@@ -126,7 +126,7 @@ export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p
         const stepBase = (i / total) * 100
         const stepSpan = 100 / total
         send({ stage, percent: Math.round(stepBase), message: stepLabel(step.label, i, total) })
-        await runFfmpeg(step.args, {
+        const result = await runFfmpeg(step.args, {
           signal: abort.signal,
           label: step.label,
           cwd: dir,
@@ -135,6 +135,15 @@ export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p
             send({ stage, percent: Math.round(stepBase + frac * stepSpan), message: `${stepLabel(step.label, i, total)}${p.speed ? ` · ${p.speed}` : ''}` })
           }
         })
+        if (result.cancelled || abort.signal.aborted) {
+          // apaga a saída parcial deste passo
+          try {
+            if (step.outFile && step.outFile !== 'NUL' && existsSync(step.outFile)) rmSync(step.outFile, { force: true })
+          } catch {
+            /* ignore */
+          }
+          throw new Error('cancelado')
+        }
       }
       // limpa logs do 2-pass
       for (const step of plan.steps) {
