@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { join } from 'path'
+import { statSync } from 'fs'
 import { IPC, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
 import { getSettings, outputDir, rawDir, setSettings } from './settings/settingsStore'
@@ -63,6 +64,15 @@ export function registerIpc(store: SessionStore): void {
     const w = BrowserWindow.fromWebContents(e.sender)
     return w ? displayIdOfWindow(w) : null
   })
+  ipcMain.handle(IPC.app.fileSizes, (_e, paths: string[]) =>
+    paths.map((p) => {
+      try {
+        return statSync(p).size
+      } catch {
+        return null
+      }
+    })
+  )
 
   // ---- settings ----
   ipcMain.handle(IPC.settings.get, () => getSettings())
@@ -173,7 +183,11 @@ export function registerIpc(store: SessionStore): void {
     return { jobId }
   })
   ipcMain.handle(IPC.export.cancel, (_e, jobId: string) => cancelExportJob(jobId))
-  ipcMain.handle(IPC.export.probeEncoders, (_e, force: boolean) => probeEncoders(force))
+  ipcMain.handle(IPC.export.probeEncoders, async (_e, force: boolean) => {
+    const r = await probeEncoders(force)
+    broadcastAll(IPC.settings.changed, getSettings())
+    return r
+  })
   ipcMain.handle(IPC.export.reviewAssets, async (_e, sessionId: string) => {
     let session = store.get(sessionId)
     if (!session) throw new Error('Sessão não encontrada')

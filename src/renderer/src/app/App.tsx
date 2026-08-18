@@ -29,6 +29,11 @@ function useBoot(): void {
     wireController()
     window.__navigate = (screen) => {
       // 'review:<sessionId>' abre uma sessão bruta na Revisão (QA/histórico)
+      if (screen.startsWith('settings:')) {
+        sessionStorage.setItem('settingsTab', screen.slice(9))
+        st.getState().setScreen('settings')
+        return
+      }
       if (screen.startsWith('review:')) {
         void window.api.session.get(screen.slice(7)).then((s) => {
           if (s) {

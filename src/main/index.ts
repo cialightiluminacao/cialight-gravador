@@ -81,6 +81,8 @@ if (!gotLock) {
 
     // QA visual: CIALIGHT_SHOT=<arquivo.png> [CIALIGHT_SCREEN=settings|history] captura a janela e sai
     if (process.env.CIALIGHT_SHOT) {
+      const size = /^(\d+)x(\d+)$/.exec(process.env.CIALIGHT_SHOT_SIZE ?? '')
+      if (size) win.setSize(Number(size[1]), Number(size[2]))
       win.webContents.once('did-finish-load', () => {
         setTimeout(async () => {
           if (process.env.CIALIGHT_SCREEN) await win.webContents.executeJavaScript(`window.__navigate && window.__navigate(${JSON.stringify(process.env.CIALIGHT_SCREEN)})`, true).catch(() => {})

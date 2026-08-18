@@ -145,6 +145,8 @@ export interface IpcApi {
     quit(): Promise<void>
     windowKind(): 'recorder' | 'bar' | 'overlay' | 'spike'
     displayIdOfThisWindow(): Promise<string | null>
+    /** Tamanho em bytes de arquivos (null se não existir). */
+    fileSizes(paths: string[]): Promise<(number | null)[]>
   }
   settings: {
     get(): Promise<Settings>
@@ -233,7 +235,8 @@ export const IPC = {
     minimize: 'app:minimize',
     hideToTray: 'app:hideToTray',
     quit: 'app:quit',
-    displayIdOfThisWindow: 'app:displayIdOfThisWindow'
+    displayIdOfThisWindow: 'app:displayIdOfThisWindow',
+    fileSizes: 'app:fileSizes'
   },
   settings: { get: 'settings:get', set: 'settings:set', pickFolder: 'settings:pickFolder', changed: 'settings:changed' },
   sources: { list: 'sources:list', thumbnail: 'sources:thumbnail' },

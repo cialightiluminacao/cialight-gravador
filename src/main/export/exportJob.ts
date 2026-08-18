@@ -148,6 +148,7 @@ export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p
         session.state = 'finalized'
         store.save(session)
       }
+      cleanupComposed(req.composedFile)
       send({ stage: 'done', percent: 100, outputs: plan.outputs, message: warn })
     } catch (e) {
       if (abort.signal.aborted) {
@@ -159,6 +160,7 @@ export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p
       }
     } finally {
       jobs.delete(jobId)
+      cleanupComposed(req.composedFile)
     }
   })()
 
@@ -167,6 +169,16 @@ export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p
 
 export function cancelExportJob(jobId: string): void {
   jobs.get(jobId)?.abort.abort()
+}
+
+/** composed.mp4 é um intermediário grande (~20 Mbps): apaga após o job (sucesso, erro ou cancelamento). */
+function cleanupComposed(file: string | null): void {
+  if (!file) return
+  try {
+    if (existsSync(file) && /composed[^\/]*\.mp4$/i.test(file)) rmSync(file, { force: true })
+  } catch (e) {
+    log.warn('não foi possível remover o composed.mp4', e)
+  }
 }
 
 function stepLabel(label: string, i: number, total: number): string {

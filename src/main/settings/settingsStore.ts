@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { parseSettings } from '@shared/schemas'
 import type { Settings } from '@shared/types'
 import { log } from '../log'
@@ -73,6 +73,6 @@ export function outputDir(): string {
 
 export function rawDir(): string {
   // CIALIGHT_RAW_DIR: usado pelos testes de integração para não tocar na pasta real
-  if (process.env.CIALIGHT_RAW_DIR) return process.env.CIALIGHT_RAW_DIR
+  if (process.env.CIALIGHT_RAW_DIR) return resolve(process.env.CIALIGHT_RAW_DIR)
   return getSettings().rawDir ?? join(defaultOutputDir(), 'Brutos')
 }

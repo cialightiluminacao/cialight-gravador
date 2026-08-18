@@ -28,9 +28,11 @@ export class SessionStore {
     return join(this.root(), sessionId)
   }
 
+  /** Caminho de um arquivo da sessão. Aceita no máximo um subdiretório (ex.: thumbs/001.jpg); nunca '..'. */
   filePath(sessionId: string, name: string): string {
-    if (name.includes('..') || name.includes('/') || name.includes('\\')) throw new Error(`nome de arquivo inválido: ${name}`)
-    return join(this.dirOf(sessionId), name)
+    const parts = name.split(/[\\/]/).filter(Boolean)
+    if (parts.length === 0 || parts.length > 2 || parts.some((p) => p === '..' || !/^[\w.\- ()]+$/.test(p))) throw new Error(`nome de arquivo inválido: ${name}`)
+    return join(this.dirOf(sessionId), ...parts)
   }
 
   create(config: RecordingConfig, sessionId: string, extra: { bounds: Session['source']['bounds']; scaleFactor: number; video: Session['video'] }): { dir: string; session: Session } {

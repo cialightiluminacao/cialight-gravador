@@ -27,7 +27,8 @@ const api: IpcApi = {
     hideToTray: () => ipcRenderer.invoke(IPC.app.hideToTray),
     quit: () => ipcRenderer.invoke(IPC.app.quit),
     windowKind: () => kind,
-    displayIdOfThisWindow: async () => argDisplay ?? (await ipcRenderer.invoke(IPC.app.displayIdOfThisWindow))
+    displayIdOfThisWindow: async () => argDisplay ?? (await ipcRenderer.invoke(IPC.app.displayIdOfThisWindow)),
+    fileSizes: (paths) => ipcRenderer.invoke(IPC.app.fileSizes, paths)
   },
   settings: {
     get: () => ipcRenderer.invoke(IPC.settings.get),
