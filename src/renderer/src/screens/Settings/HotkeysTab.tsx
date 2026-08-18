@@ -9,6 +9,7 @@ import { useAppStore } from '@/app/store'
 import { Button } from '@/components/ui/Button'
 import { Badge, Kbd, Section, Tip } from '@/components/ui/primitives'
 import { HotkeyRecorder } from './HotkeyRecorder'
+import { freezeHotkeyStatus, isHotkeyStatusFrozen, unfreezeHotkeyStatus, useDisplayedHotkeyStatus } from './hotkeyStatusView'
 import { useSettingsPatch } from './useSettingsPatch'
 
 // Aba Atalhos: tabela ação × combinação, status de registro, avisos e conflitos.
@@ -36,12 +37,21 @@ function StatusBadge({ acc, status, duplicate }: { acc: string | null; status: H
   return status.registered ? <Badge tone="ok">ativo</Badge> : <Badge tone="warn">não registrado</Badge>
 }
 
+function warnUnregistered(status: HotkeyStatus[]): void {
+  const failed = status.filter((s) => s.accelerator && !s.registered)
+  if (!failed.length) return
+  toast.warning(failed.length === 1 ? `Um atalho não pôde ser registrado: ${HOTKEY_LABELS[failed[0].action]}` : `${failed.length} atalhos não puderam ser registrados`)
+}
+
 export function HotkeysTab(): React.JSX.Element {
   const { settings, patch } = useSettingsPatch()
-  const hotkeyStatus = useAppStore((s) => s.hotkeyStatus)
+  const hotkeyStatus = useDisplayedHotkeyStatus()
   const setHotkeyStatus = useAppStore((s) => s.setHotkeyStatus)
   const hotkeys = settings.hotkeys
-  const suspended = useRef(false)
+  /** Último mapa enviado ao main (evita reaplicar o mesmo mapa duas vezes). */
+  const applied = useRef<HotkeyMap | null>(null)
+  /** Mapa em vigor quando a captura começou (para avisar só se algo mudou). */
+  const beforeCapture = useRef<HotkeyMap | null>(null)
 
   const statusByAction = useMemo(() => new Map(hotkeyStatus.map((s) => [s.action, s])), [hotkeyStatus])
   const duplicates = useMemo(() => {
@@ -55,7 +65,8 @@ export function HotkeysTab(): React.JSX.Element {
   const isDefault = useMemo(() => sameMap(hotkeys, DEFAULT_HOTKEYS), [hotkeys])
 
   const applyMap = useCallback(
-    async (map: HotkeyMap) => {
+    async (map: HotkeyMap): Promise<HotkeyStatus[] | null> => {
+      applied.current = map
       try {
         const status = await window.api.hotkeys.apply(map)
         setHotkeyStatus(status)
@@ -68,29 +79,37 @@ export function HotkeysTab(): React.JSX.Element {
     [setHotkeyStatus]
   )
 
-  const commit = async (next: HotkeyMap): Promise<void> => {
-    suspended.current = false
-    await patch({ hotkeys: next })
-    const status = await applyMap(next)
-    const failed = status?.filter((s) => s.accelerator && !s.registered) ?? []
-    if (status && failed.length) toast.warning(failed.length === 1 ? `Um atalho não pôde ser registrado: ${HOTKEY_LABELS[failed[0].action]}` : `${failed.length} atalhos não puderam ser registrados`)
+  /** Registra no main o mapa que está no store (se ainda não for o aplicado). */
+  const syncApplied = async (warn: boolean): Promise<void> => {
+    const current = useAppStore.getState().settings.hotkeys
+    if (applied.current && sameMap(applied.current, current)) return
+    const status = await applyMap(current)
+    if (warn && status) warnUnregistered(status)
+  }
+
+  const commit = async (next: HotkeyMap): Promise<boolean> => {
+    const ok = await patch({ hotkeys: next })
+    // Durante uma captura os atalhos ficam suspensos; o mapa é aplicado ao terminar.
+    if (!isHotkeyStatusFrozen()) await syncApplied(ok)
+    return ok
   }
 
   const setOne = (action: HotkeyAction, value: string | null): void => void commit({ ...hotkeys, [action]: value })
-  const restore = (): void => {
-    void commit({ ...DEFAULT_HOTKEYS })
-    toast.success('Atalhos padrão restaurados')
+  const restore = async (): Promise<void> => {
+    if (await commit({ ...DEFAULT_HOTKEYS })) toast.success('Atalhos padrão restaurados')
   }
 
   // Enquanto o usuário grava uma combinação, os atalhos globais são suspensos
   // para que a própria combinação (ex.: Ctrl+Shift+F9) chegue ao campo em vez de disparar a ação.
+  // O status exibido fica congelado nesse período (ver hotkeyStatusView).
   const onCapturingChange = (capturing: boolean): void => {
-    if (capturing && !suspended.current) {
-      suspended.current = true
+    if (capturing && !isHotkeyStatusFrozen()) {
+      beforeCapture.current = useAppStore.getState().settings.hotkeys
+      freezeHotkeyStatus()
       void applyMap(EMPTY_MAP)
-    } else if (!capturing && suspended.current) {
-      suspended.current = false
-      void applyMap(useAppStore.getState().settings.hotkeys)
+    } else if (!capturing && isHotkeyStatusFrozen()) {
+      const changed = !beforeCapture.current || !sameMap(beforeCapture.current, useAppStore.getState().settings.hotkeys)
+      void syncApplied(changed).finally(unfreezeHotkeyStatus)
     }
   }
 
@@ -100,7 +119,7 @@ export function HotkeysTab(): React.JSX.Element {
         title="Atalhos globais"
         className="rise-in"
         aside={
-          <Button size="sm" variant="ghost" onClick={restore} disabled={isDefault}>
+          <Button size="sm" variant="ghost" onClick={() => void restore()} disabled={isDefault}>
             <RotateCcw className="h-3.5 w-3.5" /> Restaurar padrões
           </Button>
         }

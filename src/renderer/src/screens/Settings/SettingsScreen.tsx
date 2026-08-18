@@ -4,6 +4,7 @@ import { Cable, CheckCircle2, Info, Keyboard, PenLine, SlidersHorizontal, Wrench
 import { useAppStore } from '@/app/store'
 import { Tabs, TabsContent } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
+import { useDisplayedHotkeyStatus } from './hotkeyStatusView'
 import { SETTINGS_TABS, SETTINGS_TAB_LABELS, getInitialSettingsTab, installSettingsDeepLink, rememberSettingsTab, type SettingsTab } from './settingsTabs'
 import { GeneralTab } from './GeneralTab'
 import { DevicesTab } from './DevicesTab'
@@ -48,7 +49,8 @@ export function SettingsScreen(): React.JSX.Element {
   const [tab, setTab] = useState<SettingsTab>(getInitialSettingsTab)
   const settingsLoaded = useAppStore((s) => s.settingsLoaded)
   const updateState = useAppStore((s) => s.updateStatus?.state)
-  const hotkeyIssues = useAppStore((s) => s.hotkeyStatus.filter((h) => h.accelerator && !h.registered).length)
+  const hotkeyStatus = useDisplayedHotkeyStatus()
+  const hotkeyIssues = hotkeyStatus.filter((h) => h.accelerator && !h.registered).length
   useEffect(() => rememberSettingsTab(tab), [tab])
 
   const dot = (t: SettingsTab): 'accent' | 'warn' | null => {

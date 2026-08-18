@@ -49,7 +49,9 @@ export function installSettingsDeepLink(): void {
     if (!screen.startsWith(DEEP_LINK_PREFIX)) return
     const tab = parseSettingsTab(screen)
     if (tab) currentTab = tab
-    useAppStore.getState().setScreen('settings')
+    // setState direto (não setScreen) para não gravar 'settings:<aba>' como returnScreen —
+    // senão «Voltar» cairia no deep link de novo e o usuário ficaria preso em Configurações.
+    useAppStore.setState({ screen: 'settings' })
   }
   useAppStore.subscribe((st, prev) => {
     if (st.screen !== prev.screen) handle(st.screen)

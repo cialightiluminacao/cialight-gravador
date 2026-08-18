@@ -23,6 +23,14 @@ describe('deep link settings:<aba>', () => {
     expect(useAppStore.getState().screen).toBe('settings')
     expect(getInitialSettingsTab()).toBe('avancado')
   })
+  it('preserva a tela de retorno: «Voltar» não cai no deep link de novo', () => {
+    useAppStore.setState({ screen: 'prepare', returnScreen: 'prepare' })
+    useAppStore.getState().setScreen('settings:atalhos' as never)
+    expect(useAppStore.getState().screen).toBe('settings')
+    expect(useAppStore.getState().returnScreen).toBe('prepare')
+    useAppStore.getState().goBack()
+    expect(useAppStore.getState().screen).toBe('prepare')
+  })
   it('mantém a última aba quando o deep link não é reconhecido', () => {
     rememberSettingsTab('atalhos')
     useAppStore.getState().setScreen('settings:inexistente' as never)

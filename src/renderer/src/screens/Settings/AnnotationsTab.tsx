@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Check, MousePointerClick, Palette } from 'lucide-react'
 import { Badge, Kbd, Section, Slider, Toggle } from '@/components/ui/primitives'
 import { SettingRow, SettingRows } from '@/components/ui/SettingRow'
@@ -68,6 +68,12 @@ export function AnnotationsTab(): React.JSX.Element {
   const setAnn = (p: Partial<typeof ann>): void => void patch({ annotations: { ...ann, ...p } })
   const inPalette = PALETTE.some((c) => c.value.toLowerCase() === ann.color.toLowerCase())
   const fadeOn = ann.autoFadeSec !== null
+  // Durante o arrasto dos sliders o valor fica local; só persiste ao soltar (onValueCommit),
+  // para não gravar em disco a cada tick nem fazer o thumb tremer com o broadcast.
+  const [widthDraft, setWidthDraft] = useState<number | null>(null)
+  const [fadeDraft, setFadeDraft] = useState<number | null>(null)
+  const width = widthDraft ?? ann.width
+  const fadeSec = fadeDraft ?? ann.autoFadeSec ?? FADE_DEFAULT
 
   return (
     <div className="flex flex-col gap-4">
@@ -109,15 +115,26 @@ export function AnnotationsTab(): React.JSX.Element {
             <SettingRow label="Espessura" description="Ajuste também com [ e ] enquanto desenha.">
               <div className="flex w-60 items-center gap-3">
                 <span className="font-mono w-6 text-right text-[11px] text-muted">{WIDTH_MIN}</span>
-                <Slider min={WIDTH_MIN} max={WIDTH_MAX} step={1} value={[ann.width]} onValueChange={([v]) => setAnn({ width: v })} aria-label="Espessura do traço" />
+                <Slider
+                  min={WIDTH_MIN}
+                  max={WIDTH_MAX}
+                  step={1}
+                  value={[width]}
+                  onValueChange={([v]) => setWidthDraft(v)}
+                  onValueCommit={([v]) => {
+                    setWidthDraft(null)
+                    if (v !== ann.width) setAnn({ width: v })
+                  }}
+                  aria-label="Espessura do traço"
+                />
                 <span className="font-mono w-6 text-[11px] text-muted">{WIDTH_MAX}</span>
               </div>
             </SettingRow>
           </SettingRows>
           <div className="flex flex-col gap-2 pt-1">
-            <StrokePreview color={ann.color} width={ann.width} />
+            <StrokePreview color={ann.color} width={width} />
             <p className="text-center text-[11px] text-muted">
-              Prévia · <span className="font-mono tnum">{ann.width} px</span>
+              Prévia · <span className="font-mono tnum">{width} px</span>
             </p>
           </div>
         </div>
@@ -127,14 +144,25 @@ export function AnnotationsTab(): React.JSX.Element {
         <SettingRows>
           <SettingRow
             label="Sumir automaticamente"
-            description={fadeOn ? `Cada traço desaparece sozinho ${ann.autoFadeSec} s depois de desenhado.` : 'Os traços ficam na tela até você apagar (E) ou sair do modo desenho.'}
+            description={fadeOn ? `Cada traço desaparece sozinho ${fadeSec} s depois de desenhado.` : 'Os traços ficam na tela até você apagar (E) ou sair do modo desenho.'}
             htmlFor="autoFade"
           >
             <div className="flex items-center gap-4">
               {fadeOn ? (
                 <div className="flex w-56 items-center gap-3">
-                  <Slider min={FADE_MIN} max={FADE_MAX} step={1} value={[ann.autoFadeSec ?? FADE_DEFAULT]} onValueChange={([v]) => setAnn({ autoFadeSec: v })} aria-label="Segundos até sumir" />
-                  <span className="font-mono tnum w-8 text-right text-xs text-fg-2">{ann.autoFadeSec} s</span>
+                  <Slider
+                    min={FADE_MIN}
+                    max={FADE_MAX}
+                    step={1}
+                    value={[fadeSec]}
+                    onValueChange={([v]) => setFadeDraft(v)}
+                    onValueCommit={([v]) => {
+                      setFadeDraft(null)
+                      if (v !== ann.autoFadeSec) setAnn({ autoFadeSec: v })
+                    }}
+                    aria-label="Segundos até sumir"
+                  />
+                  <span className="font-mono tnum w-8 text-right text-xs text-fg-2">{fadeSec} s</span>
                 </div>
               ) : null}
               <Toggle id="autoFade" checked={fadeOn} onCheckedChange={(v) => setAnn({ autoFadeSec: v ? FADE_DEFAULT : null })} />

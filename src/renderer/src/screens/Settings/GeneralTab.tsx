@@ -174,7 +174,7 @@ export function GeneralTab(): React.JSX.Element {
 
         <Section title="Pastas e arquivos" className="rise-in rise-in-1">
           <SettingRows>
-            <SettingRow label="Onde salvar os vídeos exportados" description="A pasta padrão fica dentro de Vídeos. Os brutos ficam numa subpasta (dá para trocar em Avançado)." stack>
+            <SettingRow label="Onde salvar os vídeos exportados" description="Por padrão, dentro de Vídeos. Os brutos ficam numa subpasta (dá para trocar em Avançado)." stack>
               <PathField value={settings.outputDir} defaultPath={appInfo?.paths.output ?? null} onChange={(v) => void patch({ outputDir: v })} />
             </SettingRow>
             <SettingRow label="Manter gravações brutas por" description="Os brutos permitem reexportar depois com outro corte ou preset. Vídeos já exportados nunca são apagados.">

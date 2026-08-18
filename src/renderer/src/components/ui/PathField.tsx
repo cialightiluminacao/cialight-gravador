@@ -15,7 +15,7 @@ export function PathField({
 }: {
   /** Caminho escolhido pelo usuário; `null` = usar o padrão. */
   value: string | null
-  /** Caminho padrão do app (mostrado quando `value` é null). */
+  /** Caminho efetivo do app quando `value` é null (recarregado após cada troca via `refreshAppInfo`). */
   defaultPath: string | null
   onChange: (next: string | null) => void
   className?: string
@@ -42,7 +42,10 @@ export function PathField({
       <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-xl border border-border-strong bg-bg-2 px-3">
         <FolderOpen className="h-4 w-4 shrink-0 text-muted" />
         <span className="font-mono flex min-w-0 flex-1 items-baseline text-[12px]" title={effective}>
-          <span className="min-w-[6ch] shrink truncate text-muted">{parent}</span>
+          {/* Pai truncado pelo início («…\Videos\»): direção rtl no contêiner, texto ltr dentro. */}
+          <span className="min-w-[8ch] shrink truncate text-muted" style={{ direction: 'rtl' }}>
+            <span dir="ltr">{parent}</span>
+          </span>
           <span className="shrink-0 font-semibold text-fg">{leaf || '—'}</span>
         </span>
         {isDefault ? <span className="shrink-0 rounded-md bg-white/6 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">padrão</span> : null}

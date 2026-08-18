@@ -100,14 +100,18 @@ export function AdvancedTab(): React.JSX.Element {
             description="Registro de erros (envie o mais recente ao pedir suporte) e pasta de configurações e cache."
           >
             <Tip content={appInfo?.paths.logs ?? 'Pasta de logs'}>
-              <Button size="sm" variant="secondary" disabled={!appInfo} onClick={() => openPath(appInfo?.paths.logs)}>
-                <FolderOpen className="h-3.5 w-3.5" /> Abrir pasta de logs
-              </Button>
+              <span>
+                <Button size="sm" variant="secondary" disabled={!appInfo} onClick={() => openPath(appInfo?.paths.logs)}>
+                  <FolderOpen className="h-3.5 w-3.5" /> Abrir pasta de logs
+                </Button>
+              </span>
             </Tip>
             <Tip content={appInfo?.paths.userData ?? 'Pasta de dados do aplicativo'}>
-              <Button size="sm" variant="ghost" disabled={!appInfo} onClick={() => openPath(appInfo?.paths.userData)}>
-                <HardDrive className="h-3.5 w-3.5" /> Pasta de dados
-              </Button>
+              <span>
+                <Button size="sm" variant="ghost" disabled={!appInfo} onClick={() => openPath(appInfo?.paths.userData)}>
+                  <HardDrive className="h-3.5 w-3.5" /> Pasta de dados
+                </Button>
+              </span>
             </Tip>
           </SettingRow>
         </SettingRows>

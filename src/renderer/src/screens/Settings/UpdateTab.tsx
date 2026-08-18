@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AlertCircle, CheckCircle2, Download, ExternalLink, GitBranch, Loader2, RefreshCw, RotateCw, Sparkles } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Download, ExternalLink, GitBranch, Loader2, RefreshCw, RotateCw, ScrollText, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import type { UpdateStatus } from '@shared/ipc'
 import { useAppStore } from '@/app/store'
@@ -13,12 +13,14 @@ import { cn } from '@/lib/cn'
 
 const REPO_URL = 'https://github.com/cialightiluminacao/cialight-gravador'
 const RELEASES_URL = `${REPO_URL}/releases`
+const GPL3_URL = 'https://www.gnu.org/licenses/gpl-3.0.html'
+const FFMPEG_BUILDS_URL = 'https://github.com/BtbN/FFmpeg-Builds'
+const FFMPEG_SOURCE_URL = 'https://github.com/FFmpeg/FFmpeg'
 
 interface LicenseEntry {
   name: string
   license: string
   url: string
-  note?: string
 }
 
 const LICENSES: LicenseEntry[] = [
@@ -31,13 +33,7 @@ const LICENSES: LicenseEntry[] = [
   { name: 'sonner', license: 'MIT', url: 'https://github.com/emilkowalski/sonner' },
   { name: 'Tailwind CSS', license: 'MIT', url: 'https://github.com/tailwindlabs/tailwindcss' },
   { name: 'electron-updater / electron-log', license: 'MIT', url: 'https://github.com/electron-userland/electron-builder' },
-  { name: 'Fontes Manrope e Azeret Mono', license: 'OFL 1.1', url: 'https://github.com/fontsource/fontsource' },
-  {
-    name: 'FFmpeg (build BtbN)',
-    license: 'GPL v3',
-    url: 'https://github.com/BtbN/FFmpeg-Builds',
-    note: 'Executável independente (não é vinculado ao app), chamado só na exportação, conforme a GPL v3. O código-fonte está no repositório do FFmpeg (github.com/FFmpeg/FFmpeg) e o texto da licença acompanha o ffmpeg.exe (LICENSE.txt na pasta de instalação).'
-  }
+  { name: 'Fontes Manrope e Azeret Mono', license: 'OFL 1.1', url: 'https://github.com/fontsource/fontsource' }
 ]
 
 /** Notas da release: markdown bem simples (títulos, listas, parágrafos). */
@@ -111,7 +107,7 @@ export function UpdateTab(): React.JSX.Element {
   }
 
   const state = update?.state ?? 'idle'
-  const canCheck = state !== 'checking' && state !== 'downloading' && !checking
+  const canCheck = state !== 'checking' && state !== 'downloading' && !checking && !busy
 
   return (
     <div className="flex flex-col gap-4">
@@ -166,9 +162,13 @@ export function UpdateTab(): React.JSX.Element {
                 </span>
               </Tip>
             ) : null}
-            <Button size="sm" variant="secondary" disabled={!canCheck} onClick={() => void check()}>
-              <RefreshCw className={cn('h-3.5 w-3.5', (checking || state === 'checking') && 'animate-spin')} /> Verificar agora
-            </Button>
+            <Tip content={busy ? 'Termine a gravação para verificar atualizações' : 'Consulta agora se há uma versão nova'}>
+              <span>
+                <Button size="sm" variant="secondary" disabled={!canCheck} onClick={() => void check()}>
+                  <RefreshCw className={cn('h-3.5 w-3.5', (checking || state === 'checking') && 'animate-spin')} /> Verificar agora
+                </Button>
+              </span>
+            </Tip>
           </div>
         </div>
         {state === 'downloading' ? <Progress value={update?.percent ?? 0} className="mt-3" tone="info" /> : null}
@@ -186,21 +186,46 @@ export function UpdateTab(): React.JSX.Element {
       </Section>
 
       <Section title="Licenças de terceiros" className="rise-in rise-in-2">
-        <ul className="grid grid-cols-3 gap-x-6">
+        <ul className="flex flex-wrap gap-1.5">
           {LICENSES.map((l) => (
-            <li key={l.name} className={cn('flex items-start gap-3 border-b border-border py-1', l.note && 'col-span-3 border-b-0 pt-2')}>
-              <div className="min-w-0 flex-1">
-                <button type="button" className="whitespace-nowrap text-left text-[13px] font-medium text-fg hover:text-accent-2 hover:underline" onClick={() => external(l.url)}>
-                  {l.name}
-                </button>
-                {l.note ? <p className="mt-0.5 text-xs leading-relaxed text-muted">{l.note}</p> : null}
-              </div>
-              <Badge tone="neutral" className="h-5 shrink-0 normal-case tracking-normal">
-                {l.license}
-              </Badge>
+            <li key={l.name}>
+              <button
+                type="button"
+                title={`Abrir ${l.name} no navegador`}
+                onClick={() => external(l.url)}
+                className="flex h-7 items-center gap-2 rounded-lg border border-border bg-white/[0.03] pl-2.5 pr-1 text-[12px] font-medium text-fg transition-colors hover:border-border-strong hover:bg-surface-2 hover:text-accent-2"
+              >
+                {l.name}
+                <Badge tone="neutral" className="h-5 normal-case tracking-normal">
+                  {l.license}
+                </Badge>
+              </button>
             </li>
           ))}
         </ul>
+        <div className="mt-3 flex items-start gap-3 rounded-xl border border-border bg-white/[0.03] px-3 py-2.5">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <button type="button" className="text-[13px] font-semibold text-fg hover:text-accent-2 hover:underline" onClick={() => external(FFMPEG_BUILDS_URL)}>
+                FFmpeg (build BtbN)
+              </button>
+              <Badge tone="neutral" className="h-5 normal-case tracking-normal">
+                GPL v3
+              </Badge>
+            </div>
+            <p className="mt-0.5 text-xs leading-relaxed text-muted">
+              Executável independente (não é vinculado ao app), chamado só na exportação, conforme a GPL v3. O texto da licença acompanha o ffmpeg.exe (LICENSE.txt na pasta de instalação).
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button size="sm" variant="ghost" onClick={() => external(GPL3_URL)}>
+              <ScrollText className="h-3.5 w-3.5" /> Texto da GPL v3
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => external(FFMPEG_SOURCE_URL)}>
+              Código-fonte <ExternalLink className="h-3 w-3 text-muted" />
+            </Button>
+          </div>
+        </div>
       </Section>
     </div>
   )

@@ -21,7 +21,7 @@ export function SettingRow({
   htmlFor?: string
 }): React.JSX.Element {
   return (
-    <div className={cn('flex gap-4 py-2.5 first:pt-0 last:pb-0', stack ? 'flex-col' : 'items-center justify-between', className)}>
+    <div className={cn('flex py-2 first:pt-0 last:pb-0', stack ? 'flex-col gap-3' : 'items-center justify-between gap-4', className)}>
       <div className="min-w-0">
         <label htmlFor={htmlFor} className="block text-sm font-semibold text-fg">
           {label}

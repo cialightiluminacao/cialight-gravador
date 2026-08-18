@@ -124,7 +124,7 @@ export function HotkeyRecorder({
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
         className={cn(
-          'flex h-8 min-w-[196px] cursor-pointer select-none items-center rounded-xl border px-3 text-sm outline-none transition-colors',
+          'flex h-8 w-[208px] cursor-pointer select-none items-center rounded-xl border px-3 text-sm outline-none transition-colors',
           capturing ? 'border-accent bg-accent/10 text-fg shadow-[0_0_0_3px_var(--ring)]' : 'border-border-strong bg-bg-2 hover:bg-surface-2 focus-visible:border-border-strong',
           !capturing && invalid && 'border-danger/60 bg-danger/10',
           rejected && 'border-danger bg-danger/15 shadow-none'
