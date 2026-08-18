@@ -15,7 +15,7 @@ export function RecBorder({ paused, rect, drawing, windowMode, sourceName }: { p
   }
   return (
     <>
-      <div className="rec-border pointer-events-none" style={{ ...style, border: `3px solid ${color}`, boxSizing: 'border-box', boxShadow: `inset 0 0 24px ${paused ? 'rgba(245,179,1,0.18)' : 'rgba(255,77,79,0.18)'}` }} />
+      <div className="rec-border pointer-events-none" style={{ ...style, border: `4px solid ${color}`, boxSizing: 'border-box', boxShadow: `inset 0 0 28px ${paused ? 'rgba(245,179,1,0.22)' : 'rgba(255,77,79,0.22)'}` }} />
       {paused || drawing ? (
         <div className="pointer-events-none fixed left-1/2 top-3 -translate-x-1/2 rounded-full border border-white/15 bg-black/70 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-white backdrop-blur" style={{ color: paused ? '#f5b301' : '#fff' }}>
           {paused ? 'Pausado' : 'Modo anotação — Esc para sair'}

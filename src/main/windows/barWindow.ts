@@ -10,7 +10,7 @@ import { log } from '../log'
 // Barra flutuante de controles: pílula sempre-no-topo no monitor gravado,
 // excluída da captura, arrastável (-webkit-app-region: drag no renderer).
 
-export const BAR_WIDTH = 460
+export const BAR_WIDTH = 560
 export const BAR_HEIGHT = 64
 
 let barWin: BrowserWindow | null = null

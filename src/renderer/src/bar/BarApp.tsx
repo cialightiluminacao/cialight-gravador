@@ -25,7 +25,7 @@ export function BarApp(): React.JSX.Element {
           <div className="no-drag mr-1 flex items-center gap-2 rounded-xl px-2 py-1">
             <span className={cn('h-2.5 w-2.5 rounded-full', paused ? 'bg-warn' : recording ? 'bg-accent rec-pulse' : 'bg-white/40')} />
             <span className="font-mono tnum text-[15px] font-semibold text-white">{formatClock(s?.elapsedMs ?? 0)}</span>
-            <span className="font-mono text-[10px] text-white/45">{formatBytes(s?.bytes ?? 0)}</span>
+            <span className="font-mono whitespace-nowrap text-[10px] text-white/45">{formatBytes(s?.bytes ?? 0)}</span>
           </div>
           <span className="mx-1 h-6 w-px bg-white/12" />
           <Tip content={paused ? 'Retomar' : 'Pausar'} shortcut="Ctrl+Shift+F10" side="bottom">
