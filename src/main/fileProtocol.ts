@@ -57,14 +57,15 @@ export function installFileProtocol(store: SessionStore): void {
             'Content-Length': String(end - start + 1),
             'Content-Range': `bytes ${start}-${end}/${st.size}`,
             'Accept-Ranges': 'bytes',
-            'Cache-Control': 'no-cache'
+            'Cache-Control': 'no-cache',
+            'Access-Control-Allow-Origin': '*'
           }
         })
       }
       const stream = Readable.toWeb(createReadStream(file)) as ReadableStream
       return new Response(stream, {
         status: 200,
-        headers: { 'Content-Type': type, 'Content-Length': String(st.size), 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache' }
+        headers: { 'Content-Type': type, 'Content-Length': String(st.size), 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' }
       })
     } catch (e) {
       log.warn(`cialight-file: ${request.url} → ${String(e)}`)
