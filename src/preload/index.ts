@@ -130,3 +130,7 @@ export type SpikeApi = typeof spike
 
 contextBridge.exposeInMainWorld('api', api)
 contextBridge.exposeInMainWorld('spikeApi', spike)
+// canal do teste de integração de captura (só quando CIALIGHT_TEST está definido)
+if (process.env.CIALIGHT_TEST) {
+  contextBridge.exposeInMainWorld('__captureTestSend', (r: unknown) => ipcRenderer.send('test:result', r))
+}

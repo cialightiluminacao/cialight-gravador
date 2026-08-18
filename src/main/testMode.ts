@@ -151,24 +151,50 @@ async function testFfmpeg(store: SessionStore): Promise<number> {
   return failures.length ? 1 : 0
 }
 
-async function testCapture(): Promise<number> {
+async function testCapture(store: SessionStore): Promise<number> {
   mkdirSync(outDir, { recursive: true })
+  const failures: string[] = []
   const win = new BrowserWindow({ width: 1000, height: 700, show: true, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
-  const result = await new Promise<{ ok: boolean; report: unknown }>((resolve) => {
-    ipcMain.once('test:result', (_e, r: { ok: boolean; report: unknown }) => resolve(r))
-    setTimeout(() => resolve({ ok: false, report: 'timeout de 90 s' }), 90_000)
+  const result = await new Promise<{ ok: boolean; report: Record<string, unknown> }>((resolve) => {
+    ipcMain.once('test:result', (_e, r: { ok: boolean; report: Record<string, unknown> }) => resolve(r))
+    setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 90 s'] } }), 90_000)
     loadPage(win, 'index.html?test=capture')
   })
-  writeFileSync(join(outDir, 'capture-report.json'), JSON.stringify(result, null, 2))
-  console.log(result.ok ? 'TESTE DE CAPTURA PASSOU' : `TESTE DE CAPTURA FALHOU: ${JSON.stringify(result.report).slice(0, 2000)}`)
-  return result.ok ? 0 : 1
+  ok(result.ok, `engine concluiu sem exceção (${JSON.stringify(result.report.errors ?? [])})`, failures)
+  const session = result.report.session as Session | undefined
+  if (session) {
+    const rec = join(store.dirOf(session.id), session.files.rec)
+    ok(existsSync(rec), 'rec.mp4 existe', failures)
+    const p = await probeFile(rec)
+    const videos = p.streams.filter((s) => s.type === 'video')
+    const audios = p.streams.filter((s) => s.type === 'audio')
+    const expectV = 1 + (session.tracks.webcam !== undefined ? 1 : 0)
+    const expectA = (session.tracks.mic !== undefined ? 1 : 0) + (session.tracks.system !== undefined ? 1 : 0)
+    ok(videos.length === expectV, `faixas de vídeo: ${videos.length} (esperado ${expectV})`, failures)
+    ok(audios.length === expectA, `faixas de áudio: ${audios.length} (esperado ${expectA})`, failures)
+    ok(videos[0]?.codec === 'h264', `tela em h264 (${videos[0]?.codec})`, failures)
+    // 9 s de teste com 2 s de pausa → ~7 s de mídia (tolerância 0,8 s)
+    ok(Math.abs(p.durationMs - 7000) < 800, `duração ≈ 7 s (${p.durationMs} ms)`, failures)
+    for (const s of p.streams) ok(s.durationMs === undefined || Math.abs(s.durationMs - p.durationMs) < 500, `faixa ${s.index} (${s.type}) com duração coerente (${s.durationMs} ms)`, failures)
+    ok((session.durationMs ?? 0) > 6200 && (session.durationMs ?? 0) < 7800, `session.durationMs coerente (${session.durationMs})`, failures)
+    ok(session.pauses.length === 1, `1 pausa registrada (${session.pauses.length})`, failures)
+    ok(session.pip.length >= 2, `keyframes de PiP registrados (${session.pip.length})`, failures)
+    ok(session.strokes.length === 1, 'traço registrado', failures)
+    ok(session.state === 'stopped', `estado stopped (${session.state})`, failures)
+    const j = JSON.parse(readFileSync(join(store.dirOf(session.id), 'session.json'), 'utf8')) as Session
+    ok(j.state === 'stopped' && j.durationMs === session.durationMs, 'session.json persistido', failures)
+    await store.delete(session.id).catch(() => {})
+  }
+  writeFileSync(join(outDir, 'capture-report.json'), JSON.stringify({ result, failures }, null, 2))
+  console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE CAPTURA PASSOU')
+  return failures.length ? 1 : 0
 }
 
 export async function runIntegrationTest(mode: string, store: SessionStore): Promise<void> {
   let code = 1
   try {
     if (mode === 'ffmpeg') code = await testFfmpeg(store)
-    else if (mode === 'capture') code = await testCapture()
+    else if (mode === 'capture') code = await testCapture(store)
     else console.error(`modo de teste desconhecido: ${mode}`)
   } catch (e) {
     console.error('teste falhou com exceção:', e)
