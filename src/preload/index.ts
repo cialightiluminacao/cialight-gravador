@@ -1,41 +1,132 @@
-import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { FILE_PROTOCOL, IPC, type IpcApi } from '@shared/ipc'
 
-const api = {
-  ping: (): Promise<string> => ipcRenderer.invoke('ping'),
-  spike: {
-    getSources: (): Promise<unknown[]> => ipcRenderer.invoke('spike:getSources'),
-    chooseSource: (id: string, wantAudio: boolean): Promise<void> => ipcRenderer.invoke('spike:chooseSource', id, wantAudio),
-    openWrite: (name: string): Promise<number> => ipcRenderer.invoke('spike:openWrite', name),
-    write: (handle: number, data: Uint8Array, position: number): Promise<void> =>
-      ipcRenderer.invoke('spike:write', handle, data, position),
-    closeWrite: (handle: number): Promise<void> => ipcRenderer.invoke('spike:closeWrite', handle),
-    log: (msg: string): void => {
-      ipcRenderer.send('spike:log', msg)
-    },
-    captureThumb: (name: string): Promise<string> => ipcRenderer.invoke('spike:captureThumb', name),
-    protect: (on: boolean): Promise<void> => ipcRenderer.invoke('spike:protect', on),
-    setOverlayInteractive: (on: boolean): Promise<void> => ipcRenderer.invoke('spike:overlayInteractive', on),
-    cpu: (): Promise<{ percentCPUUsage: number }> => ipcRenderer.invoke('spike:cpu'),
-    done: (report: unknown): Promise<unknown> => ipcRenderer.invoke('spike:done', report),
-    osClickOverlay: (): Promise<void> => ipcRenderer.invoke('spike:osClickOverlay'),
-    playSound: (): Promise<void> => ipcRenderer.invoke('spike:playSound'),
-    testHotkeyNotepad: (): Promise<void> => ipcRenderer.invoke('spike:testHotkeyNotepad'),
-    requestGestureStart: (): Promise<void> => ipcRenderer.invoke('spike:requestGestureStart'),
-    onHotkey: (cb: () => void): (() => void) => {
-      const l = (_e: IpcRendererEvent): void => cb()
-      ipcRenderer.on('spike:hotkey', l)
-      return () => ipcRenderer.removeListener('spike:hotkey', l)
-    },
-    onOverlayEvent: (cb: (msg: string) => void): (() => void) => {
-      const l = (_e: IpcRendererEvent, msg: string): void => cb(msg)
-      ipcRenderer.on('spike:overlayEvent', l)
-      return () => ipcRenderer.removeListener('spike:overlayEvent', l)
-    },
-    overlayReport: (msg: string): void => {
-      ipcRenderer.send('spike:overlayReport', msg)
-    }
+// API tipada exposta ao renderer (contextIsolation ON). Cada janela recebe o
+// mesmo preload; `windowKind` diz qual é (recorder | bar | overlay | spike).
+
+const argKind = process.argv.find((a) => a.startsWith('--cialight-window='))?.split('=')[1]
+const kind = (argKind === 'bar' || argKind === 'overlay' || argKind === 'spike' ? argKind : 'recorder') as ReturnType<IpcApi['app']['windowKind']>
+const argDisplay = process.argv.find((a) => a.startsWith('--cialight-display='))?.split('=')[1] ?? null
+
+function on<T>(channel: string, cb: (payload: T) => void): () => void {
+  const listener = (_e: IpcRendererEvent, payload: T): void => cb(payload)
+  ipcRenderer.on(channel, listener)
+  return () => ipcRenderer.removeListener(channel, listener)
+}
+
+const api: IpcApi = {
+  app: {
+    info: () => ipcRenderer.invoke(IPC.app.info),
+    openExternal: (url) => ipcRenderer.invoke(IPC.app.openExternal, url),
+    showItemInFolder: (p) => ipcRenderer.invoke(IPC.app.showItemInFolder, p),
+    openPath: (p) => ipcRenderer.invoke(IPC.app.openPath, p),
+    copyText: (t) => ipcRenderer.invoke(IPC.app.copyText, t),
+    copyFile: (p) => ipcRenderer.invoke(IPC.app.copyFile, p),
+    showRecorder: () => ipcRenderer.invoke(IPC.app.showRecorder),
+    minimize: () => ipcRenderer.invoke(IPC.app.minimize),
+    hideToTray: () => ipcRenderer.invoke(IPC.app.hideToTray),
+    quit: () => ipcRenderer.invoke(IPC.app.quit),
+    windowKind: () => kind,
+    displayIdOfThisWindow: async () => argDisplay ?? (await ipcRenderer.invoke(IPC.app.displayIdOfThisWindow))
+  },
+  settings: {
+    get: () => ipcRenderer.invoke(IPC.settings.get),
+    set: (patch) => ipcRenderer.invoke(IPC.settings.set, patch),
+    pickFolder: (current) => ipcRenderer.invoke(IPC.settings.pickFolder, current),
+    onChange: (cb) => on(IPC.settings.changed, cb)
+  },
+  sources: {
+    list: () => ipcRenderer.invoke(IPC.sources.list),
+    thumbnail: (id, w, h) => ipcRenderer.invoke(IPC.sources.thumbnail, id, w, h)
+  },
+  capture: {
+    select: (sourceId, systemAudio) => ipcRenderer.invoke(IPC.capture.select, sourceId, systemAudio)
+  },
+  session: {
+    create: (config, sessionId) => ipcRenderer.invoke(IPC.session.create, config, sessionId),
+    writeOpen: (sessionId, name) => ipcRenderer.invoke(IPC.session.writeOpen, sessionId, name),
+    write: (handle, data, position) => ipcRenderer.invoke(IPC.session.write, handle, data, position),
+    writeClose: (handle) => ipcRenderer.invoke(IPC.session.writeClose, handle),
+    save: (session) => ipcRenderer.invoke(IPC.session.save, session),
+    get: (id) => ipcRenderer.invoke(IPC.session.get, id),
+    list: () => ipcRenderer.invoke(IPC.session.list),
+    delete: (id) => ipcRenderer.invoke(IPC.session.delete, id),
+    openFolder: (id) => ipcRenderer.invoke(IPC.session.openFolder, id),
+    freeSpaceMB: () => ipcRenderer.invoke(IPC.session.freeSpaceMB),
+    unfinished: () => ipcRenderer.invoke(IPC.session.unfinished),
+    fileUrl: (id, name) => `${FILE_PROTOCOL}://${encodeURIComponent(id)}/${encodeURIComponent(name)}`,
+    filePath: (id, name) => ipcRenderer.invoke(IPC.session.filePath, id, name)
+  },
+  recording: {
+    setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),
+    barUpdate: (state) => ipcRenderer.send(IPC.recording.barUpdate, state),
+    sendCommand: (cmd) => ipcRenderer.send(IPC.recording.sendCommand, cmd),
+    onCommand: (cb) => on(IPC.recording.command, cb),
+    onRecover: (cb) => on(IPC.recording.recover, cb)
+  },
+  overlay: {
+    setMode: (payload) => ipcRenderer.invoke(IPC.overlay.setMode, payload),
+    onMode: (cb) => on(IPC.overlay.mode, cb),
+    emitStroke: (evt) => ipcRenderer.send(IPC.overlay.emitStroke, evt),
+    onStroke: (cb) => on(IPC.overlay.stroke, cb),
+    emitAction: (evt) => ipcRenderer.send(IPC.overlay.emitAction, evt),
+    onAction: (cb) => on(IPC.overlay.action, cb),
+    syncStrokes: (displayId, strokes) => ipcRenderer.send(IPC.overlay.syncStrokes, displayId, strokes),
+    onSyncStrokes: (cb) => on(IPC.overlay.strokesSynced, cb)
+  },
+  bar: {
+    onState: (cb) => on(IPC.bar.state, cb),
+    setPosition: (x, y) => ipcRenderer.send(IPC.bar.setPosition, x, y)
+  },
+  export: {
+    run: (req) => ipcRenderer.invoke(IPC.export.run, req),
+    cancel: (jobId) => ipcRenderer.invoke(IPC.export.cancel, jobId),
+    onProgress: (cb) => on(IPC.export.progress, cb),
+    probeEncoders: (force) => ipcRenderer.invoke(IPC.export.probeEncoders, force),
+    reviewAssets: (sessionId) => ipcRenderer.invoke(IPC.export.reviewAssets, sessionId),
+    onReviewAssetsProgress: (cb) => on(IPC.export.reviewAssetsProgress, cb)
+  },
+  hotkeys: {
+    apply: (map) => ipcRenderer.invoke(IPC.hotkeys.apply, map),
+    status: () => ipcRenderer.invoke(IPC.hotkeys.status),
+    onStatus: (cb) => on(IPC.hotkeys.statusChanged, cb)
+  },
+  update: {
+    check: (manual) => ipcRenderer.invoke(IPC.update.check, manual),
+    download: () => ipcRenderer.invoke(IPC.update.download),
+    install: () => ipcRenderer.invoke(IPC.update.install),
+    status: () => ipcRenderer.invoke(IPC.update.status),
+    onStatus: (cb) => on(IPC.update.statusChanged, cb)
   }
 }
 
-export type Api = typeof api
+// API do spike (só quando o app roda em CIALIGHT_SPIKE=1) — mantida em objeto separado.
+const spike = {
+  getSources: (): Promise<unknown[]> => ipcRenderer.invoke('spike:getSources'),
+  chooseSource: (id: string, wantAudio: boolean): Promise<void> => ipcRenderer.invoke('spike:chooseSource', id, wantAudio),
+  openWrite: (name: string): Promise<number> => ipcRenderer.invoke('spike:openWrite', name),
+  write: (handle: number, data: Uint8Array, position: number): Promise<void> => ipcRenderer.invoke('spike:write', handle, data, position),
+  closeWrite: (handle: number): Promise<void> => ipcRenderer.invoke('spike:closeWrite', handle),
+  log: (msg: string): void => {
+    ipcRenderer.send('spike:log', msg)
+  },
+  captureThumb: (name: string): Promise<string> => ipcRenderer.invoke('spike:captureThumb', name),
+  protect: (on: boolean): Promise<void> => ipcRenderer.invoke('spike:protect', on),
+  setOverlayInteractive: (on: boolean): Promise<void> => ipcRenderer.invoke('spike:overlayInteractive', on),
+  cpu: (): Promise<{ percentCPUUsage: number }> => ipcRenderer.invoke('spike:cpu'),
+  done: (report: unknown): Promise<unknown> => ipcRenderer.invoke('spike:done', report),
+  osClickOverlay: (): Promise<void> => ipcRenderer.invoke('spike:osClickOverlay'),
+  playSound: (): Promise<void> => ipcRenderer.invoke('spike:playSound'),
+  testHotkeyNotepad: (): Promise<void> => ipcRenderer.invoke('spike:testHotkeyNotepad'),
+  requestGestureStart: (): Promise<void> => ipcRenderer.invoke('spike:requestGestureStart'),
+  onHotkey: (cb: () => void): (() => void) => on('spike:hotkey', cb),
+  onOverlayEvent: (cb: (msg: string) => void): (() => void) => on('spike:overlayEvent', cb),
+  overlayReport: (msg: string): void => {
+    ipcRenderer.send('spike:overlayReport', msg)
+  }
+}
+
+export type SpikeApi = typeof spike
+
 contextBridge.exposeInMainWorld('api', api)
+contextBridge.exposeInMainWorld('spikeApi', spike)

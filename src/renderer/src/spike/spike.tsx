@@ -26,15 +26,15 @@ function SpikeApp(): React.JSX.Element {
 
   const log = (msg: string): void => {
     setLines((l) => [...l.slice(-200), msg])
-    window.api.spike.log(msg)
+    window.spikeApi.log(msg)
   }
 
   const chooseScreen = async (wantAudio: boolean): Promise<void> => {
-    const list = (await window.api.spike.getSources()) as SourceInfo[]
+    const list = (await window.spikeApi.getSources()) as SourceInfo[]
     setSources(list)
     const screen = list.find((s) => s.id.startsWith('screen:'))
     if (!screen) throw new Error('nenhuma tela')
-    await window.api.spike.chooseSource(screen.id, wantAudio)
+    await window.spikeApi.chooseSource(screen.id, wantAudio)
   }
 
   const start = async (label: string): Promise<void> => {
@@ -47,7 +47,7 @@ function SpikeApp(): React.JSX.Element {
     if (!ok) {
       if (label === 'hotkey-ipc') {
         log('tentando via executeJavaScript(userGesture=true)...')
-        await window.api.spike.requestGestureStart()
+        await window.spikeApi.requestGestureStart()
       }
       return
     }
@@ -63,18 +63,18 @@ function SpikeApp(): React.JSX.Element {
         }
       })
       log('enviando relatório...')
-      const full = await window.api.spike.done(getReport())
+      const full = await window.spikeApi.done(getReport())
       log(`RELATÓRIO: ${JSON.stringify(full).slice(0, 4000)}`)
     } catch (e) {
       log(`FALHA: ${e instanceof Error ? `${e.name}: ${e.message}\n${e.stack}` : String(e)}`)
-      await window.api.spike.done({ ...getReport(), fatal: String(e) })
+      await window.spikeApi.done({ ...getReport(), fatal: String(e) })
     }
     setPhase('done')
   }
 
   useEffect(() => {
     window.__spikeStart = (label) => void start(label)
-    const offHot = window.api.spike.onHotkey(() => {
+    const offHot = window.spikeApi.onHotkey(() => {
       log('hotkey recebido no renderer')
       void start('hotkey-ipc')
     })

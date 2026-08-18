@@ -16,7 +16,10 @@
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "spike": "cross-env CIALIGHT_SPIKE=1 electron-vite dev",
     "dist:win": "electron-vite build && electron-builder --win",
-    "postversion": "git push --follow-tags"
+    "postversion": "git push --follow-tags",
+    "test:ffmpeg": "electron-vite build && cross-env CIALIGHT_TEST=ffmpeg CIALIGHT_RAW_DIR=test-out/raw electron .",
+    "test:capture": "electron-vite build && cross-env CIALIGHT_TEST=capture CIALIGHT_RAW_DIR=test-out/raw electron .",
+    "icons": "node scripts/make-icons.mjs"
   },
   "dependencies": {
     "electron-log": "^5.4.4",

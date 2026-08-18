@@ -1,8 +1,10 @@
-import type { Api } from './index'
+import type { IpcApi } from '@shared/ipc'
+import type { SpikeApi } from './index'
 
 declare global {
   interface Window {
-    api: Api
+    api: IpcApi
+    spikeApi: SpikeApi
   }
 }
 export {}

@@ -10,7 +10,7 @@ function SpikeOverlay(): React.JSX.Element {
     <div
       className="fixed inset-0"
       style={{ background: 'transparent' }}
-      onPointerDown={(e) => window.api.spike.overlayReport(`pointerdown ${e.clientX},${e.clientY}`)}
+      onPointerDown={(e) => window.spikeApi.overlayReport(`pointerdown ${e.clientX},${e.clientY}`)}
     >
       <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs text-white">OVERLAY SPIKE (transparente, click-through)</div>
       <div

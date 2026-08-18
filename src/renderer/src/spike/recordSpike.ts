@@ -54,7 +54,7 @@ export interface RunOptions {
 // Sequência principal: 15 s de gravação (pausa 5→8 s) em 4 faixas fMP4.
 export async function runRecordingSpike(opts: RunOptions): Promise<void> {
   const { log } = opts
-  const api = window.api.spike
+  const api = window.spikeApi
   const t0 = performance.now()
   const mark = (k: string): void => {
     report.timings[k] = Math.round(performance.now() - t0)

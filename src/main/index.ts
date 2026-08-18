@@ -1,21 +1,132 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
-import { createRecorderWindow } from './windows/recorderWindow'
+import { app, BrowserWindow, dialog, powerMonitor, shell } from 'electron'
+import { IPC } from '@shared/ipc'
+import { registerFileProtocolScheme, installFileProtocol } from './fileProtocol'
 import { runSpike } from './spike/spikeMain'
+import { createRecorderWindow, getRecorderWindow, setQuitting, showRecorder } from './windows/recorderWindow'
+import { installDisplayMediaHandler } from './capture/displayMediaHandler'
+import { listDisplays } from './capture/sources'
+import { SessionStore } from './session/sessionStore'
+import { getSettings, rawDir } from './settings/settingsStore'
+import { registerIpc } from './ipc'
+import { applyHotkeys, onHotkeyStatus, unregisterAllHotkeys } from './hotkeys/globalShortcuts'
+import { createTray } from './tray'
+import { initAutoUpdater, check as updateCheck, stopUpdater } from './update/autoUpdater'
+import { isRecordingActive, setCommandSink, setPhaseValue } from './recording/state'
+import { setProtection } from './windows/protection'
+import { destroyOverlays, watchDisplayChanges } from './windows/overlayWindows'
+import { destroyBar } from './windows/barWindow'
+import { log } from './log'
+import { runIntegrationTest } from './testMode'
+
+// Bootstrap do processo principal.
 
 app.setAppUserModelId('com.cialight.gravador')
+registerFileProtocolScheme()
 
-app.whenReady().then(() => {
-  ipcMain.handle('ping', () => 'pong')
-  if (process.env.CIALIGHT_SPIKE) {
-    void runSpike()
-    return
-  }
-  createRecorderWindow()
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createRecorderWindow()
-  })
-})
-
-app.on('window-all-closed', () => {
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
   app.quit()
-})
+} else {
+  app.on('second-instance', () => showRecorder())
+
+  app.whenReady().then(async () => {
+    log.info(`CiaLight Gravador ${app.getVersion()} — Electron ${process.versions.electron}, Chromium ${process.versions.chrome}`)
+    if (process.env.CIALIGHT_SPIKE) {
+      void runSpike()
+      return
+    }
+
+    const store = new SessionStore({ rawRoot: rawDir, trash: (p) => shell.trashItem(p), log })
+    installFileProtocol(store)
+    installDisplayMediaHandler()
+    registerIpc(store)
+
+    setCommandSink((cmd) => {
+      const w = getRecorderWindow()
+      if (!w) {
+        // sem janela (fechada em idle): recria e reenvia quando carregar
+        const nw = createRecorderWindow()
+        nw.webContents.once('did-finish-load', () => nw.webContents.send(IPC.recording.command, cmd))
+        return
+      }
+      w.webContents.send(IPC.recording.command, cmd)
+    })
+
+    if (process.env.CIALIGHT_TEST) {
+      await runIntegrationTest(process.env.CIALIGHT_TEST, store)
+      return
+    }
+
+    const win = createRecorderWindow()
+    createTray({
+      openSettings: () => {
+        showRecorder()
+        getRecorderWindow()?.webContents.send(IPC.recording.command, 'showRecorder')
+        getRecorderWindow()?.webContents.send('app:navigate', 'settings')
+      },
+      checkUpdate: () => void updateCheck(true),
+      quit: () => app.quit()
+    })
+    onHotkeyStatus((s) => {
+      for (const w of BrowserWindow.getAllWindows()) if (!w.webContents.isDestroyed()) w.webContents.send(IPC.hotkeys.statusChanged, s)
+    })
+    applyHotkeys(getSettings().hotkeys)
+    watchDisplayChanges(listDisplays)
+    initAutoUpdater({
+      isRecording: isRecordingActive,
+      onStatus: (s) => {
+        for (const w of BrowserWindow.getAllWindows()) if (!w.webContents.isDestroyed()) w.webContents.send(IPC.update.statusChanged, s)
+      }
+    })
+
+    // Recuperação de sessões interrompidas
+    win.webContents.once('did-finish-load', () => {
+      const unfinished = store.findUnfinished()
+      if (unfinished.length) {
+        log.info(`sessões interrompidas: ${unfinished.map((s) => s.id).join(', ')}`)
+        win.webContents.send(IPC.recording.recover, unfinished)
+      }
+      // limpeza de brutos antigos
+      const days = getSettings().rawRetentionDays
+      if (days) void store.cleanupOld(days).then((n) => n && log.info(`limpeza: ${n} sessão(ões) antigas enviadas à lixeira`))
+    })
+
+    powerMonitor.on('shutdown', () => {
+      log.warn('desligamento do sistema durante execução')
+    })
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createRecorderWindow()
+    })
+  })
+
+  app.on('before-quit', (e) => {
+    if (isRecordingActive() && !process.env.CIALIGHT_TEST) {
+      const r = dialog.showMessageBoxSync({
+        type: 'warning',
+        buttons: ['Continuar gravando', 'Sair e descartar'],
+        defaultId: 0,
+        cancelId: 0,
+        title: 'CiaLight Gravador',
+        message: 'Há uma gravação em andamento.',
+        detail: 'Se sair agora, a gravação bruta fica salva até o último segundo gravado e pode ser recuperada na próxima abertura.'
+      })
+      if (r === 0) {
+        e.preventDefault()
+        return
+      }
+    }
+    setQuitting(true)
+    setPhaseValue('idle')
+    setProtection(false)
+    unregisterAllHotkeys()
+    stopUpdater()
+    destroyOverlays()
+    destroyBar()
+  })
+
+  app.on('window-all-closed', () => {
+    // fecha o app quando a janela principal é fechada em modo ocioso (barra/overlay não contam: são destruídas junto)
+    if (!isRecordingActive()) app.quit()
+  })
+}

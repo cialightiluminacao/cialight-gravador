@@ -8,3 +8,4 @@ spike-out/
 .env
 .DS_Store
 Thumbs.db
+test-out/
