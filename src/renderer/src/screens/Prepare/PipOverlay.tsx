@@ -42,8 +42,15 @@ const CTRL_PAD = 3
 const CTRL_H = CTRL_BTN + CTRL_PAD * 2 + 2
 const CTRL_OFFSET = 8
 const STAGE_MARGIN = 4
+// teclado: setas movem a PiP (fração do palco); Shift acelera
+const KEY_STEP = 0.01
+const KEY_STEP_FAST = 0.05
+const EPS = 1e-4
 
 const stripT = (k: PipKeyframe): PipGeom => ({ x: k.x, y: k.y, w: k.w, h: k.h, shape: k.shape, visible: k.visible })
+
+const sameGeom = (a: PipGeom, b: PipGeom): boolean =>
+  a.shape === b.shape && a.visible === b.visible && Math.abs(a.x - b.x) < EPS && Math.abs(a.y - b.y) < EPS && Math.abs(a.w - b.w) < EPS && Math.abs(a.h - b.h) < EPS
 
 /** Altura normalizada para que a PiP tenha a proporção certa em pixels no palco W×H. */
 function heightFor(w: number, shape: PipGeom['shape'], W: number, H: number): number {
@@ -94,7 +101,7 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
   useLayoutEffect(() => {
     const el = rootRef.current
     if (!el) return
-    const update = (): void => setSize({ W: el.clientWidth, H: el.clientHeight })
+    const update = (): void => setSize((cur) => (cur.W === el.clientWidth && cur.H === el.clientHeight ? cur : { W: el.clientWidth, H: el.clientHeight }))
     update()
     const ro = new ResizeObserver(update)
     ro.observe(el)
@@ -103,7 +110,9 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
 
   // sincroniza com o keyframe externo quando não estamos arrastando
   useEffect(() => {
-    if (!dragRef.current) setDraft(stripT(pip))
+    if (dragRef.current) return
+    const next = stripT(pip)
+    if (!sameGeom(next, draftRef.current)) setDraft(next)
   }, [pip, setDraft])
 
   const videoRef = useCallback((v: HTMLVideoElement | null) => attachStream(v, camStream), [camStream])
@@ -117,6 +126,21 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
     },
     [onChange]
   )
+
+  // o palco mudou de proporção (outra fonte, janela redimensionada): a geometria é
+  // normalizada, então refazemos o ajuste para a PiP continuar 1:1 / 16:9 em pixels —
+  // e propagamos, para que a saída (mesma proporção da fonte) fique igual ao palco.
+  useEffect(() => {
+    const { W, H } = size
+    if (dragRef.current || W <= 0 || H <= 0) return
+    const cur = draftRef.current
+    if (!cur.visible) return
+    const next = fit(cur, W, H)
+    if (Math.abs(next.w - cur.w) > EPS || Math.abs(next.h - cur.h) > EPS || Math.abs(next.x - cur.x) > EPS || Math.abs(next.y - cur.y) > EPS) {
+      setDraft(next)
+      emit(next, true)
+    }
+  }, [size, setDraft, emit])
 
   const beginDrag = (mode: DragState['mode']) => (e: React.PointerEvent<HTMLElement>) => {
     if (!interactive || e.button !== 0) return
@@ -159,6 +183,22 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
     emit(draftRef.current, true)
   }
 
+  const onKeyDown = (e: React.KeyboardEvent<HTMLElement>): void => {
+    if (!interactive) return
+    const step = e.shiftKey ? KEY_STEP_FAST : KEY_STEP
+    let dx = 0
+    let dy = 0
+    if (e.key === 'ArrowLeft') dx = -step
+    else if (e.key === 'ArrowRight') dx = step
+    else if (e.key === 'ArrowUp') dy = -step
+    else if (e.key === 'ArrowDown') dy = step
+    else return
+    e.preventDefault()
+    const next = clampPip({ ...draft, x: draft.x + dx, y: draft.y + dy })
+    setDraft(next)
+    emit(next, true)
+  }
+
   const toggleShape = (): void => {
     const next = pipWithShape(draft, draft.shape === 'circle' ? 'rounded' : 'circle', size.W, size.H)
     setDraft(next)
@@ -190,20 +230,22 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
     <div ref={rootRef} className={cn('pointer-events-none absolute inset-0 select-none overflow-hidden', className)} aria-hidden={!interactive}>
       {px ? (
         <div
-          className={cn('group pointer-events-auto absolute', interactive ? (dragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default')}
+          className={cn('group pointer-events-auto absolute outline-none', interactive ? (dragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default')}
           style={{ left: px.x, top: px.y, width: px.w, height: px.h }}
           onPointerDown={beginDrag('move')}
           onPointerMove={onPointerMove}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
+          onKeyDown={onKeyDown}
           role={interactive ? 'button' : undefined}
-          aria-label="Câmera (arraste para posicionar)"
+          tabIndex={interactive ? 0 : undefined}
+          aria-label="Câmera (arraste ou use as setas para posicionar)"
         >
           {/* moldura da PiP */}
           <div
             className={cn(
               'relative h-full w-full overflow-hidden bg-surface-2 shadow-[0_8px_28px_rgba(0,0,0,0.55)] ring-2 ring-white/85 transition-shadow',
-              interactive && 'group-hover:ring-accent-2',
+              interactive && 'group-hover:ring-accent-2 group-focus-visible:ring-accent-2',
               dragging && 'ring-accent'
             )}
             style={{ borderRadius: px.radius }}
@@ -268,14 +310,14 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
             <div
               className={cn(
                 'absolute z-10 h-4 w-4 cursor-nwse-resize rounded-full border-2 border-white bg-accent shadow-md transition-opacity',
-                dragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                dragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
               )}
               style={isCircle ? { right: '9%', bottom: '9%' } : { right: handleRight, bottom: handleBottom }}
               onPointerDown={beginDrag('resize')}
               onPointerMove={onPointerMove}
               onPointerUp={endDrag}
               onPointerCancel={endDrag}
-              aria-label="Redimensionar câmera"
+              aria-hidden
             />
           ) : null}
         </div>

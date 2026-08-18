@@ -1,4 +1,6 @@
 import { useEffect } from 'react'
+import { toast } from 'sonner'
+import type { SourcesList } from '@shared/ipc'
 import { useAppStore } from '@/app/store'
 
 // Lista monitores/janelas; atualiza a cada `intervalMs` enquanto ativo.
@@ -7,12 +9,29 @@ import { useAppStore } from '@/app/store'
 // relido: a seleção feita pelo usuário durante a listagem prevalece.
 
 let inFlight: Promise<void> | null = null
+let listFailed = false
+
+/** Lista as fontes; se a captura falhar, avisa uma vez e mantém a lista anterior. */
+async function listSources(): Promise<SourcesList | null> {
+  try {
+    const list = await window.api.sources.list()
+    listFailed = false
+    return list
+  } catch (e) {
+    if (!listFailed) {
+      listFailed = true
+      toast.error(`Não foi possível listar monitores e janelas: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    return null
+  }
+}
 
 async function runRefresh(): Promise<void> {
   const st = useAppStore.getState()
   st.setSourcesLoading(true)
   try {
-    const list = await window.api.sources.list()
+    const list = await listSources()
+    if (!list) return
     // estado atual (a seleção pode ter mudado enquanto a listagem rodava)
     const now = useAppStore.getState()
     now.setSources(list)

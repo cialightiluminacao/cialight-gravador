@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react'
 import { AppWindow, Monitor } from 'lucide-react'
 import type { CaptureSource } from '@shared/types'
 import { cn } from '@/lib/cn'
-import { Badge } from '@/components/ui/primitives'
 
 // Cartão de uma fonte de captura (monitor ou janela): miniatura 16:9, nome,
 // ícone do app e selo "principal". Selecionado = anel no acento. Compacto o
@@ -47,9 +46,9 @@ export function SourceCard({ source, selected, primary = false, title, subtitle,
           </div>
         )}
         {primary ? (
-          <Badge tone="accent" className="absolute left-1.5 top-1.5 h-5 px-1.5 text-[9px] backdrop-blur">
+          <span className="absolute left-1.5 top-1.5 inline-flex h-5 items-center rounded-full border border-white/15 bg-black/70 px-1.5 text-[9px] font-semibold uppercase tracking-wide text-fg shadow backdrop-blur">
             principal
-          </Badge>
+          </span>
         ) : null}
         {selected ? <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent shadow-[0_0_0_3px_rgba(255,77,79,0.25)]" /> : null}
       </div>

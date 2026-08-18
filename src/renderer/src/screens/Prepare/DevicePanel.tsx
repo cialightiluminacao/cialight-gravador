@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { AlertTriangle, Camera, CameraOff, Circle, Mic, MicOff, Volume2, VolumeX } from 'lucide-react'
+import { AlertTriangle, Camera, CameraOff, Mic, MicOff, SlidersHorizontal, Volume2, VolumeX } from 'lucide-react'
 import type { CountdownSec, Fps, MicMode, Quality } from '@shared/types'
 import { cn } from '@/lib/cn'
 import { Button } from '@/components/ui/Button'
@@ -159,7 +159,7 @@ export function DevicePanel(p: DevicePanelProps): React.JSX.Element {
 
       {/* Qualidade */}
       <div className="flex shrink-0 flex-col gap-2">
-        <GroupHeader icon={<Circle className="h-3 w-3" />} label="Qualidade" />
+        <GroupHeader icon={<SlidersHorizontal className="h-3 w-3" />} label="Qualidade" />
         <QualityPicker quality={p.quality} fps={p.fps} countdownSec={p.countdownSec} onQuality={p.onQuality} onFps={p.onFps} onCountdown={p.onCountdown} />
       </div>
 

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AppWindow, Circle, FlipHorizontal2, Info, Monitor, MonitorOff, Move, RectangleHorizontal } from 'lucide-react'
 import type { CaptureSource, DisplayInfo, Fps, PipKeyframe, Quality } from '@shared/types'
 import { QUALITY_PRESETS } from '@shared/defaults'
+import { targetDimensions } from '@/engine/encoderSupport'
 import { cn } from '@/lib/cn'
 import { usePageVisible } from '@/hooks/usePageVisible'
 import { Tip } from '@/components/ui/primitives'
@@ -11,7 +12,9 @@ import { PipOverlay, pipWithShape } from './PipOverlay'
 // sources.thumbnail enquanto a tela está visível) e a PiP posicionável por cima,
 // com uma barra fixa de forma/espelho no canto do palco (sempre visível com a
 // câmera ligada). A proporção do palco segue a fonte (monitor: bounds; janela:
-// miniatura), com limites para não distorcer o layout; padrão 16:9.
+// miniatura) — a mesma que a gravação mantém (targetDimensions) — para que a
+// posição/tamanho da PiP no palco correspondam ao arquivo final; padrão 16:9.
+// Limites só para casos extremos (fontes muito estreitas/largas) não quebrarem o layout.
 
 export interface PreviewStageProps {
   source: CaptureSource | null
@@ -33,9 +36,10 @@ const THUMB_H = 540
 // monitor: 1 fps; janela: 0,5 fps (a captura de janelas é mais cara no processo principal)
 const REFRESH_SCREEN_MS = 1000
 const REFRESH_WINDOW_MS = 2000
-const MIN_ASPECT = 1.15
-const MAX_ASPECT = 2.4
+const MIN_ASPECT = 0.4
+const MAX_ASPECT = 4
 const DEFAULT_ASPECT = 16 / 9
+const STAGE_PAD = 16
 
 /** Miniatura em alta da fonte, renovada periodicamente enquanto ativo. */
 function useLiveThumbnail(source: CaptureSource | null, active: boolean): string | null {
@@ -68,10 +72,20 @@ function useLiveThumbnail(source: CaptureSource | null, active: boolean): string
   return thumb
 }
 
-function resolutionLabel(quality: Quality, display: DisplayInfo | undefined): string {
+/**
+ * Resolução prevista da gravação: a fonte mantém a proporção e só é limitada pela
+ * altura do preset (mesma regra do encoder). Monitor: bounds×scaleFactor; janela: só
+ * a proporção é conhecida (miniatura), então mostramos o preset ("1080p", "Nativa").
+ */
+function resolutionLabel(quality: Quality, source: CaptureSource | null, display: DisplayInfo | undefined): string {
   const p = QUALITY_PRESETS[quality]
-  if (p.width && p.height) return `${p.width}×${p.height}`
-  return display ? `${Math.round(display.bounds.width * display.scaleFactor)}×${Math.round(display.bounds.height * display.scaleFactor)}` : 'Nativa'
+  if (source?.kind === 'screen' && display) {
+    const srcW = Math.round(display.bounds.width * display.scaleFactor)
+    const srcH = Math.round(display.bounds.height * display.scaleFactor)
+    const { width, height } = targetDimensions(quality, srcW, srcH)
+    return `${width}×${height}`
+  }
+  return p.label
 }
 
 interface StageToolbarProps {
@@ -136,13 +150,17 @@ export function PreviewStage({ source, display, quality, fps, cameraOn, camStrea
   const rawAspect = source?.kind === 'screen' && display ? display.bounds.width / display.bounds.height : (imgAspect ?? DEFAULT_ASPECT)
   const aspect = Math.min(MAX_ASPECT, Math.max(MIN_ASPECT, rawAspect || DEFAULT_ASPECT))
 
-  // ajusta o palco ao espaço disponível mantendo a proporção
+  // ajusta o palco à área de conteúdo (sem o padding) mantendo a proporção
   const boxRef = useRef<HTMLDivElement>(null)
   const [box, setBox] = useState({ w: 0, h: 0 })
   useLayoutEffect(() => {
     const el = boxRef.current
     if (!el) return
-    const update = (): void => setBox({ w: el.clientWidth, h: el.clientHeight })
+    const update = (): void => {
+      const w = Math.max(0, el.clientWidth - STAGE_PAD * 2)
+      const h = Math.max(0, el.clientHeight - STAGE_PAD * 2)
+      setBox((cur) => (cur.w === w && cur.h === h ? cur : { w, h }))
+    }
     update()
     const ro = new ResizeObserver(update)
     ro.observe(el)
@@ -156,7 +174,7 @@ export function PreviewStage({ source, display, quality, fps, cameraOn, camStrea
   const showPip = !!source && cameraOn
 
   return (
-    <section className="card @container flex min-h-0 flex-col overflow-hidden">
+    <section className="card @container flex min-h-0 flex-1 flex-col overflow-hidden">
       <div ref={boxRef} className="relative flex min-h-0 flex-1 items-center justify-center p-4">
         {stageW > 0 && stageH > 0 ? (
           <div className="relative overflow-hidden rounded-xl bg-bg-2 shadow-[0_18px_50px_rgba(0,0,0,0.5)] ring-1 ring-white/8" style={{ width: stageW, height: stageH }}>
@@ -200,7 +218,7 @@ export function PreviewStage({ source, display, quality, fps, cameraOn, camStrea
                 <span />
               )}
               <span className="font-mono tnum flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-white/10 bg-black/55 px-2.5 py-1 text-[11px] font-medium text-fg-2 shadow backdrop-blur">
-                {resolutionLabel(quality, display)}
+                {resolutionLabel(quality, source, display)}
                 <span className="text-muted">·</span>
                 {fps}
                 <span className="@max-[560px]:hidden">fps</span>

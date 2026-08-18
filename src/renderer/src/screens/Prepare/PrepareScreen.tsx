@@ -207,7 +207,7 @@ export function PrepareScreen(): React.JSX.Element {
     }
   }, [])
 
-  const pipForStage: PipKeyframe = { ...pipDraft, visible: true }
+  const pipForStage = useMemo<PipKeyframe>(() => ({ ...pipDraft, visible: true }), [pipDraft])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
