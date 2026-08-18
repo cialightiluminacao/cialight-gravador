@@ -90,6 +90,21 @@ if (!gotLock) {
           writeFileSync(process.env.CIALIGHT_SHOT!, img.toPNG())
           log.info(`screenshot salvo em ${process.env.CIALIGHT_SHOT}`)
           if (process.env.CIALIGHT_SHOT_QUIT !== '0') app.exit(0)
+          // QA contínua: CIALIGHT_SHOT_EVERY=<ms> captura periodicamente (nome-N.png) enquanto o app roda
+          const every = Number(process.env.CIALIGHT_SHOT_EVERY ?? 0)
+          if (every > 0) {
+            let n = 0
+            setInterval(async () => {
+              const w = getRecorderWindow()
+              if (!w || w.isDestroyed()) return
+              try {
+                const shot = await w.webContents.capturePage()
+                writeFileSync(process.env.CIALIGHT_SHOT!.replace(/\.png$/i, `-${++n}.png`), shot.toPNG())
+              } catch (e) {
+                log.warn('screenshot periódico falhou', e)
+              }
+            }, every)
+          }
         }, 2500)
       })
     }

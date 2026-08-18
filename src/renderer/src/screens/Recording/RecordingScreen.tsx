@@ -117,8 +117,8 @@ export function RecordingScreen(): React.JSX.Element {
             <span className="truncate max-w-[280px]" title={selected?.name}>{selected?.name}</span>
           </span>
         </div>
-        <div className="rise-in rise-in-1 min-h-0 flex-1">
-          <div className="mx-auto h-full max-h-full" style={{ maxWidth: 'calc((100vh - 260px) * 16 / 9)' }}>
+        <div className="rise-in rise-in-1 flex min-h-0 flex-1 items-center justify-center">
+          <div className="w-full" style={{ maxWidth: 'calc((100vh - 250px) * 16 / 9)' }}>
             <LivePreview />
           </div>
         </div>

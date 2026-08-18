@@ -342,12 +342,14 @@ export function clearAnnotations(): void {
   api.overlay.syncStrokes('', [])
 }
 
+/** A overlay carimba com epoch ms (performance.timeOrigin + performance.now()); aqui viramos tempo local desta janela. */
+const epochToLocal = (epochMs: number): number => epochMs - performance.timeOrigin
+
 function onOverlayStroke(evt: OverlayStrokeEvent): void {
-  // converte instantes de parede da overlay em tempo de mídia
   const stroke: Stroke = {
     ...evt.stroke,
-    tMs: engine.mediaTimeAt(evt.stroke.tMs),
-    points: evt.stroke.points.map((p) => ({ ...p, tMs: engine.mediaTimeAt(p.tMs) }))
+    tMs: engine.mediaTimeAt(epochToLocal(evt.stroke.tMs)),
+    points: evt.stroke.points.map((p) => ({ ...p, tMs: engine.mediaTimeAt(epochToLocal(p.tMs)) }))
   }
   engine.upsertStroke(stroke)
 }

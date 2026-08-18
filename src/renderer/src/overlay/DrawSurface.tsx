@@ -3,7 +3,7 @@ import type { Stroke, StrokeTool } from '@shared/types'
 import { drawStrokes } from '@shared/compositor'
 
 // Superfície de desenho em tela cheia. Coordenadas normalizadas (0–1) do display;
-// tMs local = performance.now() (o gravador converte para tempo de mídia).
+// tMs = epoch ms de alta resolução (comparável entre janelas); o gravador converte para tempo de mídia.
 // Renderização local usa o MESMO drawStrokes da exportação (paridade visual).
 
 export interface DrawSettings {
@@ -23,6 +23,8 @@ interface Props {
 
 let seq = 0
 const EMIT_INTERVAL_MS = 33
+/** Relógio comparável entre janelas (epoch ms com sub-ms). */
+export const nowEpoch = (): number => performance.timeOrigin + performance.now()
 
 export function DrawSurface({ displayId, settings, strokes, autoFadeSec, onStrokesChange, readOnly }: Props): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -52,7 +54,7 @@ export function DrawSurface({ displayId, settings, strokes, autoFadeSec, onStrok
       const H = canvas.height
       ctx.clearRect(0, 0, W, H)
       const all = current.current ? [...strokesRef.current, current.current] : strokesRef.current
-      if (all.length) drawStrokes(ctx, W, H, { strokes: all, clearEvents: [] }, performance.now(), autoFadeSec ? autoFadeSec * 1000 : null)
+      if (all.length) drawStrokes(ctx, W, H, { strokes: all, clearEvents: [] }, nowEpoch(), autoFadeSec ? autoFadeSec * 1000 : null)
       raf.current = requestAnimationFrame(loop)
     }
     raf.current = requestAnimationFrame(loop)
@@ -81,7 +83,7 @@ export function DrawSurface({ displayId, settings, strokes, autoFadeSec, onStrok
       // Shift = linha reta; Ctrl+Shift = seta (estilo ZoomIt); senão a ferramenta selecionada
       const tool: StrokeTool = e.ctrlKey && e.shiftKey ? 'arrow' : e.shiftKey ? 'line' : st.tool
       const p = norm(e)
-      const t = performance.now()
+      const t = nowEpoch()
       current.current = { id: `${displayId}-${t.toFixed(0)}-${seq++}`, tMs: t, tool, points: [{ ...p, tMs: t }], color: st.color, width: st.width }
       emit(false)
     }
@@ -89,7 +91,7 @@ export function DrawSurface({ displayId, settings, strokes, autoFadeSec, onStrok
       const s = current.current
       if (!s) return
       const p = norm(e)
-      const t = performance.now()
+      const t = nowEpoch()
       if (s.tool === 'pen') {
         const last = s.points[s.points.length - 1]
         if (Math.hypot(p.x - last.x, p.y - last.y) < 0.0015) return
@@ -110,7 +112,7 @@ export function DrawSurface({ displayId, settings, strokes, autoFadeSec, onStrok
         /* ok */
       }
       const p = norm(e)
-      const t = performance.now()
+      const t = nowEpoch()
       if (s.tool === 'pen') {
         s.points.push({ ...p, tMs: t })
       } else if (s.points.length === 1) s.points.push({ ...p, tMs: t })
