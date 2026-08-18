@@ -153,22 +153,21 @@ export const ExportOptionsPanel = memo(function ExportOptionsPanel({ session, op
 
       {preset.supportsTargetSize ? (
         <div className="py-2.5">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <div>
-              <div className="text-[13px] font-medium">Tamanho-alvo</div>
-              <div className="text-[11px] text-muted">WhatsApp aceita 64 MB; e-mail, cerca de 20 MB</div>
-            </div>
-            <Segmented<'64' | '20' | 'none'>
-              size="sm"
-              value={target === 64 ? '64' : target === 20 ? '20' : 'none'}
-              onValueChange={(v) => onChange({ targetSizeMB: v === '64' ? 64 : v === '20' ? 20 : null })}
-              options={[
-                { value: '64', label: '64 MB', title: 'WhatsApp' },
-                { value: '20', label: '20 MB', title: 'E-mail' },
-                { value: 'none', label: 'Livre', title: 'Sem limite de tamanho' }
-              ]}
-            />
+          <div className="mb-2">
+            <div className="text-[13px] font-medium">Tamanho-alvo</div>
+            <div className="text-[11px] text-muted">WhatsApp aceita até 64 MB; e-mail, cerca de 20 MB</div>
           </div>
+          <Segmented<'64' | '20' | 'none'>
+            size="sm"
+            className="mb-2 w-full"
+            value={target === 64 ? '64' : target === 20 ? '20' : 'none'}
+            onValueChange={(v) => onChange({ targetSizeMB: v === '64' ? 64 : v === '20' ? 20 : null })}
+            options={[
+              { value: '64', label: <span className="whitespace-nowrap">64 MB · WhatsApp</span> },
+              { value: '20', label: <span className="whitespace-nowrap">20 MB · e-mail</span> },
+              { value: 'none', label: <span className="whitespace-nowrap">Sem limite</span> }
+            ]}
+          />
           {targetPlan && targetTwoPass ? (
             <div className={cn('rounded-lg border px-2.5 py-1.5 text-[11px]', targetPlan.warn ? 'border-warn/30 bg-warn/10 text-warn' : 'border-info/30 bg-info/10 text-info')}>
               {targetPlan.warn
