@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AlertCircle, CheckCircle2, Download, ExternalLink, GitBranch, Loader2, RefreshCw, RotateCw, ScrollText, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import type { UpdateStatus } from '@shared/ipc'
@@ -8,6 +8,7 @@ import { Badge, Progress, Section, Tip } from '@/components/ui/primitives'
 import { Note } from '@/components/ui/SettingRow'
 import { formatMB } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { notesToLines } from './releaseNotes'
 
 // Aba Atualização e sobre: versão, updater (verificar/baixar/instalar), notas, repositório, licenças.
 
@@ -36,30 +37,31 @@ const LICENSES: LicenseEntry[] = [
   { name: 'Fontes Manrope e Azeret Mono', license: 'OFL 1.1', url: 'https://github.com/fontsource/fontsource' }
 ]
 
-/** Notas da release: markdown bem simples (títulos, listas, parágrafos). */
+/** Notas da release (HTML do GitHub ou markdown) em linhas simples: títulos, itens e parágrafos. */
 function ReleaseNotes({ text }: { text: string }): React.JSX.Element {
-  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const lines = useMemo(() => notesToLines(text), [text])
   return (
     <div className="max-h-44 space-y-1 overflow-y-auto rounded-xl border border-border bg-bg-2 px-3 py-2 text-xs leading-relaxed text-fg-2">
       {lines.map((line, i) => {
-        const t = line.trim()
-        if (!t) return <div key={i} className="h-1" />
-        const heading = /^#{1,6}\s+(.*)$/.exec(t)
-        if (heading)
-          return (
-            <div key={i} className="pt-1 font-semibold text-fg">
-              {heading[1]}
-            </div>
-          )
-        const bullet = /^[-*•]\s+(.*)$/.exec(t)
-        if (bullet)
-          return (
-            <div key={i} className="flex gap-2 pl-1">
-              <span className="text-muted">•</span>
-              <span>{bullet[1]}</span>
-            </div>
-          )
-        return <p key={i}>{t}</p>
+        switch (line.kind) {
+          case 'blank':
+            return <div key={i} className="h-1" />
+          case 'heading':
+            return (
+              <div key={i} className={cn('font-semibold text-fg', i > 0 && 'pt-1')}>
+                {line.text}
+              </div>
+            )
+          case 'bullet':
+            return (
+              <div key={i} className="flex gap-2 pl-1">
+                <span className="text-muted">•</span>
+                <span>{line.text}</span>
+              </div>
+            )
+          case 'paragraph':
+            return <p key={i}>{line.text}</p>
+        }
       })}
     </div>
   )
@@ -107,7 +109,15 @@ export function UpdateTab(): React.JSX.Element {
   }
 
   const state = update?.state ?? 'idle'
-  const canCheck = state !== 'checking' && state !== 'downloading' && !checking && !busy
+  // O main ignora o check enquanto baixa ou com versão já baixada — o botão acompanha.
+  const canCheck = state !== 'checking' && state !== 'downloading' && state !== 'downloaded' && !checking && !busy
+  const checkTip = busy
+    ? 'Termine a gravação para verificar atualizações'
+    : state === 'downloaded'
+      ? 'Já há uma versão baixada — reinicie para atualizar'
+      : state === 'downloading'
+        ? 'Aguarde o download terminar'
+        : 'Consulta agora se há uma versão nova'
 
   return (
     <div className="flex flex-col gap-4">
@@ -162,7 +172,7 @@ export function UpdateTab(): React.JSX.Element {
                 </span>
               </Tip>
             ) : null}
-            <Tip content={busy ? 'Termine a gravação para verificar atualizações' : 'Consulta agora se há uma versão nova'}>
+            <Tip content={checkTip}>
               <span>
                 <Button size="sm" variant="secondary" disabled={!canCheck} onClick={() => void check()}>
                   <RefreshCw className={cn('h-3.5 w-3.5', (checking || state === 'checking') && 'animate-spin')} /> Verificar agora

@@ -7,25 +7,29 @@ import { useSettingsPatch } from './useSettingsPatch'
 
 // Aba Anotações: cor, espessura (com prévia), sumir automaticamente, realce de cliques, teclas do modo desenho.
 
-const PALETTE: { value: string; label: string }[] = [
+// Mesmas cores das teclas R/G/B/Y/W da overlay de desenho (OverlayApp), mais laranja.
+const PALETTE: { value: string; label: string; darkCheck?: boolean }[] = [
   { value: '#ff3b30', label: 'Vermelho' },
   { value: '#ff9f0a', label: 'Laranja' },
-  { value: '#ffd60a', label: 'Amarelo' },
-  { value: '#30d158', label: 'Verde' },
-  { value: '#0a84ff', label: 'Azul' },
-  { value: '#ffffff', label: 'Branco' }
+  { value: '#ffd23f', label: 'Amarelo', darkCheck: true },
+  { value: '#3ddc97', label: 'Verde' },
+  { value: '#4d8dff', label: 'Azul' },
+  { value: '#ffffff', label: 'Branco', darkCheck: true }
 ]
 
+// Faixa de espessura igual à da overlay ([ e ] vão de 2 a 24 px).
 const WIDTH_MIN = 2
-const WIDTH_MAX = 16
+const WIDTH_MAX = 24
 const FADE_MIN = 2
 const FADE_MAX = 15
 const FADE_DEFAULT = 5
 
+// Espelha os atalhos tratados em OverlayApp/DrawPalette (modo desenho).
 const DRAW_KEYS: { keys: string[]; what: string }[] = [
+  { keys: ['P', 'L', 'A'], what: 'caneta · linha · seta' },
   { keys: ['Shift'], what: 'segurando: linha reta' },
   { keys: ['Ctrl+Shift'], what: 'segurando: seta' },
-  { keys: ['R', 'G', 'B', 'Y'], what: 'vermelho · verde · azul · amarelo' },
+  { keys: ['R', 'G', 'B', 'Y', 'W'], what: 'vermelho · verde · azul · amarelo · branco' },
   { keys: ['[', ']'], what: 'espessura − / +' },
   { keys: ['Ctrl+Z'], what: 'desfaz o último traço' },
   { keys: ['E'], what: 'apaga tudo' },
@@ -80,7 +84,7 @@ export function AnnotationsTab(): React.JSX.Element {
       <Section title="Traço" className="rise-in">
         <div className="grid grid-cols-[1fr_220px] gap-6">
           <SettingRows>
-            <SettingRow label="Cor" description="Cor inicial ao entrar no modo desenho. Durante a gravação, R, G, B e Y trocam na hora.">
+            <SettingRow label="Cor" description="Cor inicial ao entrar no modo desenho. Durante a gravação, R, G, B, Y e W trocam na hora.">
               <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Cor do traço">
                 {PALETTE.map((c) => {
                   const active = c.value.toLowerCase() === ann.color.toLowerCase()
@@ -96,7 +100,7 @@ export function AnnotationsTab(): React.JSX.Element {
                       className={cn('flex h-7 w-7 items-center justify-center rounded-full border-2 transition-transform hover:scale-110', active ? 'border-fg' : 'border-transparent')}
                       style={{ background: c.value }}
                     >
-                      {active ? <Check className={cn('h-3.5 w-3.5', c.value === '#ffffff' || c.value === '#ffd60a' ? 'text-black' : 'text-white')} strokeWidth={3} /> : null}
+                      {active ? <Check className={cn('h-3.5 w-3.5', c.darkCheck ? 'text-black' : 'text-white')} strokeWidth={3} /> : null}
                     </button>
                   )
                 })}
@@ -189,7 +193,7 @@ export function AnnotationsTab(): React.JSX.Element {
         <ul className="grid grid-cols-2 gap-x-8 gap-y-2">
           {DRAW_KEYS.map((k) => (
             <li key={k.what} className="flex items-center gap-3 text-xs text-fg-2">
-              <span className="flex w-[124px] shrink-0 items-center gap-1">
+              <span className="flex w-[148px] shrink-0 items-center gap-1">
                 {k.keys.map((key) => (
                   <Kbd key={key}>{key}</Kbd>
                 ))}

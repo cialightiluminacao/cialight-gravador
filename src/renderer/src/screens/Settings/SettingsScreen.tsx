@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import * as TabsPrimitive from '@radix-ui/react-tabs'
 import { Cable, CheckCircle2, Info, Keyboard, PenLine, SlidersHorizontal, Wrench, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/app/store'
 import { Tabs, TabsContent } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
 import { useDisplayedHotkeyStatus } from './hotkeyStatusView'
-import { SETTINGS_TABS, SETTINGS_TAB_LABELS, getInitialSettingsTab, installSettingsDeepLink, rememberSettingsTab, type SettingsTab } from './settingsTabs'
+import { SETTINGS_TABS, SETTINGS_TAB_LABELS, applyStoredSettingsTab, installSettingsDeepLink, parseSettingsTab, setSettingsTab, useSettingsTab, type SettingsTab } from './settingsTabs'
 import { GeneralTab } from './GeneralTab'
 import { DevicesTab } from './DevicesTab'
 import { HotkeysTab } from './HotkeysTab'
@@ -15,6 +15,8 @@ import { UpdateTab } from './UpdateTab'
 
 // Tela Configurações: cabeçalho, abas verticais à esquerda e cartões à direita.
 // Cada mudança persiste na hora (settings:set) com preview otimista no store.
+// A aba atual vive em settingsTabs.ts (mini-store): sobrevive a sair/voltar da tela
+// e pode ser trocada por deep link (`settings:<aba>` / sessionStorage.settingsTab).
 
 installSettingsDeepLink()
 
@@ -46,12 +48,13 @@ const TAB_CONTENT: Record<SettingsTab, () => React.JSX.Element> = {
 }
 
 export function SettingsScreen(): React.JSX.Element {
-  const [tab, setTab] = useState<SettingsTab>(getInitialSettingsTab)
+  const tab = useSettingsTab()
   const settingsLoaded = useAppStore((s) => s.settingsLoaded)
   const updateState = useAppStore((s) => s.updateStatus?.state)
   const hotkeyStatus = useDisplayedHotkeyStatus()
   const hotkeyIssues = hotkeyStatus.filter((h) => h.accelerator && !h.registered).length
-  useEffect(() => rememberSettingsTab(tab), [tab])
+  // Pedido de aba deixado antes de a tela montar (ex.: App navegou com sessionStorage já preenchido).
+  useEffect(() => applyStoredSettingsTab(), [])
 
   const dot = (t: SettingsTab): 'accent' | 'warn' | null => {
     if (t === 'atualizacao' && (updateState === 'available' || updateState === 'downloaded')) return 'accent'
@@ -72,7 +75,13 @@ export function SettingsScreen(): React.JSX.Element {
         </div>
       </header>
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as SettingsTab)} orientation="vertical" className="flex min-h-0 flex-1 gap-6 px-7 pb-6">
+      <Tabs
+        value={tab}
+        onValueChange={(v) => {
+          const next = parseSettingsTab(v)
+          if (next) setSettingsTab(next)
+        }}
+        orientation="vertical" className="flex min-h-0 flex-1 gap-6 px-7 pb-6">
         <TabsPrimitive.List aria-label="Seções das configurações" className="flex w-[228px] shrink-0 flex-col gap-1">
           {SETTINGS_TABS.map((t, i) => {
             const Icon = TAB_ICONS[t]

@@ -55,15 +55,20 @@ export function PathField({
           <FolderInput className="h-3.5 w-3.5" /> Trocar
         </Button>
       </Tip>
-      <Tip content="Voltar à pasta padrão do aplicativo">
-        <Button size="sm" variant="ghost" className="px-2" disabled={isDefault} onClick={() => onChange(null)} aria-label="Voltar à pasta padrão">
-          <RotateCcw className="h-3.5 w-3.5" />
-        </Button>
+      {/* <span> em volta: o tooltip precisa de um alvo que receba eventos mesmo com o botão desabilitado. */}
+      <Tip content={isDefault ? 'Já está na pasta padrão do aplicativo' : 'Voltar à pasta padrão do aplicativo'}>
+        <span className="inline-flex">
+          <Button size="sm" variant="ghost" className="px-2" disabled={isDefault} onClick={() => onChange(null)} aria-label="Voltar à pasta padrão">
+            <RotateCcw className="h-3.5 w-3.5" />
+          </Button>
+        </span>
       </Tip>
-      <Tip content="Abrir no Explorador de Arquivos">
-        <Button size="sm" variant="ghost" className="px-2" disabled={!effective} onClick={() => void open()} aria-label="Abrir pasta">
-          <FolderOpen className="h-3.5 w-3.5" />
-        </Button>
+      <Tip content={effective ? 'Abrir no Explorador de Arquivos' : 'Nenhuma pasta definida'}>
+        <span className="inline-flex">
+          <Button size="sm" variant="ghost" className="px-2" disabled={!effective} onClick={() => void open()} aria-label="Abrir pasta">
+            <FolderOpen className="h-3.5 w-3.5" />
+          </Button>
+        </span>
       </Tip>
     </div>
   )

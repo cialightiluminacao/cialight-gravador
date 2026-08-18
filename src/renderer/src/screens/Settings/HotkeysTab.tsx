@@ -23,11 +23,19 @@ function sameMap(a: HotkeyMap, b: HotkeyMap): boolean {
   return ACTIONS.every((k) => a[k] === b[k])
 }
 
-/** Avisos únicos por ação: do status do main + heurísticas locais. */
+/** Prefixo do aviso do main quando o Windows recusa o registro — já aparece no badge/tooltip, não na linha. */
+const UNREGISTERED_PREFIX = 'Não foi possível registrar'
+
+/** Avisos a mostrar na linha (únicos por ação): do status do main + heurísticas locais, sem o «não registrado». */
 function problemsFor(acc: string | null, status: HotkeyStatus | undefined): string[] {
-  const list = [...(status?.problems ?? [])]
+  const list = (status?.problems ?? []).filter((p) => !p.startsWith(UNREGISTERED_PREFIX))
   if (acc) for (const p of hotkeyProblems(acc)) if (!list.includes(p)) list.push(p)
   return list
+}
+
+/** Ações cujo atalho difere entre dois mapas. */
+function changedActions(before: HotkeyMap, after: HotkeyMap): HotkeyAction[] {
+  return ACTIONS.filter((a) => before[a] !== after[a])
 }
 
 function StatusBadge({ acc, status, duplicate }: { acc: string | null; status: HotkeyStatus | undefined; duplicate: boolean }): React.JSX.Element {
@@ -37,10 +45,14 @@ function StatusBadge({ acc, status, duplicate }: { acc: string | null; status: H
   return status.registered ? <Badge tone="ok">ativo</Badge> : <Badge tone="warn">não registrado</Badge>
 }
 
-function warnUnregistered(status: HotkeyStatus[]): void {
-  const failed = status.filter((s) => s.accelerator && !s.registered)
+/** Avisa (uma vez) só sobre as ações recém-alteradas que o Windows recusou; as demais ficam no badge da linha. */
+function warnUnregistered(status: HotkeyStatus[], changed: HotkeyAction[]): void {
+  const failed = status.filter((s) => changed.includes(s.action) && s.accelerator && !s.registered)
   if (!failed.length) return
-  toast.warning(failed.length === 1 ? `Um atalho não pôde ser registrado: ${HOTKEY_LABELS[failed[0].action]}` : `${failed.length} atalhos não puderam ser registrados`)
+  const names = failed.map((f) => `«${HOTKEY_LABELS[f.action]}»`)
+  toast.warning(failed.length === 1 ? `O atalho de ${names[0]} não pôde ser registrado` : `${failed.length} atalhos não puderam ser registrados: ${names.join(', ')}`, {
+    description: 'Outro programa já usa a combinação — escolha outra.'
+  })
 }
 
 export function HotkeysTab(): React.JSX.Element {
@@ -79,18 +91,19 @@ export function HotkeysTab(): React.JSX.Element {
     [setHotkeyStatus]
   )
 
-  /** Registra no main o mapa que está no store (se ainda não for o aplicado). */
-  const syncApplied = async (warn: boolean): Promise<void> => {
+  /** Registra no main o mapa que está no store (se ainda não for o aplicado) e avisa sobre as ações alteradas. */
+  const syncApplied = async (changed: HotkeyAction[]): Promise<void> => {
     const current = useAppStore.getState().settings.hotkeys
     if (applied.current && sameMap(applied.current, current)) return
     const status = await applyMap(current)
-    if (warn && status) warnUnregistered(status)
+    if (status) warnUnregistered(status, changed)
   }
 
   const commit = async (next: HotkeyMap): Promise<boolean> => {
+    const changed = changedActions(useAppStore.getState().settings.hotkeys, next)
     const ok = await patch({ hotkeys: next })
     // Durante uma captura os atalhos ficam suspensos; o mapa é aplicado ao terminar.
-    if (!isHotkeyStatusFrozen()) await syncApplied(ok)
+    if (!isHotkeyStatusFrozen()) await syncApplied(ok ? changed : [])
     return ok
   }
 
@@ -108,7 +121,8 @@ export function HotkeysTab(): React.JSX.Element {
       freezeHotkeyStatus()
       void applyMap(EMPTY_MAP)
     } else if (!capturing && isHotkeyStatusFrozen()) {
-      const changed = !beforeCapture.current || !sameMap(beforeCapture.current, useAppStore.getState().settings.hotkeys)
+      const now = useAppStore.getState().settings.hotkeys
+      const changed = beforeCapture.current ? changedActions(beforeCapture.current, now) : ACTIONS
       void syncApplied(changed).finally(unfreezeHotkeyStatus)
     }
   }
