@@ -3,6 +3,7 @@ import { Toaster, toast } from 'sonner'
 import { TooltipProvider } from '@/components/ui/primitives'
 import { useAppStore, type Screen } from './store'
 import { wireController } from './recordingController'
+import { installQaHooks } from './qa'
 import { Titlebar } from './Titlebar'
 import { UpdateBanner } from './UpdateBanner'
 import { RecoverDialog } from './RecoverDialog'
@@ -27,6 +28,7 @@ function useBoot(): void {
   useEffect(() => {
     let alive = true
     wireController()
+    installQaHooks()
     window.__navigate = (screen) => {
       // 'review:<sessionId>' abre uma sessão bruta na Revisão (QA/histórico)
       if (screen.startsWith('settings:')) {
