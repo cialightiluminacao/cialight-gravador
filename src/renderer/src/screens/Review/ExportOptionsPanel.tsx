@@ -1,35 +1,15 @@
 import { memo } from 'react'
 import { Circle, FolderOpen, RotateCcw, Square } from 'lucide-react'
-import type { AudioMode, ExportOptions, PipKeyframe, PipShape, Session } from '@shared/types'
+import type { AudioMode, ExportOptions, PipShape, Session } from '@shared/types'
 import { PRESETS } from '@shared/presets/presets'
 import { needsTwoPass, planForTarget } from '@shared/presets/sizeTarget'
 import { Button } from '@/components/ui/Button'
 import { Segmented, Slider, Toggle } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
+import type { PipChoice, PipCorner, PipSize } from './pipChoice'
 
 // Opções de exportação (spec §4.3 item 3). Só mostra o que faz sentido para a sessão
 // (webcam/anotações/áudios gravados) e para o preset escolhido (alvo, Reels, separado).
-
-export type PipCorner = 'tl' | 'tr' | 'bl' | 'br'
-export type PipSize = 'p' | 'm' | 'g'
-export type PipChoice = { mode: 'original' } | { mode: 'fixed'; corner: PipCorner; size: PipSize; shape: PipShape }
-
-const PIP_SIZE_W: Record<PipSize, number> = { p: 0.16, m: 0.2, g: 0.28 }
-/** Margem até a borda, em fração da largura (a vertical usa a mesma medida em pixels). */
-const PIP_MARGIN_X = 0.03
-
-/** Keyframe único (posição fixa) para a escolha; null = manter o movimento gravado. */
-export function pipOverrideFor(choice: PipChoice, videoW: number, videoH: number): PipKeyframe[] | null {
-  if (choice.mode === 'original') return null
-  const aspect = videoW > 0 && videoH > 0 ? videoW / videoH : 16 / 9
-  const w = PIP_SIZE_W[choice.size]
-  const h = Math.min(1, w * aspect)
-  const mx = PIP_MARGIN_X
-  const my = PIP_MARGIN_X * aspect
-  const x = choice.corner === 'tl' || choice.corner === 'bl' ? mx : 1 - w - mx
-  const y = choice.corner === 'tl' || choice.corner === 'tr' ? my : 1 - h - my
-  return [{ tMs: 0, x, y, w, h, shape: choice.shape, visible: true }]
-}
 
 /** Estimativa (MB) do preset atual — para avisar sobre 2 passes / qualidade baixa no alvo. */
 export interface TargetHint {

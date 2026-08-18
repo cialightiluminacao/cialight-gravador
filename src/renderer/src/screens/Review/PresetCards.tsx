@@ -13,8 +13,8 @@ const PRESET_UI: Record<ExportPresetId, { icon: LucideIcon; description: string 
   small: { icon: MessageCircle, description: 'Até 720p, cabe em 64 MB' },
   high: { icon: CloudUpload, description: 'Nativa, H.264 High' },
   max: { icon: Gem, description: 'Nativa, qualidade máxima' },
-  separate: { icon: Layers, description: 'Faixas separadas para edição' },
-  cutOnly: { icon: Scissors, description: 'Sem recodificar (corte ≈ 1 s)' }
+  separate: { icon: Layers, description: 'Faixas para edição' },
+  cutOnly: { icon: Scissors, description: 'Sem recodificar, corte ≈ 1 s' }
 }
 
 interface Props {

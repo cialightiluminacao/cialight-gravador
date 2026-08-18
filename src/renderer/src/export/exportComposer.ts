@@ -16,6 +16,8 @@ export interface ComposeSessionArgs {
   fps: number
   width: number
   height: number
+  /** Duração conhecida da gravação (ms) — usada como fim quando não há corte final. */
+  durationMs: number
   /** Sumiço automático das anotações (ms) ou null — vem de settings.annotations.autoFadeSec. */
   autoFadeMs: number | null
   onProgress: (percent: number) => void
@@ -29,12 +31,22 @@ export class ComposeCancelledError extends Error {
   }
 }
 
+/**
+ * Descarta o composed.mp4 da sessão (intermediário pesado, ~20 Mbps): abrir para escrita com
+ * flag 'w' zera o arquivo — não há IPC de exclusão de arquivo avulso na pasta bruta.
+ */
+export async function discardComposed(sessionId: string): Promise<void> {
+  const api = window.api
+  const handle = await api.session.writeOpen(sessionId, COMPOSED_FILE)
+  await api.session.writeClose(handle)
+}
+
 /** Compõe tela + PiP + traços em composed.mp4 (fMP4, só vídeo) e devolve o caminho absoluto. */
 export async function composeSession(args: ComposeSessionArgs): Promise<string> {
   const { sessionId, session, options, signal } = args
   if (signal.aborted) throw new ComposeCancelledError()
   const api = window.api
-  const durationMs = session.durationMs ?? 0
+  const durationMs = args.durationMs > 0 ? args.durationMs : (session.durationMs ?? 0)
   const trimEndMs = options.trimEndMs !== null && options.trimEndMs > options.trimStartMs ? options.trimEndMs : durationMs
 
   const start: ComposeStartMessage = {

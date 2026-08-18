@@ -21,6 +21,8 @@ export interface ReviewPlayerHandle {
   toggle(): void
   seek(ms: number): void
   setMuted(muted: boolean): void
+  /** Pausa e solta os arquivos (src) dos <video> — antes de excluir a pasta bruta. */
+  release(): void
 }
 
 interface Props {
@@ -151,6 +153,14 @@ export const ReviewPlayer = forwardRef<ReviewPlayerHandle, Props>(function Revie
       seek,
       setMuted: (m) => {
         if (videoRef.current) videoRef.current.muted = m
+      },
+      release: () => {
+        for (const el of [videoRef.current, camRef.current]) {
+          if (!el) continue
+          el.pause()
+          el.removeAttribute('src')
+          el.load()
+        }
       }
     }),
     [play, pause, seek]
@@ -191,7 +201,8 @@ export const ReviewPlayer = forwardRef<ReviewPlayerHandle, Props>(function Revie
       role="presentation"
     >
       <video ref={videoRef} src={proxyUrl} preload="auto" playsInline className="pointer-events-none absolute inset-0 h-full w-full opacity-0" {...onVideoEvent} />
-      {webcamUrl ? <video ref={camRef} src={webcamUrl} preload="auto" muted playsInline className="pointer-events-none absolute inset-0 h-px w-px opacity-0" onLoadedData={paint} /> : null}
+      {/* onSeeked: durante o seek o readyState da webcam cai e o paint do proxy sai sem PiP — repinta quando o quadro chega. */}
+      {webcamUrl ? <video ref={camRef} src={webcamUrl} preload="auto" muted playsInline className="pointer-events-none absolute inset-0 h-px w-px opacity-0" onLoadedData={paint} onSeeked={paint} /> : null}
       <canvas ref={canvasRef} width={width} height={height} className="absolute inset-0 h-full w-full" />
       {!ready ? <div className="absolute inset-0 animate-pulse bg-surface-2" /> : null}
       <div

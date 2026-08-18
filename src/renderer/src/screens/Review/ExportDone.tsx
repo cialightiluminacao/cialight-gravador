@@ -11,8 +11,6 @@ import { cn } from '@/lib/cn'
 
 interface Props {
   outputs: string[]
-  /** Pasta de destino (mostrada abaixo da lista). */
-  outputDir: string
   /** Tamanho em bytes por caminho, quando conhecido. */
   sizes?: Record<string, number>
   /** Aviso vindo do job (ex.: qualidade baixa para o alvo). */
@@ -24,11 +22,14 @@ interface Props {
 
 const baseName = (p: string): string => p.split(/[\\/]/).pop() ?? p
 const extOf = (p: string): string => (baseName(p).split('.').pop() ?? '').toLowerCase()
+/** Pasta real dos arquivos gerados (dirname do primeiro output). */
+const dirName = (p: string): string => p.slice(0, Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'))) || p
 
-export function ExportDone({ outputs, outputDir, sizes, warning, onReexport, onNewRecording, onDeleteRaw }: Props): React.JSX.Element {
+export function ExportDone({ outputs, sizes, warning, onReexport, onNewRecording, onDeleteRaw }: Props): React.JSX.Element {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const first = outputs[0]
+  const outputDir = first ? dirName(first) : ''
   const api = window.api
 
   const copyFile = async (p: string): Promise<void> => {
@@ -91,10 +92,12 @@ export function ExportDone({ outputs, outputDir, sizes, warning, onReexport, onN
               )
             })}
           </ul>
-          <button type="button" className="mt-2 flex w-full items-center gap-1.5 truncate rounded-md px-1 py-1 text-left text-[11px] text-muted hover:text-fg" title={outputDir} onClick={() => void api.app.openPath(outputDir)}>
-            <FolderOpen className="h-3 w-3 shrink-0" />
-            <span className="truncate">{outputDir}</span>
-          </button>
+          {outputDir ? (
+            <button type="button" className="mt-2 flex w-full items-center gap-1.5 truncate rounded-md px-1 py-1 text-left text-[11px] text-muted hover:text-fg" title={outputDir} onClick={() => void api.app.openPath(outputDir)}>
+              <FolderOpen className="h-3 w-3 shrink-0" />
+              <span className="truncate">{outputDir}</span>
+            </button>
+          ) : null}
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-2">

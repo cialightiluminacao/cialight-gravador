@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppWindow, Clapperboard, LoaderCircle, Monitor, Pause, Play, RefreshCw, SkipBack, Video, Volume2, VolumeX } from 'lucide-react'
 import { toast } from 'sonner'
 import type { ExportOptions, ExportPresetId, Session } from '@shared/types'
-import type { ExportProgress as ExportProgressEvent } from '@shared/ipc'
 import { PRESETS } from '@shared/presets/presets'
 import { estimateOutputMB } from '@shared/presets/sizeEstimate'
 import { defaultOutputName, sanitizeFileName } from '@shared/filenames'
@@ -11,17 +10,18 @@ import { Button } from '@/components/ui/Button'
 import { Badge, Kbd, Progress, Section, Tip } from '@/components/ui/primitives'
 import { formatBytes, formatClock, formatDate, formatMB, formatTimecode } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { ComposeCancelledError, composeSession, needsComposition } from '@/export/exportComposer'
 import { ReviewPlayer, type ReviewPlayerHandle } from './ReviewPlayer'
 import { MIN_TRIM_GAP_MS, Timeline } from './Timeline'
 import { PresetCards } from './PresetCards'
-import { ExportOptionsPanel, pipOverrideFor, type PipChoice } from './ExportOptionsPanel'
-import { ExportProgress, type ExportProgressState, type ExportSummary } from './ExportProgress'
+import { ExportOptionsPanel } from './ExportOptionsPanel'
+import { pipOverrideFor, type PipChoice } from './pipChoice'
+import { ExportProgress, type ExportSummary } from './ExportProgress'
 import { ExportDone } from './ExportDone'
+import { cancelExport, resetExport, startExport, useExportRunner, type ExportResult } from './exportRunner'
 
 // Tela de Revisão (spec §4.3): prepara os assets (proxy/webcam/miniaturas/onda), player com
 // composição idêntica à exportação, timeline com corte, presets + opções, exportação com
-// progresso (composição no Worker → ffmpeg no main) e estado concluído.
+// progresso (composição no Worker → ffmpeg no main, via exportRunner) e estado concluído.
 
 declare global {
   interface Window {
@@ -34,13 +34,6 @@ type AssetsState =
   | { status: 'loading'; percent: number }
   | { status: 'ready'; proxyUrl: string; webcamUrl: string | null; thumbs: string[]; waveformUrl: string | null }
   | { status: 'error'; message: string }
-
-type ExportPhase =
-  | { kind: 'idle' }
-  | { kind: 'running'; progress: ExportProgressState; jobId: string | null; opts: ExportOptions }
-  | { kind: 'done'; outputs: string[]; warning: string | null }
-
-type ExportResult = { outputs: string[]; error?: string }
 
 const pad3 = (n: number): string => String(n).padStart(3, '0')
 
@@ -65,7 +58,8 @@ function initialOptions(session: Session, outputDir: string): ExportOptions {
     targetSizeMB: null,
     reels: false,
     outputDir,
-    fileName: defaultOutputName(new Date(session.createdAt)),
+    // Sem extensão: o main acrescenta .mp4/.wav conforme o preset (o painel mostra o sufixo).
+    fileName: defaultOutputName(new Date(session.createdAt), ''),
     pipOverride: null
   }
 }
@@ -90,19 +84,6 @@ function exportSummary(session: Session, opts: ExportOptions, durationMs: number
 }
 
 const AUDIO_SUMMARY: Record<ExportOptions['audioMode'], string> = { mix: 'áudio mixado', micOnly: 'só microfone', systemOnly: 'só áudio do sistema', separate: 'áudios separados' }
-
-function stageTitle(stage: ExportProgressEvent['stage']): string {
-  switch (stage) {
-    case 'prepare':
-      return 'Preparando'
-    case 'pass1':
-      return 'Analisando (passo 1 de 2)'
-    case 'pass2':
-      return 'Codificando (passo 2 de 2)'
-    default:
-      return 'Codificando com ffmpeg'
-  }
-}
 
 export function ReviewScreen(): React.JSX.Element {
   const session = useAppStore((s) => s.reviewSession)
@@ -155,14 +136,9 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
   const trimEnd = trimEndState ?? durationMs
   const [options, setOptions] = useState<ExportOptions>(() => initialOptions(session, outputDir))
   const [pipChoice, setPipChoice] = useState<PipChoice>({ mode: 'original' })
-  const [phase, setPhase] = useState<ExportPhase>({ kind: 'idle' })
-  const composeAbortRef = useRef<AbortController | null>(null)
-  const jobIdRef = useRef<string | null>(null)
-  const totalStepsRef = useRef<1 | 2>(1)
-  const runningOptsRef = useRef<ExportOptions | null>(null)
-  const resolverRef = useRef<((r: ExportResult) => void) | null>(null)
+  const { phase, busyElsewhere } = useExportRunner(session.id)
 
-  const pipOverride = useMemo(() => pipOverrideFor(pipChoice, session.video.width, session.video.height), [pipChoice, session.video.width, session.video.height])
+  const pipOverride = useMemo(() => pipOverrideFor(pipChoice, session.video.width, session.video.height, session.pip), [pipChoice, session.video.width, session.video.height, session.pip])
   const effectiveMs = Math.max(0, trimEnd - trimStart)
   const measuredKbps = session.bytes && durationMs > 0 ? (session.bytes * 8) / durationMs : null
   const preset = PRESETS[options.presetId]
@@ -209,61 +185,24 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
     // Depende só de session.id + regen: os demais campos da sessão são lidos no disparo.
   }, [session.id, regen])
 
-  // ---- progresso do job de exportação (main) ----
-  useEffect(() => {
-    const off = api.export.onProgress((p) => {
-      if (jobIdRef.current && p.jobId !== jobIdRef.current) return
-      if (p.stage === 'done') {
-        const outputs = p.outputs ?? []
-        setPhase({ kind: 'done', outputs, warning: p.message ?? null })
-        toast.success(outputs.length === 1 ? 'Vídeo exportado com sucesso.' : `${outputs.length} arquivos exportados.`)
-        void api.session.get(session.id).then((fresh) => fresh && setReviewSession(fresh))
-        resolverRef.current?.({ outputs })
-        resolverRef.current = null
-        jobIdRef.current = null
-        return
-      }
-      const opts = runningOptsRef.current ?? options
-      if (p.stage === 'error') {
-        const error = p.error ?? 'Erro desconhecido'
-        setPhase({ kind: 'running', jobId: null, opts, progress: { step: totalStepsRef.current, totalSteps: totalStepsRef.current, title: 'Falha', detail: null, percent: 0, error } })
-        toast.error('A exportação falhou.')
-        resolverRef.current?.({ outputs: [], error })
-        resolverRef.current = null
-        jobIdRef.current = null
-        return
-      }
-      if (p.stage === 'cancelled') {
-        setPhase({ kind: 'idle' })
-        toast('Exportação cancelada.')
-        resolverRef.current?.({ outputs: [], error: 'cancelado' })
-        resolverRef.current = null
-        jobIdRef.current = null
-        return
-      }
-      setPhase({
-        kind: 'running',
-        jobId: p.jobId,
-        opts,
-        progress: { step: totalStepsRef.current, totalSteps: totalStepsRef.current, title: stageTitle(p.stage), detail: p.message ?? null, percent: p.percent, error: null }
-      })
-    })
-    return off
-  }, [api, session.id, setReviewSession, options])
-
   // Preset que não suporta algo → normaliza opções dependentes.
-  const selectPreset = useCallback((presetId: ExportPresetId): void => {
-    setOptions((o) => {
-      const p = PRESETS[presetId]
-      return {
-        ...o,
-        presetId,
-        targetSizeMB: p.supportsTargetSize ? (o.targetSizeMB ?? 64) : null,
-        reels: p.supportsReels ? o.reels : false,
-        audioMode: o.audioMode === 'separate' && presetId !== 'separate' ? 'mix' : o.audioMode
-      }
-    })
-  }, [])
+  const selectPreset = useCallback(
+    (presetId: ExportPresetId): void => {
+      setOptions((o) => {
+        const p = PRESETS[presetId]
+        const hasAudio = session.tracks.mic !== undefined || session.tracks.system !== undefined
+        return {
+          ...o,
+          presetId,
+          targetSizeMB: p.supportsTargetSize ? (o.targetSizeMB ?? 64) : null,
+          reels: p.supportsReels ? o.reels : false,
+          // "Edição posterior" já entra com áudios separados; ao sair dele, volta a mixar.
+          audioMode: presetId === 'separate' && hasAudio ? 'separate' : o.audioMode === 'separate' ? 'mix' : o.audioMode
+        }
+      })
+    },
+    [session.tracks.mic, session.tracks.system]
+  )
 
   const patchOptions = useCallback((patch: Partial<ExportOptions>): void => setOptions((o) => ({ ...o, ...patch })), [])
 
@@ -299,16 +238,23 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
   }, [api, setReviewSession, setStorePhase, setScreen])
 
   const deleteRaw = useCallback(async (): Promise<void> => {
-    await api.session.delete(session.id)
+    // Solta preview.mp4/webcam.mp4 dos <video> antes de mover a pasta para a Lixeira (Windows trava arquivos abertos).
+    playerRef.current?.release()
+    try {
+      await api.session.delete(session.id)
+    } catch (e) {
+      toast.error(`Não foi possível excluir: ${e instanceof Error ? e.message : String(e)}`)
+      return
+    }
     toast('Gravação bruta enviada à Lixeira.')
     goPrepare()
   }, [api, session.id, goPrepare])
 
-  // ---- exportação ----
+  // ---- exportação (estado no exportRunner: sobrevive à navegação e a remontagens) ----
   const runExport = useCallback(
-    async (overrides?: Partial<ExportOptions>): Promise<ExportResult> => {
+    (overrides?: Partial<ExportOptions>): Promise<ExportResult> => {
       playerRef.current?.pause()
-      const fileName = sanitizeFileName(options.fileName.trim()) || defaultOutputName(new Date(session.createdAt))
+      const fileName = sanitizeFileName(options.fileName.trim()) || defaultOutputName(new Date(session.createdAt), '')
       const opts: ExportOptions = {
         ...options,
         trimStartMs: Math.round(trimStart),
@@ -318,71 +264,20 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
         pipOverride,
         ...overrides
       }
-      const compose = needsComposition(session, opts)
-      totalStepsRef.current = compose ? 2 : 1
-      runningOptsRef.current = opts
-      const composeState = (percent: number): ExportPhase => ({
-        kind: 'running',
-        jobId: null,
-        opts,
-        progress: { step: 1, totalSteps: 2, title: 'Compondo o vídeo', detail: `${[opts.includeWebcam && session.tracks.webcam !== undefined ? 'webcam' : null, opts.includeAnnotations && session.strokes.length ? 'anotações' : null].filter(Boolean).join(' + ')} · ${session.video.width}×${session.video.height} · ${session.video.fps} fps`, percent, error: null }
-      })
-      setPhase(compose ? composeState(0) : { kind: 'running', jobId: null, opts, progress: { step: 1, totalSteps: 1, title: 'Preparando', detail: null, percent: 0, error: null } })
-      let composedFile: string | null = null
-      try {
-        if (compose) {
-          const ac = new AbortController()
-          composeAbortRef.current = ac
-          composedFile = await composeSession({
-            sessionId: session.id,
-            session,
-            options: opts,
-            fps: session.video.fps,
-            width: session.video.width,
-            height: session.video.height,
-            autoFadeMs,
-            onProgress: (pct) => setPhase(composeState(pct)),
-            signal: ac.signal
-          })
-          composeAbortRef.current = null
-        }
-        const result = new Promise<ExportResult>((resolve) => {
-          resolverRef.current = resolve
-        })
-        const { jobId } = await api.export.run({ sessionId: session.id, options: opts, composedFile })
-        jobIdRef.current = jobId
-        return await result
-      } catch (e) {
-        composeAbortRef.current = null
-        if (e instanceof ComposeCancelledError) {
-          setPhase({ kind: 'idle' })
-          toast('Exportação cancelada.')
-          return { outputs: [], error: 'cancelado' }
-        }
-        const error = e instanceof Error ? e.message : String(e)
-        setPhase({ kind: 'running', jobId: null, opts, progress: { step: 1, totalSteps: totalStepsRef.current, title: 'Falha', detail: null, percent: 0, error } })
-        toast.error('A exportação falhou.')
-        return { outputs: [], error }
-      }
+      return startExport({ session, options: opts, durationMs, autoFadeMs })
     },
-    [api, options, session, trimStart, trimEnd, durationMs, outputDir, pipOverride, autoFadeMs]
+    [options, session, trimStart, trimEnd, durationMs, outputDir, pipOverride, autoFadeMs]
   )
+  const backToOptions = useCallback((): void => resetExport(session.id), [session.id])
 
-  const cancelExport = useCallback((): void => {
-    if (composeAbortRef.current) {
-      composeAbortRef.current.abort()
-      return
-    }
-    if (jobIdRef.current) void api.export.cancel(jobIdRef.current)
-  }, [api])
-
-  // QA: window.__qaExport(presetId) exporta com webcam + anotações.
+  // QA (só fora do pacote): window.__qaExport(presetId) exporta com webcam + anotações.
   useEffect(() => {
+    if (appInfo?.isPackaged) return
     window.__qaExport = (presetId, overrides) => runExport({ presetId, includeWebcam: true, includeAnnotations: true, ...overrides })
     return () => {
       delete window.__qaExport
     }
-  }, [runExport])
+  }, [runExport, appInfo?.isPackaged])
 
   // ---- atalhos de teclado ----
   useEffect(() => {
@@ -433,7 +328,7 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
     playerRef.current?.setMuted(m)
   }
 
-  const canExport = assets.status === 'ready' && durationMs > 0 && phase.kind === 'idle'
+  const canExport = assets.status === 'ready' && durationMs > 0 && phase.kind === 'idle' && !busyElsewhere
   const SourceIcon = session.source.kind === 'window' ? AppWindow : Monitor
 
   return (
@@ -457,7 +352,11 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
               <span className="font-mono tnum">{formatClock(durationMs)}</span>
               {session.bytes ? <span className="font-mono tnum">{formatBytes(session.bytes)}</span> : null}
               {session.tracks.webcam !== undefined ? <span>webcam</span> : null}
-              {session.strokes.length ? <span>{session.strokes.length === 1 ? '1 anotação' : `${session.strokes.length} anotações`}</span> : null}
+              {session.strokes.length ? (
+                <span>
+                  <span className="font-mono tnum">{session.strokes.length}</span> {session.strokes.length === 1 ? 'anotação' : 'anotações'}
+                </span>
+              ) : null}
             </div>
           </div>
           <Tip content="Manter esta gravação no histórico e voltar para gravar outra">
@@ -543,15 +442,9 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
       {/* ---------------- painel direito: exportação ---------------- */}
       <aside className="flex w-[360px] shrink-0 flex-col rise-in rise-in-1">
         {phase.kind === 'running' ? (
-          <ExportProgress
-            state={phase.progress}
-            summary={exportSummary(session, phase.opts, durationMs)}
-            onCancel={cancelExport}
-            onRetry={() => void runExport()}
-            onBack={() => setPhase({ kind: 'idle' })}
-          />
+          <ExportProgress state={phase.progress} summary={exportSummary(session, phase.opts, durationMs)} onCancel={cancelExport} onRetry={() => void runExport()} onBack={backToOptions} />
         ) : phase.kind === 'done' ? (
-          <ExportDone outputs={phase.outputs} outputDir={outputDir} warning={phase.warning} onReexport={() => setPhase({ kind: 'idle' })} onNewRecording={goPrepare} onDeleteRaw={deleteRaw} />
+          <ExportDone outputs={phase.outputs} warning={phase.warning} onReexport={backToOptions} onNewRecording={goPrepare} onDeleteRaw={deleteRaw} />
         ) : (
           <>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden pr-1">
@@ -584,6 +477,7 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
                 Exportar
                 <Kbd className="ml-1 border-white/30 bg-white/15 text-white">Ctrl+Enter</Kbd>
               </Button>
+              {busyElsewhere ? <p className="mt-2 text-center text-[11px] text-warn">Outra gravação está sendo exportada — aguarde terminar.</p> : null}
             </div>
           </>
         )}
