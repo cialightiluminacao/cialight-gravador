@@ -223,3 +223,12 @@ Auto-zoom/cursor suave; HEVC/AV1; loopback por aplicativo; captura de região ar
 
 ## 14. Riscos e planos B
 Ver relatório §7. Principais: exclusão da UI da captura (self-test + mover para outro monitor + ocultar barra), robustez WebCodecs (fallback MediaRecorder), desempenho iGPU (1080p30 padrão; reduzir automaticamente), overlay preta (detecção + desativar), sincronia mic (EC off + offset), modo janela (padrão monitor + avisos), NVENC ffmpeg 9 (build 8.1), updater (releaseType, artifactName ASCII, versões pinadas), gravações longas (streaming + checagem de disco).
+
+## 15. Notas de implementação (v1.0.x) — desvios e decisões tomadas
+- **Modo janela sem anotações**: o Windows não permite desenhar sobre a janela capturada (a overlay não é capturada e não conhecemos os bounds da janela via desktopCapturer). Em modo janela o botão/atalho de anotar mostra um aviso; a borda de gravação vira uma pílula "Gravando · janela: <nome>". Fica para a v2 (bounds via DWM/koffi).
+- **Fallback MediaRecorder** só na inicialização (encoder/WebCodecs indisponível). Falha fatal do encoder no meio da gravação encerra a gravação preservando o fMP4 (recuperável), com mensagem clara — em vez de trocar de motor no meio (evita segmentos a costurar).
+- **Relógio entre janelas**: overlays carimbam eventos com `performance.timeOrigin + performance.now()` (epoch ms); o gravador converte para tempo de mídia. `performance.now()` puro não é comparável entre janelas.
+- **composed.mp4** é apagado após cada exportação (main) e zerado pelo renderer em caso de erro/cancelamento.
+- **CI**: workflows em `docs/ci/` (o token do gh não tinha escopo `workflow`); publicação feita a partir do PC (`npm run release:publish` ou `gh release create` com exe+blockmap+latest.yml).
+- **ffmpeg**: build BtbN n8.1.2 **shared** (metade do tamanho dos estáticos), espelhado em release de dependência `deps-ffmpeg-n8.1.2` (marcada como pré-release para não virar "latest").
+- **QA**: `window.__qa` (só fora do pacote) e `scripts/qa/cdp.mjs` permitem dirigir o app por CDP; `CIALIGHT_SHOT[_EVERY|_SIZE]`/`CIALIGHT_SCREEN` para screenshots.
