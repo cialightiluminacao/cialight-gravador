@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AppWindow, Info, Monitor, RefreshCw, Search, X } from 'lucide-react'
 import type { CaptureSource, DisplayInfo } from '@shared/types'
 import type { SourcesList } from '@shared/ipc'
@@ -14,7 +14,8 @@ export interface SourcePickerProps {
   loading: boolean
   selected: CaptureSource | null
   onSelect: (s: CaptureSource) => void
-  onRefresh: () => void
+  /** Atualização manual; a promessa resolve quando a listagem termina. */
+  onRefresh: () => Promise<void>
 }
 
 type Tab = 'screens' | 'windows'
@@ -23,19 +24,22 @@ function displayFor(displays: DisplayInfo[], s: CaptureSource): DisplayInfo | un
   return s.displayId ? displays.find((d) => d.id === s.displayId) : undefined
 }
 
+/** Resolução física do monitor (a mesma do chip "Nativa" no palco) e a escala do Windows. */
 function screenSubtitle(d: DisplayInfo | undefined): string | undefined {
   if (!d) return undefined
-  const scale = d.scaleFactor !== 1 ? ` · escala ${Math.round(d.scaleFactor * 100)}%` : ''
-  return `${d.bounds.width}×${d.bounds.height}${scale}`
+  const w = Math.round(d.bounds.width * d.scaleFactor)
+  const h = Math.round(d.bounds.height * d.scaleFactor)
+  const scale = d.scaleFactor !== 1 ? ` (${Math.round(d.scaleFactor * 100)}%)` : ''
+  return `${w}×${h}${scale}`
 }
 
 function SkeletonCards({ count }: { count: number }): React.JSX.Element {
   return (
     <div className="flex flex-col gap-2" aria-busy>
       {Array.from({ length: count }, (_, i) => (
-        <div key={i} className="rounded-xl border border-border bg-surface-2/40 p-2">
+        <div key={i} className="rounded-xl border border-border bg-surface-2/40 p-1.5">
           <div className="aspect-video w-full animate-pulse rounded-lg bg-white/5" />
-          <div className="mt-2 h-3 w-2/3 animate-pulse rounded bg-white/5" />
+          <div className="mx-1 mt-1.5 h-3 w-2/3 animate-pulse rounded bg-white/5" />
         </div>
       ))}
     </div>
@@ -45,6 +49,22 @@ function SkeletonCards({ count }: { count: number }): React.JSX.Element {
 export function SourcePicker({ sources, loading, selected, onSelect, onRefresh }: SourcePickerProps): React.JSX.Element {
   const [tab, setTab] = useState<Tab>(() => (selected?.kind === 'window' ? 'windows' : 'screens'))
   const [query, setQuery] = useState('')
+  // o ícone só gira na atualização manual (a automática, a cada 2 s, seria ruído)
+  const [manualRefreshing, setManualRefreshing] = useState(false)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+  const refresh = (): void => {
+    if (manualRefreshing) return
+    setManualRefreshing(true)
+    void onRefresh().finally(() => {
+      if (mountedRef.current) setManualRefreshing(false)
+    })
+  }
   // acompanha a aba da fonte selecionada (ex.: última fonte restaurada era uma janela)
   const selectedKind = selected?.kind
   useEffect(() => {
@@ -62,16 +82,17 @@ export function SourcePicker({ sources, loading, selected, onSelect, onRefresh }
 
   return (
     <aside className="card flex min-h-0 flex-col overflow-hidden">
-      <div className="flex items-center justify-between gap-2 px-4 pt-3.5 pb-2">
+      <div className="flex items-center justify-between gap-2 px-4 pt-3 pb-1.5">
         <h2 className="text-[11px] font-bold uppercase tracking-[0.14em] text-muted">O que gravar</h2>
-        <Tip content="Atualizar lista de monitores e janelas">
+        <Tip content="Atualizar lista de monitores e janelas (a lista também se renova sozinha)">
           <button
             type="button"
-            onClick={onRefresh}
+            onClick={refresh}
             className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-semibold text-muted transition-colors hover:bg-white/5 hover:text-fg"
             aria-label="Atualizar fontes"
+            aria-busy={loading || undefined}
           >
-            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+            <RefreshCw className={cn('h-3.5 w-3.5', manualRefreshing && 'animate-spin')} />
             Atualizar
           </button>
         </Tip>
@@ -93,7 +114,7 @@ export function SourcePicker({ sources, loading, selected, onSelect, onRefresh }
           </TabsList>
         </div>
 
-        <TabsContent value="screens" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-3 focus:outline-none">
+        <TabsContent value="screens" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-2.5 focus:outline-none">
           {!sources ? (
             <SkeletonCards count={2} />
           ) : screens.length === 0 ? (
@@ -119,7 +140,7 @@ export function SourcePicker({ sources, loading, selected, onSelect, onRefresh }
         </TabsContent>
 
         <TabsContent value="windows" className="flex min-h-0 flex-1 flex-col focus:outline-none">
-          <div className="flex items-center gap-1.5 px-3 pt-3">
+          <div className="flex items-center gap-1.5 px-3 pt-2.5">
             <label className="relative flex min-w-0 flex-1 items-center">
               <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-muted" />
               <input
@@ -143,7 +164,7 @@ export function SourcePicker({ sources, loading, selected, onSelect, onRefresh }
               </button>
             </Tip>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-3">
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-2.5">
             {!sources ? (
               <SkeletonCards count={3} />
             ) : filteredWindows.length === 0 ? (

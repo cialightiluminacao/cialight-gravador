@@ -7,6 +7,8 @@ import { Badge, Kbd, Segmented, Select, Tip, Toggle, VuMeter } from '@/component
 import { QualityPicker } from './QualityPicker'
 
 // Rodapé do Preparar: câmera · microfone · áudio do sistema · qualidade · Gravar.
+// Abaixo de ~1096 px de largura útil (container query) o grupo Gravar desce para
+// uma linha própria, alinhado à direita e em formato horizontal (botão + atalho + dica).
 
 export interface DevicePanelProps {
   cameras: MediaDeviceInfo[]
@@ -119,10 +121,10 @@ export function DevicePanel(p: DevicePanelProps): React.JSX.Element {
         </div>
       </div>
 
-      <div className="w-px shrink-0 self-stretch bg-border @max-[1060px]:hidden" />
+      <div className="w-px shrink-0 self-stretch bg-border @max-[1096px]:hidden" />
 
       {/* Microfone */}
-      <div className="flex min-w-[236px] flex-1 flex-col gap-2">
+      <div className="flex min-w-[220px] flex-1 flex-col gap-2">
         <GroupHeader icon={micIcon} label="Microfone" right={<Toggle size="sm" checked={p.micOn && !noMic} onCheckedChange={p.onMicOn} disabled={noMic} aria-label="Ligar microfone" />} />
         <Select
           value={micValue}
@@ -142,16 +144,18 @@ export function DevicePanel(p: DevicePanelProps): React.JSX.Element {
         <Segmented size="sm" value={p.micMode} onValueChange={p.onMicMode} options={MIC_MODE_OPTIONS} className="grid grid-cols-2" />
       </div>
 
-      <div className="w-px shrink-0 self-stretch bg-border @max-[1060px]:hidden" />
+      <div className="w-px shrink-0 self-stretch bg-border @max-[1096px]:hidden" />
 
       {/* Áudio do sistema */}
       <div className="flex w-[118px] shrink-0 flex-col gap-2">
         <GroupHeader icon={sysIcon} label="Sistema" right={<Toggle size="sm" checked={p.systemAudioOn} onCheckedChange={p.onSystemAudioOn} aria-label="Gravar áudio do sistema" />} />
         <div className="text-[11px] leading-snug text-fg-2">Áudio do computador</div>
-        <div className="text-[10.5px] leading-snug text-muted-2">{p.systemAudioOn ? 'Sons que tocam no PC entram na gravação.' : 'Só o microfone será gravado.'}</div>
+        <div className="text-[10.5px] leading-snug text-muted-2">
+          {p.systemAudioOn ? 'Sons que tocam no PC entram na gravação.' : p.micOn && !noMic ? 'Só o microfone será gravado.' : 'Nenhum áudio será gravado.'}
+        </div>
       </div>
 
-      <div className="w-px shrink-0 self-stretch bg-border @max-[1060px]:hidden" />
+      <div className="w-px shrink-0 self-stretch bg-border @max-[1096px]:hidden" />
 
       {/* Qualidade */}
       <div className="flex shrink-0 flex-col gap-2">
@@ -159,11 +163,11 @@ export function DevicePanel(p: DevicePanelProps): React.JSX.Element {
         <QualityPicker quality={p.quality} fps={p.fps} countdownSec={p.countdownSec} onQuality={p.onQuality} onFps={p.onFps} onCountdown={p.onCountdown} />
       </div>
 
-      <div className="w-px shrink-0 self-stretch bg-border @max-[1060px]:hidden" />
+      <div className="w-px shrink-0 self-stretch bg-border @max-[1096px]:hidden" />
 
       {/* Gravar */}
-      <div className="flex w-[164px] shrink-0 flex-col items-stretch justify-center gap-2">
-        <Button variant="primary" size="xl" className={cn('w-full gap-3 px-4', !p.busy && p.canRecord && 'rec-pulse')} onClick={p.onRecord} disabled={p.busy} aria-label="Iniciar gravação">
+      <div className="flex w-[164px] shrink-0 flex-col items-stretch justify-center gap-2 @max-[1096px]:ml-auto @max-[1096px]:w-full @max-[1096px]:flex-row-reverse @max-[1096px]:items-center @max-[1096px]:justify-start @max-[1096px]:gap-3 @max-[1096px]:border-t @max-[1096px]:border-border @max-[1096px]:pt-3">
+        <Button variant="primary" size="xl" className={cn('w-full gap-3 px-4 @max-[1096px]:w-[164px]', !p.busy && p.canRecord && 'rec-pulse')} onClick={p.onRecord} disabled={p.busy} aria-label="Iniciar gravação">
           <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full ring-2 ring-white/80">
             <span className="h-2.5 w-2.5 rounded-full bg-white" />
           </span>
@@ -179,8 +183,14 @@ export function DevicePanel(p: DevicePanelProps): React.JSX.Element {
             </span>
           </Tip>
         ) : (
-          <div className="flex flex-col items-center gap-1 text-[10.5px] text-muted-2">
-            {p.hotkey ? <Kbd>{p.hotkey}</Kbd> : null}
+          <div className="flex min-w-0 flex-col items-center gap-1 text-[10.5px] text-muted-2 @max-[1096px]:flex-row-reverse @max-[1096px]:gap-2.5">
+            {p.hotkey ? (
+              <Kbd>{p.hotkey}</Kbd>
+            ) : (
+              <Tip content="Nenhum atalho global definido. Configure em Configurações › Atalhos." side="top">
+                <span className="cursor-help rounded border border-dashed border-border-strong px-1.5 py-px text-[10px] text-muted">Sem atalho</span>
+              </Tip>
+            )}
             <span className="truncate">{!p.canRecord ? 'Escolha uma fonte para gravar' : p.countdownSec > 0 ? `Começa após ${p.countdownSec} s de contagem` : 'Começa imediatamente'}</span>
           </div>
         )}

@@ -6,6 +6,7 @@ import { buildRecordingConfig, useAppStore } from '@/app/store'
 import { startRecording } from '@/app/recordingController'
 import { refreshSources, useSources } from '@/hooks/useSources'
 import { useCameraPreview, useMicPreview } from '@/hooks/useMediaPreview'
+import { usePageVisible } from '@/hooks/usePageVisible'
 import { useVu } from '@/hooks/useVu'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent } from '@/components/ui/primitives'
@@ -24,17 +25,62 @@ const PRIVACY_URL: Record<PrivacyKind, string> = {
 }
 
 const PIP_SAVE_DEBOUNCE_MS = 400
+const PERMISSION_DENIED = 'NotAllowedError'
 
-function isPermissionError(msg: string | null): boolean {
-  return !!msg && msg.toLocaleLowerCase('pt-BR').includes('permiss')
+type PipGeom = Omit<PipKeyframe, 'tMs'>
+type SettingsKey = keyof Settings
+
+function reportSaveError(e: Error): void {
+  toast.error(`Não foi possível salvar a configuração: ${e.message}`)
 }
 
-/** Aplica um patch de settings de forma otimista no store e persiste no main. */
+/**
+ * Aplica um patch de settings de forma otimista no store e persiste no main.
+ * Enquanto houver patches em voo, o `settings:changed` de um patch anterior não
+ * reverte os seguintes (as chaves pendentes são reaplicadas sobre o que chegar).
+ * Antes de settings carregarem, só persiste (o store recebe o resultado do main).
+ */
 function usePatchSettings(): (patch: Partial<Settings>) => void {
+  const pendingRef = useRef<Partial<Settings>>({})
+  const inflightRef = useRef(new Map<SettingsKey, number>())
+
+  useEffect(
+    () =>
+      useAppStore.subscribe((s, prev) => {
+        if (s.settings === prev.settings) return
+        const pending = pendingRef.current
+        const keys = Object.keys(pending) as SettingsKey[]
+        if (keys.length === 0) return
+        if (keys.every((k) => Object.is(s.settings[k], pending[k]))) return
+        s.setSettings({ ...s.settings, ...pending })
+      }),
+    []
+  )
+
   return useCallback((patch: Partial<Settings>) => {
     const st = useAppStore.getState()
+    if (!st.settingsLoaded) {
+      void window.api.settings.set(patch).catch(reportSaveError)
+      return
+    }
+    const keys = Object.keys(patch) as SettingsKey[]
+    const inflight = inflightRef.current
+    Object.assign(pendingRef.current, patch)
+    for (const k of keys) inflight.set(k, (inflight.get(k) ?? 0) + 1)
     st.setSettings({ ...st.settings, ...patch })
-    void window.api.settings.set(patch).catch((e: Error) => toast.error(`Não foi possível salvar a configuração: ${e.message}`))
+    void window.api.settings
+      .set(patch)
+      .catch(reportSaveError)
+      .finally(() => {
+        for (const k of keys) {
+          const n = (inflight.get(k) ?? 1) - 1
+          if (n > 0) inflight.set(k, n)
+          else {
+            inflight.delete(k)
+            delete pendingRef.current[k]
+          }
+        }
+      })
   }, [])
 }
 
@@ -52,7 +98,9 @@ export function PrepareScreen(): React.JSX.Element {
   const hotkeyStatus = useAppStore((s) => s.hotkeyStatus)
   const patch = usePatchSettings()
 
-  useSources(true)
+  // lista de fontes só enquanto a janela está visível (minimizada/oculta: pausa)
+  const pageVisible = usePageVisible()
+  useSources(pageVisible)
 
   // restaura a última fonte usada quando settings chegam depois da primeira listagem
   const restoredRef = useRef(false)
@@ -78,25 +126,25 @@ export function PrepareScreen(): React.JSX.Element {
   const cameraOn = settings.devices.cameraOn && !noCam
   const micOn = settings.devices.micOn && !noMic
 
-  const { stream: camStream, error: camError } = useCameraPreview(camId, cameraOn && !busy)
-  const { stream: micStream, error: micError } = useMicPreview(micId, micOn && !busy, settings.devices.micMode === 'speakers')
+  const { stream: camStream, error: camError, errorName: camErrorName } = useCameraPreview(camId, cameraOn && !busy)
+  const { stream: micStream, error: micError, errorName: micErrorName } = useMicPreview(micId, micOn && !busy, settings.devices.micMode === 'speakers')
   const micLevel = useVu(micStream, micOn && !busy)
 
-  // permissão negada → diálogo com atalho para as configurações de privacidade
+  // permissão negada (NotAllowedError) → diálogo com atalho para as configurações de privacidade
   const [privacy, setPrivacy] = useState<PrivacyKind | null>(null)
   const askedRef = useRef<Record<PrivacyKind, boolean>>({ camera: false, microphone: false })
   useEffect(() => {
-    if (isPermissionError(camError) && !askedRef.current.camera) {
+    if (camErrorName === PERMISSION_DENIED && !askedRef.current.camera) {
       askedRef.current.camera = true
       setPrivacy('camera')
     }
-  }, [camError])
+  }, [camErrorName])
   useEffect(() => {
-    if (isPermissionError(micError) && !askedRef.current.microphone) {
+    if (micErrorName === PERMISSION_DENIED && !askedRef.current.microphone) {
       askedRef.current.microphone = true
       setPrivacy((cur) => cur ?? 'microphone')
     }
-  }, [micError])
+  }, [micErrorName])
 
   const display = useMemo(() => (selectedSource?.displayId ? sources?.displays.find((d) => d.id === selectedSource.displayId) : undefined), [sources, selectedSource])
 
@@ -108,25 +156,29 @@ export function PrepareScreen(): React.JSX.Element {
     [setSelectedSource, patch]
   )
 
-  // PiP: store imediato; settings com debounce (arrasto emite a ~16 Hz)
+  // PiP: store imediato; settings com debounce (arrasto emite a ~16 Hz).
+  // Ao sair da tela (ex.: Gravar logo após arrastar) o último valor é gravado na hora.
   const pipSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pipPendingRef = useRef<PipGeom | null>(null)
+  const flushPip = useCallback(() => {
+    if (pipSaveTimer.current) clearTimeout(pipSaveTimer.current)
+    pipSaveTimer.current = null
+    const k = pipPendingRef.current
+    if (!k) return
+    pipPendingRef.current = null
+    const cur = useAppStore.getState().settings.pip
+    patch({ pip: { ...cur, x: k.x, y: k.y, w: k.w, h: k.h, shape: k.shape } })
+  }, [patch])
   const onPipChange = useCallback(
-    (k: Omit<PipKeyframe, 'tMs'>) => {
+    (k: PipGeom) => {
       setPipDraft({ ...k, tMs: 0 })
+      pipPendingRef.current = k
       if (pipSaveTimer.current) clearTimeout(pipSaveTimer.current)
-      pipSaveTimer.current = setTimeout(() => {
-        const cur = useAppStore.getState().settings.pip
-        patch({ pip: { ...cur, x: k.x, y: k.y, w: k.w, h: k.h, shape: k.shape } })
-      }, PIP_SAVE_DEBOUNCE_MS)
+      pipSaveTimer.current = setTimeout(flushPip, PIP_SAVE_DEBOUNCE_MS)
     },
-    [setPipDraft, patch]
+    [setPipDraft, flushPip]
   )
-  useEffect(
-    () => () => {
-      if (pipSaveTimer.current) clearTimeout(pipSaveTimer.current)
-    },
-    []
-  )
+  useEffect(() => flushPip, [flushPip])
   const toggleMirror = useCallback(() => {
     const cur = useAppStore.getState().settings.pip
     patch({ pip: { ...cur, mirrored: !cur.mirrored } })
@@ -161,7 +213,7 @@ export function PrepareScreen(): React.JSX.Element {
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       <div className="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)] gap-3">
         <div className="rise-in flex min-h-0 flex-col">
-          <SourcePicker sources={sources} loading={sourcesLoading} selected={selectedSource} onSelect={selectSource} onRefresh={() => void refreshSources()} />
+          <SourcePicker sources={sources} loading={sourcesLoading} selected={selectedSource} onSelect={selectSource} onRefresh={refreshSources} />
         </div>
         <div className="rise-in rise-in-1 flex min-h-0 flex-col">
           <PreviewStage

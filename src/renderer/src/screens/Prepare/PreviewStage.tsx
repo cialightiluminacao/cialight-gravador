@@ -1,14 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { AppWindow, Info, Monitor, MonitorOff, Move } from 'lucide-react'
+import { AppWindow, Circle, FlipHorizontal2, Info, Monitor, MonitorOff, Move, RectangleHorizontal } from 'lucide-react'
 import type { CaptureSource, DisplayInfo, Fps, PipKeyframe, Quality } from '@shared/types'
 import { QUALITY_PRESETS } from '@shared/defaults'
 import { cn } from '@/lib/cn'
-import { PipOverlay } from './PipOverlay'
+import { usePageVisible } from '@/hooks/usePageVisible'
+import { Tip } from '@/components/ui/primitives'
+import { PipOverlay, pipWithShape } from './PipOverlay'
 
-// Centro do Preparar: palco com a miniatura da fonte (atualizada a ~1 fps via
-// sources.thumbnail enquanto a tela está visível) e a PiP posicionável por cima.
-// A proporção do palco segue a fonte (monitor: bounds; janela: miniatura), com
-// limites para não distorcer o layout; padrão 16:9.
+// Centro do Preparar: palco com a miniatura da fonte (atualizada via
+// sources.thumbnail enquanto a tela está visível) e a PiP posicionável por cima,
+// com uma barra fixa de forma/espelho no canto do palco (sempre visível com a
+// câmera ligada). A proporção do palco segue a fonte (monitor: bounds; janela:
+// miniatura), com limites para não distorcer o layout; padrão 16:9.
 
 export interface PreviewStageProps {
   source: CaptureSource | null
@@ -27,25 +30,18 @@ export interface PreviewStageProps {
 
 const THUMB_W = 960
 const THUMB_H = 540
-const REFRESH_MS = 1000
+// monitor: 1 fps; janela: 0,5 fps (a captura de janelas é mais cara no processo principal)
+const REFRESH_SCREEN_MS = 1000
+const REFRESH_WINDOW_MS = 2000
 const MIN_ASPECT = 1.15
 const MAX_ASPECT = 2.4
 const DEFAULT_ASPECT = 16 / 9
 
-function usePageVisible(): boolean {
-  const [visible, setVisible] = useState(() => document.visibilityState === 'visible')
-  useEffect(() => {
-    const on = (): void => setVisible(document.visibilityState === 'visible')
-    document.addEventListener('visibilitychange', on)
-    return () => document.removeEventListener('visibilitychange', on)
-  }, [])
-  return visible
-}
-
-/** Miniatura em alta da fonte, renovada a ~1 fps enquanto ativo. */
+/** Miniatura em alta da fonte, renovada periodicamente enquanto ativo. */
 function useLiveThumbnail(source: CaptureSource | null, active: boolean): string | null {
   const [thumb, setThumb] = useState<string | null>(null)
   const sourceId = source?.id ?? null
+  const refreshMs = source?.kind === 'window' ? REFRESH_WINDOW_MS : REFRESH_SCREEN_MS
   useEffect(() => {
     setThumb(null)
     if (!sourceId || !active) return
@@ -60,7 +56,7 @@ function useLiveThumbnail(source: CaptureSource | null, active: boolean): string
         /* fonte fechou; a lista será atualizada pelo useSources */
       }
       if (!alive) return
-      const wait = Math.max(200, REFRESH_MS - (performance.now() - started))
+      const wait = Math.max(200, refreshMs - (performance.now() - started))
       timer = setTimeout(() => void tick(), wait)
     }
     void tick()
@@ -68,14 +64,65 @@ function useLiveThumbnail(source: CaptureSource | null, active: boolean): string
       alive = false
       if (timer) clearTimeout(timer)
     }
-  }, [sourceId, active])
+  }, [sourceId, active, refreshMs])
   return thumb
 }
 
-function qualityLabel(quality: Quality, fps: Fps, display: DisplayInfo | undefined): string {
+function resolutionLabel(quality: Quality, display: DisplayInfo | undefined): string {
   const p = QUALITY_PRESETS[quality]
-  const res = p.width && p.height ? `${p.width}×${p.height}` : display ? `${Math.round(display.bounds.width * display.scaleFactor)}×${Math.round(display.bounds.height * display.scaleFactor)}` : 'Nativa'
-  return `${res} · ${fps} fps`
+  if (p.width && p.height) return `${p.width}×${p.height}`
+  return display ? `${Math.round(display.bounds.width * display.scaleFactor)}×${Math.round(display.bounds.height * display.scaleFactor)}` : 'Nativa'
+}
+
+interface StageToolbarProps {
+  pip: PipKeyframe
+  stageW: number
+  stageH: number
+  onPipChange: (k: Omit<PipKeyframe, 'tMs'>) => void
+  mirrored: boolean
+  onToggleMirror: () => void
+}
+
+/** Barra fixa no canto do palco: forma da câmera e espelho (sempre acessível, sem depender do hover na PiP). */
+function StageToolbar({ pip, stageW, stageH, onPipChange, mirrored, onToggleMirror }: StageToolbarProps): React.JSX.Element {
+  const isCircle = pip.shape === 'circle'
+  const setShape = (shape: PipKeyframe['shape']): void => {
+    if (shape === pip.shape) return
+    const { x, y, w, h, visible } = pip
+    onPipChange(pipWithShape({ x, y, w, h, shape, visible }, shape, stageW, stageH))
+  }
+  const btn = 'flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-semibold transition-colors'
+  const on = 'bg-white/15 text-fg shadow-sm'
+  const off = 'text-fg-2 hover:bg-white/8 hover:text-fg'
+  return (
+    <div className="pointer-events-auto absolute bottom-3 left-3 flex items-center gap-1.5">
+      <div className="flex items-center gap-0.5 rounded-lg border border-white/10 bg-black/55 p-0.5 shadow backdrop-blur" role="radiogroup" aria-label="Forma da câmera">
+        <Tip content="Câmera em círculo" side="top">
+          <button type="button" role="radio" aria-checked={isCircle} className={cn(btn, isCircle ? on : off)} onClick={() => setShape('circle')}>
+            <Circle className="h-3.5 w-3.5" />
+            Círculo
+          </button>
+        </Tip>
+        <Tip content="Câmera em retângulo arredondado (16:9)" side="top">
+          <button type="button" role="radio" aria-checked={!isCircle} className={cn(btn, !isCircle ? on : off)} onClick={() => setShape('rounded')}>
+            <RectangleHorizontal className="h-3.5 w-3.5" />
+            Retângulo
+          </button>
+        </Tip>
+      </div>
+      <Tip content={mirrored ? 'Desativar espelho (a imagem sai como os outros veem você)' : 'Espelhar a câmera (como num espelho)'} side="top">
+        <button
+          type="button"
+          aria-pressed={mirrored}
+          className={cn('flex h-7 items-center gap-1.5 rounded-lg border border-white/10 bg-black/55 px-2 text-[11px] font-semibold shadow backdrop-blur transition-colors', mirrored ? 'text-accent-2' : 'text-fg-2 hover:bg-black/70 hover:text-fg')}
+          onClick={onToggleMirror}
+        >
+          <FlipHorizontal2 className="h-3.5 w-3.5" />
+          Espelhar
+        </button>
+      </Tip>
+    </div>
+  )
 }
 
 export function PreviewStage({ source, display, quality, fps, cameraOn, camStream, pip, onPipChange, mirrored, onToggleMirror, active }: PreviewStageProps): React.JSX.Element {
@@ -106,15 +153,13 @@ export function PreviewStage({ source, display, quality, fps, cameraOn, camStrea
 
   const isWindow = source?.kind === 'window'
   const KindIcon = isWindow ? AppWindow : Monitor
+  const showPip = !!source && cameraOn
 
   return (
-    <section className="card flex min-h-0 flex-col overflow-hidden">
+    <section className="card @container flex min-h-0 flex-col overflow-hidden">
       <div ref={boxRef} className="relative flex min-h-0 flex-1 items-center justify-center p-4">
         {stageW > 0 && stageH > 0 ? (
-          <div
-            className="relative overflow-hidden rounded-xl bg-bg-2 shadow-[0_18px_50px_rgba(0,0,0,0.5)] ring-1 ring-white/8"
-            style={{ width: stageW, height: stageH }}
-          >
+          <div className="relative overflow-hidden rounded-xl bg-bg-2 shadow-[0_18px_50px_rgba(0,0,0,0.5)] ring-1 ring-white/8" style={{ width: stageW, height: stageH }}>
             {source && imgSrc ? (
               <img
                 key={source.id}
@@ -147,19 +192,23 @@ export function PreviewStage({ source, display, quality, fps, cameraOn, camStrea
             {/* chips */}
             <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">
               {source ? (
-                <span className="flex max-w-[60%] items-center gap-1.5 rounded-lg border border-white/10 bg-black/55 px-2.5 py-1 text-xs font-semibold text-fg shadow backdrop-blur">
+                <span className="flex min-w-0 max-w-[65%] items-center gap-1.5 rounded-lg border border-white/10 bg-black/55 px-2.5 py-1 text-xs font-semibold text-fg shadow backdrop-blur">
                   <KindIcon className="h-3.5 w-3.5 shrink-0 text-fg-2" />
                   <span className="truncate">{source.name}</span>
                 </span>
               ) : (
                 <span />
               )}
-              <span className="font-mono tnum flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/55 px-2.5 py-1 text-[11px] font-medium text-fg-2 shadow backdrop-blur">
-                {qualityLabel(quality, fps, display)}
+              <span className="font-mono tnum flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-white/10 bg-black/55 px-2.5 py-1 text-[11px] font-medium text-fg-2 shadow backdrop-blur">
+                {resolutionLabel(quality, display)}
+                <span className="text-muted">·</span>
+                {fps}
+                <span className="@max-[560px]:hidden">fps</span>
               </span>
             </div>
 
-            {source && cameraOn ? <PipOverlay pip={pip} onChange={onPipChange} mirrored={mirrored} onToggleMirror={onToggleMirror} camStream={camStream} /> : null}
+            {showPip ? <StageToolbar pip={pip} stageW={stageW} stageH={stageH} onPipChange={onPipChange} mirrored={mirrored} onToggleMirror={onToggleMirror} /> : null}
+            {showPip ? <PipOverlay pip={pip} onChange={onPipChange} mirrored={mirrored} onToggleMirror={onToggleMirror} camStream={camStream} /> : null}
           </div>
         ) : null}
       </div>
@@ -171,12 +220,16 @@ export function PreviewStage({ source, display, quality, fps, cameraOn, camStrea
             <span className="truncate">Menus suspensos e dicas de ferramenta podem não aparecer.</span>
           </span>
         ) : (
-          <span className="truncate">{source ? 'A pré-visualização é atualizada a cada segundo; a gravação será em tempo real.' : 'Selecione uma fonte para ver a pré-visualização.'}</span>
+          <span className={cn('truncate', showPip && '@max-[640px]:hidden')}>{source ? 'A pré-visualização é atualizada a cada segundo; a gravação será em tempo real.' : 'Selecione uma fonte para ver a pré-visualização.'}</span>
         )}
-        <span className={cn('flex shrink-0 items-center gap-1.5', !(source && cameraOn) && 'invisible')}>
-          <Move className="h-3.5 w-3.5" />
-          Arraste a câmera para posicionar · alça no canto para redimensionar
-        </span>
+        {showPip ? (
+          <span className="flex min-w-0 shrink items-center gap-1.5">
+            <Move className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">
+              Arraste a câmera para posicionar<span className="@max-[720px]:hidden"> · alça no canto para redimensionar</span>
+            </span>
+          </span>
+        ) : null}
       </div>
     </section>
   )

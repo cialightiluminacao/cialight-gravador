@@ -22,7 +22,7 @@ export interface PipOverlayProps {
   className?: string
 }
 
-type PipGeom = Omit<PipKeyframe, 'tMs'>
+export type PipGeom = Omit<PipKeyframe, 'tMs'>
 
 interface DragState {
   mode: 'move' | 'resize'
@@ -34,6 +34,14 @@ interface DragState {
 
 const THROTTLE_MS = 60
 const RECT_RATIO = 9 / 16
+
+// barra de controles (forma / espelho): dimensões fixas para posicioná-la sem medir
+const CTRL_BTN = 26
+const CTRL_GAP = 2
+const CTRL_PAD = 3
+const CTRL_H = CTRL_BTN + CTRL_PAD * 2 + 2
+const CTRL_OFFSET = 8
+const STAGE_MARGIN = 4
 
 const stripT = (k: PipKeyframe): PipGeom => ({ x: k.x, y: k.y, w: k.w, h: k.h, shape: k.shape, visible: k.visible })
 
@@ -49,15 +57,28 @@ function fit(g: PipGeom, W: number, H: number): PipGeom {
   if (W <= 0 || H <= 0) return clampPip(g)
   const ratio = g.shape === 'circle' ? 1 : RECT_RATIO
   // maior largura possível para caber com a proporção pedida (em px)
-  let wpx = Math.max(g.w * W, PIP_MIN_SIZE * W, PIP_MIN_SIZE * H / ratio)
+  let wpx = Math.max(g.w * W, PIP_MIN_SIZE * W, (PIP_MIN_SIZE * H) / ratio)
   wpx = Math.min(wpx, W, H / ratio)
   const hpx = wpx * ratio
   return clampPip({ ...g, w: wpx / W, h: hpx / H })
 }
 
+/** Mesma geometria com outra forma, mantendo a largura e a proporção em pixels no palco W×H. */
+export function pipWithShape(g: PipGeom, shape: PipGeom['shape'], W: number, H: number): PipGeom {
+  return fit({ ...g, shape, h: heightFor(g.w, shape, W, H) }, W, H)
+}
+
+/** Liga o stream ao <video> assim que o elemento existe (callback ref: não depende de efeito). */
+function attachStream(v: HTMLVideoElement | null, stream: MediaStream | null): void {
+  if (!v) return
+  if (v.srcObject !== stream) v.srcObject = stream
+  if (stream) void v.play().catch(() => {})
+}
+
+type CtrlPlacement = 'below' | 'above' | 'inside'
+
 export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream = null, interactive = true, showControls = true, className }: PipOverlayProps): React.JSX.Element | null {
   const rootRef = useRef<HTMLDivElement>(null)
-  const videoRef = useRef<HTMLVideoElement>(null)
   const [size, setSize] = useState({ W: 0, H: 0 })
   const [draft, setDraftState] = useState<PipGeom>(() => stripT(pip))
   const draftRef = useRef(draft)
@@ -85,13 +106,7 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
     if (!dragRef.current) setDraft(stripT(pip))
   }, [pip, setDraft])
 
-  // stream da câmera no <video>
-  useEffect(() => {
-    const v = videoRef.current
-    if (!v) return
-    if (v.srcObject !== camStream) v.srcObject = camStream
-    if (camStream) void v.play().catch(() => {})
-  }, [camStream, draft.visible])
+  const videoRef = useCallback((v: HTMLVideoElement | null) => attachStream(v, camStream), [camStream])
 
   const emit = useCallback(
     (g: PipGeom, force: boolean) => {
@@ -145,9 +160,7 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
   }
 
   const toggleShape = (): void => {
-    const shape = draft.shape === 'circle' ? 'rounded' : 'circle'
-    const { W, H } = size
-    const next = fit({ ...draft, shape, h: heightFor(draft.w, shape, W, H) }, W, H)
+    const next = pipWithShape(draft, draft.shape === 'circle' ? 'rounded' : 'circle', size.W, size.H)
     setDraft(next)
     emit(next, true)
   }
@@ -157,6 +170,21 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
   const { W, H } = size
   const px = W > 0 && H > 0 ? pipPixelRect(draft, W, H) : null
   const isCircle = draft.shape === 'circle'
+
+  // controles: abaixo da PiP se couber; senão acima; senão dentro (PiP quase do tamanho do palco).
+  // Horizontalmente, centralizados na PiP mas sempre dentro do palco.
+  const ctrlCount = onToggleMirror ? 2 : 1
+  const ctrlW = ctrlCount * CTRL_BTN + (ctrlCount - 1) * CTRL_GAP + CTRL_PAD * 2 + 2
+  let placement: CtrlPlacement = 'below'
+  let ctrlLeft = 0
+  if (px) {
+    if (px.y + px.h + CTRL_OFFSET + CTRL_H > H - STAGE_MARGIN) placement = px.y - CTRL_OFFSET - CTRL_H >= STAGE_MARGIN ? 'above' : 'inside'
+    const wanted = px.x + px.w / 2 - ctrlW / 2
+    ctrlLeft = Math.min(Math.max(wanted, STAGE_MARGIN), Math.max(STAGE_MARGIN, W - ctrlW - STAGE_MARGIN)) - px.x
+  }
+  // alça de redimensionar: para fora do canto quando há espaço; encostada quando a PiP toca a borda
+  const handleRight = px && px.x + px.w > W - 7 ? 2 : -6
+  const handleBottom = px && px.y + px.h > H - 7 ? 2 : -6
 
   return (
     <div ref={rootRef} className={cn('pointer-events-none absolute inset-0 select-none overflow-hidden', className)} aria-hidden={!interactive}>
@@ -181,14 +209,7 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
             style={{ borderRadius: px.radius }}
           >
             {camStream ? (
-              <video
-                ref={videoRef}
-                autoPlay
-                muted
-                playsInline
-                className="h-full w-full object-cover"
-                style={{ transform: mirrored ? 'scaleX(-1)' : undefined }}
-              />
+              <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" style={{ transform: mirrored ? 'scaleX(-1)' : undefined }} />
             ) : (
               <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-[radial-gradient(circle_at_50%_35%,rgba(255,255,255,0.10),transparent_60%),linear-gradient(180deg,#2a3040,#171b26)] text-fg-2">
                 <Camera className="h-[28%] w-[28%] max-h-9 max-w-9 opacity-80" strokeWidth={1.6} />
@@ -197,33 +218,48 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
             )}
           </div>
 
-          {/* controles flutuantes (forma / espelho) */}
+          {/* controles flutuantes (forma / espelho) — o invólucro cobre o vão até a PiP para o hover não cair */}
           {interactive && showControls ? (
             <div
-              className={cn(
-                'absolute left-1/2 top-full z-10 mt-2 flex -translate-x-1/2 items-center gap-0.5 rounded-lg border border-border-strong bg-surface-3/95 p-0.5 shadow-xl backdrop-blur transition-opacity',
-                dragging ? 'opacity-0' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'
-              )}
+              className={cn('absolute z-10 transition-opacity', dragging ? 'opacity-0' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100')}
+              style={{
+                left: ctrlLeft,
+                width: ctrlW,
+                ...(placement === 'below'
+                  ? { top: px.h, paddingTop: CTRL_OFFSET }
+                  : placement === 'above'
+                    ? { bottom: px.h, paddingBottom: CTRL_OFFSET }
+                    : { top: CTRL_OFFSET })
+              }}
               onPointerDown={(e) => e.stopPropagation()}
             >
-              <Tip content={isCircle ? 'Usar retângulo arredondado' : 'Usar círculo'} side="bottom">
-                <button type="button" className="flex h-6 w-6 items-center justify-center rounded-md text-fg-2 hover:bg-white/8 hover:text-fg" onClick={toggleShape} aria-label="Alternar forma da câmera">
-                  {isCircle ? <RectangleHorizontal className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
-                </button>
-              </Tip>
-              {onToggleMirror ? (
-                <Tip content={mirrored ? 'Desativar espelho' : 'Espelhar câmera'} side="bottom">
+              <div className="flex items-center rounded-lg border border-border-strong bg-surface-3/95 shadow-xl backdrop-blur" style={{ gap: CTRL_GAP, padding: CTRL_PAD }}>
+                <Tip content={isCircle ? 'Usar retângulo arredondado' : 'Usar círculo'} side={placement === 'above' ? 'top' : 'bottom'}>
                   <button
                     type="button"
-                    className={cn('flex h-6 w-6 items-center justify-center rounded-md hover:bg-white/8', mirrored ? 'text-accent-2' : 'text-fg-2 hover:text-fg')}
-                    onClick={onToggleMirror}
-                    aria-label="Espelhar câmera"
-                    aria-pressed={mirrored}
+                    className="flex items-center justify-center rounded-md text-fg-2 hover:bg-white/8 hover:text-fg"
+                    style={{ width: CTRL_BTN, height: CTRL_BTN }}
+                    onClick={toggleShape}
+                    aria-label="Alternar forma da câmera"
                   >
-                    <FlipHorizontal2 className="h-3.5 w-3.5" />
+                    {isCircle ? <RectangleHorizontal className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
                   </button>
                 </Tip>
-              ) : null}
+                {onToggleMirror ? (
+                  <Tip content={mirrored ? 'Desativar espelho' : 'Espelhar câmera'} side={placement === 'above' ? 'top' : 'bottom'}>
+                    <button
+                      type="button"
+                      className={cn('flex items-center justify-center rounded-md hover:bg-white/8', mirrored ? 'text-accent-2' : 'text-fg-2 hover:text-fg')}
+                      style={{ width: CTRL_BTN, height: CTRL_BTN }}
+                      onClick={onToggleMirror}
+                      aria-label="Espelhar câmera"
+                      aria-pressed={mirrored}
+                    >
+                      <FlipHorizontal2 className="h-3.5 w-3.5" />
+                    </button>
+                  </Tip>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
@@ -234,7 +270,7 @@ export function PipOverlay({ pip, onChange, mirrored, onToggleMirror, camStream 
                 'absolute z-10 h-4 w-4 cursor-nwse-resize rounded-full border-2 border-white bg-accent shadow-md transition-opacity',
                 dragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
               )}
-              style={isCircle ? { right: '9%', bottom: '9%' } : { right: -6, bottom: -6 }}
+              style={isCircle ? { right: '9%', bottom: '9%' } : { right: handleRight, bottom: handleBottom }}
               onPointerDown={beginDrag('resize')}
               onPointerMove={onPointerMove}
               onPointerUp={endDrag}
