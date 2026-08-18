@@ -179,7 +179,7 @@ function drawArrowHead(ctx: Canvas2DLike, from: { x: number; y: number }, to: { 
   ctx.fill()
 }
 
-function drawStrokes(
+export function drawStrokes(
   ctx: Canvas2DLike,
   W: number,
   H: number,

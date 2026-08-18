@@ -20,6 +20,7 @@ let annotating = false
 let annotateTool: StrokeTool = 'pen'
 let currentDisplayIds: string[] = []
 let targetRect: { x: number; y: number; width: number; height: number } | null = null
+const srcCtx = (): { sourceKind: 'screen' | 'window'; sourceName: string } => ({ sourceKind: lastConfig?.source.kind ?? 'screen', sourceName: lastConfig?.source.name ?? '' })
 let levelMeter: LevelMeter | null = null
 let unsubs: (() => void)[] = []
 const PIP_CORNERS: [number, number][] = [
@@ -148,14 +149,14 @@ export async function startRecording(config: RecordingConfig): Promise<void> {
     currentDisplayIds = displaysForConfig(config)
     targetRect = null
     setPhase('countdown')
-    await api.recording.setPhase('countdown', { displayIds: currentDisplayIds, countdownSec: config.countdownSec, targetRect })
+    await api.recording.setPhase('countdown', { displayIds: currentDisplayIds, countdownSec: config.countdownSec, targetRect, ...srcCtx() })
     st.setScreen('recording')
     levelMeter = new LevelMeter(prepared)
     // contagem regressiva (a overlay mostra os números; o gravador espelha)
     countdownAbort = new AbortController()
     try {
       for (let n: number = config.countdownSec; n > 0; n--) {
-        await api.overlay.setMode({ mode: 'countdown', count: n, targetRect })
+        await api.overlay.setMode({ mode: 'countdown', count: n, targetRect, ...srcCtx() })
         if (config.countdownSec > 0 && st.settings.startSound) beep(n === 1 ? 880 : 660, 90)
         await sleep(1000, countdownAbort.signal)
       }
@@ -167,7 +168,7 @@ export async function startRecording(config: RecordingConfig): Promise<void> {
     countdownAbort = null
     await engine.start()
     setPhase('recording')
-    await api.recording.setPhase('recording', { displayIds: currentDisplayIds, targetRect })
+    await api.recording.setPhase('recording', { displayIds: currentDisplayIds, targetRect, ...srcCtx() })
     if (config.countdownSec > 0 && st.settings.startSound) beep(1040, 120)
     barTimer = setInterval(pushBar, 500)
     pushBar()
@@ -208,7 +209,7 @@ export function pauseRecording(): void {
   if (store.getState().phase !== 'recording') return
   engine.pause()
   setPhase('paused')
-  void api.recording.setPhase('paused', { displayIds: currentDisplayIds, targetRect })
+  void api.recording.setPhase('paused', { displayIds: currentDisplayIds, targetRect, ...srcCtx() })
   pushBar()
 }
 
@@ -216,7 +217,7 @@ export function resumeRecording(): void {
   if (store.getState().phase !== 'paused') return
   engine.resume()
   setPhase('recording')
-  void api.recording.setPhase('recording', { displayIds: currentDisplayIds, targetRect })
+  void api.recording.setPhase('recording', { displayIds: currentDisplayIds, targetRect, ...srcCtx() })
   pushBar()
 }
 
@@ -318,11 +319,15 @@ export async function setAnnotating(on: boolean, tool: StrokeTool = annotateTool
   const st = store.getState()
   const phase = st.phase
   if (on && phase !== 'recording' && phase !== 'paused') return
+  if (on && lastConfig?.source.kind === 'window') {
+    toast('As anotações na tela estão disponíveis ao gravar um monitor.', { description: 'Em modo janela, o Windows não permite desenhar sobre a janela capturada.' })
+    return
+  }
   annotating = on
   annotateTool = tool
   const a = st.settings.annotations
-  if (on) await api.overlay.setMode({ mode: 'drawing', tool, color: a.color, width: a.width, autoFadeSec: a.autoFadeSec, targetRect })
-  else await api.overlay.setMode({ mode: 'idle', paused: phase === 'paused', targetRect })
+  if (on) await api.overlay.setMode({ mode: 'drawing', tool, color: a.color, width: a.width, autoFadeSec: a.autoFadeSec, targetRect, ...srcCtx() })
+  else await api.overlay.setMode({ mode: 'idle', paused: phase === 'paused', targetRect, ...srcCtx() })
   st.setLive({ annotating: on })
   pushBar()
 }

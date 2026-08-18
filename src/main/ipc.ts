@@ -113,19 +113,19 @@ export function registerIpc(store: SessionStore): void {
       case 'countdown': {
         setProtection(true)
         if (targets.length) showOverlays(targets)
-        setOverlayMode({ mode: 'countdown', count: ctx?.countdownSec ?? 3, targetRect: ctx?.targetRect ?? null })
+        setOverlayMode({ mode: 'countdown', count: ctx?.countdownSec ?? 3, targetRect: ctx?.targetRect ?? null, sourceKind: ctx?.sourceKind, sourceName: ctx?.sourceName })
         break
       }
       case 'recording': {
         setProtection(true)
         if (targets.length) showOverlays(targets)
-        setOverlayMode({ mode: 'idle', paused: false, targetRect: ctx?.targetRect ?? null })
+        setOverlayMode({ mode: 'idle', paused: false, targetRect: ctx?.targetRect ?? null, sourceKind: ctx?.sourceKind, sourceName: ctx?.sourceName })
         const barTarget = targets[0] ?? displays.find((d) => d.isPrimary) ?? displays[0]
         if (barTarget && !(prev === 'paused' && isBarHiddenByUser())) showBar(barTarget, null)
         break
       }
       case 'paused': {
-        setOverlayMode({ mode: 'idle', paused: true, targetRect: ctx?.targetRect ?? null })
+        setOverlayMode({ mode: 'idle', paused: true, targetRect: ctx?.targetRect ?? null, sourceKind: ctx?.sourceKind, sourceName: ctx?.sourceName })
         break
       }
       case 'stopping':

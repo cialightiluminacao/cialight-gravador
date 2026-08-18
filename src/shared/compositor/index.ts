@@ -6,6 +6,7 @@ export { visibleStrokesAt, STROKE_FADE_MS } from './strokes'
 export type { VisibleStroke } from './strokes'
 export {
   drawFrame,
+  drawStrokes,
   coverCrop,
   REFERENCE_WIDTH,
   PIP_SHADOW_COLOR,

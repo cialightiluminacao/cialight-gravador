@@ -83,6 +83,9 @@ export interface OverlayModePayload {
   autoFadeSec?: number | null
   /** Retângulo (px do display) da janela gravada em modo janela; null = display inteiro. */
   targetRect?: { x: number; y: number; width: number; height: number } | null
+  /** Modo janela: a borda não faz sentido (mostra só a pílula com o nome da janela). */
+  sourceKind?: 'screen' | 'window'
+  sourceName?: string
 }
 
 export interface OverlayStrokeEvent {
@@ -124,6 +127,8 @@ export interface RecordingPhaseContext {
   /** Em modo janela: retângulo da janela alvo (px de tela). */
   targetRect?: { x: number; y: number; width: number; height: number } | null
   countdownSec?: number
+  sourceKind?: 'screen' | 'window'
+  sourceName?: string
 }
 
 export interface IpcApi {
