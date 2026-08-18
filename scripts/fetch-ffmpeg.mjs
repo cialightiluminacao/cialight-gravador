@@ -60,17 +60,24 @@ if (sha !== meta.sha256) {
 }
 
 const zip = new AdmZip(buf)
-const wanted = new Set(meta.files)
+// `files` aceita caminhos exatos ("LICENSE.txt") ou prefixos com curinga ("bin/*" = tudo dentro de bin/)
+const exact = new Set(meta.files.filter((f) => !f.endsWith('/*')))
+const prefixes = meta.files.filter((f) => f.endsWith('/*')).map((f) => f.slice(0, -1))
 let extracted = 0
+const seenExact = new Set()
 for (const entry of zip.getEntries()) {
+  if (entry.isDirectory) continue
   // entradas vêm como "<build>/bin/ffmpeg.exe"
   const rel = entry.entryName.split('/').slice(1).join('/')
-  if (wanted.has(rel)) {
+  const byPrefix = prefixes.some((p) => rel.startsWith(p) && !rel.slice(p.length).includes('/'))
+  if (exact.has(rel) || byPrefix) {
     writeFileSync(join(dir, basename(rel)), entry.getData())
     extracted++
+    if (exact.has(rel)) seenExact.add(rel)
   }
 }
-if (extracted !== wanted.size) { console.error(`extraídos ${extracted}/${wanted.size} arquivos`); process.exit(4) }
+if (seenExact.size !== exact.size || extracted === 0) { console.error(`extraídos ${extracted} arquivos; faltando: ${[...exact].filter((f) => !seenExact.has(f)).join(', ')}`); process.exit(4) }
+if (!existsSync(join(dir, 'ffmpeg.exe')) || !existsSync(join(dir, 'ffprobe.exe'))) { console.error('ffmpeg.exe/ffprobe.exe não encontrados no zip'); process.exit(4) }
 
 const ver = execFileSync(join(dir, 'ffmpeg.exe'), ['-version'], { encoding: 'utf8' }).split('\n')[0]
 if (!ver.includes(`ffmpeg version n${meta.series}`)) { console.error(`versão inesperada: ${ver}`); process.exit(5) }

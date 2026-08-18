@@ -1,6 +1,6 @@
 {
   "name": "cialight-gravador",
-  "version": "0.1.0",
+  "version": "0.9.0",
   "description": "Gravador de tela da Cia Light: monitor/janela, webcam, áudio do sistema e microfone, anotações e exportação com presets.",
   "author": "Cia Light",
   "license": "MIT",
@@ -65,5 +65,85 @@
     "vitest": "^4.1.0",
     "zod": "^4.4.0",
     "zustand": "^5.0.0"
+  },
+  "homepage": "https://github.com/cialightiluminacao/cialight-gravador",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cialightiluminacao/cialight-gravador.git"
+  },
+  "build": {
+    "appId": "com.cialight.gravador",
+    "productName": "CiaLight Gravador",
+    "copyright": "Cia Light Iluminação",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "asar": true,
+    "npmRebuild": false,
+    "files": [
+      "out/**",
+      "package.json",
+      "!docs/**",
+      "!scripts/**",
+      "!src/**",
+      "!build/**",
+      "!spike-out/**",
+      "!test-out/**",
+      "!*.md",
+      "!resources/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "*.exe",
+          "*.dll",
+          "LICENSE.txt",
+          "VERSION.json",
+          "!ffplay.exe"
+        ]
+      },
+      {
+        "from": "resources/icons",
+        "to": "icons",
+        "filter": [
+          "*.png"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "CiaLightGravador-Setup-${version}.${ext}",
+      "icon": "build/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CiaLight Gravador",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "artifactName": "CiaLightGravador-Setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "cialightiluminacao",
+        "repo": "cialight-gravador",
+        "releaseType": "release"
+      }
+    ]
   }
 }

@@ -1,0 +1,35 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Cache do Electron
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\electron\Cache
+          key: electron-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+      - run: npm run fetch:ffmpeg
+      - run: npm run typecheck
+      - run: npm test
+      - name: Empacotar e publicar na release
+        run: npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Conferir artefatos
+        shell: pwsh
+        run: |
+          Get-ChildItem release | Format-Table Name, Length
+          if (-not (Test-Path release/latest.yml)) { throw "latest.yml ausente" }
+          if (-not (Get-ChildItem release/*.exe)) { throw "instalador ausente" }
+          if (-not (Get-ChildItem release/*.blockmap)) { throw "blockmap ausente" }

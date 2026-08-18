@@ -1,10 +1,14 @@
 {
   "series": "8.1",
-  "build": "ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1",
+  "build": "ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-shared-8.1",
   "urls": [
-    "https://github.com/cialightiluminacao/cialight-gravador/releases/download/deps-ffmpeg-n8.1.2/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip",
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-18-15-03/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip"
+    "https://github.com/cialightiluminacao/cialight-gravador/releases/download/deps-ffmpeg-n8.1.2/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-shared-8.1.zip",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-18-15-03/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-shared-8.1.zip"
   ],
-  "sha256": "66e3797adad33063ae3f55c7eacb9f1bff604322a4e50225039626230fd0c0d1",
-  "files": ["bin/ffmpeg.exe", "bin/ffprobe.exe", "LICENSE.txt"]
+  "sha256": "dc0ea35fbfdf17f7da656c2210f68544eb7ac538c5bf9dd258c1c9bd3a124bbf",
+  "files": [
+    "bin/*",
+    "LICENSE.txt"
+  ],
+  "note": "Build \"shared\" (ffmpeg.exe + ffprobe.exe + DLLs) — metade do tamanho dos estáticos. Espelho próprio primeiro; BtbN como fallback."
 }
