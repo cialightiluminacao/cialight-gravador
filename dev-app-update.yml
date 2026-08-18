@@ -1,0 +1,4 @@
+# Usado só em dev com CIALIGHT_UPDATE_TEST=1 para testar o auto-update contra as releases reais.
+provider: github
+owner: cialightiluminacao
+repo: cialight-gravador
