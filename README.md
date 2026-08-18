@@ -23,7 +23,9 @@ npm run spike             # spike técnico (validações de captura/proteção/o
 npm run dist:win          # instalador NSIS em release/
 ```
 
-Publicar uma versão: `npm version patch` (ou `minor`/`major`) — o `postversion` faz push da tag e o workflow **Release** empacota e publica no GitHub Releases; os apps instalados recebem a atualização automaticamente.
+Publicar uma versão (do PC de desenvolvimento): `npm version patch` (ou `minor`/`major`) e depois `npm run release:publish` — empacota e publica no GitHub Releases (usa o token do `gh`/`GH_TOKEN`); os apps instalados recebem a atualização automaticamente.
+
+Os workflows de CI/Release do GitHub Actions estão em `docs/ci/` (para ativá-los, copie para `.github/workflows/` — exige token com escopo `workflow`).
 
 ## Estrutura
 

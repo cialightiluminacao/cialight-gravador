@@ -19,7 +19,8 @@
     "postversion": "git push --follow-tags",
     "test:ffmpeg": "electron-vite build && cross-env CIALIGHT_TEST=ffmpeg CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:capture": "electron-vite build && cross-env CIALIGHT_TEST=capture CIALIGHT_RAW_DIR=test-out/raw electron .",
-    "icons": "node scripts/make-icons.mjs"
+    "icons": "node scripts/make-icons.mjs",
+    "release:publish": "electron-vite build && electron-builder --win --publish always"
   },
   "dependencies": {
     "electron-log": "^5.4.4",
