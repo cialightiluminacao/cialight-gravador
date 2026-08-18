@@ -1,0 +1,10 @@
+node_modules/
+out/
+release/
+resources/ffmpeg/*
+!resources/ffmpeg/VERSION.json
+spike-out/
+*.log
+.env
+.DS_Store
+Thumbs.db

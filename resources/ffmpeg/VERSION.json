@@ -1,0 +1,10 @@
+{
+  "series": "8.1",
+  "build": "ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1",
+  "urls": [
+    "https://github.com/cialightiluminacao/cialight-gravador/releases/download/deps-ffmpeg-n8.1.2/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-18-15-03/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip"
+  ],
+  "sha256": "66e3797adad33063ae3f55c7eacb9f1bff604322a4e50225039626230fd0c0d1",
+  "files": ["bin/ffmpeg.exe", "bin/ffprobe.exe", "LICENSE.txt"]
+}
