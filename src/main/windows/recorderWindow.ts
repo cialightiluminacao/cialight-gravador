@@ -40,8 +40,10 @@ export function createRecorderWindow(): BrowserWindow {
     minHeight: 640,
     show: false,
     title: 'CiaLight Gravador',
-    backgroundColor: '#0f1115',
+    backgroundColor: '#0b0d12',
     autoHideMenuBar: true,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#0b0d12', symbolColor: '#c8c9cf', height: 40 },
     webPreferences: {
       preload: preloadPath(),
       sandbox: false,

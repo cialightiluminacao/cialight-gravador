@@ -1,33 +1,200 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "@fontsource-variable/manrope";
+@import "@fontsource-variable/azeret-mono";
 
+/* ---------------------------------------------------------------------------
+   CiaLight Gravador — tema "sala de controle" (grafite profundo, acento coral)
+   --------------------------------------------------------------------------- */
 :root {
-  --background: #0f1115;
-  --surface: #171a21;
-  --surface-2: #1f2330;
-  --border: #2a2f3d;
-  --foreground: #e6e8ee;
-  --muted: #8b90a0;
+  --bg: #0b0d12;
+  --bg-2: #0f121a;
+  --surface: #141823;
+  --surface-2: #1b202d;
+  --surface-3: #232937;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --fg: #eceae4;
+  --fg-2: #c8c9cf;
+  --muted: #8a8f9e;
+  --muted-2: #5f6575;
   --accent: #ff4d4f;
-  --accent-2: #22c55e;
+  --accent-2: #ff7a7c;
+  --accent-deep: #c9302c;
+  --ok: #3ddc97;
+  --warn: #f5b301;
+  --info: #7aa2ff;
+  --danger: #ff5c5c;
+  --ring: rgba(255, 77, 79, 0.45);
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  --radius: 14px;
+  --font-sans: "Manrope Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Azeret Mono Variable", "Cascadia Mono", Consolas, monospace;
 }
 
 @theme inline {
-  --color-background: var(--background);
+  --color-bg: var(--bg);
+  --color-bg-2: var(--bg-2);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-border: var(--border);
-  --color-foreground: var(--foreground);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
   --color-muted: var(--muted);
+  --color-muted-2: var(--muted-2);
   --color-accent: var(--accent);
   --color-accent-2: var(--accent-2);
+  --color-accent-deep: var(--accent-deep);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-info: var(--info);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --radius-card: var(--radius);
 }
 
-html, body, #root { height: 100%; }
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* fundo com vinheta + grão sutil (só na janela principal) */
+.app-bg {
+  background:
+    radial-gradient(1200px 700px at 20% -10%, rgba(255, 77, 79, 0.08), transparent 60%),
+    radial-gradient(900px 600px at 100% 110%, rgba(122, 162, 255, 0.07), transparent 60%),
+    var(--bg);
+  position: relative;
+}
+.app-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  mix-blend-mode: screen;
+}
+
+.font-mono,
+.tnum {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* scrollbars finas */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* cartão padrão */
+.card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0) 40%), var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* botão de gravar: anel pulsante */
+@keyframes rec-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 14px rgba(255, 77, 79, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 77, 79, 0);
+  }
+}
+.rec-pulse {
+  animation: rec-pulse 1.6s ease-out infinite;
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.rise-in {
+  animation: rise-in 0.42s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.rise-in-1 {
+  animation-delay: 0.05s;
+}
+.rise-in-2 {
+  animation-delay: 0.12s;
+}
+.rise-in-3 {
+  animation-delay: 0.19s;
+}
+.rise-in-4 {
+  animation-delay: 0.26s;
+}
+
+/* medidor de nível */
+.vu-seg {
+  transition: opacity 80ms linear;
+}
+
+/* borda "gravando" da overlay */
+@keyframes border-breathe {
+  0%,
+  100% {
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.rec-border {
+  animation: border-breathe 2.4s ease-in-out infinite;
+}
+
+/* seleção de texto permitida em campos */
+input,
+textarea,
+[contenteditable] {
+  user-select: text;
 }

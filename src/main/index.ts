@@ -23,7 +23,8 @@ import { runIntegrationTest } from './testMode'
 app.setAppUserModelId('com.cialight.gravador')
 registerFileProtocolScheme()
 
-const gotLock = app.requestSingleInstanceLock()
+// QA/testes rodam em paralelo (várias instâncias): sem lock nesses modos
+const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST ? true : app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
@@ -61,8 +62,7 @@ if (!gotLock) {
     createTray({
       openSettings: () => {
         showRecorder()
-        getRecorderWindow()?.webContents.send(IPC.recording.command, 'showRecorder')
-        getRecorderWindow()?.webContents.send('app:navigate', 'settings')
+        void getRecorderWindow()?.webContents.executeJavaScript('window.__navigate && window.__navigate("settings")', true).catch(() => {})
       },
       checkUpdate: () => void updateCheck(true),
       quit: () => app.quit()
@@ -78,6 +78,21 @@ if (!gotLock) {
         for (const w of BrowserWindow.getAllWindows()) if (!w.webContents.isDestroyed()) w.webContents.send(IPC.update.statusChanged, s)
       }
     })
+
+    // QA visual: CIALIGHT_SHOT=<arquivo.png> [CIALIGHT_SCREEN=settings|history] captura a janela e sai
+    if (process.env.CIALIGHT_SHOT) {
+      win.webContents.once('did-finish-load', () => {
+        setTimeout(async () => {
+          if (process.env.CIALIGHT_SCREEN) await win.webContents.executeJavaScript(`window.__navigate && window.__navigate(${JSON.stringify(process.env.CIALIGHT_SCREEN)})`, true).catch(() => {})
+          await new Promise((r) => setTimeout(r, 1200))
+          const img = await win.webContents.capturePage()
+          const { writeFileSync } = await import('fs')
+          writeFileSync(process.env.CIALIGHT_SHOT!, img.toPNG())
+          log.info(`screenshot salvo em ${process.env.CIALIGHT_SHOT}`)
+          if (process.env.CIALIGHT_SHOT_QUIT !== '0') app.exit(0)
+        }, 2500)
+      })
+    }
 
     // Recuperação de sessões interrompidas
     win.webContents.once('did-finish-load', () => {
