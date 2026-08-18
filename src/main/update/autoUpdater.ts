@@ -18,6 +18,7 @@ let onStatus: ((s: UpdateStatus) => void) | null = null
 let isRecording: () => boolean = () => false
 let timer: NodeJS.Timeout | null = null
 let initialized = false
+let manualCheck = false
 
 function emit(patch: Partial<UpdateStatus>): void {
   status = { ...status, ...patch, currentVersion: app.getVersion() }
@@ -67,7 +68,10 @@ export function initAutoUpdater(opts: { isRecording: () => boolean; onStatus: (s
   })
   autoUpdater.on('error', (e) => {
     log.warn('auto-update erro', e)
-    emit({ state: 'error', error: e?.message ?? String(e) })
+    // checagens automáticas falham silenciosamente (sem internet, sem release ainda);
+    // só a verificação manual mostra o erro na UI
+    if (manualCheck || status.state === 'downloading') emit({ state: 'error', error: e?.message ?? String(e) })
+    else emit({ state: 'idle', error: undefined })
   })
 
   setTimeout(() => void check(false), FIRST_CHECK_DELAY_MS)
@@ -81,10 +85,14 @@ export async function check(manual: boolean): Promise<void> {
     return
   }
   if (status.state === 'downloading' || status.state === 'downloaded') return
+  manualCheck = manual
   try {
     await autoUpdater.checkForUpdates()
   } catch (e) {
     if (manual) emit({ state: 'error', error: e instanceof Error ? e.message : String(e) })
+    else emit({ state: 'idle' })
+  } finally {
+    manualCheck = false
   }
 }
 
