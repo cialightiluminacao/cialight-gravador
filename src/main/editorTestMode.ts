@@ -1,0 +1,140 @@
+import { app, BrowserWindow, ipcMain } from 'electron'
+import { createHash } from 'crypto'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
+import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
+import type { ProjectStore } from './project/projectStore'
+import type { SessionStore } from './session/sessionStore'
+import { runFfmpeg } from './export/ffmpegRunner'
+import { probe } from './media/probe'
+import { assetFromInfo } from './media/ingest'
+import { loadPage, preloadPath } from './windows/recorderWindow'
+
+// Teste de integração do render do editor (CIALIGHT_TEST=editor-render, `npm run test:editor`).
+// Gera testsrc2 + PNG vermelho, registra um projeto temporário no ProjectStore do protocolo de mídia,
+// abre uma janela oculta em index.html#editor-test/<id> (só o RenderClient) e valida os pixels.
+// Não grava settings.json (o app instalado divide a pasta userData): o teste confere o hash.
+
+const PROJECT_ID = 'p-editor-render-test'
+const SESSION_ID = 'editor-render-test-session'
+type Rgba = [number, number, number, number]
+type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
+
+interface HarnessReport {
+  errors: string[]
+  first?: Rendered
+  pixels?: { circleCenter: Rgba; boxCorner: Rgba; missing: Rgba; corrupt: Rgba; stroke: Rgba }
+  videoMean?: number[]
+  sequential?: Rendered[]
+  seek?: Rendered
+  videoDiff?: number
+  burst?: string[]
+}
+
+function check(cond: boolean, msg: string, failures: string[]): void {
+  if (!cond) failures.push(msg)
+  console.log(`${cond ? 'OK ' : 'FAIL'} ${msg}`)
+}
+
+function settingsHash(): string | null {
+  const f = join(app.getPath('userData'), 'settings.json')
+  return existsSync(f) ? createHash('sha1').update(readFileSync(f)).digest('hex') : null
+}
+
+const isRed = (p: Rgba | undefined): boolean => !!p && p[0] > 200 && p[1] < 40 && p[2] < 40
+// xadrez do placeholder: cinza neutro (0,33 / 0,45 → ~84 / ~115)
+const isGray = (p: Rgba | undefined): boolean => !!p && Math.max(p[0], p[1], p[2]) - Math.min(p[0], p[1], p[2]) <= 4 && p[0] >= 70 && p[0] <= 130
+
+function track(id: string, name: string, item: MediaItem): Track {
+  return { id, kind: 'video', name, muted: false, hidden: false, locked: false, volume: 1, items: [item] }
+}
+
+function placed(asset: Asset, cx: number, cy: number, scale: number, shape?: 'circle'): MediaItem {
+  const it = { ...createMediaItem(asset, 0, 'video'), durationUs: 3_000_000 }
+  const v = it.visual!
+  return { ...it, visual: { ...v, transform: { ...v.transform, x: { value: cx }, y: { value: cy }, scale: { value: scale } }, ...(shape ? { shape } : {}) } }
+}
+
+export async function testEditorRender(projects: ProjectStore, sessions: SessionStore, outDir: string): Promise<number> {
+  const failures: string[] = []
+  const hashBefore = settingsHash()
+  const dir = join(outDir, 'editor-render')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const video = join(dir, 'testsrc2.mp4')
+  const red = join(dir, 'vermelho.png')
+  const corrupt = join(dir, 'corrompido.mp4')
+  const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
+  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30', '-t', '3', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '15', '-pix_fmt', 'yuv420p', video], 'editor: testsrc2')
+  await gen(['-f', 'lavfi', '-i', 'color=c=red:s=256x256', '-frames:v', '1', '-update', '1', red], 'editor: vermelho')
+  writeFileSync(corrupt, Buffer.alloc(64 * 1024, 0x5a)) // não é MP4: o decoder falha
+  // sessão mínima com um traço verde horizontal (anotações v1 via cialight-file://<sessionId>/session.json)
+  const sdir = sessions.dirOf(SESSION_ID)
+  rmSync(sdir, { recursive: true, force: true })
+  mkdirSync(sdir, { recursive: true })
+  const stroke = { id: 's1', tMs: 0, tool: 'line', color: '#00ff00', width: 40, points: [{ x: 0.5, y: 0.3, tMs: 0 }, { x: 0.6, y: 0.3, tMs: 0 }] }
+  writeFileSync(join(sdir, 'session.json'), JSON.stringify({ id: SESSION_ID, strokes: [stroke], clearEvents: [] }))
+
+  const iVideo = await probe(video)
+  const iRed = await probe(red)
+  const aVideo: Asset = { ...assetFromInfo('a_video', video, statSync(video), iVideo), status: 'ready' }
+  const aRed = assetFromInfo('a_red', red, statSync(red), iRed)
+  const aMissing: Asset = { ...aVideo, id: 'a_missing', name: 'nao-existe.mp4', source: { type: 'file', path: join(dir, 'nao-existe.mp4'), size: 1, mtimeMs: 0 } }
+  const aCorrupt: Asset = { ...aVideo, id: 'a_corrupt', name: 'corrompido.mp4', source: { type: 'file', path: corrupt, size: statSync(corrupt).size, mtimeMs: Math.round(statSync(corrupt).mtimeMs) } }
+
+  const base = createEmptyProject('Teste de render', { width: 1920, height: 1080, fps: 30, background: '#000000' })
+  const project: Project = {
+    ...base,
+    id: PROJECT_ID,
+    assets: [aVideo, aRed, aMissing, aCorrupt],
+    tracks: [
+      track('t_video', 'Vídeo', { ...createMediaItem(aVideo, 0, 'video'), durationUs: 3_000_000 }),
+      track('t_red', 'Vermelho', placed(aRed, 0.875, 0.125, 0.25, 'circle')),
+      track('t_missing', 'Ausente', placed(aMissing, 0.125, 0.875, 0.25)),
+      track('t_corrupt', 'Corrompido', placed(aCorrupt, 0.375, 0.875, 0.25)),
+      { id: 't_ann', kind: 'video', name: 'Anotações', muted: false, hidden: false, locked: false, volume: 1, items: [{ id: 'i_ann', type: 'annotations', sessionId: SESSION_ID, inUs: 0, startUs: 0, durationUs: 3_000_000 }] }
+    ]
+  }
+  rmSync(projects.dirOf(PROJECT_ID), { recursive: true, force: true })
+  projects.create(project)
+
+  const win = new BrowserWindow({ width: 800, height: 600, show: false, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
+  const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 60 s'] } }), 60_000)
+    ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
+      clearTimeout(timer)
+      resolve(r)
+    })
+    win.webContents.on('console-message', (e) => {
+      if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
+    })
+    loadPage(win, `index.html#editor-test/${PROJECT_ID}`)
+  })
+  win.destroy()
+
+  const r = result.report
+  check(result.ok && r.errors.length === 0, `harness sem exceção nem erro do worker (${JSON.stringify(r.errors)})`, failures)
+  const first = r.first
+  check(first?.t === 'rendered', `quadro em t=1 s renderizado (${JSON.stringify(first)})`, failures)
+  if (first?.t === 'rendered') {
+    check(first.missing.includes('a_missing') && first.missing.includes('a_corrupt') && !first.missing.includes('a_video') && !first.missing.includes('a_red'), `missing = ausente + corrompido (${first.missing.join(', ')})`, failures)
+  }
+  const px = r.pixels
+  check(isRed(px?.circleCenter), `centro do círculo vermelho (${px?.circleCenter})`, failures)
+  check(!!px && !isRed(px.boxCorner), `canto da caixa fora do círculo não é vermelho (${px?.boxCorner})`, failures)
+  check(isGray(px?.missing), `asset ausente → placeholder cinza (${px?.missing})`, failures)
+  check(isGray(px?.corrupt), `asset corrompido → placeholder cinza (${px?.corrupt})`, failures)
+  const st = px?.stroke
+  check(!!st && st[1] > 200 && st[0] < 40 && st[2] < 40, `anotação (traço verde) desenhada sobre o vídeo (${st})`, failures)
+  check(!!r.videoMean && r.videoMean.some((c) => c > 20), `vídeo desenhado no centro (média ${r.videoMean})`, failures)
+  check(!!r.sequential && r.sequential.length === 5 && r.sequential.every((s) => s.t === 'rendered'), `reprodução sequencial: 5 quadros (${r.sequential?.map((s) => (s.t === 'rendered' ? `${s.ms.toFixed(1)} ms` : s.message)).join(', ')})`, failures)
+  check(r.seek?.t === 'rendered', `seek para 2,5 s (${JSON.stringify(r.seek)})`, failures)
+  check((r.videoDiff ?? 0) > 2, `quadro em 2,5 s difere do de 1 s (diferença média ${r.videoDiff?.toFixed(1)})`, failures)
+  check(!!r.burst && r.burst.length === 5 && r.burst.every((t) => t === 'rendered'), `rajada de 5 pedidos resolvida (${r.burst?.join(', ')})`, failures)
+  check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
+
+  writeFileSync(join(outDir, 'editor-render-report.json'), JSON.stringify({ result, failures }, null, 2))
+  console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE RENDER DO EDITOR PASSOU')
+  return failures.length ? 1 : 0
+}

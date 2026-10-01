@@ -6,16 +6,17 @@ import { log } from '../log'
 let recorderWin: BrowserWindow | null = null
 let quitting = false
 
-export function rendererUrl(page: string): { url?: string; file?: string; query?: string } {
-  const [file, query] = page.split('?')
+export function rendererUrl(page: string): { url?: string; file?: string; query?: string; hash?: string } {
+  const [path, hash] = page.split('#')
+  const [file, query] = path.split('?')
   if (process.env.ELECTRON_RENDERER_URL) return { url: `${process.env.ELECTRON_RENDERER_URL}/${page}` }
-  return { file: join(__dirname, `../renderer/${file}`), query }
+  return { file: join(__dirname, `../renderer/${file}`), query, hash }
 }
 
 export function loadPage(win: BrowserWindow, page: string): void {
   const target = rendererUrl(page)
   if (target.url) void win.loadURL(target.url)
-  else void win.loadFile(target.file!, target.query ? { search: `?${target.query}` } : undefined)
+  else void win.loadFile(target.file!, target.query || target.hash ? { ...(target.query ? { search: `?${target.query}` } : {}), ...(target.hash ? { hash: target.hash } : {}) } : undefined)
 }
 
 export function preloadPath(): string {

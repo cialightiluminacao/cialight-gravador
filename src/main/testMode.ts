@@ -20,10 +20,11 @@ import { startExportJob } from './export/exportJob'
 import { buildReviewAssets } from './export/reviewAssets'
 import { preloadPath, loadPage } from './windows/recorderWindow'
 import { log } from './log'
+import { testEditorRender } from './editorTestMode'
 
-// Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest). Roda no Electron
+// Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render). Roda no Electron
 // real com o ffmpeg embutido; escreve um relatório JSON em test-out/ e sai com
-// código 0 (sucesso) ou 1 (falha). Chamado por `npm run test:ffmpeg|test:capture|test:ingest`.
+// código 0 (sucesso) ou 1 (falha). Chamado por `npm run test:ffmpeg|test:capture|test:ingest|test:editor`.
 
 const outDir = join(app.getAppPath(), 'test-out')
 
@@ -378,12 +379,13 @@ async function testIngest(): Promise<number> {
   return failures.length ? 1 : 0
 }
 
-export async function runIntegrationTest(mode: string, store: SessionStore): Promise<void> {
+export async function runIntegrationTest(mode: string, store: SessionStore, projects: ProjectStore): Promise<void> {
   let code = 1
   try {
     if (mode === 'ffmpeg') code = await testFfmpeg(store)
     else if (mode === 'capture') code = await testCapture(store)
     else if (mode === 'ingest') code = await testIngest()
+    else if (mode === 'editor-render') code = await testEditorRender(projects, store, outDir)
     else console.error(`modo de teste desconhecido: ${mode}`)
   } catch (e) {
     console.error('teste falhou com exceção:', e)
