@@ -75,7 +75,9 @@ describe('resolveFrame', () => {
     let { p } = base()
     const tid = p.tracks[0].id
     p = ops.insertItems(p, tid, [{ id: 'an', type: 'annotations', startUs: 20 * S, durationUs: 5 * S, sessionId: 's1', inUs: 2 * S }], 'overwrite')
-    expect(resolveFrame(p, 21 * S)).toEqual([{ kind: 'annotations', itemId: 'an', sessionId: 's1', sessionMs: 3000 }])
+    expect(resolveFrame(p, 21 * S)).toEqual([{ kind: 'annotations', itemId: 'an', sessionId: 's1', sessionMs: 3000, autoFadeMs: null }])
+    p = ops.insertItems(p, tid, [{ id: 'an2', type: 'annotations', startUs: 40 * S, durationUs: 5 * S, sessionId: 's1', inUs: 0, autoFadeMs: 2500 }], 'overwrite')
+    expect(resolveFrame(p, 41 * S)[0]).toMatchObject({ kind: 'annotations', itemId: 'an2', autoFadeMs: 2500 })
     const fx: EffectItem = {
       id: 'fx', type: 'effect', effect: 'blur', startUs: 30 * S, durationUs: 2 * S, feather: 0, color: '#000', invert: false, scope: 'below',
       region: { shape: 'rect', x: { value: 0.5, keys: [{ tUs: 0, value: 0, ease: 'linear' }, { tUs: 2 * S, value: 1, ease: 'linear' }] }, y: { value: 0.5 }, w: { value: 0.2 }, h: { value: 0.2 }, rotation: { value: 0 } },

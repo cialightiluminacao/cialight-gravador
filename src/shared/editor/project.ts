@@ -52,7 +52,8 @@ export interface EffectItem extends ItemBase {
   type: 'effect'; effect: 'blur' | 'pixelate' | 'solid'; region: EffectRegion
   strength: Anim<number>; feather: number; color: string; invert: boolean; scope: 'below' | 'track'
 }
-export interface AnnotationsItem extends ItemBase { type: 'annotations'; sessionId: string; inUs: Us }
+/** autoFadeMs: sumiço automático dos traços (como settings.annotations.autoFadeSec da v1); null/ausente = ficam até apagar. */
+export interface AnnotationsItem extends ItemBase { type: 'annotations'; sessionId: string; inUs: Us; autoFadeMs?: number | null }
 export type Item = MediaItem | TextItem | ShapeItem | EffectItem | AnnotationsItem
 export type TrackKind = 'video' | 'audio'
 export interface Track { id: string; kind: TrackKind; name: string; muted: boolean; hidden: boolean; locked: boolean; volume: number; role?: 'voice' | 'music' | 'sfx'; items: Item[] }

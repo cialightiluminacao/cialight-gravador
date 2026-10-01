@@ -16,7 +16,7 @@ export interface MediaLayer {
   shape: 'rect' | 'rounded' | 'circle'; radius: number
   border?: { width: number; color: string }; adjust?: VisualProps['adjust']; mirror: boolean
 }
-export interface AnnotationsLayer { kind: 'annotations'; itemId: string; sessionId: string; sessionMs: number }
+export interface AnnotationsLayer { kind: 'annotations'; itemId: string; sessionId: string; sessionMs: number; autoFadeMs: number | null }
 export interface EffectLayer {
   kind: 'effect'; itemId: string; effect: EffectItem['effect']
   region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }
@@ -111,7 +111,7 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
         break
       }
       case 'annotations':
-        layers.push({ kind: 'annotations', itemId: item.id, sessionId: item.sessionId, sessionMs: (item.inUs + local) / 1000 })
+        layers.push({ kind: 'annotations', itemId: item.id, sessionId: item.sessionId, sessionMs: (item.inUs + local) / 1000, autoFadeMs: item.autoFadeMs ?? null })
         break
       case 'text': {
         const s = visualState(item.visual, item.durationUs, local)

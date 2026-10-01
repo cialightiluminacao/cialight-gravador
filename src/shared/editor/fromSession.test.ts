@@ -50,6 +50,11 @@ describe('projectFromSession', () => {
     expect(p.markers.map((m) => [m.label, m.tUs, m.color])).toEqual([['Marcador 1', 2_500_000, '#ff4d4f'], ['Importante', 5_000_000, '#ff4d4f']])
   })
 
+  it('anotações: autoFadeMs vem da opção (padrão null)', () => {
+    expect(projectFromSession(full, opts).tracks[2].items[0]).toMatchObject({ type: 'annotations', autoFadeMs: null })
+    expect(projectFromSession(full, { ...opts, annotationsAutoFadeMs: 4000 }).tracks[2].items[0]).toMatchObject({ type: 'annotations', autoFadeMs: 4000 })
+  })
+
   it('webcam: keys em tMs e tMs+150 ms, shape, espelho e fit', () => {
     const p = projectFromSession(full, opts)
     const cam = p.tracks[1].items[0]

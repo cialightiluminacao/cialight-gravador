@@ -96,7 +96,7 @@ const effectItem = z.object({
   invert: z.boolean(),
   scope: z.enum(['below', 'track'])
 })
-const annotationsItem = z.object({ ...itemBase, type: z.literal('annotations'), sessionId: z.string(), inUs: us })
+const annotationsItem = z.object({ ...itemBase, type: z.literal('annotations'), sessionId: z.string(), inUs: us, autoFadeMs: z.number().nonnegative().nullable().optional() })
 const item = z.discriminatedUnion('type', [mediaItem, textItem, shapeItem, effectItem, annotationsItem])
 
 const assetSource = z.discriminatedUnion('type', [

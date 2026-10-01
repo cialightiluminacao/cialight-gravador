@@ -23,6 +23,16 @@ describe('schema', () => {
     p.assets = [{ ...asset, filmstripInfo: { frames: 6, everyUs: 1.5, tileW: 114, tileH: 64 } }]
     expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/filmstripInfo/)
   })
+  it('anotações: autoFadeMs opcional (número ≥ 0 ou null), round-trip', () => {
+    const p = createEmptyProject('x')
+    const ann = (autoFadeMs?: number | null): Project['tracks'][number]['items'][number] => ({ id: 'an', type: 'annotations', sessionId: 's', inUs: 0, startUs: 0, durationUs: 1_000_000, ...(autoFadeMs !== undefined ? { autoFadeMs } : {}) })
+    for (const v of [undefined, null, 3000]) {
+      p.tracks[0].items = [ann(v)]
+      expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+    }
+    p.tracks[0].items = [ann(-1)]
+    expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow()
+  })
   it('versão futura lança', () => expect(() => parseProject({ ...createEmptyProject('x'), version: 2 })).toThrow())
   it('detecta sobreposição', () => {
     const a = { ...createMediaItem(asset, 0, 'video'), id: 'i1', durationUs: 1_000_000 }

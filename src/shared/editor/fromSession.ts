@@ -110,7 +110,8 @@ function webcamVisual(session: Session, pipRaw: PipKeyframe[], totalUs: Us): Vis
   }
 }
 
-export function projectFromSession(session: Session, opts: { projectId: string; name: string; now: string }): Project {
+/** annotationsAutoFadeMs: sumiço automático das anotações (settings.annotations.autoFadeSec·1000 da v1) ou null. */
+export function projectFromSession(session: Session, opts: { projectId: string; name: string; now: string; annotationsAutoFadeMs?: number | null }): Project {
   if (session.durationMs == null || !Number.isFinite(session.durationMs) || session.durationMs <= 0) {
     throw new Error('Sessão sem duração: não é possível criar o projeto')
   }
@@ -143,7 +144,7 @@ export function projectFromSession(session: Session, opts: { projectId: string; 
   }
   if (session.strokes.length > 0) {
     tracks.push(track('annotations', 'video', 'Anotações', [
-      { id: `${projectId}-annotations-item`, type: 'annotations', sessionId: session.id, inUs: 0, startUs: 0, durationUs: total }
+      { id: `${projectId}-annotations-item`, type: 'annotations', sessionId: session.id, inUs: 0, startUs: 0, durationUs: total, autoFadeMs: opts.annotationsAutoFadeMs ?? null }
     ]))
   }
   if (hasMic) tracks.push(track('mic', 'audio', 'Microfone', [mediaItem('mic', 'audio', undefined, linkId)], 'voice'))

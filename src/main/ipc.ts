@@ -183,7 +183,8 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     const d = new Date(session.createdAt)
     const p2 = (n: number): string => String(n).padStart(2, '0')
     const name = `Gravação ${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}`
-    const project = projectFromSession(session, { projectId: newProjectId(now), name, now: now.toISOString() })
+    const fade = getSettings().annotations.autoFadeSec
+    const project = projectFromSession(session, { projectId: newProjectId(now), name, now: now.toISOString(), annotationsAutoFadeMs: fade ? fade * 1000 : null })
     projects.create(project)
     return project
   })
