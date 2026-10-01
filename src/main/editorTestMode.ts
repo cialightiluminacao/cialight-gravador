@@ -24,7 +24,7 @@ type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: 
 interface HarnessReport {
   errors: string[]
   first?: Rendered
-  pixels?: { circleCenter: Rgba; boxCorner: Rgba; missing: Rgba; corrupt: Rgba; stroke: Rgba }
+  pixels?: { circleCenter: Rgba; boxCorner: Rgba; missing: Rgba; corrupt: Rgba; stroke: Rgba; webcam: Rgba }
   rotated?: { frame: Rendered; pillarLeft: Rgba; pillarRight: Rgba; topLeft: Rgba; topRight: Rgba; bottomLeft: Rgba; bottomRight: Rgba }
   rotationDiag?: Record<string, unknown>
   videoMean?: number[]
@@ -35,6 +35,7 @@ interface HarnessReport {
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
     clockAdvanceUs?: number; wallAdvanceUs?: number; playheadUs?: number; playing?: boolean; pausedPlaying?: boolean; audioErrors?: string[]
+    seek?: { error?: string; seekToUs?: number; clockAfterUs?: number | null; playing?: boolean; scheduledAfter?: { fromUs: number; startS: number }[]; seekCtxS?: number; badSchedules?: number }
   }
 }
 
@@ -91,6 +92,8 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   mkdirSync(sdir, { recursive: true })
   const stroke = { id: 's1', tMs: 0, tool: 'line', color: '#00ff00', width: 40, points: [{ x: 0.5, y: 0.3, tMs: 0 }, { x: 0.6, y: 0.3, tMs: 0 }] }
   writeFileSync(join(sdir, 'session.json'), JSON.stringify({ id: SESSION_ID, strokes: [stroke], clearEvents: [] }))
+  // rec.mp4 da sessão com duas faixas de vídeo, como a gravação v1: v:0 tela (azul) e v:1 webcam (vermelho)
+  await gen(['-f', 'lavfi', '-i', 'color=c=blue:s=640x360:r=30', '-f', 'lavfi', '-i', 'color=c=red:s=320x240:r=30', '-t', '3', '-map', '0:v', '-map', '1:v', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '15', '-pix_fmt', 'yuv420p', join(sdir, 'rec.mp4')], 'editor: rec.mp4 multi-faixa')
 
   const iVideo = await probe(video)
   const iRed = await probe(red)
@@ -99,6 +102,11 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const aRot: Asset = { ...assetFromInfo('a_rot', rotated, statSync(rotated), iRot), status: 'ready' }
   const aVideo: Asset = { ...assetFromInfo('a_video', video, statSync(video), iVideo), status: 'ready' }
   const aRed = assetFromInfo('a_red', red, statSync(red), iRed)
+  // webcam de sessão: rec.mp4 (protocolo de mídia → sessions.filePath), faixa v:1
+  const aCam: Asset = {
+    id: 'a_cam', name: 'Webcam', kind: 'video', source: { type: 'session', sessionId: SESSION_ID, stream: 'webcam' }, durationUs: 3_000_000,
+    video: { width: 320, height: 240, fps: 30, codec: 'h264', rotation: 0, decodable: true, gopUs: 500_000 }, status: 'ready', videoTrackIndex: 1
+  }
   const aAv: Asset = { ...assetFromInfo('a_av', avTracks, statSync(avTracks), await probe(avTracks)), status: 'ready', audioTrackIndex: 1 }
   const aMissing: Asset = { ...aVideo, id: 'a_missing', name: 'nao-existe.mp4', source: { type: 'file', path: join(dir, 'nao-existe.mp4'), size: 1, mtimeMs: 0 } }
   const aCorrupt: Asset = { ...aVideo, id: 'a_corrupt', name: 'corrompido.mp4', source: { type: 'file', path: corrupt, size: statSync(corrupt).size, mtimeMs: Math.round(statSync(corrupt).mtimeMs) } }
@@ -107,7 +115,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const project: Project = {
     ...base,
     id: PROJECT_ID,
-    assets: [aVideo, aRed, aMissing, aCorrupt, aRot, aAv],
+    assets: [aVideo, aRed, aMissing, aCorrupt, aRot, aAv, aCam],
     tracks: [
       track('t_video', 'Vídeo', { ...createMediaItem(aVideo, 0, 'video'), durationUs: 3_000_000 }),
       track('t_red', 'Vermelho', placed(aRed, 0.875, 0.125, 0.25, 'circle')),
@@ -115,6 +123,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       track('t_corrupt', 'Corrompido', placed(aCorrupt, 0.375, 0.875, 0.25)),
       // mesmo asset do fundo numa 2ª camada simultânea (outro ponto da fonte): slot de decoder próprio
       track('t_dup', 'Duplicado', { ...placed(aVideo, 0.625, 0.875, 0.25), inUs: 1_500_000, durationUs: 1_500_000 }),
+      track('t_cam', 'Webcam', placed(aCam, 0.875, 0.875, 0.25)),
       track('t_rot', 'Girado', { ...placed(aRot, 0.5, 0.5, 1), startUs: 3_000_000, durationUs: 2_000_000 }),
       { id: 't_audio', kind: 'audio', name: 'Áudio', muted: false, hidden: false, locked: false, volume: 1, items: [{ ...createMediaItem(aAv, 0, 'audio'), durationUs: 3_500_000 }] },
       { id: 't_ann', kind: 'video', name: 'Anotações', muted: false, hidden: false, locked: false, volume: 1, items: [{ id: 'i_ann', type: 'annotations', sessionId: SESSION_ID, inUs: 0, startUs: 0, durationUs: 3_000_000 }] }
@@ -149,6 +158,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!px && !isRed(px.boxCorner), `canto da caixa fora do círculo não é vermelho (${px?.boxCorner})`, failures)
   check(isGray(px?.missing), `asset ausente → placeholder cinza (${px?.missing})`, failures)
   check(isGray(px?.corrupt), `asset corrompido → placeholder cinza (${px?.corrupt})`, failures)
+  check(isRed(px?.webcam), `webcam da sessão (rec.mp4 v:1 vermelho, v:0 azul) desenhada da faixa v:1 (${px?.webcam})`, failures)
   const st = px?.stroke
   check(!!st && st[1] > 200 && st[0] < 40 && st[2] < 40, `anotação (traço verde) desenhada sobre o vídeo (${st})`, failures)
   check(!!r.videoMean && r.videoMean.some((c) => c > 20), `vídeo desenhado no centro (média ${r.videoMean})`, failures)
@@ -173,6 +183,10 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(pb?.driftMaxTailUs != null && pb.driftMaxTailUs < frameUs, `deriva vídeo × relógio do áudio < 1 quadro ao fim (máx. dos últimos 10: ${pb?.driftMaxTailUs} µs)`, failures)
   check(pb?.clockAdvanceUs != null && pb.wallAdvanceUs != null && Math.abs(pb.clockAdvanceUs - pb.wallAdvanceUs) < frameUs, `relógio do áudio acompanha o tempo real em 2 s (${pb?.clockAdvanceUs} × ${pb?.wallAdvanceUs} µs)`, failures)
   check(pb?.playing === true && pb.pausedPlaying === false && (pb.playheadUs ?? 0) > 2_300_000, `store: playing durante, false após pause; playhead avançou (${pb?.playheadUs})`, failures)
+  const sk = pb?.seek
+  console.log(`seek durante a reprodução: ${JSON.stringify(sk)}`)
+  check(!!sk && !sk.error && sk.playing === true && sk.clockAfterUs != null && sk.seekToUs != null && sk.clockAfterUs >= sk.seekToUs && sk.clockAfterUs < sk.seekToUs + 700_000, `seek tocando: relógio continua do novo ponto (${sk?.clockAfterUs} a partir de ${sk?.seekToUs}) ${sk?.error ?? ''}`, failures)
+  check(!!sk && (sk.scheduledAfter?.length ?? 0) > 0 && sk.badSchedules === 0, `seek tocando: nenhum nó do ponto antigo agendado depois do seek (${sk?.scheduledAfter?.length} agendados, ${sk?.badSchedules} inválidos)`, failures)
   check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
 
   writeFileSync(join(outDir, 'editor-render-report.json'), JSON.stringify({ result, failures }, null, 2))

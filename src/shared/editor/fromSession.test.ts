@@ -63,6 +63,15 @@ describe('projectFromSession', () => {
     expect(swapped.assets.find((a) => a.id === 'p1-system')?.audioTrackIndex).toBe(0)
   })
 
+  it('vídeo da sessão: videoTrackIndex = índice v:N (tela 0, webcam session.tracks.webcam); áudio sem', () => {
+    const p = projectFromSession(full, opts)
+    const byId = (id: string): Asset | undefined => p.assets.find((a) => a.id === id)
+    expect(byId('p1-screen')?.videoTrackIndex).toBe(0)
+    expect(byId('p1-webcam')?.videoTrackIndex).toBe(1)
+    expect(byId('p1-mic')?.videoTrackIndex).toBeUndefined()
+    expect(byId('p1-system')?.videoTrackIndex).toBeUndefined()
+  })
+
   it('anotações: autoFadeMs vem da opção (padrão null)', () => {
     expect(projectFromSession(full, opts).tracks[2].items[0]).toMatchObject({ type: 'annotations', autoFadeMs: null })
     expect(projectFromSession(full, { ...opts, annotationsAutoFadeMs: 4000 }).tracks[2].items[0]).toMatchObject({ type: 'annotations', autoFadeMs: 4000 })

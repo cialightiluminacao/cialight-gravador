@@ -18,6 +18,8 @@ let segments: AudioSegment[] = []
 const sources = new Map<string, AssetPcm>()
 const queue: RenderMsg[] = []
 let busy = false
+// muda a cada `cancel`: pedidos e aquecimentos de antes ficam obsoletos
+let epoch = 0
 
 self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
   const m = e.data
@@ -29,6 +31,10 @@ self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
       case 'render':
         queue.push(m)
         if (!busy) void pump()
+        break
+      case 'cancel':
+        queue.length = 0
+        epoch++
         break
       case 'dispose':
         queue.length = 0
@@ -55,7 +61,7 @@ function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean): 
   for (const id of used) {
     if (sources.has(id)) continue
     const want = sourceFor(project, id, mediaUrls, useProxy)
-    if (want) sources.set(id, new AssetPcm(want.url, want.trackIndex))
+    if (want) sources.set(id, new AssetPcm(want.url, want.trackIndex, { onError: (message) => post({ t: 'error', message, assetId: id }) }))
   }
 }
 
@@ -75,13 +81,16 @@ async function pump(): Promise<void> {
   try {
     while (queue.length) {
       const m = queue.shift()!
+      const e0 = epoch
+      const stale = (): boolean => epoch !== e0
       try {
         const segs = segments
-        await prepare(segs, m.fromUs, m.frames)
+        await prepare(segs, m.fromUs, m.frames, stale)
+        if (stale()) continue // cancelado durante a decodificação: o cliente já descartou
         const pcm = mixBlock(segs, m.fromUs, m.frames, sources as Map<string, PcmSource>)
         post({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm }, [pcm.buffer])
         const endUs = m.fromUs + Math.round((m.frames * 1e6) / SR)
-        void prepare(segs, endUs, Math.round((LOOKAHEAD_US * SR) / 1e6))
+        void prepare(segs, endUs, Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
       } catch (err) {
         post({ t: 'error', message: errMsg(err), seq: m.seq })
       }
@@ -92,7 +101,7 @@ async function pump(): Promise<void> {
 }
 
 /** Decodifica o que os segmentos vão ler em [fromUs, fromUs + frames/SR) — mesma conta de posição do mixBlock. */
-function prepare(segs: AudioSegment[], fromUs: Us, frames: number): Promise<unknown> {
+function prepare(segs: AudioSegment[], fromUs: Us, frames: number, stale: () => boolean): Promise<unknown> {
   const blockEnd = fromUs + Math.round((frames * 1e6) / SR)
   const jobs: Promise<void>[] = []
   for (const seg of segs) {
@@ -102,7 +111,7 @@ function prepare(segs: AudioSegment[], fromUs: Us, frames: number): Promise<unkn
     if (!src || b <= a) continue
     const local = a - seg.startUs
     const srcFrom = seg.reverse ? seg.srcInUs + Math.round((seg.durationUs - local) * seg.speed) : seg.srcInUs + Math.round(local * seg.speed)
-    jobs.push(src.ensure(srcFrom, Math.ceil(((b - a) * SR) / 1e6) + 1, seg.speed, seg.reverse))
+    jobs.push(src.ensure(srcFrom, Math.ceil(((b - a) * SR) / 1e6) + 1, seg.speed, seg.reverse, stale))
   }
   return Promise.all(jobs)
 }

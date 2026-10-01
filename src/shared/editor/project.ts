@@ -18,6 +18,8 @@ export interface Asset {
   video?: AssetVideoInfo; audio?: AssetAudioInfo
   /** Índice da faixa de áudio (a:N) no arquivo original multi-faixa (rec.mp4 da sessão: mic/sistema); ausente = faixa principal. */
   audioTrackIndex?: number
+  /** Índice da faixa de vídeo (v:N) no arquivo original multi-faixa (rec.mp4 da sessão: tela 0, webcam 1); ausente = faixa principal. */
+  videoTrackIndex?: number
   /** Caminhos relativos à pasta do projeto (proxies/…, cache/…). */
   proxy?: string; intermediate?: string; filmstrip?: string; peaks?: string
   /** Geometria do sprite do filmstrip: `frames` quadros de tileW×tileH, um a cada `everyUs`. */

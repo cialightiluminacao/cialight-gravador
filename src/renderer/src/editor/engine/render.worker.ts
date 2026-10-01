@@ -49,8 +49,16 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
       case 'project': {
         project = m.project
         const urls: Record<string, string> = {}
-        for (const [id, u] of Object.entries(m.mediaUrls)) urls[id] = m.useProxy && u.proxy ? u.proxy : u.original
-        pool.setSources(urls)
+        const videoTracks: Record<string, number> = {}
+        for (const [id, u] of Object.entries(m.mediaUrls)) {
+          const asset = m.project.assets.find((a) => a.id === id)
+          const idx = asset?.videoTrackIndex
+          // proxy e intermediário levam só 0:v:0: faixa v:N > 0 lê sempre o original (sessões nem têm proxy)
+          const proxy = m.useProxy && u.proxy && !idx
+          urls[id] = proxy ? u.proxy! : u.original
+          if (!proxy && !asset?.intermediate && idx !== undefined) videoTracks[id] = idx
+        }
+        pool.setSources(urls, videoTracks)
         if (!busy) pool.flushRetired()
         break
       }

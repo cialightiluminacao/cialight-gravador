@@ -27,6 +27,7 @@ interface Opened {
 interface Entry {
   assetId: string
   url: string
+  trackIndex: number | null // faixa de vídeo v:N; null = principal
   opened: Promise<Opened>
   it: AsyncGenerator<VideoSample, void, unknown> | null
   held: VideoSample | null // último sample com timestamp ≤ alvo (do pool)
@@ -41,6 +42,7 @@ const keyOf = (assetId: string, slot: number): string => `${assetId}#${slot}`
 
 export class DecoderPool {
   private urls: Record<string, string> = {}
+  private trackIdx: Record<string, number> = {}
   private entries = new Map<string, Entry>()
   private images = new Map<string, { url: string; bmp: Promise<ImageBitmap | null> }>()
   private retired: Promise<ImageBitmap | null>[] = []
@@ -48,10 +50,14 @@ export class DecoderPool {
 
   constructor(private readonly maxLive = 8) {}
 
-  /** assetId → URL (proxy ou original). Entradas cuja URL mudou ou sumiu são descartadas. */
-  setSources(urls: Record<string, string>): void {
+  /**
+   * assetId → URL (proxy ou original) e, para arquivos multi-faixa (rec.mp4 da sessão), assetId → índice v:N.
+   * Entradas cuja URL ou faixa mudou ou sumiu são descartadas.
+   */
+  setSources(urls: Record<string, string>, videoTracks: Record<string, number> = {}): void {
     this.urls = { ...urls }
-    for (const [key, e] of this.entries) if (urls[e.assetId] !== e.url) this.drop(key, e)
+    this.trackIdx = { ...videoTracks }
+    for (const [key, e] of this.entries) if (urls[e.assetId] !== e.url || (videoTracks[e.assetId] ?? null) !== e.trackIndex) this.drop(key, e)
     for (const [id, img] of this.images) {
       if (urls[id] === img.url) continue
       this.images.delete(id)
@@ -146,6 +152,7 @@ export class DecoderPool {
     this.images.clear()
     this.flushRetired()
     this.urls = {}
+    this.trackIdx = {}
   }
 
   // ---- internos ----
@@ -155,7 +162,8 @@ export class DecoderPool {
     if (!url) return null
     let e = this.entries.get(key)
     if (!e) {
-      e = { assetId, url, opened: open(url), it: null, held: null, ahead: null, done: false, lock: Promise.resolve(), busy: 0, lastUsed: 0 }
+      const trackIndex = this.trackIdx[assetId] ?? null
+      e = { assetId, url, trackIndex, opened: open(url, trackIndex), it: null, held: null, ahead: null, done: false, lock: Promise.resolve(), busy: 0, lastUsed: 0 }
       e.opened.catch(() => {}) // falha tratada em frameAt/prefetch
       this.entries.set(key, e)
     }
@@ -225,11 +233,11 @@ export class DecoderPool {
   }
 }
 
-async function open(url: string): Promise<Opened> {
+async function open(url: string, trackIndex: number | null): Promise<Opened> {
   const input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS })
   try {
-    const track = await input.getPrimaryVideoTrack()
-    if (!track) throw new Error('sem faixa de vídeo')
+    const track = trackIndex === null ? await input.getPrimaryVideoTrack() : ((await input.getVideoTracks())[trackIndex] ?? null)
+    if (!track) throw new Error(trackIndex === null ? 'sem faixa de vídeo' : `faixa de vídeo v:${trackIndex} inexistente`)
     if (!(await track.canDecode())) throw new Error(`codec não decodificável: ${track.codec}`)
     const firstS = await track.getFirstTimestamp()
     return { input, sink: new VideoSampleSink(track), firstS }

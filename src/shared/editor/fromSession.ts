@@ -23,7 +23,9 @@ function sessionAsset(session: Session, projectId: string, stream: SessionStream
   return {
     ...base,
     kind: 'video',
-    video: { ...dims, fps: session.video.fps, rotation: 0, decodable: true, gopUs: secToUs(1) }
+    video: { ...dims, fps: session.video.fps, rotation: 0, decodable: true, gopUs: secToUs(1) },
+    // rec.mp4 tem tela (v:0) e webcam (v:1): session.tracks diz qual
+    videoTrackIndex: session.tracks[stream] ?? 0
   }
 }
 

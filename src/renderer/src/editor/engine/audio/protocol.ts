@@ -6,8 +6,9 @@ export type AudioIn =
   // useProxy: mesma variante do vídeo no preview (o proxy tem o áudio a:0 em AAC)
   | { t: 'project'; project: Project; mediaUrls: MediaUrls; useProxy: boolean }
   | { t: 'render'; fromUs: Us; frames: number; seq: number } // mixa [fromUs, fromUs + frames/48 kHz)
+  | { t: 'cancel' } // seek/pausa: descarta os pedidos na fila e o aquecimento ainda não iniciado
   | { t: 'dispose' }
 
 export type AudioOut =
   | { t: 'block'; seq: number; fromUs: Us; pcm: Float32Array } // estéreo intercalado 48 kHz (transferido)
-  | { t: 'error'; message: string; seq?: number }
+  | { t: 'error'; message: string; seq?: number; assetId?: string } // assetId: falha de mídia (uma vez por asset)

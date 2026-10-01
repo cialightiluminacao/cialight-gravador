@@ -27,6 +27,15 @@ describe('schema', () => {
     p.assets = [{ ...asset, audioTrackIndex: 0.5 }]
     expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/audioTrackIndex/)
   })
+  it('videoTrackIndex: round-trip; negativo ou fracionário lança', () => {
+    const p = createEmptyProject('x')
+    p.assets = [{ ...asset, videoTrackIndex: 1 }]
+    expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+    p.assets = [{ ...asset, videoTrackIndex: -1 }]
+    expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/videoTrackIndex/)
+    p.assets = [{ ...asset, videoTrackIndex: 1.5 }]
+    expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/videoTrackIndex/)
+  })
   it('filmstripInfo inválido lança', () => {
     const p = createEmptyProject('x')
     p.assets = [{ ...asset, filmstripInfo: { frames: 6, everyUs: 1.5, tileW: 114, tileH: 64 } }]

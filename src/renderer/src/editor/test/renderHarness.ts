@@ -47,7 +47,8 @@ export async function runRenderHarness(projectId: string): Promise<void> {
       boxCorner: await px(1550, 5),
       missing: await px(240, 945),
       corrupt: await px(720, 945),
-      stroke: await px(1056, 324)
+      stroke: await px(1056, 324),
+      webcam: await px(1680, 945)
     }
     const at1s = await region(W / 2, H / 2, 200)
     report.videoMean = mean(at1s)
@@ -128,6 +129,7 @@ async function playbackCheck(client: RenderClient, project: Awaited<ReturnType<t
     const w1 = performance.now()
     const playheadUs = useEditorStore.getState().playheadUs
     const playing = useEditorStore.getState().playing
+    const seek = await seekCheck(ctl)
     ctl.pause()
     const tail = drifts.slice(-10)
     return {
@@ -141,6 +143,7 @@ async function playbackCheck(client: RenderClient, project: Awaited<ReturnType<t
       playing,
       pausedPlaying: useEditorStore.getState().playing,
       startupMs: Math.round(w0 - startWait),
+      seek,
       audioErrors
     }
   } finally {
@@ -148,6 +151,30 @@ async function playbackCheck(client: RenderClient, project: Awaited<ReturnType<t
     off()
     ctl.dispose()
     audio.dispose()
+  }
+}
+
+/**
+ * Seek tocando: volta de ~2,7 s para 1,0 s. O relógio deve seguir do novo ponto e todo nó agendado depois
+ * do seek deve ser do novo ponto (fromUs em [alvo, alvo + 1 s]) e começar depois do instante do seek.
+ */
+async function seekCheck(ctl: PlaybackController): Promise<Record<string, unknown>> {
+  const seekToUs = 1_000_000
+  const after: { fromUs: number; startS: number }[] = []
+  let seekCtxS = Infinity
+  const off = ctl.onSchedule((s) => {
+    if (ctl.contextTime >= seekCtxS) after.push({ fromUs: s.fromUs, startS: s.startS })
+  })
+  try {
+    seekCtxS = ctl.contextTime
+    ctl.seek(seekToUs)
+    await sleep(400)
+    const clockAfterUs = ctl.clockUs
+    // o ponto antigo (~2,7 s) fica fora de [alvo, alvo + 1 s]: nó dele depois do seek conta como inválido
+    const bad = after.filter((s) => s.fromUs < seekToUs || s.fromUs > seekToUs + 1_000_000 || s.startS < seekCtxS).length
+    return { seekToUs, clockAfterUs, playing: ctl.playing, seekCtxS, scheduledAfter: after, badSchedules: bad }
+  } finally {
+    off()
   }
 }
 

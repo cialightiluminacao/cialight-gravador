@@ -41,6 +41,12 @@ export class AudioClient {
     })
   }
 
+  /** Seek/pausa: o worker descarta a fila; os pedidos pendentes resolvem com null. */
+  cancel(): void {
+    this.send({ t: 'cancel' })
+    for (const [seq] of this.pending) this.settle(seq, null)
+  }
+
   onError(cb: (message: string) => void): () => void {
     this.errorListeners.add(cb)
     return () => this.errorListeners.delete(cb)

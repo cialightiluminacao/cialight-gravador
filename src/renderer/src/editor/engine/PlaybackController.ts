@@ -14,10 +14,10 @@ const BLOCK_US = 100_000
 const BLOCK_FRAMES = (BLOCK_US * SR) / 1e6 // 4800
 const AHEAD_S = 0.3
 const PUMP_MS = 25
-// Bloco que chega mais atrasado que isso começa no ponto atual (offset), sem deslocar o relógio.
-const LATE_TOLERANCE_S = 0.005
 
 interface Scheduled { atS: number; endS: number; l: number; r: number }
+/** Nó agendado: bloco da timeline em fromUs, tocando a partir de startS (tempo do AudioContext). */
+export interface ScheduledInfo { fromUs: Us; startS: number; offsetS: number }
 
 export class PlaybackController {
   private ctx: AudioContext | null = null
@@ -33,12 +33,34 @@ export class PlaybackController {
   private raf = 0
   private pumpTimer: ReturnType<typeof setInterval> | null = null
   private frameInFlight = false
+  /** Erros de áudio (mídia que não abre/decodifica, contexto que não inicia); a UI mostra como toast. */
+  readonly errors: string[] = []
+  private readonly errorListeners = new Set<(message: string) => void>()
+  private readonly scheduleListeners = new Set<(s: ScheduledInfo) => void>()
 
   constructor(
     private readonly render: RenderClient,
     private readonly audio: AudioClient,
     private readonly store: typeof useEditorStore
-  ) {}
+  ) {
+    this.audio.onError((message) => this.fail(message))
+  }
+
+  onError(cb: (message: string) => void): () => void {
+    this.errorListeners.add(cb)
+    return () => this.errorListeners.delete(cb)
+  }
+
+  /** Cada AudioBufferSourceNode agendado (diagnóstico/testes). */
+  onSchedule(cb: (s: ScheduledInfo) => void): () => void {
+    this.scheduleListeners.add(cb)
+    return () => this.scheduleListeners.delete(cb)
+  }
+
+  /** ctx.currentTime (0 sem contexto). */
+  get contextTime(): number {
+    return this.ctx?.currentTime ?? 0
+  }
 
   get playing(): boolean {
     return this.active
@@ -81,8 +103,13 @@ export class PlaybackController {
     this.scheduled = []
     this.store.getState().setPlayhead(us0)
     this.store.getState().setPlaying(true)
-    const ctx = this.ensureCtx()
-    await ctx.resume()
+    try {
+      await this.ensureCtx().resume()
+    } catch (err) {
+      if (gen === this.gen) this.stop() // também desliga `playing` na store
+      this.fail(`não foi possível iniciar o áudio (${err instanceof Error ? err.message : String(err)})`)
+      return
+    }
     if (gen !== this.gen) return
     this.pump(gen)
     this.pumpTimer = setInterval(() => this.pump(gen), PUMP_MS)
@@ -129,8 +156,15 @@ export class PlaybackController {
     return out !== null && out > fromUs ? out : projectDurationUs(p)
   }
 
+  private fail(message: string): void {
+    console.warn(`[áudio] ${message}`)
+    this.errors.push(message)
+    for (const l of this.errorListeners) l(message)
+  }
+
   private stop(): void {
     this.gen++
+    this.audio.cancel()
     const wasActive = this.active
     this.active = false
     this.started = false
@@ -154,6 +188,8 @@ export class PlaybackController {
   private pump(gen: number): void {
     const ctx = this.ctx
     if (gen !== this.gen || !ctx) return
+    // fim detectado também aqui: sem rAF (janela oculta/minimizada) a reprodução ainda para
+    if (this.finishIfEnded()) return
     const elapsed = this.started ? ctx.currentTime - this.t0 : 0
     while (this.nextBlock * (BLOCK_US / 1e6) < elapsed + AHEAD_S) {
       const k = this.nextBlock
@@ -190,13 +226,17 @@ export class PlaybackController {
     }
     const at = this.t0 + (k * BLOCK_US) / 1e6
     const dur = n / SR
-    const late = ctx.currentTime - at
+    const now = ctx.currentTime
+    const late = now - at
     if (late >= dur) return // perdido por inteiro
     const node = ctx.createBufferSource()
     node.buffer = buf
     node.connect(ctx.destination)
-    if (late > LATE_TOLERANCE_S) node.start(ctx.currentTime, late)
-    else node.start(at)
+    // atrasado: começa agora, pulando o trecho já passado (nunca sobrepõe o bloco seguinte)
+    const startS = late > 0 ? now : at
+    const offsetS = late > 0 ? late : 0
+    node.start(startS, offsetS)
+    for (const l of this.scheduleListeners) l({ fromUs: b.fromUs, startS, offsetS })
     node.onended = () => {
       node.disconnect()
       this.nodes.delete(node)
@@ -206,17 +246,21 @@ export class PlaybackController {
     this.scheduled.sort((x, y) => x.atS - y.atS)
   }
 
+  /** Chegou ao fim: para, deixa o playhead no fim e mostra o quadro. */
+  private finishIfEnded(): boolean {
+    const t = this.clockUs
+    if (t === null || t < this.endUs) return false
+    const end = this.endUs
+    this.stop()
+    this.store.getState().setPlayhead(end)
+    void this.render.requestFrame(end, false)
+    return true
+  }
+
   private tick(gen: number): void {
     if (gen !== this.gen) return
     const t = this.clockUs
-    if (t === null) return
-    if (t >= this.endUs) {
-      const end = this.endUs
-      this.stop()
-      this.store.getState().setPlayhead(end)
-      void this.render.requestFrame(end, false)
-      return
-    }
+    if (t === null || this.finishIfEnded()) return
     this.store.getState().setPlayhead(t)
     if (!this.frameInFlight) {
       // um pedido de quadro por vez: se o render atrasar, o próximo rAF pede o tempo mais recente
