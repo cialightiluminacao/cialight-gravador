@@ -58,6 +58,15 @@ const api: IpcApi = {
     fileUrl: (id, name) => `${FILE_PROTOCOL}://${encodeURIComponent(id)}/${encodeURIComponent(name)}`,
     filePath: (id, name) => ipcRenderer.invoke(IPC.session.filePath, id, name)
   },
+  project: {
+    list: () => ipcRenderer.invoke(IPC.project.list),
+    create: (p) => ipcRenderer.invoke(IPC.project.create, p),
+    load: (id) => ipcRenderer.invoke(IPC.project.load, id),
+    save: (p) => ipcRenderer.invoke(IPC.project.save, p),
+    remove: (id) => ipcRenderer.invoke(IPC.project.remove, id),
+    fromSession: (sessionId) => ipcRenderer.invoke(IPC.project.fromSession, sessionId),
+    pickMedia: () => ipcRenderer.invoke(IPC.project.pickMedia)
+  },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),
     barUpdate: (state) => ipcRenderer.send(IPC.recording.barUpdate, state),

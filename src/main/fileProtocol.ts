@@ -1,12 +1,17 @@
 import { protocol } from 'electron'
 import { createReadStream, statSync } from 'fs'
 import { Readable } from 'stream'
-import { FILE_PROTOCOL } from '@shared/ipc'
+import { FILE_HOST_MEDIA, FILE_HOST_PROJECT, FILE_PROTOCOL } from '@shared/ipc'
 import type { SessionStore } from './session/sessionStore'
+import type { ProjectStore } from './project/projectStore'
 import { log } from './log'
 
 // cialight-file://<sessionId>/<arquivo> → arquivo da pasta da sessão, com suporte
 // a Range (o <video> da revisão faz seek; mediabunny UrlSource lê por faixas).
+// Hosts reservados (sessionIds são timestamps, sem colisão):
+//   media/<projectId>/<assetId>?v=original|proxy|intermediate → só assets registrados no project.json
+//   project/<projectId>/<rel>                                  → arquivo da pasta do projeto
+// Com scheme "standard" o host chega em minúsculo; o cache de projetos é indexado em minúsculo.
 
 const MIME: Record<string, string> = {
   '.mp4': 'video/mp4',
@@ -16,7 +21,21 @@ const MIME: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.png': 'image/png',
   '.json': 'application/json',
-  '.wav': 'audio/wav'
+  '.wav': 'audio/wav',
+  '.mov': 'video/quicktime',
+  '.m4a': 'audio/mp4',
+  '.mp3': 'audio/mpeg',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.bmp': 'image/bmp',
+  '.avi': 'video/x-msvideo',
+  '.ts': 'video/mp2t',
+  '.m4v': 'video/mp4',
+  '.bin': 'application/octet-stream'
 }
 
 export function registerFileProtocolScheme(): void {
@@ -25,17 +44,33 @@ export function registerFileProtocolScheme(): void {
   ])
 }
 
-export function installFileProtocol(store: SessionStore): void {
+function resolveFile(url: URL, store: SessionStore, projects: ProjectStore): string | null {
+  const host = decodeURIComponent(url.hostname || url.pathname.split('/')[1] || '')
+  const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
+  if (host === FILE_HOST_MEDIA) {
+    const [projectId, assetId] = parts
+    if (!projectId || !assetId || parts.length !== 2) return null
+    const v = url.searchParams.get('v') ?? 'original'
+    if (v !== 'original' && v !== 'proxy' && v !== 'intermediate') return null
+    return projects.assetPath(projects.cached(projectId), assetId, v, store)
+  }
+  if (host === FILE_HOST_PROJECT) {
+    const [projectId, ...rel] = parts
+    if (!projectId || !rel.length) return null
+    return projects.filePath(projectId, rel.join('/'))
+  }
+  // sessionId preservado como veio; o arquivo real é procurado no NTFS (case-insensitive)
+  const name = parts.join('/')
+  if (!host || !name) return null
+  return store.filePath(host, name)
+}
+
+export function installFileProtocol(store: SessionStore, projects: ProjectStore): void {
   protocol.handle(FILE_PROTOCOL, (request) => {
     try {
       const url = new URL(request.url)
-      const sessionId = decodeURIComponent(url.hostname || url.pathname.split('/')[1] || '')
-      // com scheme "standard", o host vira lowercase; sessionIds são case-insensitive no NTFS, mas
-      // preservamos: procuramos o arquivo real
-      const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
-      const name = parts.length ? parts.join('/') : ''
-      if (!sessionId || !name) return new Response('bad request', { status: 400 })
-      const file = store.filePath(sessionId, name.replace(/\//g, '\\'))
+      const file = resolveFile(url, store, projects)
+      if (!file) return new Response('bad request', { status: 400 })
       const st = statSync(file)
       const ext = file.slice(file.lastIndexOf('.')).toLowerCase()
       const type = MIME[ext] ?? 'application/octet-stream'

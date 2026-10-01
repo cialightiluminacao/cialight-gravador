@@ -16,7 +16,18 @@ import type {
   StrokeTool
 } from './types'
 
+import type { Project, Us } from './editor/project'
+
 export type Unsubscribe = () => void
+
+export interface ProjectSummary {
+  id: string
+  name: string
+  updatedAt: string
+  durationUs: Us
+  thumb?: string
+  originSessionId?: string
+}
 
 export interface SourcesList {
   displays: DisplayInfo[]
@@ -177,6 +188,17 @@ export interface IpcApi {
     fileUrl(id: string, name: string): string
     filePath(id: string, name: string): Promise<string>
   }
+  project: {
+    list(): Promise<ProjectSummary[]>
+    create(p: Project): Promise<void>
+    load(id: string): Promise<Project>
+    save(p: Project): Promise<void>
+    remove(id: string): Promise<void>
+    /** Lê a sessão no main, converte com projectFromSession, cria o projeto e o retorna. */
+    fromSession(sessionId: string): Promise<Project>
+    /** Diálogo de abrir arquivos de mídia (multi-seleção); [] se cancelado. */
+    pickMedia(): Promise<string[]>
+  }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
     barUpdate(state: BarState): void
@@ -255,6 +277,15 @@ export const IPC = {
     unfinished: 'session:unfinished',
     filePath: 'session:filePath'
   },
+  project: {
+    list: 'project:list',
+    create: 'project:create',
+    load: 'project:load',
+    save: 'project:save',
+    remove: 'project:remove',
+    fromSession: 'project:fromSession',
+    pickMedia: 'project:pickMedia'
+  },
   recording: {
     setPhase: 'recording:setPhase',
     barUpdate: 'recording:barUpdate',
@@ -286,3 +317,6 @@ export const IPC = {
 } as const
 
 export const FILE_PROTOCOL = 'cialight-file'
+/** Hosts reservados do protocolo (os demais hosts são sessionIds): media/<projectId>/<assetId>?v=..., project/<projectId>/<rel>. */
+export const FILE_HOST_MEDIA = 'media'
+export const FILE_HOST_PROJECT = 'project'

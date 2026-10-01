@@ -6,7 +6,9 @@ import { runEditorSpike } from './spike/editorSpikeMain'
 import { createRecorderWindow, getRecorderWindow, setQuitting, showRecorder } from './windows/recorderWindow'
 import { installDisplayMediaHandler } from './capture/displayMediaHandler'
 import { listDisplays } from './capture/sources'
+import { dirname, join } from 'path'
 import { SessionStore } from './session/sessionStore'
+import { ProjectStore } from './project/projectStore'
 import { getSettings, rawDir } from './settings/settingsStore'
 import { registerIpc } from './ipc'
 import { applyHotkeys, onHotkeyStatus, unregisterAllHotkeys } from './hotkeys/globalShortcuts'
@@ -47,9 +49,11 @@ if (!gotLock) {
     }
 
     const store = new SessionStore({ rawRoot: rawDir, trash: (p) => shell.trashItem(p), log })
-    installFileProtocol(store)
+    // Projetos ficam ao lado dos brutos (<brutos>\..\Projetos); calculado a cada uso porque rawDir pode mudar nas Configurações.
+    const projects = new ProjectStore({ projectsRoot: () => join(dirname(rawDir()), 'Projetos'), trash: (p) => shell.trashItem(p), log })
+    installFileProtocol(store, projects)
     installDisplayMediaHandler()
-    registerIpc(store)
+    registerIpc(store, projects)
 
     setCommandSink((cmd) => {
       const w = getRecorderWindow()

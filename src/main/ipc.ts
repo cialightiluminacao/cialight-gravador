@@ -7,6 +7,10 @@ import { getSettings, outputDir, rawDir, setSettings } from './settings/settings
 import { listDisplays, listSources, sourceThumbnail } from './capture/sources'
 import { selectCaptureSource } from './capture/displayMediaHandler'
 import type { SessionStore } from './session/sessionStore'
+import type { ProjectStore } from './project/projectStore'
+import type { Project } from '@shared/editor/project'
+import { projectFromSession } from '@shared/editor/fromSession'
+import { newProjectId } from '@shared/editor/ids'
 import { getRecorderWindow, showRecorder, displayIdOfWindow } from './windows/recorderWindow'
 import { hideBar, showBar, toggleBar, updateBar, isBarHiddenByUser } from './windows/barWindow'
 import { hideOverlays, setOverlayMode, showOverlays, syncStrokesToOverlays } from './windows/overlayWindows'
@@ -21,9 +25,13 @@ import { check as updateCheck, download as updateDownload, getUpdateStatus, inst
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
 
+const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'ts']
+const AUDIO_EXT = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
+const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg']
+
 // Registra todos os handlers IPC. Mantém a UI (renderer) desacoplada dos módulos do main.
 
-export function registerIpc(store: SessionStore): void {
+export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   const sendToRecorder = (channel: string, ...args: unknown[]): void => {
     const w = getRecorderWindow()
     if (w && !w.webContents.isDestroyed()) w.webContents.send(channel, ...args)
@@ -112,6 +120,39 @@ export function registerIpc(store: SessionStore): void {
   ipcMain.handle(IPC.session.freeSpaceMB, () => store.freeSpaceMB())
   ipcMain.handle(IPC.session.unfinished, () => store.findUnfinished())
   ipcMain.handle(IPC.session.filePath, (_e, id: string, name: string) => store.filePath(id, name))
+
+  // ---- project (editor) ----
+  ipcMain.handle(IPC.project.list, () => projects.list())
+  ipcMain.handle(IPC.project.create, (_e, p: Project) => projects.create(p))
+  ipcMain.handle(IPC.project.load, (_e, id: string) => projects.load(id))
+  ipcMain.handle(IPC.project.save, (_e, p: Project) => projects.save(p))
+  ipcMain.handle(IPC.project.remove, (_e, id: string) => projects.remove(id))
+  ipcMain.handle(IPC.project.fromSession, (_e, sessionId: string) => {
+    const session = store.get(sessionId)
+    if (!session) throw new Error('Sessão não encontrada')
+    const now = new Date()
+    const d = new Date(session.createdAt)
+    const p2 = (n: number): string => String(n).padStart(2, '0')
+    const name = `Gravação ${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}`
+    const project = projectFromSession(session, { projectId: newProjectId(now), name, now: now.toISOString() })
+    projects.create(project)
+    return project
+  })
+  ipcMain.handle(IPC.project.pickMedia, async (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender) ?? undefined
+    const opts: Electron.OpenDialogOptions = {
+      title: 'Importar mídia',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Todos os arquivos de mídia', extensions: [...VIDEO_EXT, ...AUDIO_EXT, ...IMAGE_EXT] },
+        { name: 'Vídeos', extensions: VIDEO_EXT },
+        { name: 'Áudios', extensions: AUDIO_EXT },
+        { name: 'Imagens', extensions: IMAGE_EXT }
+      ]
+    }
+    const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
+    return r.canceled ? [] : r.filePaths
+  })
 
   // ---- recording (fase, barra, comandos) ----
   ipcMain.handle(IPC.recording.setPhase, (_e, phase: RecorderPhase, ctx?: RecordingPhaseContext) => {
