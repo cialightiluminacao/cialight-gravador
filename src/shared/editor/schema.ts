@@ -196,10 +196,12 @@ export function validateProject(p: Project): string[] {
   const assets = new Map(p.assets.map((a) => [a.id, a]))
   const tol = frameDurUs(p.canvas.fps)
   for (const tr of p.tracks) {
+    // compara com o maior fim acumulado (um item longo pode cobrir vários seguintes)
     const sorted = [...tr.items].sort((a, b) => a.startUs - b.startUs)
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[i - 1], cur = sorted[i]
-      if (cur.startUs < itemEndUs(prev)) errs.push(`Faixa "${tr.name}": item ${cur.id} sobrepõe o item ${prev.id}`)
+    let maxEndItem: Item | null = null
+    for (const cur of sorted) {
+      if (maxEndItem && cur.startUs < itemEndUs(maxEndItem)) errs.push(`Faixa "${tr.name}": item ${cur.id} sobrepõe o item ${maxEndItem.id}`)
+      if (!maxEndItem || itemEndUs(cur) > itemEndUs(maxEndItem)) maxEndItem = cur
     }
     for (const it of tr.items) {
       const tag = `Faixa "${tr.name}", item ${it.id}`
@@ -218,7 +220,8 @@ export function validateProject(p: Project): string[] {
       for (const [name, an] of itemAnims(it)) {
         const keys = an.keys ?? []
         for (let i = 0; i < keys.length; i++) {
-          if (i > 0 && keys[i].tUs < keys[i - 1].tUs) errs.push(`${tag}: keyframes de ${name} fora de ordem`)
+          // tempo repetido também é inválido: evalAnim divide por (k1.tUs − k0.tUs)
+          if (i > 0 && keys[i].tUs <= keys[i - 1].tUs) errs.push(`${tag}: keyframes de ${name} fora de ordem ou com tempo repetido`)
           if (keys[i].tUs < 0 || keys[i].tUs > it.durationUs) errs.push(`${tag}: keyframe de ${name} fora de [0, duração]`)
         }
       }
