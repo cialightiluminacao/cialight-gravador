@@ -32,6 +32,10 @@ interface HarnessReport {
   seek?: Rendered
   videoDiff?: number
   burst?: string[]
+  playback?: {
+    error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
+    clockAdvanceUs?: number; wallAdvanceUs?: number; playheadUs?: number; playing?: boolean; pausedPlaying?: boolean; audioErrors?: string[]
+  }
 }
 
 function check(cond: boolean, msg: string, failures: string[]): void {
@@ -69,6 +73,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const corrupt = join(dir, 'corrompido.mp4')
   const quadRaw = join(dir, 'quadrante.mp4')
   const rotated = join(dir, 'quadrante-girado.mp4')
+  const avTracks = join(dir, 'audio-multifaixa.mp4')
   const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
   await gen(['-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30', '-t', '3', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '15', '-pix_fmt', 'yuv420p', video], 'editor: testsrc2')
   await gen(['-f', 'lavfi', '-i', 'color=c=red:s=256x256', '-frames:v', '1', '-update', '1', red], 'editor: vermelho')
@@ -77,6 +82,8 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   // vermelho no quadrante superior DIREITO.
   await gen(['-f', 'lavfi', '-i', 'color=c=blue:s=1920x1080:r=30,drawbox=x=0:y=0:w=960:h=540:color=red:t=fill', '-t', '2', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '15', '-pix_fmt', 'yuv420p', quadRaw], 'editor: quadrante')
   await gen(['-display_rotation', '-90', '-i', quadRaw, '-c', 'copy', rotated], 'editor: quadrante girado')
+  // vídeo + 2 faixas de áudio: a:0 silêncio, a:1 senoide 1 kHz amplitude 0,5 (mono) — como o rec.mp4 multi-faixa
+  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-f', 'lavfi', '-i', 'sine=frequency=1000:sample_rate=48000,volume=4', '-t', '4', '-map', '0:v', '-map', '1:a', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', avTracks], 'editor: áudio multi-faixa')
   writeFileSync(corrupt, Buffer.alloc(64 * 1024, 0x5a)) // não é MP4: o decoder falha
   // sessão mínima com um traço verde horizontal (anotações v1 via cialight-file://<sessionId>/session.json)
   const sdir = sessions.dirOf(SESSION_ID)
@@ -92,6 +99,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const aRot: Asset = { ...assetFromInfo('a_rot', rotated, statSync(rotated), iRot), status: 'ready' }
   const aVideo: Asset = { ...assetFromInfo('a_video', video, statSync(video), iVideo), status: 'ready' }
   const aRed = assetFromInfo('a_red', red, statSync(red), iRed)
+  const aAv: Asset = { ...assetFromInfo('a_av', avTracks, statSync(avTracks), await probe(avTracks)), status: 'ready', audioTrackIndex: 1 }
   const aMissing: Asset = { ...aVideo, id: 'a_missing', name: 'nao-existe.mp4', source: { type: 'file', path: join(dir, 'nao-existe.mp4'), size: 1, mtimeMs: 0 } }
   const aCorrupt: Asset = { ...aVideo, id: 'a_corrupt', name: 'corrompido.mp4', source: { type: 'file', path: corrupt, size: statSync(corrupt).size, mtimeMs: Math.round(statSync(corrupt).mtimeMs) } }
 
@@ -99,7 +107,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const project: Project = {
     ...base,
     id: PROJECT_ID,
-    assets: [aVideo, aRed, aMissing, aCorrupt, aRot],
+    assets: [aVideo, aRed, aMissing, aCorrupt, aRot, aAv],
     tracks: [
       track('t_video', 'Vídeo', { ...createMediaItem(aVideo, 0, 'video'), durationUs: 3_000_000 }),
       track('t_red', 'Vermelho', placed(aRed, 0.875, 0.125, 0.25, 'circle')),
@@ -108,6 +116,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       // mesmo asset do fundo numa 2ª camada simultânea (outro ponto da fonte): slot de decoder próprio
       track('t_dup', 'Duplicado', { ...placed(aVideo, 0.625, 0.875, 0.25), inUs: 1_500_000, durationUs: 1_500_000 }),
       track('t_rot', 'Girado', { ...placed(aRot, 0.5, 0.5, 1), startUs: 3_000_000, durationUs: 2_000_000 }),
+      { id: 't_audio', kind: 'audio', name: 'Áudio', muted: false, hidden: false, locked: false, volume: 1, items: [{ ...createMediaItem(aAv, 0, 'audio'), durationUs: 3_500_000 }] },
       { id: 't_ann', kind: 'video', name: 'Anotações', muted: false, hidden: false, locked: false, volume: 1, items: [{ id: 'i_ann', type: 'annotations', sessionId: SESSION_ID, inUs: 0, startUs: 0, durationUs: 3_000_000 }] }
     ]
   }
@@ -155,6 +164,15 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(isRed(ro?.topRight), `girado: vermelho no quadrante superior direito (${ro?.topRight})`, failures)
   check(isBlue(ro?.topLeft) && isBlue(ro?.bottomLeft) && isBlue(ro?.bottomRight), `girado: azul nos outros quadrantes (${ro?.topLeft} | ${ro?.bottomLeft} | ${ro?.bottomRight})`, failures)
   check(!!r.burst && r.burst.length === 5 && r.burst.every((t) => t === 'rendered'), `rajada de 5 pedidos resolvida (${r.burst?.join(', ')})`, failures)
+  const pb = r.playback
+  const frameUs = 1e6 / 30
+  console.log(`reprodução: ${JSON.stringify(pb)}`)
+  check(!!pb && !pb.error && (pb.audioErrors?.length ?? 0) === 0, `reprodução de 2 s sem erro (${pb?.error ?? ''} ${JSON.stringify(pb?.audioErrors ?? [])})`, failures)
+  check(!!pb?.peak && pb.peak.l > 0.1 && pb.peak.r > 0.1, `nível de áudio (VU) > 0,1 com a faixa a:1 (${JSON.stringify(pb?.peak)})`, failures)
+  check((pb?.frames ?? 0) > 20, `quadros renderizados durante a reprodução (${pb?.frames})`, failures)
+  check(pb?.driftMaxTailUs != null && pb.driftMaxTailUs < frameUs, `deriva vídeo × relógio do áudio < 1 quadro ao fim (máx. dos últimos 10: ${pb?.driftMaxTailUs} µs)`, failures)
+  check(pb?.clockAdvanceUs != null && pb.wallAdvanceUs != null && Math.abs(pb.clockAdvanceUs - pb.wallAdvanceUs) < frameUs, `relógio do áudio acompanha o tempo real em 2 s (${pb?.clockAdvanceUs} × ${pb?.wallAdvanceUs} µs)`, failures)
+  check(pb?.playing === true && pb.pausedPlaying === false && (pb.playheadUs ?? 0) > 2_300_000, `store: playing durante, false após pause; playhead avançou (${pb?.playheadUs})`, failures)
   check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
 
   writeFileSync(join(outDir, 'editor-render-report.json'), JSON.stringify({ result, failures }, null, 2))

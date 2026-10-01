@@ -14,7 +14,8 @@ function sessionAsset(session: Session, projectId: string, stream: SessionStream
   const base = { id: `${projectId}-${stream}`, name, source: { type: 'session' as const, sessionId: session.id, stream }, durationUs, status: 'ready' as const }
   if (stream === 'mic' || stream === 'system') {
     // Canais/taxa reais só são conhecidos ao decodificar; valores típicos do rec.mp4 (AAC 48 kHz).
-    return { ...base, kind: 'audio', audio: { channels: 2, sampleRate: 48000, codec: 'aac' } }
+    // rec.mp4 tem uma faixa de áudio por fonte: session.tracks diz qual (a:N).
+    return { ...base, kind: 'audio', audio: { channels: 2, sampleRate: 48000, codec: 'aac' }, audioTrackIndex: session.tracks[stream] ?? 0 }
   }
   const dims = stream === 'screen'
     ? { width: session.video.width, height: session.video.height, codec: session.video.codec }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { pipRectAt } from '../compositor/pipMath'
 import type { PipKeyframe, Session } from '../types'
 import { projectFromSession } from './fromSession'
+import type { Asset } from './project'
 import { resolveFrame } from './resolve'
 import type { MediaLayer } from './resolve'
 import { validateProject } from './schema'
@@ -48,6 +49,18 @@ describe('projectFromSession', () => {
     expect(p.tracks[4].items[0].linkId).toBe(link)
     expect(p.tracks[2].items[0]).toMatchObject({ type: 'annotations', sessionId: full.id, inUs: 0, startUs: 0, durationUs: 10_000_000 })
     expect(p.markers.map((m) => [m.label, m.tUs, m.color])).toEqual([['Marcador 1', 2_500_000, '#ff4d4f'], ['Importante', 5_000_000, '#ff4d4f']])
+  })
+
+  it('áudio da sessão: audioTrackIndex = índice a:N de session.tracks (rec.mp4 multi-faixa)', () => {
+    const p = projectFromSession(full, opts)
+    const byId = (id: string): Asset | undefined => p.assets.find((a) => a.id === id)
+    expect(byId('p1-mic')?.audioTrackIndex).toBe(0)
+    expect(byId('p1-system')?.audioTrackIndex).toBe(1)
+    expect(byId('p1-screen')?.audioTrackIndex).toBeUndefined()
+    expect(byId('p1-webcam')?.audioTrackIndex).toBeUndefined()
+    const swapped = projectFromSession({ ...full, tracks: { screen: 0, system: 0, mic: 1 } } as Session, opts)
+    expect(swapped.assets.find((a) => a.id === 'p1-mic')?.audioTrackIndex).toBe(1)
+    expect(swapped.assets.find((a) => a.id === 'p1-system')?.audioTrackIndex).toBe(0)
   })
 
   it('anotações: autoFadeMs vem da opção (padrão null)', () => {

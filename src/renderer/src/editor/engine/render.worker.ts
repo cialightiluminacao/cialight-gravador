@@ -17,6 +17,8 @@ const post = (m: RenderOut, transfer: Transferable[] = []): void => (self as unk
 
 // Sessão indisponível: nova tentativa depois disso.
 const SESSION_RETRY_MS = 5000
+// Reprodução: decoders dos itens que começam dentro desse intervalo são aquecidos antes.
+const PREFETCH_US = 1_000_000
 
 let compositor: Compositor | null = null
 let canvas: OffscreenCanvas | null = null
@@ -29,6 +31,8 @@ let busy = false
 // Sessões das anotações: carregadas antes do draw (que é síncrono). Falha → null, nova tentativa após SESSION_RETRY_MS.
 const sessions = new Map<string, { load: Promise<void>; session: Session | null; failedAt: number | null }>()
 let annCanvas: OffscreenCanvas | null = null
+// itens já aquecidos nesta reprodução (zera ao pausar/seek)
+const prefetched = new Set<string>()
 
 self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
   const m = e.data
@@ -174,10 +178,47 @@ async function renderFrame(m: FrameMsg): Promise<void> {
   } finally {
     for (const f of frames) f.close()
   }
-  // buffers de reprodução só para o que está no quadro e só durante a reprodução
-  if (m.playing) pool.releaseExcept(used)
-  else pool.releaseAll()
+  // buffers de reprodução só para o que está no quadro (e o que vai começar) e só durante a reprodução
+  if (m.playing) pool.releaseExcept([...used, ...prefetchUpcoming(p, m.tUs, used)])
+  else {
+    prefetched.clear()
+    pool.releaseAll()
+  }
   post({ t: 'rendered', seq: m.seq, tUs: m.tUs, ms: performance.now() - t0, missing: [...missing] })
+}
+
+/**
+ * Reprodução: aquece o decoder dos itens que começam em até PREFETCH_US (uma vez por item), no slot e
+ * na posição da fonte do quadro em que começam. Devolve as entradas a manter fora do releaseExcept.
+ * Não mexe numa entrada em uso no quadro atual (reposicionar o iterador quebraria a reprodução dela).
+ */
+function prefetchUpcoming(p: Project, tUs: number, used: [string, number][]): [string, number][] {
+  const busyKeys = new Set(used.map(([a, s]) => `${a}#${s}`))
+  const keep: [string, number][] = []
+  for (const track of p.tracks) {
+    if (track.hidden) continue
+    for (const item of track.items) {
+      if (item.type !== 'media' || item.startUs <= tUs || item.startUs > tUs + PREFETCH_US) continue
+      // slots como em renderFrame: ordem das camadas de vídeo com asset disponível
+      const slots = new Map<string, number>()
+      for (const layer of resolveFrame(p, item.startUs)) {
+        if (layer.kind !== 'media' || layer.srcUs === null) continue
+        const asset = p.assets.find((a) => a.id === layer.assetId)
+        if (!asset || asset.status === 'missing') continue
+        const slot = slots.get(asset.id) ?? 0
+        slots.set(asset.id, slot + 1)
+        if (layer.itemId !== item.id) continue
+        if (busyKeys.has(`${asset.id}#${slot}`)) break
+        keep.push([asset.id, slot])
+        if (!prefetched.has(item.id)) {
+          prefetched.add(item.id)
+          pool.prefetch(asset.id, layer.srcUs, slot)
+        }
+        break
+      }
+    }
+  }
+  return keep
 }
 
 function loadSession(sessionId: string): Promise<void> {

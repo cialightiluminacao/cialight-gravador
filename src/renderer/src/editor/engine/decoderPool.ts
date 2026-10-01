@@ -110,7 +110,8 @@ export class DecoderPool {
     const t = srcUs / 1e6
     e.opened
       .then((o) => this.run(e, async () => {
-        if (e.it && e.held && t >= e.held.timestamp - EPS_S && t <= e.held.timestamp + MAX_SKIP_S) return
+        const ref = e.held ?? e.ahead
+        if (e.it && ref && t >= ref.timestamp - EPS_S && t <= ref.timestamp + MAX_SKIP_S) return
         this.restart(e, o, t)
         const r = await e.it!.next()
         if (r.done) e.done = true

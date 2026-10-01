@@ -18,6 +18,15 @@ describe('schema', () => {
     p.assets = [{ ...asset, filmstrip: 'cache/a1.strip.jpg', filmstripInfo: { frames: 6, everyUs: 1_000_000, tileW: 114, tileH: 64 }, peaks: 'cache/a1.peaks.bin' }]
     expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
   })
+  it('audioTrackIndex: round-trip; negativo ou fracionário lança', () => {
+    const p = createEmptyProject('x')
+    p.assets = [{ ...asset, audioTrackIndex: 1 }]
+    expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+    p.assets = [{ ...asset, audioTrackIndex: -1 }]
+    expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/audioTrackIndex/)
+    p.assets = [{ ...asset, audioTrackIndex: 0.5 }]
+    expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/audioTrackIndex/)
+  })
   it('filmstripInfo inválido lança', () => {
     const p = createEmptyProject('x')
     p.assets = [{ ...asset, filmstripInfo: { frames: 6, everyUs: 1.5, tileW: 114, tileH: 64 } }]

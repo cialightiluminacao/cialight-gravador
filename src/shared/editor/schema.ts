@@ -122,6 +122,7 @@ const asset = z.object({
     })
     .optional(),
   audio: z.object({ channels: z.number(), sampleRate: z.number(), codec: z.string() }).optional(),
+  audioTrackIndex: z.number().int().nonnegative().optional(),
   proxy: z.string().optional(),
   intermediate: z.string().optional(),
   filmstrip: z.string().optional(),

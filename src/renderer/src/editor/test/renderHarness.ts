@@ -2,6 +2,9 @@ import { ALL_FORMATS, Input, UrlSource, VideoSampleSink } from 'mediabunny'
 import type { RenderOut } from '../engine/protocol'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
+import { AudioClient } from '../engine/audio/AudioClient'
+import { PlaybackController } from '../engine/PlaybackController'
+import { useEditorStore } from '../state/editorStore'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -72,6 +75,8 @@ export async function runRenderHarness(projectId: string): Promise<void> {
     // vários pedidos sem esperar: o worker coalesce, todos resolvem
     const burst = await Promise.all([0, 1, 2, 3, 4].map((i) => client.requestFrame(500_000 + i * 100_000, false)))
     report.burst = burst.map((r) => r.t)
+
+    report.playback = await playbackCheck(client, project)
     client.dispose()
     ok = true
   } catch (e) {
@@ -79,6 +84,74 @@ export async function runRenderHarness(projectId: string): Promise<void> {
   }
   window.__captureTestSend?.({ ok, report })
 }
+
+/**
+ * Reprodução real por 2 s a partir de 0,5 s (AudioContext como relógio): faixa de áudio com senoide de
+ * 1 kHz na faixa a:1 do arquivo (a:0 é silêncio, então nível > 0 prova a escolha da faixa).
+ * Deriva = relógio do áudio (clockUs) no instante em que chega cada quadro renderizado − tUs do quadro;
+ * taxa = avanço do relógio do áudio × tempo real em 2 s (após o aquecimento do dispositivo).
+ */
+async function playbackCheck(client: RenderClient, project: Awaited<ReturnType<typeof window.api.project.load>>): Promise<Record<string, unknown>> {
+  const audio = new AudioClient()
+  const audioErrors: string[] = []
+  audio.onError((m) => audioErrors.push(m))
+  audio.setProject(project, mediaUrlsFor(project, 'preview'), true)
+  useEditorStore.getState().open(project)
+  useEditorStore.getState().setPlayhead(500_000)
+  const ctl = new PlaybackController(client, audio, useEditorStore)
+  const drifts: number[] = []
+  let frames = 0
+  const off = client.onMessage((m) => {
+    const c = ctl.clockUs
+    if (m.t !== 'rendered' || c === null) return
+    frames++
+    drifts.push(c - m.tUs)
+  })
+  const peak = { l: 0, r: 0 }
+  const vu = setInterval(() => {
+    const lv = ctl.levels
+    peak.l = Math.max(peak.l, lv.l)
+    peak.r = Math.max(peak.r, lv.r)
+  }, 20)
+  try {
+    await ctl.play()
+    const startWait = performance.now()
+    // durante a latência de saída o relógio fica preso em us0 (o som ainda não saiu): mede depois disso
+    while ((ctl.clockUs ?? 0) <= 500_000 && performance.now() - startWait < 5000) await sleep(1)
+    // e o currentTime anda aos saltos logo após o início do dispositivo (~30 ms medidos): mede a taxa depois
+    await sleep(200)
+    const c0 = ctl.clockUs
+    const w0 = performance.now()
+    if (c0 === null || c0 <= 500_000) return { error: 'relógio não começou', audioErrors }
+    while (performance.now() - w0 < 2000) await sleep(10)
+    const c1 = ctl.clockUs ?? NaN
+    const w1 = performance.now()
+    const playheadUs = useEditorStore.getState().playheadUs
+    const playing = useEditorStore.getState().playing
+    ctl.pause()
+    const tail = drifts.slice(-10)
+    return {
+      peak,
+      frames,
+      driftLastUs: tail.length ? tail[tail.length - 1] : null,
+      driftMaxTailUs: tail.length ? Math.max(...tail.map(Math.abs)) : null,
+      clockAdvanceUs: c1 - c0,
+      wallAdvanceUs: Math.round((w1 - w0) * 1000),
+      playheadUs,
+      playing,
+      pausedPlaying: useEditorStore.getState().playing,
+      startupMs: Math.round(w0 - startWait),
+      audioErrors
+    }
+  } finally {
+    clearInterval(vu)
+    off()
+    ctl.dispose()
+    audio.dispose()
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /** O que o mediabunny entrega para uma faixa girada: rotação no sample e dimensões do VideoFrame. */
 async function rotationDiag(url: string | undefined): Promise<Record<string, unknown>> {
