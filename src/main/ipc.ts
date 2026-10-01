@@ -29,6 +29,7 @@ import { EditorExportJobs } from './export/editorExportJob'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
+import { setExportBusyCheck } from './quitGuard'
 
 const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'ts']
 const AUDIO_EXT = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
@@ -351,6 +352,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
 
   // ---- exportação do editor (arquivo .part → faststart) ----
   const editorExports = new EditorExportJobs()
+  setExportBusyCheck(() => editorExports.busy)
   const exportOwners = new Set<number>()
   ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string, opts?: { estimateBytes?: number }) => {
     const wc = e.sender

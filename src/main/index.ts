@@ -22,6 +22,7 @@ import { destroyBar } from './windows/barWindow'
 import { log } from './log'
 import { runIntegrationTest } from './testMode'
 import { createQaEditorFixture } from './qaEditorFixture'
+import { confirmQuit, createQuitGuard, isEditorExportBusy, setAppQuitGuard, type QuitReason } from './quitGuard'
 
 // Bootstrap do processo principal.
 
@@ -39,6 +40,31 @@ if (!gotLock) {
   app.quit()
 } else {
   app.on('second-instance', () => showRecorder())
+
+  const QUIT_DIALOG: Record<QuitReason, { buttons: string[]; message: string; detail: string }> = {
+    recording: {
+      buttons: ['Continuar gravando', 'Sair e descartar'],
+      message: 'Há uma gravação em andamento.',
+      detail: 'Se sair agora, a gravação bruta fica salva até o último segundo gravado e pode ser recuperada na próxima abertura.'
+    },
+    export: {
+      buttons: ['Continuar exportando', 'Sair e cancelar'],
+      message: 'Há uma exportação do editor em andamento.',
+      detail: 'Se sair agora, a exportação é cancelada e o arquivo parcial é apagado.'
+    }
+  }
+  setAppQuitGuard(
+    createQuitGuard({
+      isRecording: isRecordingActive,
+      isExporting: isEditorExportBusy,
+      enabled: () => !process.env.CIALIGHT_TEST,
+      ask: (reason) => {
+        const d = QUIT_DIALOG[reason]
+        // sem janela-mãe: gravando, a janela do gravador pode estar oculta (e o diálogo junto)
+        return dialog.showMessageBoxSync({ type: 'warning', buttons: d.buttons, defaultId: 0, cancelId: 0, title: 'CiaLight Gravador', message: d.message, detail: d.detail }) === 1
+      }
+    })
+  )
 
   app.whenReady().then(async () => {
     log.info(`CiaLight Gravador ${app.getVersion()} — Electron ${process.versions.electron}, Chromium ${process.versions.chrome}`)
@@ -174,20 +200,11 @@ if (!gotLock) {
   })
 
   app.on('before-quit', (e) => {
-    if (isRecordingActive() && !process.env.CIALIGHT_TEST) {
-      const r = dialog.showMessageBoxSync({
-        type: 'warning',
-        buttons: ['Continuar gravando', 'Sair e descartar'],
-        defaultId: 0,
-        cancelId: 0,
-        title: 'CiaLight Gravador',
-        message: 'Há uma gravação em andamento.',
-        detail: 'Se sair agora, a gravação bruta fica salva até o último segundo gravado e pode ser recuperada na próxima abertura.'
-      })
-      if (r === 0) {
-        e.preventDefault()
-        return
-      }
+    // gravação/exportação em andamento: pergunta uma vez por saída (o flush do editor e o cancelamento
+    // da exportação refazem o app.quit() e passam por aqui de novo)
+    if (!confirmQuit()) {
+      e.preventDefault()
+      return
     }
     // editor aberto: grava o pendente (transação, autosave) e só então sai de verdade
     if (editorNeedsFlush()) {

@@ -3,6 +3,7 @@ import { IPC } from '@shared/ipc'
 import { join } from 'path'
 import { getPhase } from '../recording/state'
 import { log } from '../log'
+import { confirmQuit, isEditorExportBusy } from '../quitGuard'
 
 let recorderWin: BrowserWindow | null = null
 let quitting = false
@@ -66,6 +67,11 @@ export function createRecorderWindow(): BrowserWindow {
       e.preventDefault()
       win.hide()
       log.info('janela do gravador escondida durante a gravação')
+      return
+    }
+    // exportação do editor em andamento: fechar a janela a cancelaria — pergunta antes
+    if (!quitting && isEditorExportBusy() && !confirmQuit()) {
+      e.preventDefault()
       return
     }
     // editor aberto: grava o pendente antes de fechar (depois do flush este handler deixa passar)

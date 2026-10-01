@@ -375,6 +375,7 @@ export function handleCommand(cmd: RecorderCommand): void {
       if (st.phase === 'idle' || st.phase === 'review') {
         const cfg = st.screen === 'prepare' || st.screen === 'review' || st.screen === 'history' || st.screen === 'settings' ? buildConfigFromStore() : null
         if (cfg) void startRecording(cfg)
+        else if (st.screen === 'editor' || st.screen === 'projects') toast.error(st.screen === 'editor' ? 'Saia do editor para gravar.' : 'Volte à tela de gravação para começar a gravar.')
         else toast.error('Escolha uma fonte de gravação primeiro.')
       } else void stopRecording()
       break
