@@ -67,7 +67,8 @@ export function ColorInput({ value, label, onChange }: { value: string; label: s
         opened.current = false
       }}
       onChange={(e) => {
-        if (!opened.current) {
+        // a transação pode ter sido encerrada por fora (Esc, desfazer, outro gesto): reabre
+        if (!opened.current || !st().txBase) {
           st().begin()
           opened.current = true
         }

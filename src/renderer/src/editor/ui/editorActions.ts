@@ -1,9 +1,9 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addMarker, addMediaFromAsset, deleteItems, deleteRange, duplicateItems, projectDurationUs, splitAt, trimItem } from '@shared/editor/ops'
-import type { Item, Project, Us } from '@shared/editor/project'
-import { frameToUs, itemEndUs, secToUs, usToFrame } from '@shared/editor/time'
+import { addMarker, addMediaFromAsset, addTrack, deleteItems, deleteRange, duplicateItems, projectDurationUs, splitAt, trimItem } from '@shared/editor/ops'
+import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
+import { frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
 import type { PlaybackController } from '../engine/PlaybackController'
 import type { ShortcutAction } from '../shortcuts'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
@@ -12,6 +12,15 @@ const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getS
 
 /** Área de transferência interna (ids dos itens copiados). */
 let clipboard: string[] = []
+
+/** J/L: o motor só toca a 1× (sem taxas 2×/4× nem reverso), então J/L saltam 5 s sem parar a reprodução. */
+export const SHUTTLE_JUMP_US = 5_000_000
+
+/** "Ajustar tudo" (Shift+Z) depende da largura da linha do tempo: ela registra o handler aqui. */
+let zoomFitHandler: (() => void) | null = null
+export function registerZoomFit(fn: (() => void) | null): void {
+  zoomFitHandler = fn
+}
 
 export function seekTo(playback: PlaybackController | null, us: Us): void {
   const p = st().project
@@ -54,16 +63,32 @@ function trimToPlayhead(edge: 'start' | 'end'): void {
   st().apply((p) => trimItem(p, target.id, edge, playheadUs, { ripple: true }))
 }
 
-/** Adiciona o asset no playhead (vídeo + áudio vinculado) e seleciona o que entrou. */
-export function addAssetAtPlayhead(assetId: string): void {
-  const st = useEditorStore.getState()
+/**
+ * Adiciona o asset em atUs (vídeo + áudio vinculado) e seleciona o que entrou. `track`: faixa
+ * escolhida (soltar na linha do tempo) — existente (do tipo certo) ou nova; sem ela, a primeira livre.
+ */
+export function addAssetAt(assetId: string, atUs: Us, track?: { trackId: string } | { newTrack: TrackKind }): void {
+  const s = st()
   let ids: string[] = []
-  const ok = st.apply((p) => {
-    const r = addMediaFromAsset(p, assetId, st.playheadUs)
+  const ok = s.apply((p) => {
+    let q = p
+    let trackId: string | undefined
+    if (track && 'newTrack' in track) {
+      const r = addTrack(q, track.newTrack)
+      q = r.project
+      trackId = r.trackId
+    } else trackId = track?.trackId
+    const kind = q.tracks.find((t) => t.id === trackId)?.kind
+    const r = addMediaFromAsset(q, assetId, atUs, kind === 'video' ? { videoTrackId: trackId } : kind === 'audio' ? { audioTrackId: trackId } : undefined)
     ids = r.itemIds
     return r.project
   })
-  if (ok) st.select(ids)
+  if (ok) s.select(ids)
+}
+
+/** Adiciona o asset no playhead (vídeo + áudio vinculado) e seleciona o que entrou. */
+export function addAssetAtPlayhead(assetId: string): void {
+  addAssetAt(assetId, st().playheadUs)
 }
 
 export function splitAtPlayhead(): void {
@@ -95,11 +120,12 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
   const fps = p.canvas.fps
   switch (action) {
     case 'playPause': togglePlay(playback); return true
-    case 'play': if (!s.playing) void playback?.play(); return true
     case 'pause': playback?.pause(); return true
-    case 'shuttleBack':
-      playback?.pause()
-      seekTo(playback, s.playheadUs - secToUs(1))
+    // J/L: salto de 5 s (seek mantém a reprodução); L parado começa a tocar
+    case 'shuttleBack': seekTo(playback, s.playheadUs - SHUTTLE_JUMP_US); return true
+    case 'shuttleForward':
+      if (!s.playing) void playback?.play()
+      else seekTo(playback, s.playheadUs + SHUTTLE_JUMP_US)
       return true
     case 'prevFrame': stepFrames(playback, -1); return true
     case 'nextFrame': stepFrames(playback, 1); return true
@@ -147,6 +173,7 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'marker': s.apply((q) => addMarker(q, s.playheadUs)); return true
     case 'zoomIn': zoomBy(1.25); return true
     case 'zoomOut': zoomBy(0.8); return true
+    case 'zoomFit': zoomFitHandler?.(); return true
     case 'save': void saveNow(); return true
     case 'toggleSnap':
       s.toggleSnapping()

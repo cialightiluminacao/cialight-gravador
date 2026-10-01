@@ -5,7 +5,7 @@ export type ShortcutAction =
   | 'playPause'
   | 'shuttleBack' // J
   | 'pause' // K
-  | 'play' // L
+  | 'shuttleForward' // L
   | 'prevFrame'
   | 'nextFrame'
   | 'back1s'
@@ -28,6 +28,7 @@ export type ShortcutAction =
   | 'marker'
   | 'zoomIn'
   | 'zoomOut'
+  | 'zoomFit'
   | 'save'
   | 'toggleSnap'
   | 'deselect'
@@ -56,7 +57,14 @@ export const SHORTCUT_LABELS: Partial<Record<ShortcutAction, string>> = {
   markIn: 'I',
   markOut: 'O',
   marker: 'M',
-  save: 'Ctrl+S'
+  save: 'Ctrl+S',
+  rippleDelete: 'Shift+Del',
+  duplicate: 'Ctrl+D',
+  deleteRange: 'Ctrl+Shift+X',
+  toggleSnap: 'N',
+  zoomIn: '+',
+  zoomOut: '-',
+  zoomFit: 'Shift+Z'
 }
 
 /** Foco em campo editável: atalhos de uma tecla não podem roubar a digitação. */
@@ -96,7 +104,7 @@ export function shortcutFor(e: KeyLike): ShortcutAction | null {
     case 'k':
       return 'pause'
     case 'l':
-      return 'play'
+      return 'shuttleForward'
     case 'ArrowLeft':
       return e.shiftKey ? 'back1s' : 'prevFrame'
     case 'ArrowRight':
@@ -122,6 +130,8 @@ export function shortcutFor(e: KeyLike): ShortcutAction | null {
       return 'marker'
     case 'n':
       return 'toggleSnap'
+    case 'z':
+      return e.shiftKey ? 'zoomFit' : null
     case '+':
     case '=':
       return 'zoomIn'

@@ -104,6 +104,11 @@ body {
   -webkit-app-region: no-drag;
 }
 
+/* gesto de arraste na linha do tempo: o cursor do gesto vale sobre qualquer elemento */
+body[data-drag-cursor] * {
+  cursor: inherit !important;
+}
+
 /* scrollbars finas */
 * {
   scrollbar-width: thin;

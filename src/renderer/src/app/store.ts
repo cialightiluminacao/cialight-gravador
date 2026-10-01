@@ -91,7 +91,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateStatus: null,
   recoverable: [],
 
-  setScreen: (s) => set((st) => ({ screen: s, returnScreen: SUB_SCREENS.includes(s) && !SUB_SCREENS.includes(st.screen) ? st.screen : st.returnScreen })),
+  setScreen: (s) =>
+    set((st) => {
+      // editor → Projetos é sair do editor (como closeEditor): voltar de Projetos não pode reabri-lo
+      if (s === 'projects' && st.screen === 'editor') return { screen: s, editorProjectId: null, returnScreen: st.returnScreen === 'editor' ? 'prepare' : st.returnScreen }
+      return { screen: s, returnScreen: SUB_SCREENS.includes(s) && !SUB_SCREENS.includes(st.screen) ? st.screen : st.returnScreen }
+    }),
   goBack: () => set((st) => ({ screen: st.returnScreen })),
   setAppInfo: (appInfo) => set({ appInfo }),
   setSettings: (settings) => set({ settings, settingsLoaded: true }),

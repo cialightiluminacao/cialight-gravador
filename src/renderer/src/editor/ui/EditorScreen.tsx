@@ -11,7 +11,7 @@ import { TopBar } from './TopBar'
 import { MediaBin } from './MediaBin'
 import { Viewer } from './Viewer'
 import { Inspector } from './Inspector/Inspector'
-import { TimelinePlaceholder } from './TimelinePlaceholder'
+import { Timeline } from './timeline/Timeline'
 
 // Tela do editor (spec §9): [Biblioteca 280 | Visualizador | Inspetor 320] em cima e a linha do
 // tempo embaixo (altura redimensionável, salva no localStorage). Monta o motor (render, áudio,
@@ -19,7 +19,7 @@ import { TimelinePlaceholder } from './TimelinePlaceholder'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; engine: EditorEngine; importPaths: (paths: string[]) => Promise<Asset[]> }
+    __qaEditor?: { store: typeof useEditorStore; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]> }
   }
 }
 
@@ -57,7 +57,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     setEngine(eng)
     const stopAutosave = startAutosave((p) => api.project.save(p))
     // QA (fora do pacote): store e motor acessíveis por CDP
-    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, engine: eng, importPaths: (paths) => importPaths(projectId, paths) }
+    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
     const offProgress = api.media.onProgress((j) => {
       if (j.projectId.toLowerCase() === projectId.toLowerCase()) useEditorStore.getState().setIngest(j.assetId, { step: j.step, percent: j.percent })
     })
@@ -199,8 +199,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         <span className="absolute left-1/2 top-1/2 h-0.5 w-8 -translate-x-1/2 -translate-y-1/2 rounded bg-white/15 group-hover:bg-accent" />
       </div>
       <div className="min-h-0 shrink-0" style={{ height: timelineH }}>
-        {/* ==== TIMELINE (Task 11): trocar <TimelinePlaceholder> pela <Timeline> definitiva ==== */}
-        {loaded ? <TimelinePlaceholder playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
+        {loaded ? <Timeline playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
       </div>
     </div>
   )
