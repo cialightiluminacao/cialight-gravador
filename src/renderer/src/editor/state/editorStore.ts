@@ -4,6 +4,7 @@ import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
 import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
 import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from './zoom'
+import { ipcErrorMessage } from '@/lib/ipcError'
 
 // Store do editor (zustand): projeto com histórico, transações (arrasto = 1 passo de undo),
 // seleção, viewport da timeline e autosave. Operações puras vivem em @shared/editor/ops.
@@ -225,7 +226,7 @@ export function startAutosave(save: (p: Project) => Promise<void>): () => void {
         if (useEditorStore.getState().project === project) useEditorStore.getState().markSaved()
       } catch (e) {
         console.error('[editor] autosave falhou', e)
-        if (!failed) toast.error(`Não foi possível salvar o projeto: ${e instanceof Error ? e.message : String(e)}`)
+        if (!failed) toast.error(`Não foi possível salvar o projeto: ${ipcErrorMessage(e)}`)
         failed = true
       } finally {
         useEditorStore.setState({ saving: false })

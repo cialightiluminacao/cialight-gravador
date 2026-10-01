@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { ipcErrorMessage } from '@/lib/ipcError'
 import type { Asset } from '@shared/editor/project'
 import { useAppStore } from '@/app/store'
 import { flushAutosave, startAutosave, useEditorStore } from '../state/editorStore'
@@ -100,7 +101,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         if (alive) enqueuePending(project.id, project.assets)
       } catch (e) {
         if (!alive) return
-        toast.error(`Não foi possível abrir o projeto: ${e instanceof Error ? e.message : String(e)}`)
+        toast.error(`Não foi possível abrir o projeto: ${ipcErrorMessage(e)}`)
         useAppStore.getState().closeEditor()
       }
     })()

@@ -12,6 +12,7 @@ import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
 import { KEYFRAME_INTERVAL_S, resizeBitrate } from './exportPlan'
 import { EditorExportCancelled, finalizeOrCancel, type Finalized } from './finalize'
+import { ipcErrorMessage } from '@/lib/ipcError'
 
 export interface EditorExportRequest {
   project: Project
@@ -240,7 +241,7 @@ function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, stage: 're
               () => render.chunkAck(jobId, m.seq),
               (e: unknown) => {
                 render.exportCancel(jobId)
-                finish({ ok: false, error: new Error(`Falha ao gravar o arquivo: ${e instanceof Error ? e.message : String(e)}`) })
+                finish({ ok: false, error: new Error(`Falha ao gravar o arquivo: ${ipcErrorMessage(e)}`) })
                 throw e
               }
             )

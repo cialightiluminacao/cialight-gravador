@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/Button'
 import { Badge, Kbd, Progress, Section, Tip } from '@/components/ui/primitives'
 import { formatBytes, formatClock, formatDate, formatMB, formatTimecode } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { ipcErrorMessage } from '@/lib/ipcError'
 import { ReviewPlayer, type ReviewPlayerHandle } from './ReviewPlayer'
 import { MIN_TRIM_GAP_MS, Timeline } from './Timeline'
 import { PresetCards } from './PresetCards'
@@ -245,7 +246,7 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
     try {
       await api.session.delete(session.id)
     } catch (e) {
-      toast.error(`Não foi possível excluir: ${e instanceof Error ? e.message : String(e)}`)
+      toast.error(`Não foi possível excluir: ${ipcErrorMessage(e)}`)
       return
     }
     toast('Gravação bruta enviada à Lixeira.')
@@ -336,7 +337,7 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
       playerRef.current?.pause()
       await openRecordingInEditor(session.id)
     } catch (e) {
-      toast.error(`Não foi possível abrir no editor: ${e instanceof Error ? e.message : String(e)}`)
+      toast.error(`Não foi possível abrir no editor: ${ipcErrorMessage(e)}`)
       setOpeningEditor(false)
     }
   }

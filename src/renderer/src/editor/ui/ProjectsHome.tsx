@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, EmptyState, Segmented, Tip } from '@/components/ui/primitives'
 import { formatDate } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { ipcErrorMessage } from '@/lib/ipcError'
 import { ASPECTS, canvasForAspect, type AspectId } from './aspects'
 import { shortDuration } from './MediaCard'
 import { projectFileUrl } from './mediaImport'
@@ -17,7 +18,7 @@ import { projectFileUrl } from './mediaImport'
 // excluir e atalho para editar uma gravação do Histórico.
 
 type ListState = { status: 'loading' } | { status: 'ready'; items: ProjectSummary[] } | { status: 'error'; message: string }
-const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
+const errMsg = ipcErrorMessage
 const NEW_ASPECTS = ASPECTS.filter((a) => a.id !== 'original').map((a) => ({ value: a.id, label: a.id, title: a.label }))
 
 export function ProjectsHome(): React.JSX.Element {

@@ -9,6 +9,7 @@ import { PathField } from '@/components/ui/PathField'
 import { useAppStore } from '@/app/store'
 import { formatBytes, formatClock } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { ipcErrorMessage } from '@/lib/ipcError'
 import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
 import { useEditorStore } from '../state/editorStore'
 import { EditorExportCancelled, editorExportRunning, runEditorExport, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
@@ -106,7 +107,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
       setPhase({ kind: 'done', result })
     } catch (e) {
       if (e instanceof EditorExportCancelled) setPhase({ kind: 'form' })
-      else setPhase({ kind: 'error', message: e instanceof Error ? e.message : String(e) })
+      else setPhase({ kind: 'error', message: ipcErrorMessage(e) })
     } finally {
       if (abortRef.current === ac) abortRef.current = null
     }
