@@ -16,7 +16,8 @@ export default defineConfig({
           index: resolve('src/renderer/index.html'),
           bar: resolve('src/renderer/bar.html'),
           overlay: resolve('src/renderer/overlay.html'),
-          spike: resolve('src/renderer/spike.html')
+          spike: resolve('src/renderer/spike.html'),
+          'editor-spike': resolve('src/renderer/editor-spike.html')
         }
       }
     }

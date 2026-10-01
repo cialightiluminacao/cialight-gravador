@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, powerMonitor, shell } from 'electron'
 import { IPC } from '@shared/ipc'
 import { registerFileProtocolScheme, installFileProtocol } from './fileProtocol'
 import { runSpike } from './spike/spikeMain'
+import { runEditorSpike } from './spike/editorSpikeMain'
 import { createRecorderWindow, getRecorderWindow, setQuitting, showRecorder } from './windows/recorderWindow'
 import { installDisplayMediaHandler } from './capture/displayMediaHandler'
 import { listDisplays } from './capture/sources'
@@ -23,8 +24,12 @@ import { runIntegrationTest } from './testMode'
 app.setAppUserModelId('com.cialight.gravador')
 registerFileProtocolScheme()
 
+// Spike F0 do editor: decoders WebCodecs inativos não são recuperados pelo Chromium.
+const editorSpikeFlag = process.env.CIALIGHT_SPIKE === 'editor' && !process.env.CIALIGHT_SPIKE_NOFLAG
+if (editorSpikeFlag) app.commandLine.appendSwitch('disable-features', 'ReclaimInactiveWebCodecs')
+
 // QA/testes rodam em paralelo (várias instâncias): sem lock nesses modos
-const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST ? true : app.requestSingleInstanceLock()
+const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST || process.env.CIALIGHT_SPIKE === 'editor' ? true : app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
@@ -32,6 +37,10 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     log.info(`CiaLight Gravador ${app.getVersion()} — Electron ${process.versions.electron}, Chromium ${process.versions.chrome}`)
+    if (process.env.CIALIGHT_SPIKE === 'editor') {
+      void runEditorSpike(editorSpikeFlag)
+      return
+    }
     if (process.env.CIALIGHT_SPIKE) {
       void runSpike()
       return

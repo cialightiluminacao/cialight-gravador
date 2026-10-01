@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- CSP do app + cialight-file: no connect-src e 'wasm-unsafe-eval'/blob: para o AudioWorklet do signalsmith-stretch -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' blob: cialight-file:; worker-src 'self' blob:" />
+    <title>SPIKE Editor</title>
+    <style>
+      body { background: #0f1115; color: #d7dbe2; font: 12px/1.4 Consolas, monospace; margin: 8px; }
+      canvas { width: 480px; height: 270px; background: #000; border: 1px solid #333; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <canvas id="view" width="1920" height="1080"></canvas>
+    <pre id="log"></pre>
+    <script type="module" src="/src/spike-editor/main.ts"></script>
+  </body>
+</html>
