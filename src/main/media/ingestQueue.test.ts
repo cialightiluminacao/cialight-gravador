@@ -100,15 +100,21 @@ describe('IngestQueue', () => {
   })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-  /** Libera as etapas pendentes uma a uma (FIFO) conferindo os limites a cada passo. */
+  /**
+   * Libera as etapas pendentes uma a uma (FIFO) conferindo os limites a cada passo. Sem etapa pendente, só
+   * termina quando a fila esvaziou: com a suíte inteira em paralelo, o fs real entre etapas pode demorar mais
+   * que alguns ticks (antes isso encerrava cedo e deixava jobs vazando para o teste seguinte).
+   */
   async function drain(): Promise<void> {
-    for (let guard = 0; guard < 200; guard++) {
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
       await flush()
       expect(h.running.heavy).toBeLessThanOrEqual(1)
       expect(h.running.light).toBeLessThanOrEqual(2)
       const next = h.calls.find((c) => !c.settled)
-      if (!next) return
-      next.resolve()
+      if (next) next.resolve()
+      else if (!queue.busy('p')) return
+      else await new Promise((r) => setTimeout(r, 5))
     }
     throw new Error('etapas não terminaram')
   }
