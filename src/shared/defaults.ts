@@ -47,6 +47,7 @@ export const DEFAULT_SETTINGS: Settings = {
   annotations: { color: '#ff3b30', width: 6, autoFadeSec: null },
   rawRetentionDays: 30,
   lastEncoderProbe: null,
+  encoderProbeV2: null,
   lastSource: null,
   barPositions: {}
 }

@@ -1,3 +1,4 @@
+import { ALL_FORMATS, Input, UrlSource, VideoSampleSink } from 'mediabunny'
 import { projectDurationUs } from '@shared/editor/ops'
 import type { Project } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
@@ -17,7 +18,7 @@ declare global {
   }
 }
 
-interface Params { projectId: string; sessionId: string; outputDir: string }
+interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[] }
 
 export async function runExportHarness(params: Params): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
@@ -59,6 +60,17 @@ export async function runExportHarness(params: Params): Promise<void> {
     report.scenario = await exportOnce(base(project, 'cenario.mp4'))
     report.fallback = await exportOnce({ ...base(project, 'cenario.mp4'), simulateHwFailure: true })
     report.cancel = await cancelOnce(base(project, 'cancelado.mp4'))
+    // falha que não é do codificador (intervalo vazio): mostra a causa real, sem tentar em software
+    report.nonEncoder = await exportOnce({ ...base(project, 'vazio.mp4'), toUs: 0 })
+    // tamanho-alvo pequeno forçado: 1ª passada passa do alvo → refeita com bitrate corrigido
+    report.sized = await exportOnce({ ...base(project, 'alvo.mp4'), targetBytes: params.targetBytes })
+    // cor: fontes BT.601 marcada e sem marcação (o que o Chromium entrega no VideoFrame + o export)
+    const color: Record<string, unknown> = {}
+    for (const id of params.colorProjects) {
+      const p = await window.api.project.load(id)
+      color[id] = { export: await exportOnce(base(p, `${id}.mp4`)), frame: await colorDiag(mediaUrlsFor(p, 'export')[p.assets[0].id]?.original) }
+    }
+    report.color = color
 
     if (!report.previewUntouched) {
       try {
@@ -78,6 +90,26 @@ export async function runExportHarness(params: Params): Promise<void> {
     errors.push(e instanceof Error ? (e.stack ?? e.message) : String(e))
   }
   window.__captureTestSend?.({ ok, report })
+}
+
+/** colorSpace do VideoFrame decodificado (o que o Chromium assume para a fonte). */
+async function colorDiag(url: string | undefined): Promise<Record<string, unknown>> {
+  if (!url) return { error: 'sem URL' }
+  const input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS })
+  try {
+    const track = await input.getPrimaryVideoTrack()
+    const sample = track ? await new VideoSampleSink(track).getSample(0.5) : null
+    if (!sample) return { error: 'sem quadro' }
+    const frame = sample.toVideoFrame()
+    const out = { colorSpace: frame.colorSpace.toJSON(), format: frame.format, trackColorSpace: await track!.getColorSpace().catch(() => null) }
+    frame.close()
+    sample.close()
+    return out
+  } catch (e) {
+    return { error: String(e) }
+  } finally {
+    input.dispose()
+  }
 }
 
 async function exportOnce(req: EditorExportRequest): Promise<Record<string, unknown>> {

@@ -17,13 +17,13 @@ export function AdvancedTab(): React.JSX.Element {
   const appInfo = useAppStore((s) => s.appInfo)
   const setSettings = useAppStore((s) => s.setSettings)
   const [probing, setProbing] = useState(false)
-  const probe = settings.lastEncoderProbe
+  const probe = settings.encoderProbeV2
 
   const reprobe = async (): Promise<void> => {
     setProbing(true)
     try {
       const result = await window.api.export.probeEncoders(true)
-      setSettings({ ...useAppStore.getState().settings, lastEncoderProbe: result })
+      setSettings({ ...useAppStore.getState().settings, encoderProbeV2: result })
       toast.success(`Encoder preferido: ${ENCODER_LABELS[result.preferred]}`)
     } catch (err) {
       toast.error('Falha ao testar os encoders', { description: err instanceof Error ? err.message : String(err) })

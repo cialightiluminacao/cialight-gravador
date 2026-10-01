@@ -38,7 +38,8 @@ export async function makeSyntheticSession(store: SessionStore, id: string): Pro
     '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
     '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000',
     '-t', '12', '-map', '0:v', '-map', '1:v', '-map', '2:a', '-map', '3:a',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-ac', '2',
+    // marcado como BT.601, como as gravações reais (VideoEncoder do Chromium)
+    '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', '-colorspace', 'smpte170m', '-color_primaries', 'smpte170m', '-color_trc', 'smpte170m', '-color_range', 'tv', '-c:a', 'aac', '-b:a', '160k', '-ac', '2',
     '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-progress', 'pipe:1', '-nostats', rec
   ], { label: 'sintético' })
   session.tracks = { screen: 0, webcam: 1, mic: 0, system: 1 }

@@ -8,9 +8,8 @@ import { estimateOutputMB } from '@shared/presets/sizeEstimate'
 import { needsTwoPass, planForTarget } from '@shared/presets/sizeTarget'
 import { sanitizeFileName, uniqueName } from '@shared/filenames'
 import { probeFile, runFfmpeg, FfmpegError } from './ffmpegRunner'
-import { probeEncoders } from './encoderProbe'
+import { cachedEncoderProbe, probeEncoders } from './encoderProbe'
 import { normalizeFallbackSession } from './fallbackRemux'
-import { getSettings } from '../settings/settingsStore'
 import type { SessionStore } from '../session/sessionStore'
 import { log } from '../log'
 
@@ -28,8 +27,8 @@ const jobs = new Map<string, Job>()
 let seq = 0
 
 function pickEncoder(): Promise<HwEncoder> {
-  const cached = getSettings().lastEncoderProbe
-  if (cached && cached.available.length) return Promise.resolve(cached.preferred)
+  const cached = cachedEncoderProbe()
+  if (cached) return Promise.resolve(cached.preferred)
   return probeEncoders(false).then((p) => p.preferred)
 }
 
@@ -54,7 +53,8 @@ function uniquifyPlanBase(outDir: string, base: string, sample: string[]): strin
   return candidate
 }
 
-export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p: ExportProgress) => void): { jobId: string; cancel: () => void } {
+/** override.encoder: força o encoder (testes: não dispara o probe, que grava no settings.json do usuário). */
+export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p: ExportProgress) => void, override: { encoder?: HwEncoder } = {}): { jobId: string; cancel: () => void } {
   const jobId = `exp-${Date.now()}-${++seq}`
   const abort = new AbortController()
   jobs.set(jobId, { id: jobId, abort })
@@ -76,7 +76,7 @@ export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p
       const durationMs = session.durationMs ?? probe.durationMs
       const opts = req.options
       const preset = PRESETS[opts.presetId]
-      const encoder = preset.copyVideo ? 'libx264' : await pickEncoder()
+      const encoder = preset.copyVideo ? 'libx264' : (override.encoder ?? (await pickEncoder()))
       const outDir = opts.outputDir
       mkdirSync(outDir, { recursive: true })
       const trimStart = Math.max(0, opts.trimStartMs)

@@ -20,7 +20,7 @@ import { hideOverlays, setOverlayMode, showOverlays, syncStrokesToOverlays } fro
 import { setProtection } from './windows/protection'
 import { broadcastCommand, getPhase, setBarState, setPhaseValue } from './recording/state'
 import { applyHotkeys, getHotkeyStatus } from './hotkeys/globalShortcuts'
-import { probeEncoders } from './export/encoderProbe'
+import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { buildReviewAssets } from './export/reviewAssets'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
@@ -66,7 +66,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     projectFile: (projectId, rel) => projects.filePath(projectId, rel),
     resolveInput: resolveIngestInput,
     // só lê o cache do probe de encoders (o probe grava settings.json); sem cache → libx264
-    encoder: () => getSettings().lastEncoderProbe?.preferred ?? 'libx264',
+    encoder: () => cachedEncoderProbe()?.preferred ?? 'libx264',
     log
   })
   ingest.on('progress', (j) => broadcastAll(IPC.media.progress, j))
@@ -328,12 +328,12 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   // ---- exportação do editor (arquivo .part → faststart) ----
   const editorExports = new EditorExportJobs()
   const exportOwners = new Set<number>()
-  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string) => {
+  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string, opts?: { estimateBytes?: number }) => {
     const wc = e.sender
     if (!exportOwners.has(wc.id)) {
       // janela fechada, renderer caído ou recarregado: o parcial não fica órfão
       exportOwners.add(wc.id)
-      const drop = (): void => editorExports.cancelOwnedBy(wc.id)
+      const drop = (): void => void editorExports.cancelOwnedBy(wc.id)
       wc.once('destroyed', () => {
         drop()
         exportOwners.delete(wc.id)
@@ -341,13 +341,27 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       wc.on('render-process-gone', drop)
       wc.on('did-navigate', drop)
     }
-    return editorExports.open(outputDir, fileName, wc.id)
+    return editorExports.open(outputDir, fileName, wc.id, Math.max(0, Number(opts?.estimateBytes) || 0))
   })
   ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => editorExports.write(jobId, data, position))
   ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))
-  ipcMain.handle(IPC.editorExport.finalize, (_e, jobId: string) => editorExports.finalize(jobId))
+  ipcMain.handle(IPC.editorExport.finalize, (e, jobId: string, opts?: { durationUs?: number; maxBytes?: number }) => {
+    const wc = e.sender
+    return editorExports.finalize(jobId, {
+      durationUs: opts?.durationUs,
+      maxBytes: opts?.maxBytes,
+      onProgress: (fraction) => {
+        if (!wc.isDestroyed()) wc.send(IPC.editorExport.finalizeProgress, { jobId, fraction })
+      }
+    })
+  })
   ipcMain.handle(IPC.editorExport.cancel, (_e, jobId: string) => editorExports.cancel(jobId))
-  app.on('will-quit', () => editorExports.cancelOwnedBy(null))
+  // saindo no meio de uma exportação/remux: interrompe, apaga os parciais e só então sai
+  app.on('will-quit', (e) => {
+    if (!editorExports.busy) return
+    e.preventDefault()
+    void editorExports.cancelOwnedBy(null).finally(() => app.quit())
+  })
 
   // ---- export ----
   ipcMain.handle(IPC.export.run, (_e, req: ExportRequest) => {

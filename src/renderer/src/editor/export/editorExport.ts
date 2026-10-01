@@ -1,15 +1,16 @@
 // Exportação do editor (thread principal): sobe uma instância PRÓPRIA do render worker (OffscreenCanvas na
 // resolução de saída) e um audio worker de exportação ligados por MessageChannel — o preview continua vivo e
 // intocado. Os bytes do MP4 vão para `<saída>.part` via IPC (editorExport.write) com contrapressão (chunkAck
-// depois de gravar); no fim o main remuxa com faststart. Encoder de hardware que falha antes do 1º pacote →
-// nova tentativa com `prefer-software`; se também falhar, erro claro. Uma exportação por vez.
+// depois de gravar); no fim o main remuxa com faststart. Falha do CODIFICADOR de hardware antes do 1º pacote →
+// nova tentativa com `prefer-software` (outras falhas mostram a causa real). Tamanho-alvo: saída acima do alvo
+// é refeita uma vez com bitrate × (alvo/obtido) × 0,97 ("Ajustando tamanho…"). Uma exportação por vez.
 import { planAudio } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
-import { KEYFRAME_INTERVAL_S } from './exportPlan'
+import { KEYFRAME_INTERVAL_S, resizeBitrate } from './exportPlan'
 
 export interface EditorExportRequest {
   project: Project
@@ -22,19 +23,24 @@ export interface EditorExportRequest {
   audioBitrate: number
   outputDir: string
   fileName: string
+  /** Tamanho estimado (bytes): o main exige estimativa × 2,1 livres antes de começar. */
+  estimateBytes?: number
+  /** Tamanho máximo (bytes) da saída (WhatsApp): acima disso, refaz uma vez com bitrate corrigido. */
+  targetBytes?: number
   /** Testes: simula a falha do encoder de hardware (exercita a nova tentativa em software). */
   simulateHwFailure?: boolean
 }
 
 export interface EditorExportProgress {
-  stage: 'render' | 'finalize'
+  /** render: codificando; resize: 2ª passada para caber no tamanho-alvo; finalize: remux faststart. */
+  stage: 'render' | 'resize' | 'finalize'
   frame: number
   total: number
-  /** 0–100 (a etapa de faststart conta como os últimos 2 %). */
+  /** 0–100 da passada atual (o remux ocupa os últimos 2 %). */
   percent: number
-  /** Velocidade em × tempo real (null no início). */
+  /** Velocidade em × tempo real, medida a partir do 1º quadro codificado (null antes disso). */
   speed: number | null
-  /** Segundos restantes estimados (null no início). */
+  /** Segundos restantes estimados (null antes do 1º quadro codificado). */
   etaS: number | null
 }
 
@@ -46,6 +52,10 @@ export interface EditorExportResult {
   hardware: HwPref
   /** Encoder de hardware falhou e a exportação foi refeita em software. */
   fellBackToSoftware: boolean
+  /** Passadas de codificação (2 = refeita para caber no tamanho-alvo). */
+  passes: number
+  /** Avisos para a tela de concluído (mídia de áudio que falhou, alvo de tamanho não atingido). */
+  warnings: string[]
 }
 
 export class EditorExportCancelled extends Error {
@@ -56,10 +66,13 @@ export class EditorExportCancelled extends Error {
 }
 
 class AttemptError extends Error {
-  constructor(message: string, readonly beforeFirstPacket: boolean) {
+  constructor(message: string, readonly retryInSoftware: boolean) {
     super(message)
   }
 }
+
+const MiB = 1024 * 1024
+const formatMB = (b: number): string => `${(b / MiB).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} MB`
 
 let running = false
 
@@ -68,44 +81,95 @@ export function editorExportRunning(): boolean {
   return running
 }
 
-export async function runEditorExport(req: EditorExportRequest, opts: { onProgress?: (p: EditorExportProgress) => void; signal?: AbortSignal } = {}): Promise<EditorExportResult> {
+type OnProgress = (p: EditorExportProgress) => void
+
+export async function runEditorExport(req: EditorExportRequest, opts: { onProgress?: OnProgress; signal?: AbortSignal } = {}): Promise<EditorExportResult> {
   if (running) throw new Error('Já existe uma exportação em andamento')
   running = true
   const api = window.api
   const signal = opts.signal ?? new AbortController().signal
-  let jobId: string | null = null
+  const durationUs = req.toUs - req.fromUs
   try {
+    let videoBitrate = req.videoBitrate
+    let hw: HwPref = 'prefer-hardware'
     let fellBack = false
-    for (const hw of ['prefer-hardware', 'prefer-software'] as const) {
-      if (signal.aborted) throw new EditorExportCancelled()
-      jobId = (await api.editorExport.open(req.outputDir, req.fileName)).jobId
+    const warnings = new Set<string>()
+    for (let pass = 1; ; pass++) {
+      const stage = pass === 1 ? 'render' : 'resize'
+      const enc = await encode({ ...req, videoBitrate }, hw, stage, signal, opts.onProgress)
+      hw = enc.hardware
+      fellBack ||= enc.fellBack
+      for (const w of enc.warnings) warnings.add(w)
+      // remux: progresso real do ffmpeg nos últimos 2 %
+      const off = api.editorExport.onFinalizeProgress((p) => {
+        if (p.jobId === enc.jobId) opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98 + 2 * p.fraction, speed: null, etaS: null })
+      })
+      let out: Awaited<ReturnType<typeof api.editorExport.finalize>>
       try {
-        const done = await attempt(req, jobId, hw, signal, opts.onProgress)
-        opts.onProgress?.({ stage: 'finalize', frame: done.total, total: done.total, percent: 98, speed: null, etaS: null })
-        const id = jobId
-        jobId = null // finalize apaga o .part mesmo se falhar
-        const out = await api.editorExport.finalize(id)
-        opts.onProgress?.({ stage: 'finalize', frame: done.total, total: done.total, percent: 100, speed: null, etaS: null })
-        return { ...out, videoCodec: done.videoCodec, audioCodec: done.audioCodec, hardware: hw, fellBackToSoftware: fellBack }
-      } catch (e) {
-        if (jobId) await api.editorExport.cancel(jobId).catch(() => {})
-        jobId = null
-        if (e instanceof EditorExportCancelled || signal.aborted) throw new EditorExportCancelled()
-        if (e instanceof AttemptError && e.beforeFirstPacket && hw === 'prefer-hardware') {
+        opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98, speed: null, etaS: null })
+        const pending = api.editorExport.finalize(enc.jobId, { durationUs, maxBytes: pass === 1 ? req.targetBytes : undefined })
+        // cancelar durante o remux: o main interrompe o ffmpeg e apaga o parcial e a saída
+        const onAbort = (): void => void api.editorExport.cancel(enc.jobId).catch(() => {})
+        signal.addEventListener('abort', onAbort)
+        try {
+          out = await pending
+        } catch (e) {
+          if (signal.aborted) throw new EditorExportCancelled()
+          throw e
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
+      } finally {
+        off()
+      }
+      if (out.oversize && req.targetBytes && pass === 1) {
+        videoBitrate = resizeBitrate(videoBitrate, req.targetBytes, out.size)
+        console.warn(`exportação: ${out.size} bytes > alvo ${req.targetBytes}; refazendo a ${videoBitrate} bps`)
+        continue
+      }
+      if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}. Ele pode não ser aceito pelo WhatsApp.`)
+      opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 100, speed: null, etaS: null })
+      return { path: out.path, size: out.size, videoCodec: enc.videoCodec, audioCodec: enc.audioCodec, hardware: hw, fellBackToSoftware: fellBack, passes: pass, warnings: [...warnings] }
+    }
+  } finally {
+    running = false
+  }
+}
+
+interface Encoded {
+  jobId: string
+  total: number
+  videoCodec: string
+  audioCodec: 'aac' | 'opus' | null
+  hardware: HwPref
+  fellBack: boolean
+  warnings: string[]
+}
+
+/** Codifica para um .part novo; falha do codificador de hardware antes do 1º pacote → refaz em software. */
+async function encode(req: EditorExportRequest, hw: HwPref, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<Encoded> {
+  const api = window.api
+  let fellBack = false
+  for (;;) {
+    if (signal.aborted) throw new EditorExportCancelled()
+    const { jobId } = await api.editorExport.open(req.outputDir, req.fileName, { estimateBytes: req.estimateBytes })
+    try {
+      const done = await attempt(req, jobId, hw, stage, signal, onProgress)
+      return { jobId, ...done, hardware: hw, fellBack }
+    } catch (e) {
+      await api.editorExport.cancel(jobId).catch(() => {})
+      if (e instanceof EditorExportCancelled || signal.aborted) throw new EditorExportCancelled()
+      if (e instanceof AttemptError && e.retryInSoftware) {
+        if (hw === 'prefer-hardware') {
           console.warn(`exportação: encoder de hardware falhou (${e.message}); tentando em software`)
+          hw = 'prefer-software'
           fellBack = true
           continue
         }
-        if (e instanceof AttemptError && e.beforeFirstPacket) {
-          throw new Error(`Não foi possível codificar o vídeo neste computador (${e.message}). Tente o preset WhatsApp (720p) ou atualize o driver de vídeo.`)
-        }
-        throw e
+        throw new Error(`Não foi possível codificar o vídeo neste computador (${e.message}). Tente o preset WhatsApp (720p) ou atualize o driver de vídeo.`)
       }
+      throw e
     }
-    throw new Error('Não foi possível codificar o vídeo neste computador.')
-  } finally {
-    if (jobId) await api.editorExport.cancel(jobId).catch(() => {})
-    running = false
   }
 }
 
@@ -113,17 +177,23 @@ interface AttemptDone {
   total: number
   videoCodec: string
   audioCodec: 'aac' | 'opus' | null
+  warnings: string[]
 }
 
 /** Uma tentativa completa (workers próprios, descartados no fim). */
-function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, signal: AbortSignal, onProgress?: (p: EditorExportProgress) => void): Promise<AttemptDone> {
+function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<AttemptDone> {
   const api = window.api
   const hasAudio = planAudio(req.project).length > 0
   const urls = mediaUrlsFor(req.project, 'export')
   const render = new RenderClient(new OffscreenCanvas(req.width, req.height), { width: req.width, height: req.height, dpr: 1 })
   const audio = hasAudio ? new AudioClient() : null
-  const audioWarnings: string[] = []
-  audio?.onError((m) => audioWarnings.push(m))
+  // falhas de mídia de áudio (uma por asset): viram avisos no resultado (o trecho sai em silêncio)
+  const audioWarnings = new Set<string>()
+  audio?.onError((message, assetId) => {
+    if (!assetId) return
+    const name = req.project.assets.find((a) => a.id === assetId)?.name ?? assetId
+    audioWarnings.add(`Áudio de “${name}” não pôde ser lido e saiu em silêncio (${message}).`)
+  })
   render.setProject(req.project, urls, false)
   audio?.setProject(req.project, urls, false)
   const channel = audio ? new MessageChannel() : null
@@ -144,14 +214,16 @@ function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, signal: Ab
   return new Promise<AttemptDone>((resolve, reject) => {
     let writes: Promise<void> = Promise.resolve()
     let settled = false
-    const t0 = performance.now()
     let total = 0
+    // velocidade/ETA medidas a partir do 1º quadro codificado (sem a abertura de decoders/encoder)
+    let first: { t: number; frame: number } | null = null
 
     const finish = (outcome: { ok: true; value: AttemptDone } | { ok: false; error: Error }): void => {
       if (settled) return
       settled = true
       signal.removeEventListener('abort', onAbort)
       off()
+      offFatal?.()
       // espera as gravações em curso antes de liberar o arquivo (finalize/cancel)
       void writes
         .catch(() => {})
@@ -167,6 +239,10 @@ function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, signal: Ab
       finish({ ok: false, error: new EditorExportCancelled() })
     }
     signal.addEventListener('abort', onAbort)
+    const offFatal = audio?.onFatal((message) => {
+      render.exportCancel(jobId)
+      finish({ ok: false, error: new AttemptError(`O processamento de áudio parou (${message}).`, false) })
+    })
 
     const off = render.onMessage((m: RenderOut) => {
       if (settled) return
@@ -187,34 +263,34 @@ function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, signal: Ab
         case 'exportProgress': {
           if (m.jobId !== jobId) return
           total = m.total
-          const elapsedS = (performance.now() - t0) / 1000
-          const doneS = m.frame / req.fps
-          const speed = elapsedS > 0.5 ? doneS / elapsedS : null
-          const fpsDone = elapsedS > 0 ? m.frame / elapsedS : 0
+          const now = performance.now()
+          if (!first) first = { t: now, frame: m.frame }
+          const elapsedS = (now - first.t) / 1000
+          const frames = m.frame - first.frame
+          const fpsDone = elapsedS > 0.3 && frames > 0 ? frames / elapsedS : null
           onProgress?.({
-            stage: 'render',
+            stage,
             frame: m.frame,
             total: m.total,
             percent: Math.min(98, (m.frame / m.total) * 98),
-            speed,
-            etaS: speed && fpsDone > 0 ? Math.max(0, (m.total - m.frame) / fpsDone) : null
+            speed: fpsDone ? fpsDone / req.fps : null,
+            etaS: fpsDone ? Math.max(0, (m.total - m.frame) / fpsDone) : null
           })
           break
         }
         case 'exportDone':
           if (m.jobId !== jobId) return
-          if (audioWarnings.length) console.warn(`exportação: avisos de áudio: ${audioWarnings.join(' | ')}`)
           void writes.then(
-            () => finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec } }),
+            () => finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, warnings: [...audioWarnings] } }),
             () => {}
           )
           break
         case 'exportError':
           if (m.jobId !== jobId) return
-          finish({ ok: false, error: m.cancelled ? new EditorExportCancelled() : new AttemptError(m.message, m.beforeFirstPacket) })
+          finish({ ok: false, error: m.cancelled ? new EditorExportCancelled() : new AttemptError(m.message, m.encoderError && m.beforeFirstPacket) })
           break
         case 'error':
-          if (m.fatal) finish({ ok: false, error: new AttemptError(`render: ${m.message}`, false) })
+          if (m.fatal) finish({ ok: false, error: new AttemptError(`O render da exportação parou (${m.message}).`, false) })
           break
       }
     })

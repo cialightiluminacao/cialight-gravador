@@ -236,16 +236,19 @@ export interface IpcApi {
     onFlushRequest(cb: () => Promise<void>): Unsubscribe
   }
   /**
-   * Arquivo da exportação do editor: `open` cria `<pasta>/<nome>.mp4.part` (nome livre: " (2)", " (3)"…),
-   * `write` grava bytes por posição, `close` fecha, `finalize` fecha + remuxa com faststart no nome final
-   * (apaga o .part) e `cancel` apaga o parcial. Uma exportação por vez.
+   * Arquivo da exportação do editor: `open` cria `<pasta>/<nome>.mp4.part` (nome livre: " (2)", " (3)"…;
+   * com `estimateBytes`, exige estimativa × 2,1 livres), `write` grava bytes por posição, `close` fecha,
+   * `finalize` fecha + remuxa com faststart no nome final (apaga o .part; com `maxBytes`, saída maior é
+   * apagada e volta `oversize`) e `cancel` apaga o parcial (interrompendo o remux, se houver). Uma por vez.
    */
   editorExport: {
-    open(outputDir: string, fileName: string): Promise<{ jobId: string; path: string }>
+    open(outputDir: string, fileName: string, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
     write(jobId: string, data: Uint8Array, position: number): Promise<void>
     close(jobId: string): Promise<void>
-    finalize(jobId: string): Promise<{ path: string; size: number }>
+    finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean }>
     cancel(jobId: string): Promise<void>
+    /** Progresso do remux (0–1) do job em finalização. */
+    onFinalizeProgress(cb: (p: { jobId: string; fraction: number }) => void): Unsubscribe
   }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
@@ -349,7 +352,8 @@ export const IPC = {
     write: 'editorExport:write',
     close: 'editorExport:close',
     finalize: 'editorExport:finalize',
-    cancel: 'editorExport:cancel'
+    cancel: 'editorExport:cancel',
+    finalizeProgress: 'editorExport:finalizeProgress'
   },
   recording: {
     setPhase: 'recording:setPhase',

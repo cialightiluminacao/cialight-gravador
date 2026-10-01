@@ -10,6 +10,7 @@ export class AudioClient {
   private seq = 0
   private readonly pending = new Map<number, (b: AudioBlock | null) => void>()
   private readonly errorListeners = new Set<(message: string, assetId?: string) => void>()
+  private readonly fatalListeners = new Set<(message: string) => void>()
 
   constructor() {
     this.worker = new Worker(new URL('./audio.worker.ts', import.meta.url), { type: 'module' })
@@ -24,6 +25,7 @@ export class AudioClient {
     this.worker.addEventListener('error', (e) => {
       for (const [seq] of this.pending) this.settle(seq, null)
       for (const l of this.errorListeners) l(e.message || 'falha no audio worker')
+      for (const l of this.fatalListeners) l(e.message || 'falha no audio worker')
     })
   }
 
@@ -52,6 +54,12 @@ export class AudioClient {
     this.worker.postMessage({ t: 'port', port } satisfies AudioIn, [port])
   }
 
+  /** O worker caiu (exceção não tratada / falha ao carregar): a exportação não pode esperar por ele. */
+  onFatal(cb: (message: string) => void): () => void {
+    this.fatalListeners.add(cb)
+    return () => this.fatalListeners.delete(cb)
+  }
+
   /** assetId: falha de mídia de um asset (o worker avisa uma vez por asset). */
   onError(cb: (message: string, assetId?: string) => void): () => void {
     this.errorListeners.add(cb)
@@ -62,6 +70,7 @@ export class AudioClient {
     this.send({ t: 'dispose' })
     for (const [seq] of this.pending) this.settle(seq, null)
     this.errorListeners.clear()
+    this.fatalListeners.clear()
     this.worker.terminate()
   }
 

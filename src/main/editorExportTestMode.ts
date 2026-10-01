@@ -13,6 +13,7 @@ import type { SessionStore } from './session/sessionStore'
 import { probeFile, runFfmpeg } from './export/ffmpegRunner'
 import { ffprobePath } from './export/ffmpegPath'
 import { startExportJob } from './export/exportJob'
+import { cachedEncoderProbe } from './export/encoderProbe'
 import { probe } from './media/probe'
 import { assetFromInfo } from './media/ingest'
 import { isFastStart, makeSyntheticSession } from './testFixtures'
@@ -35,14 +36,24 @@ const FRAME_MS = 1000 / FPS
 // fonte marcada como BT.709 (como as gravações do app): sem a marcação, o Chromium e o ffmpeg convertem o
 // YUV para RGB com matrizes diferentes e a comparação de pixels mediria a matriz, não a exportação
 const BT709 = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv']
+// como as gravações de tela da v1 (WebCodecs): BT.601 marcado
+const BT601 = ['-colorspace', 'smpte170m', '-color_primaries', 'smpte170m', '-color_trc', 'smpte170m', '-color_range', 'tv']
+const COLOR_601 = 'p-editor-export-cor-601'
+const COLOR_UNTAGGED = 'p-editor-export-cor-sem-marcacao'
+const COLOR_UNTAGGED_SD = 'p-editor-export-cor-sem-marcacao-sd'
+// tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
+const SMALL_TARGET = 2 * 1024 * 1024
 
-interface ExportOut { path?: string; size?: number; error?: string; fellBackToSoftware?: boolean; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
+interface ExportOut { path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
 interface HarnessReport {
   errors: string[]
   scenario?: ExportOut
   fallback?: ExportOut
   cancel?: { error?: string; cancelled: boolean; afterFrames: number }
   parity?: ExportOut
+  sized?: ExportOut
+  nonEncoder?: ExportOut
+  color?: Record<string, { export: ExportOut; frame: unknown }>
   v1Composed?: { path?: string; error?: string }
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
 }
@@ -63,6 +74,12 @@ const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hi
 async function frameRgb(file: string, tSec: number, out: string, crop?: { x: number; y: number; w: number; h: number }): Promise<Uint8Array> {
   const vf = crop ? ['-vf', `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`] : []
   await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', tSec.toFixed(3), '-i', file, '-frames:v', '1', ...vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', out], { label: 'teste: quadro' })
+  return new Uint8Array(readFileSync(out))
+}
+
+/** Quadro como RGB24 interpretando o YUV com a matriz/faixa dadas (ignora a marcação do arquivo). */
+async function frameRgbAs(file: string, tSec: number, out: string, matrix: 'bt601' | 'bt709', range: 'tv' | 'pc'): Promise<Uint8Array> {
+  await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', tSec.toFixed(3), '-i', file, '-frames:v', '1', '-vf', `scale=in_color_matrix=${matrix}:in_range=${range}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', out], { label: 'teste: quadro' })
   return new Uint8Array(readFileSync(out))
 }
 
@@ -134,6 +151,19 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(PROJECT_ID), { recursive: true, force: true })
   projects.create(project)
 
+  // fontes de cor: BT.601 marcada (como a gravação de tela da v1) e sem marcação nenhuma
+  // (+ uma SD 640×480 sem marcação: o Chromium escolhe a matriz pela resolução)
+  const colorSrc: Record<string, string> = { [COLOR_601]: join(dir, 'cor-601.mp4'), [COLOR_UNTAGGED]: join(dir, 'cor-sem-marcacao.mp4'), [COLOR_UNTAGGED_SD]: join(dir, 'cor-sem-marcacao-sd.mp4') }
+  for (const [id, file] of Object.entries(colorSrc)) {
+    const [cw, ch] = id === COLOR_UNTAGGED_SD ? [640, 480] : [W, H]
+    await gen(['-f', 'lavfi', '-i', `testsrc2=size=${cw}x${ch}:rate=${FPS}`, '-t', '3', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', ...(id === COLOR_601 ? BT601 : []), file], `editor-export: ${id}`)
+    const a: Asset = { ...assetFromInfo(`a_${id}`, file, statSync(file), await probe(file)), status: 'ready' }
+    let cp: Project = { ...createEmptyProject(id, { width: cw, height: ch, fps: FPS, background: '#000000' }), id }
+    cp = addMediaFromAsset(addAsset(cp, a), a.id, 0).project
+    rmSync(projects.dirOf(id), { recursive: true, force: true })
+    projects.create(cp)
+  }
+
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
   const session = await makeSyntheticSession(sessions, SESSION_ID)
@@ -148,7 +178,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD] }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -200,6 +230,43 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   const left = readdirSync(exportsDir)
   check(!left.some((n) => n.endsWith('.part') || n.startsWith('cancelado')), `sem parcial nem arquivo do cancelado (${left.join(', ')})`, failures)
 
+  // ---- erro que não é do codificador ----
+  const ne = r.nonEncoder
+  check(!!ne?.error && ne.error.includes('Intervalo de exportação vazio') && !ne.error.includes('codificar'), `erro fora do codificador mostra a causa real, sem refazer em software (${ne?.error})`, failures)
+  check(!readdirSync(exportsDir).some((n) => n.startsWith('vazio')), 'erro: nenhum arquivo deixado', failures)
+
+  // ---- tamanho-alvo ----
+  const sz = r.sized
+  check(!!sz?.path && existsSync(sz.path) && (sz.passes ?? 0) === 2 && (sz.size ?? Infinity) <= SMALL_TARGET && statSync(sz.path).size <= SMALL_TARGET, `tamanho-alvo de 2 MB: refeito na 2ª passada e ≤ alvo (${sz?.size} bytes, ${sz?.passes} passadas, avisos ${JSON.stringify(sz?.warnings)})`, failures)
+
+  // ---- cor ----
+  const color = r.color ?? {}
+  const c601 = color[COLOR_601]
+  console.log(`cor BT.601: ${JSON.stringify(c601?.frame)}`)
+  if (c601?.export.path && existsSync(c601.export.path)) {
+    const e = await frameRgb(c601.export.path, 1.0, join(dir, 'cor601-saida.rgb'))
+    const f = await frameRgb(colorSrc[COLOR_601], 1.0, join(dir, 'cor601-fonte.rgb'))
+    check(psnr(e, f) > 30, `fonte BT.601 marcada: RGB do quadro exportado ≈ fonte (ffmpeg seguindo as marcações) PSNR ${psnr(e, f).toFixed(1)} dB > 30`, failures)
+  } else check(false, `fonte BT.601 exportada (${c601?.export.error})`, failures)
+  // Sem marcação, cada um adivinha: o ffmpeg (swscale) usa sempre BT.601; o Chromium entrega o VideoFrame como
+  // BT.709 limitado (mesmo em SD — medido abaixo). O compositor relê essas fontes como BT.601 (BT709_TO_BT601),
+  // igual ao ffmpeg que gerou o arquivo e às miniaturas: a saída tem de bater com a leitura padrão do ffmpeg.
+  for (const id of [COLOR_UNTAGGED, COLOR_UNTAGGED_SD]) {
+    const cu = color[id]
+    const cs = (cu?.frame as { colorSpace?: { matrix?: string; fullRange?: boolean } } | undefined)?.colorSpace
+    console.log(`${id}: VideoFrame.colorSpace do Chromium ${JSON.stringify(cs)}`)
+    if (!cu?.export.path || !existsSync(cu.export.path) || !cs?.matrix) {
+      check(false, `${id}: exportado com colorSpace informado (${cu?.export.error ?? JSON.stringify(cu?.frame)})`, failures)
+      continue
+    }
+    const e = await frameRgb(cu.export.path, 1.0, join(dir, `${id}-saida.rgb`))
+    const interp: Record<string, number> = {}
+    for (const m of ['bt601', 'bt709'] as const) for (const rg of ['tv', 'pc'] as const) interp[`${m}/${rg}`] = +psnr(e, await frameRgbAs(colorSrc[id], 1.0, join(dir, `${id}-fonte-${m}-${rg}.rgb`), m, rg)).toFixed(1)
+    const ffDefault = +psnr(e, await frameRgb(colorSrc[id], 1.0, join(dir, `${id}-fonte.rgb`))).toFixed(1)
+    console.log(`${id}: PSNR da saída × fonte em cada interpretação ${JSON.stringify(interp)}; padrão do ffmpeg ${ffDefault} dB`)
+    check(ffDefault > 30, `${id}: saída = fonte lida como o ffmpeg lê (BT.601) apesar do Chromium decodificar como ${cs.matrix}/${cs.fullRange ? 'pc' : 'tv'} (${ffDefault} dB > 30; ${JSON.stringify(interp)})`, failures)
+  }
+
   // ---- preview intocado durante a exportação ----
   const pv = r.previewUntouched
   check(!!pv && !('error' in pv) && pv.before.length > 0 && pv.before.every((v, i) => Math.abs(v - pv.after[i]) <= 2), `preview continua vivo e igual depois da exportação (${JSON.stringify(pv)})`, failures)
@@ -213,10 +280,11 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
       targetSizeMB: null, reels: false, outputDir: exportsDir, fileName: 'paridade-v1', pipOverride: null
     }
     const v1 = await new Promise<{ outputs: string[]; error?: string }>((resolve) => {
+      // encoder do cache (só leitura): sem cache o job dispararia o probe, que grava no settings.json
       startExportJob({ sessionId: session.id, options, composedFile: r.v1Composed!.path! }, sessions, (p) => {
         if (p.stage === 'done') resolve({ outputs: p.outputs ?? [] })
         else if (p.stage === 'error' || p.stage === 'cancelled') resolve({ outputs: [], error: p.error ?? p.stage })
-      })
+      }, { encoder: cachedEncoderProbe()?.preferred ?? 'libx264' })
     })
     v1Out = v1.outputs[0] ?? null
     check(!!v1Out && existsSync(v1Out), `v1 (composição + job ffmpeg, como __qaExport) exportou (${v1Out ?? v1.error})`, failures)

@@ -92,11 +92,12 @@ const api: IpcApi = {
       })
   },
   editorExport: {
-    open: (outputDir, fileName) => ipcRenderer.invoke(IPC.editorExport.open, outputDir, fileName),
+    open: (outputDir, fileName, opts) => ipcRenderer.invoke(IPC.editorExport.open, outputDir, fileName, opts),
     write: (jobId, data, position) => ipcRenderer.invoke(IPC.editorExport.write, jobId, data, position),
     close: (jobId) => ipcRenderer.invoke(IPC.editorExport.close, jobId),
-    finalize: (jobId) => ipcRenderer.invoke(IPC.editorExport.finalize, jobId),
-    cancel: (jobId) => ipcRenderer.invoke(IPC.editorExport.cancel, jobId)
+    finalize: (jobId, opts) => ipcRenderer.invoke(IPC.editorExport.finalize, jobId, opts),
+    cancel: (jobId) => ipcRenderer.invoke(IPC.editorExport.cancel, jobId),
+    onFinalizeProgress: (cb) => on(IPC.editorExport.finalizeProgress, cb)
   },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),

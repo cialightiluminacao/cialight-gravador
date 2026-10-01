@@ -71,6 +71,13 @@ export function parseSession(raw: unknown): Session {
   return SessionSchema.parse(raw) as Session
 }
 
+const encoderProbeSchema = z.object({
+  gpuKey: z.string(),
+  probedAt: z.string(),
+  available: z.array(z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264'])),
+  preferred: z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264'])
+})
+
 /** Schema "frouxo": cada campo é opcional e cai no default; campos desconhecidos são ignorados. */
 const settingsInputSchema = z.looseObject({
   version: z.number().optional(),
@@ -110,13 +117,14 @@ const settingsInputSchema = z.looseObject({
     .object({
       gpuKey: z.string(),
       probedAt: z.string(),
-      available: z.array(z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264'])),
-      preferred: z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264'])
+      available: z.array(z.enum(['h264_nvenc', 'h264_qsv', 'h264_mf', 'libx264'])),
+      preferred: z.enum(['h264_nvenc', 'h264_qsv', 'h264_mf', 'libx264'])
     })
     .nullable()
     .optional()
-    // cache de probe ilegível (ex.: encoder desconhecido) só refaz o probe; não derruba as outras configurações
+    // cache de probe ilegível só refaz o probe; não derruba as outras configurações
     .catch(null),
+  encoderProbeV2: encoderProbeSchema.nullable().optional().catch(null),
   lastSource: z.object({ kind: z.enum(['screen', 'window']), id: z.string(), name: z.string() }).nullable().optional(),
   barPositions: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).optional()
 })
@@ -147,6 +155,7 @@ export function parseSettings(raw: unknown): Settings {
     annotations: { ...d.annotations, ...(s.annotations ?? {}) },
     rawRetentionDays: s.rawRetentionDays === undefined ? d.rawRetentionDays : s.rawRetentionDays,
     lastEncoderProbe: s.lastEncoderProbe ?? null,
+    encoderProbeV2: s.encoderProbeV2 ?? null,
     lastSource: s.lastSource ?? null,
     barPositions: s.barPositions ?? {}
   }

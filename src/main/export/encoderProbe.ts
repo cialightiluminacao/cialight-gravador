@@ -1,13 +1,15 @@
 import { app } from 'electron'
 import { execFile } from 'child_process'
 import type { EncoderProbe, HwEncoder } from '@shared/types'
+import { usableCachedProbe, v1ProbeProjection } from '@shared/encoderCache'
 import { ffmpegPath } from './ffmpegPath'
 import { getSettings, setSettings } from '../settings/settingsStore'
 import { log } from '../log'
 
 // Detecta encoders H.264 de hardware por encode-teste real (a listagem
 // `-encoders` só diz o que foi compilado). Ordem por vendor da GPU ativa.
-// Cache em settings.lastEncoderProbe por chave de GPU/driver.
+// Cache em settings.encoderProbeV2 por chave de GPU/driver; settings.lastEncoderProbe recebe só a projeção
+// sem AMF, que a v1.0.1 instalada (mesmo settings.json, schema sem h264_amf) consegue ler.
 
 export const PROBE_CANDIDATES: HwEncoder[] = ['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf']
 
@@ -15,9 +17,11 @@ export function gpuVendorOrder(gpus: { vendor: string }[]): HwEncoder[] {
   const v = gpus.map((g) => g.vendor.toLowerCase()).join(' ')
   const hasNvidia = /nvidia|0x10de/.test(v)
   const hasIntel = /intel|0x8086/.test(v)
-  // AMF (AMD) é testado logo depois do QSV em todas as ordens
+  const hasAmd = /\bamd\b|advanced micro|radeon|\bati\b|0x1002/.test(v)
+  // AMF (AMD) entra em todas as ordens: primeiro na AMD, logo depois do QSV nas outras
   if (hasNvidia) return ['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264']
   if (hasIntel) return ['h264_qsv', 'h264_amf', 'h264_mf', 'h264_nvenc', 'libx264']
+  if (hasAmd) return ['h264_amf', 'h264_mf', 'h264_qsv', 'h264_nvenc', 'libx264']
   return ['h264_mf', 'h264_qsv', 'h264_amf', 'h264_nvenc', 'libx264']
 }
 
@@ -67,10 +71,15 @@ export function testEncoder(enc: HwEncoder, timeoutMs = 20000): Promise<boolean>
   })
 }
 
+/** Probe em cache (encoderProbeV2), sem disparar o probe. */
+export function cachedEncoderProbe(): EncoderProbe | null {
+  return usableCachedProbe(getSettings(), null)
+}
+
 export async function probeEncoders(force = false): Promise<EncoderProbe> {
   const { vendors, key } = await gpuInfo()
-  const cached = getSettings().lastEncoderProbe
-  if (!force && cached && cached.gpuKey === key && cached.available.length > 0) return cached
+  const cached = usableCachedProbe(getSettings(), key)
+  if (!force && cached) return cached
   const order = gpuVendorOrder(vendors)
   const available: HwEncoder[] = []
   for (const enc of order) {
@@ -83,7 +92,7 @@ export async function probeEncoders(force = false): Promise<EncoderProbe> {
   }
   const preferred = order.find((e) => available.includes(e)) ?? 'libx264'
   const probe: EncoderProbe = { gpuKey: key, probedAt: new Date().toISOString(), available, preferred }
-  setSettings({ lastEncoderProbe: probe })
+  setSettings({ encoderProbeV2: probe, lastEncoderProbe: v1ProbeProjection(probe) })
   log.info(`probe de encoders: ${JSON.stringify(probe)}`)
   return probe
 }

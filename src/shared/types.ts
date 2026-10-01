@@ -173,7 +173,13 @@ export interface Settings {
   clickHighlight: boolean
   annotations: { color: string; width: number; autoFadeSec: number | null }
   rawRetentionDays: number | null
+  /**
+   * Projeção compatível com a v1.0.1 instalada (mesmo settings.json): sem h264_amf. O build novo não confia
+   * neste cache (ver encoderProbeV2); só o mantém para o app antigo continuar lendo o arquivo.
+   */
   lastEncoderProbe: EncoderProbe | null
+  /** Probe completo (inclui h264_amf). Ausente → o próximo uso refaz o probe uma vez. */
+  encoderProbeV2: EncoderProbe | null
   lastSource: { kind: SourceKind; id: string; name: string } | null
   barPositions: Record<string, { x: number; y: number }>
 }

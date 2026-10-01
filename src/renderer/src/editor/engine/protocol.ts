@@ -45,7 +45,8 @@ export type RenderOut =
   // bytes do MP4 a gravar em `position` (o cliente responde chunkAck depois de gravar: contrapressão)
   | { t: 'exportChunk'; jobId: string; seq: number; data: Uint8Array; position: number }
   | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: HwPref }
-  // beforeFirstPacket: o encoder de vídeo falhou antes de produzir qualquer pacote (dá para tentar outro modo)
-  | { t: 'exportError'; jobId: string; message: string; cancelled: boolean; beforeFirstPacket: boolean }
+  // encoderError: a falha veio do codificador; beforeFirstPacket: antes de qualquer pacote de vídeo
+  // (só as duas juntas justificam tentar outro modo de hardware)
+  | { t: 'exportError'; jobId: string; message: string; cancelled: boolean; beforeFirstPacket: boolean; encoderError: boolean }
   // testes: RGBA linha a linha de cima para baixo
   | { t: 'pixels'; id: number; data: Uint8Array }

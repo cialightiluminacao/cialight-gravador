@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, TriangleAlert, Upload, X } from 'lucide-react'
 import { sanitizeFileName } from '@shared/filenames'
 import { projectDurationUs } from '@shared/editor/ops'
+import { planAudio } from '@shared/editor/audioPlan'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, Progress, Segmented } from '@/components/ui/primitives'
 import { PathField } from '@/components/ui/PathField'
@@ -11,7 +12,7 @@ import { cn } from '@/lib/cn'
 import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
 import { useEditorStore } from '../state/editorStore'
 import { EditorExportCancelled, editorExportRunning, runEditorExport, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
-import { AUDIO_KBPS, EDITOR_EXPORT_PRESETS, estimateBytes, exportRange, hasInOut, outputSize, presetVideoBitrate, type EditorExportPresetId } from '../export/exportPlan'
+import { AUDIO_KBPS, EDITOR_EXPORT_PRESETS, estimateBytes, exportRange, hasInOut, outputSize, presetVideoBitrate, WHATSAPP_TARGET_MB, type EditorExportPresetId } from '../export/exportPlan'
 
 // Diálogo de exportação do editor: preset, intervalo (tudo / I–O), nome e pasta, estimativa de tamanho;
 // depois progresso (%, velocidade × tempo real, tempo restante, cancelar) e o resultado (abrir pasta /
@@ -58,7 +59,9 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
   const size = outputSize(preset, project.canvas)
   const fps = project.canvas.fps
   const videoBps = presetVideoBitrate(preset, fps, durationUs)
-  const estimate = estimateBytes(videoBps, AUDIO_KBPS * 1000, durationUs)
+  const hasAudio = planAudio(project).length > 0
+  const audioBps = hasAudio ? AUDIO_KBPS * 1000 : 0
+  const estimate = estimateBytes(videoBps, audioBps, durationUs)
   // QA (só fora do pacote): window.__qaEditor.exportDir troca a pasta padrão (o QA nunca grava na pasta real)
   const qaDir = appInfo?.isPackaged === false ? window.__qaEditor?.exportDir : undefined
   const defaultFolder = qaDir ?? settings.outputDir ?? appInfo?.paths.output ?? null
@@ -94,7 +97,9 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
           videoBitrate: videoBps,
           audioBitrate: AUDIO_KBPS * 1000,
           outputDir: targetFolder,
-          fileName: name
+          fileName: name,
+          estimateBytes: estimate,
+          ...(preset === 'whatsapp' ? { targetBytes: WHATSAPP_TARGET_MB * 1024 * 1024 } : {})
         },
         { signal: ac.signal, onProgress: (progress) => setPhase((p) => (p.kind === 'running' ? { ...p, progress } : p)) }
       )
@@ -172,7 +177,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
             <div className="rounded-xl border border-border bg-bg-2/60 px-3 py-2.5 text-[12px] text-fg-2">
               {size ? (
                 <span>
-                  {size.width}×{size.height} · {fps} fps · {formatClock(durationUs / 1000, false)} · H.264 {formatMbps(videoBps)} + AAC {AUDIO_KBPS} kbps ·{' '}
+                  {size.width}×{size.height} · {fps} fps · {formatClock(durationUs / 1000, false)} · H.264 {formatMbps(videoBps)}
+                  {hasAudio ? ` + AAC ${AUDIO_KBPS} kbps` : ' · sem áudio'} ·{' '}
                   <span className="font-semibold text-fg">≈ {formatBytes(estimate)}</span>
                 </span>
               ) : null}
@@ -210,9 +216,20 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
                 <span className="block text-[11px] text-muted">
                   MP4 · {formatBytes(phase.result.size)}
                   {phase.result.fellBackToSoftware ? ' · codificado em software (o encoder de hardware falhou)' : ''}
+                  {phase.result.passes > 1 ? ' · refeito para caber no tamanho-alvo' : ''}
                 </span>
               </span>
             </div>
+            {phase.result.warnings.length ? (
+              <ul className="flex flex-col gap-1 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] text-warn">
+                {phase.result.warnings.map((w) => (
+                  <li key={w} className="flex items-start gap-1.5">
+                    <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 break-words">{w}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 Fechar
@@ -251,12 +268,21 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
 function RunningView({ progress, cancelling, onCancel }: { progress: EditorExportProgress | null; cancelling: boolean; onCancel: () => void }): React.JSX.Element {
   const pct = progress?.percent ?? 0
   const finalizing = progress?.stage === 'finalize'
+  const resizing = progress?.stage === 'resize'
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-baseline justify-between gap-3">
         <span className="flex items-center gap-2 text-[13px] text-fg-2">
           <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-          {cancelling ? 'Cancelando…' : finalizing ? 'Finalizando o arquivo…' : progress ? `Quadro ${progress.frame} de ${progress.total}` : 'Preparando…'}
+          {cancelling
+            ? 'Cancelando…'
+            : finalizing
+              ? 'Finalizando o arquivo…'
+              : resizing
+                ? `Ajustando tamanho… quadro ${progress.frame} de ${progress.total}`
+                : progress
+                  ? `Quadro ${progress.frame} de ${progress.total}`
+                  : 'Preparando…'}
         </span>
         <span className="font-mono text-[13px] font-semibold tabular-nums text-fg">{Math.floor(pct)}%</span>
       </div>
@@ -266,7 +292,7 @@ function RunningView({ progress, cancelling, onCancel }: { progress: EditorExpor
         <span>{progress?.etaS != null && !finalizing ? `faltam ${formatClock(progress.etaS * 1000, false)}` : ''}</span>
       </div>
       <div className="flex justify-end">
-        <Button variant="secondary" onClick={onCancel} disabled={cancelling || finalizing}>
+        <Button variant="secondary" onClick={onCancel} disabled={cancelling}>
           <X className="h-4 w-4" /> Cancelar
         </Button>
       </div>

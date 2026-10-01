@@ -13,8 +13,7 @@ import { ProjectStore } from './project/projectStore'
 import { probe, type MediaInfo } from './media/probe'
 import { needsProxy } from './media/proxyPolicy'
 import { IngestQueue, assetFromInfo, type IngestJob } from './media/ingest'
-import { getSettings } from './settings/settingsStore'
-import { probeEncoders } from './export/encoderProbe'
+import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { startExportJob } from './export/exportJob'
 import { buildReviewAssets } from './export/reviewAssets'
 import { preloadPath, loadPage } from './windows/recorderWindow'
@@ -230,7 +229,7 @@ async function testIngest(): Promise<number> {
   }
   project.assets = [mk('a_long', src, iSrc), mk('a_rot', rotated, iRot), mk('a_mp3', mp3, iMp3), mk('a_png', png, iPng)]
   projects.create(project)
-  const cached = getSettings().lastEncoderProbe
+  const cached = cachedEncoderProbe()
   let encoder: HwEncoder = cached?.preferred ?? 'libx264'
   const queue = new IngestQueue({
     projectFile: (pid, rel) => projects.filePath(pid, rel),

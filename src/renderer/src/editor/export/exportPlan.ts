@@ -107,3 +107,9 @@ export function hasInOut(projectDurUs: Us, inUs: Us | null, outUs: Us | null): b
   const r = exportRange(projectDurUs, inUs, outUs, 'inout')
   return r.fromUs !== 0 || r.toUs !== projectDurUs
 }
+
+/** 2ª passada do tamanho-alvo: bitrate de vídeo × (alvo/obtido) × 0,97 (com o mesmo piso do cálculo do alvo). */
+export function resizeBitrate(videoBps: number, targetBytes: number, actualBytes: number): number {
+  if (!(actualBytes > 0)) return videoBps
+  return Math.max(MIN_TARGET_BPS, Math.floor(videoBps * (targetBytes / actualBytes) * 0.97))
+}

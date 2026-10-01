@@ -30,7 +30,7 @@ export interface IngestDeps {
   /** Caminho absoluto de um arquivo da pasta do projeto (ProjectStore.filePath). */
   projectFile: (projectId: string, rel: string) => string
   resolveInput: (projectId: string, asset: Asset) => IngestInput
-  /** Encoder H.264 para proxy/intermediário (lastEncoderProbe; nunca dispara o probe aqui). */
+  /** Encoder H.264 para proxy/intermediário (encoderProbeV2 em cache; nunca dispara o probe aqui). */
   encoder: () => HwEncoder
   log?: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void }
 }

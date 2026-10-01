@@ -316,6 +316,26 @@ class Cancelled extends Error {
   }
 }
 
+/** Falha do codificador (start/add/finalize do Output): só ela justifica tentar outro modo de hardware. */
+class EncoderError extends Error {
+  constructor(cause: unknown) {
+    super(errMsg(cause))
+    this.name = 'EncoderError'
+  }
+}
+
+/** Chamada ao encoder: falha vira EncoderError (cancelamento continua Cancelled). */
+async function encoderCall<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (e) {
+    throw e instanceof Cancelled || e instanceof EncoderError ? e : new EncoderError(e)
+  }
+}
+
+// Bloco de áudio que não chega nesse tempo: o audio worker morreu ou travou → erro claro (sem pendurar).
+const AUDIO_BLOCK_TIMEOUT_MS = 20_000
+
 /** Fila de chunks do MP4 com contrapressão: com muitos em voo, espera o ack do cliente (gravou no disco). */
 class ChunkOutbox {
   private seq = 0
@@ -385,7 +405,7 @@ class AudioFeed {
     while (this.next < this.blocks && this.next * AUDIO_BLOCK_US < untilRelUs) {
       for (let k = this.next; k < Math.min(this.blocks, this.next + AUDIO_AHEAD); k++) if (!this.pending.has(k)) this.request(k)
       const k = this.next
-      const pcm = await this.pending.get(k)!
+      const pcm = await withTimeout(this.pending.get(k)!, AUDIO_BLOCK_TIMEOUT_MS, 'O áudio parou de responder durante a exportação (mixagem do bloco em ' + ((k * AUDIO_BLOCK_US) / 1e6).toFixed(1) + ' s).')
       this.pending.delete(k)
       const sample = new AudioSample({ data: pcm, format: 'f32', numberOfChannels: AUDIO_CHANNELS, sampleRate: SR, timestamp: (k * AUDIO_BLOCK_FRAMES) / SR })
       try {
@@ -411,9 +431,14 @@ class AudioFeed {
   }
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([p, new Promise<T>((_, reject) => (timer = setTimeout(() => reject(new Error(message)), ms)))]).finally(() => clearTimeout(timer))
+}
+
 function startExport(job: ExportJobSpec, audioPort: MessagePort | null): void {
   if (exporting) {
-    post({ t: 'exportError', jobId: job.jobId, message: 'Já existe uma exportação em andamento neste worker', cancelled: false, beforeFirstPacket: false })
+    post({ t: 'exportError', jobId: job.jobId, message: 'Já existe uma exportação em andamento neste worker', cancelled: false, beforeFirstPacket: false, encoderError: false })
     return
   }
   const abort = new AbortController()
@@ -425,7 +450,7 @@ function startExport(job: ExportJobSpec, audioPort: MessagePort | null): void {
     .then((done) => post({ t: 'exportDone', jobId: job.jobId, lastSeq: outbox.lastSeq, ...done }))
     .catch((err: unknown) => {
       const cancelled = abort.signal.aborted || err instanceof Cancelled
-      post({ t: 'exportError', jobId: job.jobId, message: cancelled ? 'cancelado' : errMsg(err), cancelled, beforeFirstPacket: !cancelled && state.packets === 0 })
+      post({ t: 'exportError', jobId: job.jobId, message: cancelled ? 'cancelado' : errMsg(err), cancelled, beforeFirstPacket: !cancelled && state.packets === 0, encoderError: err instanceof EncoderError })
     })
     .finally(() => {
       if (exporting === me) exporting = null
@@ -480,8 +505,8 @@ async function runExport(
   const feed = audio && audioPort ? new AudioFeed(audioPort, job.fromUs, durationUs, signal) : null
 
   try {
-    await output.start()
-    if (job.simulateHwFailure && job.video.hw === 'prefer-hardware') throw new Error('falha simulada do encoder de hardware')
+    await encoderCall(() => output.start())
+    if (job.simulateHwFailure && job.video.hw === 'prefer-hardware') throw new EncoderError('falha simulada do encoder de hardware')
     const frameDur = 1 / job.fps
     let lastReport = 0
     for (let n = 0; n < total; n++) {
@@ -493,7 +518,7 @@ async function runExport(
       // VideoSample(canvas) copia o quadro já desenhado (mesma task do draw: nada o altera no meio)
       const sample = new VideoSample(canvas, { timestamp: relUs / 1e6, duration: frameDur })
       try {
-        await video.add(sample, n === 0 ? { keyFrame: true } : undefined)
+        await encoderCall(() => video.add(sample, n === 0 ? { keyFrame: true } : undefined))
       } finally {
         sample.close()
       }
@@ -506,7 +531,7 @@ async function runExport(
     }
     if (feed) await feed.feed(audio!, Infinity)
     if (signal.aborted) throw new Cancelled()
-    await output.finalize()
+    await encoderCall(() => output.finalize())
     return { videoCodec, audioCodec, hardware: job.video.hw }
   } catch (err) {
     if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {})

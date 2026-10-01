@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { estimateBytes, exportRange, frameCount, outputSize, presetVideoBitrate, targetBitrate, WHATSAPP_MAX_BPS } from './exportPlan'
+import { estimateBytes, exportRange, frameCount, outputSize, presetVideoBitrate, resizeBitrate, targetBitrate, WHATSAPP_MAX_BPS } from './exportPlan'
 
 const MiB = 1024 * 1024
 
@@ -78,5 +78,13 @@ describe('exportRange', () => {
     expect(exportRange(9_000_000, 1_000_000, null, 'inout')).toEqual({ fromUs: 1_000_000, toUs: 9_000_000 })
     expect(exportRange(9_000_000, null, 4_000_000, 'inout')).toEqual({ fromUs: 0, toUs: 4_000_000 })
     expect(exportRange(9_000_000, 5_000_000, 4_000_000, 'inout')).toEqual({ fromUs: 0, toUs: 9_000_000 })
+  })
+})
+
+describe('resizeBitrate', () => {
+  it('2ª passada do tamanho-alvo: bitrate × (alvo/obtido) × 0,97, com piso', () => {
+    expect(resizeBitrate(8_000_000, 64 * MiB, 80 * MiB)).toBe(Math.floor(8_000_000 * (64 / 80) * 0.97))
+    expect(resizeBitrate(8_000_000, 64 * MiB, 80 * MiB)).toBe(6_208_000)
+    expect(resizeBitrate(200_000, 1, 1e9)).toBe(100_000)
   })
 })
