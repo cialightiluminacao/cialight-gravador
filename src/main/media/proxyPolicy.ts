@@ -69,6 +69,11 @@ function videoCodecArgs(encoder: HwEncoder, quality: number, gop: number, speed:
   }
 }
 
+/** Bloco de vídeo do proxy e do intermediário a 30 fps (validação do probe de encoders: mesmos argumentos). */
+export function ingestVideoCodecArgs(encoder: HwEncoder, kind: 'proxy' | 'intermediate'): string[] {
+  return kind === 'proxy' ? videoCodecArgs(encoder, encoder === 'libx264' ? 23 : 25, 15, 'fast') : videoCodecArgs(encoder, encoder === 'h264_nvenc' ? 19 : 18, 30, 'quality')
+}
+
 function commonHead(input: string): string[] {
   return ['-hide_banner', '-nostdin', '-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?']
 }

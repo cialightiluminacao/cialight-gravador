@@ -1,13 +1,17 @@
 import { app } from 'electron'
 import { execFile } from 'child_process'
 import type { EncoderProbe, HwEncoder } from '@shared/types'
-import { usableCachedProbe, v1ProbeProjection } from '@shared/encoderCache'
+import { PROBE_ARGS_VERSION, usableCachedProbe, v1ProbeProjection } from '@shared/encoderCache'
+import { PRESET_ORDER, PRESETS } from '@shared/presets/presets'
+import { presetVideoCodecArgs } from '@shared/presets/ffmpegArgs'
+import { ingestVideoCodecArgs } from '../media/proxyPolicy'
 import { ffmpegPath } from './ffmpegPath'
 import { getSettings, setSettings } from '../settings/settingsStore'
 import { log } from '../log'
 
 // Detecta encoders H.264 de hardware por encode-teste real (a listagem
-// `-encoders` só diz o que foi compilado). Ordem por vendor da GPU ativa.
+// `-encoders` só diz o que foi compilado), com os MESMOS argumentos da exportação v1 (cada preset) e do
+// proxy/intermediário do editor: combinação que o driver recusa nunca entra como disponível. Ordem por vendor.
 // Cache em settings.encoderProbeV2 por chave de GPU/driver; settings.lastEncoderProbe recebe só a projeção
 // sem AMF, que a v1.0.1 instalada (mesmo settings.json, schema sem h264_amf) consegue ler.
 
@@ -56,19 +60,46 @@ async function gpuInfo(): Promise<{ vendors: { vendor: string }[]; key: string }
   }
 }
 
-export function testEncoder(enc: HwEncoder, timeoutMs = 20000): Promise<boolean> {
+/**
+ * Encodes-teste (30 quadros 256×256 → null) com o bloco de vídeo real de cada preset reencodado da exportação
+ * v1 e do proxy/intermediário (sem repetição). O vídeo entra em yuv420p como no filtro da exportação.
+ */
+export function validationArgSets(enc: HwEncoder): string[][] {
+  const blocks = [
+    ...PRESET_ORDER.filter((id) => !PRESETS[id].copyVideo).map((id) => presetVideoCodecArgs(PRESETS[id], enc, 30)),
+    ingestVideoCodecArgs(enc, 'proxy'),
+    ingestVideoCodecArgs(enc, 'intermediate')
+  ]
+  const seen = new Set<string>()
+  const out: string[][] = []
+  for (const b of blocks) {
+    const key = b.join(' ')
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(['-hide_banner', '-nostdin', '-f', 'lavfi', '-i', 'testsrc2=s=256x256:r=30', '-frames:v', '30', '-vf', 'format=yuv420p', ...b, '-f', 'null', '-'])
+  }
+  return out
+}
+
+function runOnce(args: string[], timeoutMs: number): Promise<string | null> {
   return new Promise((resolve) => {
-    const args = ['-hide_banner', '-nostdin', '-f', 'lavfi', '-i', 'color=gray:s=256x256:r=30', '-frames:v', '8', '-c:v', enc, '-f', 'null', '-']
     execFile(ffmpegPath(), args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, _stdout, stderr) => {
-      if (err) {
-        log.info(`encoder ${enc}: indisponível (${String(stderr).split('\n').filter(Boolean).slice(-2).join(' | ')})`)
-        resolve(false)
-      } else {
-        log.info(`encoder ${enc}: OK`)
-        resolve(true)
-      }
+      resolve(err ? String(stderr).split('\n').filter(Boolean).slice(-2).join(' | ') || err.message : null)
     })
   })
+}
+
+/** O encoder passa em todos os conjuntos de argumentos reais? Para no primeiro que falhar. */
+export async function testEncoder(enc: HwEncoder, timeoutMs = 20000): Promise<boolean> {
+  for (const args of validationArgSets(enc)) {
+    const err = await runOnce(args, timeoutMs)
+    if (err !== null) {
+      log.info(`encoder ${enc}: indisponível com ${args.slice(args.indexOf('-c:v'), -3).join(' ')} (${err})`)
+      return false
+    }
+  }
+  log.info(`encoder ${enc}: OK (${validationArgSets(enc).length} conjuntos de argumentos)`)
+  return true
 }
 
 /** Probe em cache (encoderProbeV2), sem disparar o probe. */
@@ -91,7 +122,7 @@ export async function probeEncoders(force = false): Promise<EncoderProbe> {
     if (await testEncoder(enc)) available.push(enc)
   }
   const preferred = order.find((e) => available.includes(e)) ?? 'libx264'
-  const probe: EncoderProbe = { gpuKey: key, probedAt: new Date().toISOString(), available, preferred }
+  const probe: EncoderProbe = { gpuKey: key, probedAt: new Date().toISOString(), available, preferred, argsVersion: PROBE_ARGS_VERSION }
   setSettings({ encoderProbeV2: probe, lastEncoderProbe: v1ProbeProjection(probe) })
   log.info(`probe de encoders: ${JSON.stringify(probe)}`)
   return probe

@@ -94,7 +94,7 @@ describe('IngestQueue', () => {
     h.running.heavy = h.running.light = 0
     h.max.heavy = h.max.light = 0
     dir = mkdtempSync(join(tmpdir(), 'cialight-ingest-'))
-    queue = new IngestQueue({ projectFile: (pid, rel) => join(dir, pid, rel), resolveInput: (_p, a) => ({ path: (a.source as { path: string }).path }), encoder: () => 'libx264' })
+    queue = new IngestQueue({ projectFile: (pid, rel) => join(dir, pid, rel), resolveInput: (_p, a) => ({ path: (a.source as { path: string }).path }), encoders: () => ['libx264'] })
     done = []
     queue.on('done', (_pid, assetId, patch) => done.push({ assetId, patch }))
   })

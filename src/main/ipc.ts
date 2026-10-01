@@ -21,6 +21,7 @@ import { setProtection } from './windows/protection'
 import { broadcastCommand, getPhase, setBarState, setPhaseValue } from './recording/state'
 import { applyHotkeys, getHotkeyStatus } from './hotkeys/globalShortcuts'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
+import { encoderFallbackChain } from '@shared/encoderCache'
 import { buildReviewAssets } from './export/reviewAssets'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
@@ -76,7 +77,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     projectFile: (projectId, rel) => projects.filePath(projectId, rel),
     resolveInput: resolveIngestInput,
     // só lê o cache do probe de encoders (o probe grava settings.json); sem cache → libx264
-    encoder: () => cachedEncoderProbe()?.preferred ?? 'libx264',
+    encoders: () => encoderFallbackChain(cachedEncoderProbe()),
     log
   })
   ingest.on('progress', (j) => broadcastAll(IPC.media.progress, j))

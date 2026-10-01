@@ -117,11 +117,14 @@ function inputs(i: ArgsInput, opts: { video: boolean; audio: boolean } = { video
 
 // ---------- vídeo ----------
 
-function outputFps(i: ArgsInput): number {
+/** Campos que o bloco do codec de vídeo usa (o probe de encoders valida com eles). */
+type CodecInput = Pick<ArgsInput, 'preset' | 'encoder' | 'srcFps'>
+
+function outputFps(i: CodecInput): number {
   return i.preset.maxFps != null && i.srcFps > i.preset.maxFps ? i.preset.maxFps : i.srcFps
 }
 
-function gopFrames(i: ArgsInput): number {
+function gopFrames(i: CodecInput): number {
   return Math.max(1, Math.round(i.preset.gopSeconds * outputFps(i)))
 }
 
@@ -146,12 +149,12 @@ function videoFilterChain(i: ArgsInput, twoPass: boolean): string {
   return parts.join(',')
 }
 
-function profile(i: ArgsInput): string {
+function profile(i: CodecInput): string {
   return i.preset.videoProfile ?? 'high'
 }
 
 /** Bloco do codec de vídeo (CRF/CQ) por encoder. */
-function videoCodecArgs(i: ArgsInput): string[] {
+function videoCodecArgs(i: CodecInput): string[] {
   const p = i.preset
   const gop = String(gopFrames(i))
   const bf = String(p.bFrames)
@@ -180,8 +183,14 @@ function videoCodecArgs(i: ArgsInput): string[] {
       return ['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', q, '-qp_p', q, '-qp_b', q, '-bf', bf, '-profile:v', prof, '-g', gop]
     }
     case 'h264_mf':
-      return ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '70', '-profile:v', prof, '-g', gop]
+      // o h264_mf não tem as constantes 'main'/'high' (o ffmpeg recusa e o encoder nem abre): perfil numérico
+      return ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '70', '-profile:v', prof === 'main' ? '77' : '100', '-g', gop]
   }
+}
+
+/** Bloco do codec de vídeo exatamente como a exportação do preset usa (validação do probe de encoders). */
+export function presetVideoCodecArgs(preset: PresetDef, encoder: HwEncoder, srcFps: number): string[] {
+  return videoCodecArgs({ preset, encoder, srcFps })
 }
 
 /** Bloco libx264 com bitrate fixo para o 2-pass (sem -crf; maxrate 1,5× e bufsize 3×). */

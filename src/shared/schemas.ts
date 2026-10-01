@@ -75,7 +75,8 @@ const encoderProbeSchema = z.object({
   gpuKey: z.string(),
   probedAt: z.string(),
   available: z.array(z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264'])),
-  preferred: z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264'])
+  preferred: z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264']),
+  argsVersion: z.number().int().optional()
 })
 
 /** Schema "frouxo": cada campo é opcional e cai no default; campos desconhecidos são ignorados. */

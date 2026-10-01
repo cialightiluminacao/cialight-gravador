@@ -138,6 +138,8 @@ export interface EncoderProbe {
   probedAt: string
   available: HwEncoder[]
   preferred: HwEncoder
+  /** Versão da validação (encode-teste com os argumentos reais de exportação/proxy); ausente = probe antigo. */
+  argsVersion?: number
 }
 
 export interface PipSettings {

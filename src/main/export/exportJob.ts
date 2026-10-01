@@ -9,6 +9,8 @@ import { needsTwoPass, planForTarget } from '@shared/presets/sizeTarget'
 import { sanitizeFileName, uniqueName } from '@shared/filenames'
 import { probeFile, runFfmpeg, FfmpegError } from './ffmpegRunner'
 import { cachedEncoderProbe, probeEncoders } from './encoderProbe'
+import { encoderFallbackChain } from '@shared/encoderCache'
+import { runWithEncoderFallback } from './encoderFallback'
 import { normalizeFallbackSession } from './fallbackRemux'
 import type { SessionStore } from '../session/sessionStore'
 import { log } from '../log'
@@ -26,10 +28,17 @@ interface Job {
 const jobs = new Map<string, Job>()
 let seq = 0
 
-function pickEncoder(): Promise<HwEncoder> {
-  const cached = cachedEncoderProbe()
-  if (cached) return Promise.resolve(cached.preferred)
-  return probeEncoders(false).then((p) => p.preferred)
+/** Cadeia de encoders: preferido (ou o forçado) → outros disponíveis no probe → libx264. */
+async function encoderChain(forced?: HwEncoder): Promise<HwEncoder[]> {
+  const probe = cachedEncoderProbe() ?? (forced ? null : await probeEncoders(false))
+  return encoderFallbackChain(probe, forced)
+}
+
+/** Erro do ffmpeg ao codificar o vídeo com `encoder` (não cancelamento): vale tentar o próximo encoder. */
+class EncoderStepError extends Error {
+  constructor(readonly cause: FfmpegError, readonly encoder: HwEncoder) {
+    super(cause.message)
+  }
 }
 
 function baseNameFrom(fileName: string): string {
@@ -76,7 +85,8 @@ export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p
       const durationMs = session.durationMs ?? probe.durationMs
       const opts = req.options
       const preset = PRESETS[opts.presetId]
-      const encoder = preset.copyVideo ? 'libx264' : (override.encoder ?? (await pickEncoder()))
+      const chain: HwEncoder[] = preset.copyVideo ? ['libx264'] : await encoderChain(override.encoder)
+      const encoder = chain[0]
       const outDir = opts.outputDir
       mkdirSync(outDir, { recursive: true })
       const trimStart = Math.max(0, opts.trimStartMs)
@@ -110,41 +120,66 @@ export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p
         targetSizeMB: opts.targetSizeMB, outDir, baseName: base0, twoPassKbps, targetHeight
       })
       const base = uniquifyPlanBase(outDir, base0, dryPlan.outputs.map((o) => basename(o)))
-      const plan: FfmpegPlan = base === base0 ? dryPlan : buildFfmpegArgs({
-        preset, encoder, inputVideo, inputAudio: rec, hasWebcamTrack: session.tracks.webcam !== undefined,
+      const planFor = (enc: HwEncoder): FfmpegPlan => (base === base0 && enc === encoder ? dryPlan : buildFfmpegArgs({
+        preset, encoder: enc, inputVideo, inputAudio: rec, hasWebcamTrack: session.tracks.webcam !== undefined,
         micTrackIdx: micIdx, systemTrackIdx: sysIdx, audioMode: opts.audioMode, micOffsetMs: opts.micOffsetMs,
         trimStartMs: trimStart, trimEndMs: trimEnd, durationMs, srcWidth: video0?.width ?? session.video.width,
         srcHeight: video0?.height ?? session.video.height, srcFps: video0?.fps ?? session.video.fps, reels: opts.reels,
         targetSizeMB: opts.targetSizeMB, outDir, baseName: base, twoPassKbps, targetHeight
-      })
-
-      const total = plan.steps.length
-      for (let i = 0; i < total; i++) {
-        if (abort.signal.aborted) throw new Error('cancelado')
-        const step = plan.steps[i]
-        const stage: ExportProgress['stage'] = step.label === 'pass1' ? 'pass1' : step.label === 'pass2' ? 'pass2' : 'encode'
-        const stepBase = (i / total) * 100
-        const stepSpan = 100 / total
-        send({ stage, percent: Math.round(stepBase), message: stepLabel(step.label, i, total) })
-        const result = await runFfmpeg(step.args, {
-          signal: abort.signal,
-          label: step.label,
-          cwd: dir,
-          onProgress: (p) => {
-            const frac = Math.min(1, p.outTimeUs / 1000 / Math.max(1, effectiveMs))
-            send({ stage, percent: Math.round(stepBase + frac * stepSpan), message: `${stepLabel(step.label, i, total)}${p.speed ? ` · ${p.speed}` : ''}` })
-          }
-        })
-        if (result.cancelled || abort.signal.aborted) {
-          // apaga a saída parcial deste passo
-          try {
-            if (step.outFile && step.outFile !== 'NUL' && existsSync(step.outFile)) rmSync(step.outFile, { force: true })
-          } catch {
-            /* ignore */
-          }
-          throw new Error('cancelado')
+      }))
+      const removePartial = (step: FfmpegPlan['steps'][number]): void => {
+        try {
+          if (step.outFile && step.outFile !== 'NUL' && existsSync(step.outFile)) rmSync(step.outFile, { force: true })
+        } catch {
+          /* ignore */
         }
       }
+
+      /** Executa o plano; falha do ffmpeg num passo que codifica com `enc` vira EncoderStepError (troca de encoder). */
+      const runPlan = async (enc: HwEncoder): Promise<FfmpegPlan> => {
+        const plan = planFor(enc)
+        const total = plan.steps.length
+        for (let i = 0; i < total; i++) {
+          if (abort.signal.aborted) throw new Error('cancelado')
+          const step = plan.steps[i]
+          const stage: ExportProgress['stage'] = step.label === 'pass1' ? 'pass1' : step.label === 'pass2' ? 'pass2' : 'encode'
+          const stepBase = (i / total) * 100
+          const stepSpan = 100 / total
+          send({ stage, percent: Math.round(stepBase), message: stepLabel(step.label, i, total) })
+          let result
+          try {
+            result = await runFfmpeg(step.args, {
+              signal: abort.signal,
+              label: step.label,
+              cwd: dir,
+              onProgress: (p) => {
+                const frac = Math.min(1, p.outTimeUs / 1000 / Math.max(1, effectiveMs))
+                send({ stage, percent: Math.round(stepBase + frac * stepSpan), message: `${stepLabel(step.label, i, total)}${p.speed ? ` · ${p.speed}` : ''}` })
+              }
+            })
+          } catch (e) {
+            // o arquivo deste passo foi criado por nós (uniquifyPlanBase): não fica pela metade
+            removePartial(step)
+            const usesEncoder = enc !== 'libx264' && step.args.includes(enc)
+            throw e instanceof FfmpegError && usesEncoder && !abort.signal.aborted ? new EncoderStepError(e, enc) : e
+          }
+          if (result.cancelled || abort.signal.aborted) {
+            // apaga a saída parcial deste passo
+            removePartial(step)
+            throw new Error('cancelado')
+          }
+        }
+        return plan
+      }
+      const { value: plan } = await runWithEncoderFallback(chain, runPlan, {
+        retryable: (e) => e instanceof EncoderStepError,
+        onFallback: (from, to, e) => {
+          log.warn(`exportação: encoder ${from} falhou (${e instanceof EncoderStepError ? `${e.message}\n${e.cause.stderrTail}` : String(e)}); tentando ${to}`)
+          send({ stage: 'encode', percent: 0, message: `O codificador ${from} falhou; tentando ${to}…` })
+        }
+      }).catch((e: unknown) => {
+        throw e instanceof EncoderStepError ? e.cause : e
+      })
       // limpa logs do 2-pass
       for (const step of plan.steps) {
         if (!step.passLogPrefix) continue

@@ -6,6 +6,7 @@ import type { IngestJob, IngestStep } from '@shared/ipc'
 import { probe, type MediaInfo } from './probe'
 import { audioIntermediateArgs, intermediateArgs, needsProxy, proxyArgs } from './proxyPolicy'
 import { FfmpegError } from '../export/ffmpegRunner'
+import { runWithEncoderFallback } from '../export/encoderFallback'
 import { buildFilmstrip, buildPeaks, buildThumb, CancelledError, runToFile } from './analysis'
 
 // Fila de ingestão: por asset, probe → (proxy | intermediário) em paralelo com filmstrip e peaks.
@@ -30,8 +31,11 @@ export interface IngestDeps {
   /** Caminho absoluto de um arquivo da pasta do projeto (ProjectStore.filePath). */
   projectFile: (projectId: string, rel: string) => string
   resolveInput: (projectId: string, asset: Asset) => IngestInput
-  /** Encoder H.264 para proxy/intermediário (encoderProbeV2 em cache; nunca dispara o probe aqui). */
-  encoder: () => HwEncoder
+  /**
+   * Encoders H.264 para proxy/intermediário, em ordem de tentativa (encoderFallbackChain do encoderProbeV2 em
+   * cache; nunca dispara o probe aqui): falha do ffmpeg com um tenta o próximo, terminando em libx264.
+   */
+  encoders: () => HwEncoder[]
   log?: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void }
 }
 
@@ -179,6 +183,14 @@ export class IngestQueue {
     return file
   }
 
+  /** Transcodificação com a cadeia de encoders: falha do ffmpeg (não cancelamento) tenta o próximo. */
+  private async withEncoders(assetId: string, signal: AbortSignal, run: (encoder: HwEncoder) => Promise<void>): Promise<void> {
+    await runWithEncoderFallback(this.deps.encoders(), run, {
+      retryable: (e) => e instanceof FfmpegError && !signal.aborted,
+      onFallback: (from, to, e) => this.deps.log?.warn(`ingestão ${assetId}: encoder ${from} falhou (${messageOf(e)}); tentando ${to}`)
+    })
+  }
+
   private async run(projectId: string, asset: Asset, signal: AbortSignal): Promise<Partial<Asset>> {
     const id = { projectId, assetId: asset.id }
     const input = this.deps.resolveInput(projectId, asset)
@@ -214,8 +226,7 @@ export class IngestQueue {
             const out = this.out(projectId, rel)
             const opts = { signal, onProgress }
             if (!audioOnly) {
-              const encoder = this.deps.encoder()
-              await runToFile((tmp) => intermediateArgs(input.path, tmp, mi, encoder), out, opts, durationUs, 'intermediário')
+              await this.withEncoders(asset.id, signal, (encoder) => runToFile((tmp) => intermediateArgs(input.path, tmp, mi, encoder), out, opts, durationUs, 'intermediário'))
             } else {
               try {
                 await runToFile((tmp) => audioIntermediateArgs(input.path, tmp, mi), out, opts, durationUs, 'intermediário de áudio')
@@ -223,8 +234,7 @@ export class IngestQueue {
                 // vídeo que não cabe no MP4 sem recodificar (ex.: VP8): intermediário completo
                 if (mi.kind === 'audio' || signal.aborted || e instanceof CancelledError) throw e
                 this.deps.log?.warn(`ingestão ${asset.id}: cópia do vídeo falhou; recodificando`, e)
-                const encoder = this.deps.encoder()
-                await runToFile((tmp) => intermediateArgs(input.path, tmp, mi, encoder), out, opts, durationUs, 'intermediário')
+                await this.withEncoders(asset.id, signal, (encoder) => runToFile((tmp) => intermediateArgs(input.path, tmp, mi, encoder), out, opts, durationUs, 'intermediário'))
               }
             }
             patch.intermediate = rel
@@ -239,8 +249,8 @@ export class IngestQueue {
         guard(
           'proxy',
           this.step(this.heavy, signal, { ...id, step: 'proxy' }, async (onProgress) => {
-            const encoder = this.deps.encoder()
-            await runToFile((tmp) => proxyArgs(input.path, tmp, mi, encoder), this.out(projectId, rel), { signal, onProgress }, durationUs, 'proxy')
+            const out = this.out(projectId, rel)
+            await this.withEncoders(asset.id, signal, (encoder) => runToFile((tmp) => proxyArgs(input.path, tmp, mi, encoder), out, { signal, onProgress }, durationUs, 'proxy'))
             patch.proxy = rel
           })
         )

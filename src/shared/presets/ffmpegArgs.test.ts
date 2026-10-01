@@ -147,7 +147,7 @@ describe('buildFfmpegArgs — high (YouTube / Drive / Instagram)', () => {
       '-filter_complex',
       `[0:v:0]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v];[0:a:0][0:a:1]${AMIX}[a]`,
       '-map', '[v]', '-map', '[a]',
-      '-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '70', '-profile:v', 'high', '-g', '15',
+      '-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '70', '-profile:v', '100', '-g', '15', // h264_mf só aceita o perfil numérico (100 = High)
       ...AAC(192), '-movflags', '+faststart', ...TAIL, OUT
     ])
   })

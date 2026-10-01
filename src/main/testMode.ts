@@ -34,7 +34,7 @@ function ok(cond: boolean, msg: string, failures: string[]): void {
   console.log(`${cond ? 'OK ' : 'FAIL'} ${msg}`)
 }
 
-async function runExport(store: SessionStore, session: Session, presetId: ExportPresetId, extra: Partial<ExportOptions>, outFolder: string): Promise<{ outputs: string[]; error?: string; message?: string }> {
+async function runExport(store: SessionStore, session: Session, presetId: ExportPresetId, extra: Partial<ExportOptions>, outFolder: string, override: { encoder?: HwEncoder } = {}): Promise<{ outputs: string[]; error?: string; message?: string; messages: string[] }> {
   const options: ExportOptions = {
     presetId,
     trimStartMs: 1000,
@@ -50,11 +50,13 @@ async function runExport(store: SessionStore, session: Session, presetId: Export
     pipOverride: null,
     ...extra
   }
+  const messages: string[] = []
   return new Promise((resolve) => {
     startExportJob({ sessionId: session.id, options, composedFile: null }, store, (p) => {
-      if (p.stage === 'done') resolve({ outputs: p.outputs ?? [], message: p.message })
-      else if (p.stage === 'error' || p.stage === 'cancelled') resolve({ outputs: [], error: p.error ?? p.stage })
-    })
+      if (p.message && !messages.includes(p.message)) messages.push(p.message)
+      if (p.stage === 'done') resolve({ outputs: p.outputs ?? [], message: p.message, messages })
+      else if (p.stage === 'error' || p.stage === 'cancelled') resolve({ outputs: [], error: p.error ?? p.stage, messages })
+    }, override)
   })
 }
 
@@ -112,6 +114,19 @@ async function testFfmpeg(store: SessionStore): Promise<number> {
     if (presetId === 'separate') ok(r.outputs.length >= 5, `separate: ≥5 arquivos (${r.outputs.length})`, failures)
     results[presetId] = { ...r, info }
   }
+  // encoder que falha na hora (aqui: AMF forçado; numa máquina sem AMD ele não abre) → a exportação v1 troca
+  // para o próximo da cadeia e termina, em vez de mostrar erro
+  if (!probe.available.includes('h264_amf')) {
+    const r = await runExport(store, session, 'high', { fileName: 'teste-fallback-encoder' }, exportsDir, { encoder: 'h264_amf' })
+    const fellBack = r.messages.find((m) => m.includes('h264_amf falhou'))
+    ok(!r.error && r.outputs.length === 1 && existsSync(r.outputs[0]), `fallback de encoder: AMF forçado falha e a exportação termina com outro (${fellBack ?? r.error?.split('\n')[0] ?? 'sem troca'})`, failures)
+    ok(!!fellBack, 'fallback de encoder: aviso de troca de codificador emitido', failures)
+    if (r.outputs[0] && existsSync(r.outputs[0])) {
+      const v = (await probeFile(r.outputs[0])).streams.find((s) => s.type === 'video')
+      ok(v?.codec === 'h264', `fallback de encoder: saída H.264 (${v?.codec})`, failures)
+    }
+    results.fallback = r
+  } else console.log('fallback de encoder: AMF disponível nesta máquina — teste de falha forçada pulado')
   writeFileSync(join(outDir, 'ffmpeg-report.json'), JSON.stringify({ probe, results, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTODOS OS TESTES DE FFMPEG PASSARAM')
   return failures.length ? 1 : 0
@@ -269,7 +284,7 @@ async function testIngest(store: SessionStore): Promise<number> {
   const queue = new IngestQueue({
     projectFile: (pid, rel) => projects.filePath(pid, rel),
     resolveInput: (_pid, a) => ({ path: a.source.type === 'file' ? a.source.path : '' }),
-    encoder: () => encoder,
+    encoders: () => [encoder],
     log
   })
   const steps = new Set<string>()
