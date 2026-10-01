@@ -113,4 +113,39 @@ describe('ProjectStore', () => {
     expect(() => store.assetPath(p, 'zz', 'original', sessions)).toThrow()
     expect(() => store.assetPath(p, 's', 'proxy', sessions)).toThrow()
   })
+
+  it('create recusa sobrescrever um projeto existente', () => {
+    const p = mk('p-a', '2026-10-01T10:00:00.000Z')
+    store.create(p)
+    expect(() => store.create({ ...p, name: 'outro' })).toThrow(/já existe/)
+    expect(store.load('p-a').name).toBe(p.name)
+  })
+
+  it('withMediaStatus marca file assets ausentes ou com tamanho diferente como missing e restaura os que voltaram', () => {
+    const media = join(root, 'midia.mp4')
+    writeFileSync(media, Buffer.alloc(10))
+    const base = { name: 'x', kind: 'video' as const, durationUs: 1 }
+    const assets: Asset[] = [
+      { ...base, id: 'ok', status: 'ready', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
+      { ...base, id: 'gone', status: 'ready', source: { type: 'file', path: join(root, 'nao-existe.mp4'), size: 10, mtimeMs: 1 } },
+      { ...base, id: 'changed', status: 'processing', source: { type: 'file', path: media, size: 99, mtimeMs: 1 } },
+      { ...base, id: 'back', status: 'missing', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
+      { ...base, id: 's', status: 'ready', source: { type: 'session', sessionId: 'x', stream: 'screen' } }
+    ]
+    const p = { ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets }
+    const r = store.withMediaStatus(p)
+    expect(r.assets.map((a) => [a.id, a.status])).toEqual([['ok', 'ready'], ['gone', 'missing'], ['changed', 'missing'], ['back', 'ready'], ['s', 'ready']])
+    expect(p.assets[1].status).toBe('ready') // não muta a entrada
+    expect(store.withMediaStatus(r)).toBe(r) // nada mudou → mesma referência
+  })
+
+  it('cacheAssets acrescenta/substitui assets só na memória', () => {
+    const p = mk('p-a', '2026-10-01T10:00:00.000Z')
+    store.create(p)
+    const a: Asset = { id: 'a1', name: 'a', kind: 'audio', source: { type: 'file', path: 'C:\m\a.mp3', size: 1, mtimeMs: 1 }, durationUs: 1, status: 'processing' }
+    store.cacheAssets('p-a', [a])
+    store.cacheAssets('P-A', [{ ...a, name: 'b' }])
+    expect(store.cached('p-a').assets).toEqual([{ ...a, name: 'b' }])
+    expect(store.load('p-a').assets).toEqual([]) // disco intocado
+  })
 })

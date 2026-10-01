@@ -13,6 +13,16 @@ const withItems = (items: ReturnType<typeof createMediaItem>[]): Project => {
 describe('schema', () => {
   it('round-trip', () => { const p = createEmptyProject('x'); expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p) })
   it('round-trip com item', () => { const p = withItems([createMediaItem(asset, 0, 'video')]); expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p) })
+  it('round-trip com filmstrip/peaks e filmstripInfo', () => {
+    const p = createEmptyProject('x')
+    p.assets = [{ ...asset, filmstrip: 'cache/a1.strip.jpg', filmstripInfo: { frames: 6, everyUs: 1_000_000, tileW: 114, tileH: 64 }, peaks: 'cache/a1.peaks.bin' }]
+    expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+  })
+  it('filmstripInfo inválido lança', () => {
+    const p = createEmptyProject('x')
+    p.assets = [{ ...asset, filmstripInfo: { frames: 6, everyUs: 1.5, tileW: 114, tileH: 64 } }]
+    expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/filmstripInfo/)
+  })
   it('versão futura lança', () => expect(() => parseProject({ ...createEmptyProject('x'), version: 2 })).toThrow())
   it('detecta sobreposição', () => {
     const a = { ...createMediaItem(asset, 0, 'video'), id: 'i1', durationUs: 1_000_000 }

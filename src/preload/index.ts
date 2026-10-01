@@ -67,6 +67,14 @@ const api: IpcApi = {
     fromSession: (sessionId) => ipcRenderer.invoke(IPC.project.fromSession, sessionId),
     pickMedia: () => ipcRenderer.invoke(IPC.project.pickMedia)
   },
+  media: {
+    import: (projectId, paths) => ipcRenderer.invoke(IPC.media.import, projectId, paths),
+    enqueue: (projectId, assetId, opts) => ipcRenderer.invoke(IPC.media.enqueue, projectId, assetId, opts),
+    relink: (projectId, assetId, newPath) => ipcRenderer.invoke(IPC.media.relink, projectId, assetId, newPath),
+    setOpenProject: (projectId) => ipcRenderer.invoke(IPC.media.setOpenProject, projectId),
+    onProgress: (cb) => on(IPC.media.progress, cb),
+    onDone: (cb) => on(IPC.media.done, cb)
+  },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),
     barUpdate: (state) => ipcRenderer.send(IPC.recording.barUpdate, state),

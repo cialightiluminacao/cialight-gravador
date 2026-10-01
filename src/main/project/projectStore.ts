@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { join } from 'path'
 import { parseProject } from '@shared/editor/schema'
 import { projectDurationUs } from '@shared/editor/ops'
-import type { Project } from '@shared/editor/project'
+import type { Asset, Project } from '@shared/editor/project'
 import type { ProjectSummary } from '@shared/ipc'
 import type { SessionStore } from '../session/sessionStore'
 
@@ -49,8 +49,10 @@ export class ProjectStore {
     return join(this.dirOf(id), ...parts)
   }
 
+  /** Cria a pasta e o project.json; lança se o projeto já existe (nunca sobrescreve). */
   create(p: Project): void {
     const dir = this.dirOf(p.id)
+    if (existsSync(join(dir, 'project.json'))) throw new Error(`Projeto ${p.id} já existe`)
     mkdirSync(dir, { recursive: true })
     for (const s of SUBDIRS) mkdirSync(join(dir, s), { recursive: true })
     this.save(p)
@@ -114,9 +116,41 @@ export class ProjectStore {
     throw new Error(`Projeto ${id} ilegível e sem versão recuperável: ${String(firstError)}`)
   }
 
+  /**
+   * Confere no disco os assets de arquivo importado: ausente ou com tamanho diferente → 'missing';
+   * 'missing' que voltou com o mesmo tamanho → 'ready'. Devolve a mesma referência se nada mudou.
+   */
+  withMediaStatus(p: Project): Project {
+    let changed = false
+    const assets = p.assets.map((a): Asset => {
+      if (a.source.type !== 'file') return a
+      let present = false
+      try {
+        present = statSync(a.source.path).size === a.source.size
+      } catch {
+        present = false
+      }
+      const status: Asset['status'] = !present ? 'missing' : a.status === 'missing' ? 'ready' : a.status
+      if (status === a.status) return a
+      changed = true
+      return { ...a, status }
+    })
+    return changed ? { ...p, assets } : p
+  }
+
   private remember(p: Project): Project {
     this.cache.set(p.id.toLowerCase(), p)
     return p
+  }
+
+  /**
+   * Acrescenta (ou substitui pelo id) assets só no cache em memória, sem gravar: assets recém-importados
+   * ficam resolvíveis pelo protocolo media/ e por media.enqueue antes do próximo save do renderer.
+   */
+  cacheAssets(id: string, assets: Asset[]): void {
+    const p = this.cached(id)
+    const ids = new Set(assets.map((a) => a.id))
+    this.cache.set(p.id.toLowerCase(), { ...p, assets: [...p.assets.filter((a) => !ids.has(a.id)), ...assets] })
   }
 
   /** Projeto da memória (último load/save); senão carrega do disco. `id` pode vir em minúsculo. */

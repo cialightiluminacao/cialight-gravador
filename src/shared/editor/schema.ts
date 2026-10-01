@@ -125,6 +125,9 @@ const asset = z.object({
   proxy: z.string().optional(),
   intermediate: z.string().optional(),
   filmstrip: z.string().optional(),
+  filmstripInfo: z
+    .object({ frames: z.number().int().positive(), everyUs: us.positive(), tileW: z.number().int().positive(), tileH: z.number().int().positive() })
+    .optional(),
   peaks: z.string().optional(),
   status: z.enum(['ready', 'processing', 'missing', 'error']),
   error: z.string().optional()

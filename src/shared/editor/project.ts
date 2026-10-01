@@ -10,12 +10,16 @@ export type AssetSource =
   | { type: 'file'; path: string; size: number; mtimeMs: number }
   | { type: 'generated'; file: string }
 export interface AssetVideoInfo { width: number; height: number; fps: number; codec: string; rotation: 0 | 90 | 180 | 270; decodable: boolean; gopUs: number }
+export interface FilmstripInfo { frames: number; everyUs: Us; tileW: number; tileH: number }
 export interface AssetAudioInfo { channels: number; sampleRate: number; codec: string }
 export interface Asset {
   id: string; name: string; kind: AssetKind; source: AssetSource
   durationUs: Us | null
   video?: AssetVideoInfo; audio?: AssetAudioInfo
+  /** Caminhos relativos à pasta do projeto (proxies/…, cache/…). */
   proxy?: string; intermediate?: string; filmstrip?: string; peaks?: string
+  /** Geometria do sprite do filmstrip: `frames` quadros de tileW×tileH, um a cada `everyUs`. */
+  filmstripInfo?: FilmstripInfo
   status: 'ready' | 'processing' | 'missing' | 'error'; error?: string
 }
 export type AnimPreset = 'fade' | 'slideL' | 'slideR' | 'slideU' | 'slideD' | 'zoom' | 'pop'

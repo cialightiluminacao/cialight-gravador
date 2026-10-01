@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
-import { join } from 'path'
+import { basename, extname, join } from 'path'
 import { statSync } from 'fs'
 import { IPC, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
@@ -8,9 +8,13 @@ import { listDisplays, listSources, sourceThumbnail } from './capture/sources'
 import { selectCaptureSource } from './capture/displayMediaHandler'
 import type { SessionStore } from './session/sessionStore'
 import type { ProjectStore } from './project/projectStore'
-import type { Project } from '@shared/editor/project'
+import type { Asset } from '@shared/editor/project'
 import { projectFromSession } from '@shared/editor/fromSession'
-import { newProjectId } from '@shared/editor/ids'
+import { newId, newProjectId } from '@shared/editor/ids'
+import { parseProject } from '@shared/editor/schema'
+import { updateAsset } from '@shared/editor/ops'
+import { IngestQueue, assetFromInfo, type IngestInput } from './media/ingest'
+import { probe } from './media/probe'
 import { getRecorderWindow, showRecorder, displayIdOfWindow } from './windows/recorderWindow'
 import { hideBar, showBar, toggleBar, updateBar, isBarHiddenByUser } from './windows/barWindow'
 import { hideOverlays, setOverlayMode, showOverlays, syncStrokesToOverlays } from './windows/overlayWindows'
@@ -39,6 +43,49 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   const broadcastAll = (channel: string, ...args: unknown[]): void => {
     for (const w of BrowserWindow.getAllWindows()) if (!w.webContents.isDestroyed()) w.webContents.send(channel, ...args)
   }
+
+  // ---- ingestão de mídia ----
+  // Projeto aberto em cada janela do editor (webContents.id → projectId|null).
+  const openProjects = new Map<number, string | null>()
+  const resolveIngestInput = (projectId: string, a: Asset): IngestInput => {
+    switch (a.source.type) {
+      case 'file':
+        return { path: a.source.path }
+      case 'generated':
+        return { path: projects.filePath(projectId, a.source.file) }
+      case 'session': {
+        // rec.mp4 multi-faixa: índice por tipo vem de session.tracks; gravação do app dispensa proxy
+        const tracks = store.get(a.source.sessionId)?.tracks
+        const idx = tracks?.[a.source.stream] ?? 0
+        const isVideo = a.source.stream === 'screen' || a.source.stream === 'webcam'
+        return { path: store.filePath(a.source.sessionId, 'rec.mp4'), analyzeOnly: true, ...(isVideo ? { videoMap: `0:v:${idx}` } : { audioMap: `0:a:${idx}` }) }
+      }
+    }
+  }
+  const ingest = new IngestQueue({
+    projectFile: (projectId, rel) => projects.filePath(projectId, rel),
+    resolveInput: resolveIngestInput,
+    // só lê o cache do probe de encoders (o probe grava settings.json); sem cache → libx264
+    encoder: () => getSettings().lastEncoderProbe?.preferred ?? 'libx264',
+    log
+  })
+  ingest.on('progress', (j) => broadcastAll(IPC.media.progress, j))
+  // Escritor único do project.json: com o projeto aberto num editor, o renderer recebe o patch e o
+  // aplica no próprio store (o autosave dele grava); salvar daqui disputaria com esse autosave e uma
+  // das escritas se perderia. Sem nenhuma janela com o projeto aberto, o main aplica e salva.
+  ingest.on('done', (projectId, assetId, patch) => {
+    const owners = BrowserWindow.getAllWindows().filter((w) => !w.webContents.isDestroyed() && openProjects.get(w.webContents.id) === projectId)
+    if (owners.length) {
+      for (const w of owners) w.webContents.send(IPC.media.done, { projectId, assetId, patch })
+      return
+    }
+    try {
+      const p = projects.load(projectId)
+      projects.save({ ...updateAsset(p, assetId, patch), updatedAt: new Date().toISOString() })
+    } catch (e) {
+      log.warn(`ingestão: não foi possível gravar o resultado de ${assetId} em ${projectId}`, e)
+    }
+  })
 
   // ---- app ----
   ipcMain.handle(IPC.app.info, () => ({
@@ -123,10 +170,14 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
 
   // ---- project (editor) ----
   ipcMain.handle(IPC.project.list, () => projects.list())
-  ipcMain.handle(IPC.project.create, (_e, p: Project) => projects.create(p))
-  ipcMain.handle(IPC.project.load, (_e, id: string) => projects.load(id))
-  ipcMain.handle(IPC.project.save, (_e, p: Project) => projects.save(p))
-  ipcMain.handle(IPC.project.remove, (_e, id: string) => projects.remove(id))
+  // parseProject lança "Projeto inválido: …" — nada inválido chega ao disco
+  ipcMain.handle(IPC.project.create, (_e, p: unknown) => projects.create(parseProject(p)))
+  ipcMain.handle(IPC.project.load, (_e, id: string) => projects.withMediaStatus(projects.load(id)))
+  ipcMain.handle(IPC.project.save, (_e, p: unknown) => projects.save(parseProject(p)))
+  ipcMain.handle(IPC.project.remove, (_e, id: string) => {
+    ingest.cancel(id)
+    return projects.remove(id)
+  })
   ipcMain.handle(IPC.project.fromSession, (_e, sessionId: string) => {
     const session = store.get(sessionId)
     if (!session) throw new Error('Sessão não encontrada')
@@ -152,6 +203,48 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     }
     const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
     return r.canceled ? [] : r.filePaths
+  })
+
+  // ---- media (ingestão do editor) ----
+  ipcMain.handle(IPC.media.import, async (_e, projectId: string, paths: string[]) => {
+    projects.cached(projectId) // lança cedo se o projeto não existe
+    const assets: Asset[] = []
+    for (const path of paths) {
+      const id = newId('a_')
+      try {
+        const st = statSync(path)
+        assets.push(assetFromInfo(id, path, st, await probe(path)))
+      } catch (e) {
+        log.warn(`importação de ${path} falhou`, e)
+        const ext = extname(path).slice(1).toLowerCase()
+        const kind = IMAGE_EXT.includes(ext) ? 'image' : AUDIO_EXT.includes(ext) ? 'audio' : 'video'
+        assets.push({ id, name: basename(path), kind, source: { type: 'file', path, size: 0, mtimeMs: 0 }, durationUs: null, status: 'error', error: `Não foi possível ler o arquivo: ${e instanceof Error ? e.message : String(e)}` })
+      }
+    }
+    projects.cacheAssets(projectId, assets)
+    return assets
+  })
+  ipcMain.handle(IPC.media.enqueue, (_e, projectId: string, assetId: string, opts: { decodable: boolean }) => {
+    const a = projects.cached(projectId).assets.find((x) => x.id === assetId)
+    if (!a) throw new Error(`Asset não encontrado: ${assetId}`)
+    ingest.enqueue(projectId, a.video ? { ...a, video: { ...a.video, decodable: !!opts?.decodable } } : a)
+  })
+  ipcMain.handle(IPC.media.relink, async (_e, projectId: string, assetId: string, newPath: string) => {
+    const a = projects.cached(projectId).assets.find((x) => x.id === assetId)
+    if (!a) throw new Error(`Asset não encontrado: ${assetId}`)
+    if (a.source.type !== 'file') throw new Error('Só mídia importada pode ser reapontada')
+    const info = await probe(newPath)
+    if (info.kind !== a.kind) throw new Error('O arquivo escolhido não é do mesmo tipo da mídia original')
+    const fresh = assetFromInfo(a.id, newPath, statSync(newPath), info)
+    // derivados do arquivo antigo deixam de valer (undefined explícito: o renderer aplica com updateAsset)
+    const next: Asset = { ...fresh, name: a.name, proxy: undefined, intermediate: undefined, filmstrip: undefined, filmstripInfo: undefined, peaks: undefined, error: undefined }
+    projects.cacheAssets(projectId, [next])
+    return next
+  })
+  ipcMain.handle(IPC.media.setOpenProject, (e, projectId: string | null) => {
+    const wc = e.sender
+    if (!openProjects.has(wc.id)) wc.once('destroyed', () => openProjects.delete(wc.id))
+    openProjects.set(wc.id, projectId)
   })
 
   // ---- recording (fase, barra, comandos) ----

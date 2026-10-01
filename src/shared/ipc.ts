@@ -16,7 +16,7 @@ import type {
   StrokeTool
 } from './types'
 
-import type { Project, Us } from './editor/project'
+import type { Asset, Project, Us } from './editor/project'
 
 export type Unsubscribe = () => void
 
@@ -28,6 +28,12 @@ export interface ProjectSummary {
   thumb?: string
   originSessionId?: string
 }
+
+export type IngestStep = 'probe' | 'proxy' | 'intermediate' | 'filmstrip' | 'peaks'
+/** Progresso de uma etapa da ingestão de um asset (0–100). */
+export interface IngestJob { projectId: string; assetId: string; step: IngestStep; percent: number }
+/** Resultado da ingestão de um asset: patch para ops.updateAsset (caminhos relativos à pasta do projeto). */
+export interface IngestDone { projectId: string; assetId: string; patch: Partial<Asset> }
 
 export interface SourcesList {
   displays: DisplayInfo[]
@@ -199,6 +205,25 @@ export interface IpcApi {
     /** Diálogo de abrir arquivos de mídia (multi-seleção); [] se cancelado. */
     pickMedia(): Promise<string[]>
   }
+  /**
+   * Ingestão de mídia do editor. Fluxo: `import` (probe no main; vídeos/áudios voltam com status
+   * 'processing' e já ficam resolvíveis em cialight-file://media/<projectId>/<assetId>?v=original)
+   * → renderer adiciona os assets ao projeto, testa `canDecode` e chama `enqueue` com `decodable`
+   * → `onProgress` por etapa → `onDone` com o patch, que o renderer aplica (ops.updateAsset) e salva.
+   */
+  media: {
+    import(projectId: string, paths: string[]): Promise<Asset[]>
+    enqueue(projectId: string, assetId: string, opts: { decodable: boolean }): Promise<void>
+    /** Novo caminho para um asset de arquivo (ausente/movido): devolve o asset atualizado com status 'processing'; o renderer aplica e chama `enqueue`. */
+    relink(projectId: string, assetId: string, newPath: string): Promise<Asset>
+    /**
+     * Projeto aberto nesta janela (null ao fechar). Enquanto aberto, o renderer é o único escritor
+     * do project.json e recebe `onDone`; sem janela com o projeto aberto, o main aplica e salva.
+     */
+    setOpenProject(projectId: string | null): Promise<void>
+    onProgress(cb: (j: IngestJob) => void): Unsubscribe
+    onDone(cb: (d: IngestDone) => void): Unsubscribe
+  }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
     barUpdate(state: BarState): void
@@ -285,6 +310,14 @@ export const IPC = {
     remove: 'project:remove',
     fromSession: 'project:fromSession',
     pickMedia: 'project:pickMedia'
+  },
+  media: {
+    import: 'media:import',
+    enqueue: 'media:enqueue',
+    relink: 'media:relink',
+    setOpenProject: 'media:setOpenProject',
+    progress: 'media:progress',
+    done: 'media:done'
   },
   recording: {
     setPhase: 'recording:setPhase',
