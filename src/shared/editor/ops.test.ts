@@ -216,6 +216,17 @@ describe('ops', () => {
     expect(it.visual!.animOut!.durationUs).toBe(625_000) // 1_250_000 limitado à duração
     expect(it.transitionIn!.durationUs).toBe(312_500) // 500_000 limitado à metade da duração
   })
+  it('setSpeed mantém fadeIn + fadeOut ≤ duração (vídeo e áudio) apesar do arredondamento', () => {
+    const { p, v } = base()
+    const q0 = ops.updateItem<MediaItem>(p, v, (d) => {
+      d.durationUs = S; d.visual!.fadeInUs = S / 2; d.visual!.fadeOutUs = S / 2; d.audio.fadeInUs = S / 2; d.audio.fadeOutUs = S / 2
+    })
+    const it = items(ops.setSpeed(q0, v, 3), 0)[0] // 1 s / 3 = 333 333 µs; cada fade arredondaria para 166 667
+    expect(it.durationUs).toBe(333_333)
+    expect(it.visual!.fadeInUs + it.visual!.fadeOutUs).toBeLessThanOrEqual(it.durationUs)
+    expect(it.audio.fadeInUs + it.audio.fadeOutUs).toBeLessThanOrEqual(it.durationUs)
+    expect(it.visual!.fadeInUs).toBe(166_667)
+  })
   it('deleteRange: cada linkId vincula pedaços no mesmo tempo', () => {
     const { p, a } = base()
     const q = ops.deleteRange(ops.trimItem(p, a, 'start', 3 * S, { includeLinked: false }), 2 * S, 5 * S)

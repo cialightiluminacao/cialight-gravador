@@ -704,15 +704,19 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
     const scaled = mapAnims(f.item, (a) => (a.keys ? { ...a, keys: a.keys.map((k) => ({ ...k, tUs: Math.round(k.tUs * ratio) })) } : a))
     // fades, animações e transição acompanham a escala de tempo, limitados à nova duração
     const fit = (us: Us, max: Us): Us => Math.min(max, Math.round(us * ratio))
-    let n: MediaItem = { ...scaled, speed: s, durationUs: dur, audio: { ...scaled.audio, fadeInUs: fit(scaled.audio.fadeInUs, dur), fadeOutUs: fit(scaled.audio.fadeOutUs, dur) } }
+    // fadeIn + fadeOut nunca passam da duração (o arredondamento de cada um poderia somar 1 µs a mais)
+    const fades = (fin: Us, fout: Us): { fadeInUs: Us; fadeOutUs: Us } => {
+      const fadeInUs = fit(fin, dur)
+      return { fadeInUs, fadeOutUs: fit(fout, dur - fadeInUs) }
+    }
+    let n: MediaItem = { ...scaled, speed: s, durationUs: dur, audio: { ...scaled.audio, ...fades(scaled.audio.fadeInUs, scaled.audio.fadeOutUs) } }
     if (n.visual) {
       const v = n.visual
       n = {
         ...n,
         visual: {
           ...v,
-          fadeInUs: fit(v.fadeInUs, dur),
-          fadeOutUs: fit(v.fadeOutUs, dur),
+          ...fades(v.fadeInUs, v.fadeOutUs),
           ...(v.animIn ? { animIn: { ...v.animIn, durationUs: fit(v.animIn.durationUs, dur) } } : {}),
           ...(v.animOut ? { animOut: { ...v.animOut, durationUs: fit(v.animOut.durationUs, dur) } } : {})
         }
