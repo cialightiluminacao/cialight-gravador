@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { toast } from 'sonner'
+import { discardRecoverable } from './recoverActions'
 import { useAppStore } from './store'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent } from '@/components/ui/primitives'
@@ -29,12 +31,10 @@ export function RecoverDialog(): React.JSX.Element | null {
   }
   const remove = async (): Promise<void> => {
     setBusy(true)
-    try {
-      await window.api.session.delete(s.id)
-    } finally {
-      setBusy(false)
-      setRecoverable(rest)
-    }
+    const ok = await discardRecoverable(s.id, { deleteSession: (id) => window.api.session.delete(id), notifyError: (m) => toast.error(m) })
+    setBusy(false)
+    // usada por projeto do editor: fica no diálogo para ser recuperada
+    if (ok) setRecoverable(rest)
   }
   return (
     <Dialog open>
