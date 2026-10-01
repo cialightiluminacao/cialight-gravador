@@ -238,6 +238,21 @@ export class ProjectStore {
     return out
   }
 
+  /** Pastas de projeto existentes (manutenção: limpeza de temporários). */
+  projectDirs(): string[] {
+    const root = this.root()
+    if (!existsSync(root)) return []
+    const out: string[] = []
+    for (const name of readdirSync(root)) {
+      try {
+        if (/^[\w.-]+$/.test(name) && statSync(join(root, name)).isDirectory()) out.push(join(root, name))
+      } catch {
+        // ignora
+      }
+    }
+    return out
+  }
+
   async remove(id: string): Promise<void> {
     const dir = this.dirOf(id)
     this.cache.delete(id.toLowerCase())

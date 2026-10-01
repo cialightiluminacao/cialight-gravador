@@ -10,7 +10,9 @@ import { dirname, join } from 'path'
 import { existsSync } from 'fs'
 import { SessionStore } from './session/sessionStore'
 import { ProjectStore } from './project/projectStore'
-import { getSettings, rawDir } from './settings/settingsStore'
+import { getSettings, outputDir, rawDir } from './settings/settingsStore'
+import { sweepStaleParts, type SweepTarget } from './maintenance/partSweep'
+import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { registerIpc } from './ipc'
 import { applyHotkeys, onHotkeyStatus, unregisterAllHotkeys } from './hotkeys/globalShortcuts'
 import { createTray } from './tray'
@@ -25,6 +27,8 @@ import { createQaEditorFixture } from './qaEditorFixture'
 import { confirmQuit, createQuitGuard, isEditorExportBusy, setAppQuitGuard, type QuitReason } from './quitGuard'
 
 // Bootstrap do processo principal.
+
+const MAINTENANCE_DELAY_MS = 15_000
 
 app.setAppUserModelId('com.cialight.gravador')
 registerFileProtocolScheme()
@@ -179,18 +183,38 @@ if (!gotLock) {
         log.info(`sessões interrompidas: ${unfinished.map((s) => s.id).join(', ')}`)
         win.webContents.send(IPC.recording.recover, unfinished)
       }
-      // limpeza de brutos antigos: nunca as gravações que algum projeto do editor usa
+      // manutenção fora do caminho de abertura (o app já está na tela)
+      setTimeout(() => void runMaintenance(), MAINTENANCE_DELAY_MS)
+    })
+
+    /**
+     * Manutenção adiada: limpeza de brutos antigos (nunca as gravações que algum projeto do editor usa),
+     * .part com mais de 1 dia (proxies/cache dos projetos e exportação na pasta de saída) e o probe de
+     * encoders quando o cache não vale mais (probe antigo, sem a validação com os argumentos reais).
+     */
+    const runMaintenance = async (): Promise<void> => {
       const days = getSettings().rawRetentionDays
       if (days) {
-        void Promise.resolve()
-          .then(() => {
-            const used = projects.sessionUsage()
-            return store.cleanupOld(days, (id) => used.has(id))
-          })
-          .then((n) => n && log.info(`limpeza: ${n} sessão(ões) antigas enviadas à lixeira`))
-          .catch((e) => log.warn('limpeza de brutos falhou', e))
+        try {
+          const used = projects.sessionUsage()
+          const n = await store.cleanupOld(days, (id) => used.has(id))
+          if (n) log.info(`limpeza: ${n} sessão(ões) antigas enviadas à lixeira`)
+        } catch (e) {
+          log.warn('limpeza de brutos falhou', e)
+        }
       }
-    })
+      try {
+        const targets: SweepTarget[] = [{ dir: outputDir(), kind: 'export' }]
+        for (const dir of projects.projectDirs()) targets.push({ dir: join(dir, 'proxies'), kind: 'ingest' }, { dir: join(dir, 'cache'), kind: 'ingest' })
+        const removed = await sweepStaleParts(targets, { log })
+        if (removed.length) log.info(`limpeza: ${removed.length} temporário(s) .part antigo(s) apagado(s)`)
+      } catch (e) {
+        log.warn('limpeza de temporários falhou', e)
+      }
+      if (!cachedEncoderProbe() && !process.env.CIALIGHT_SHOT && !process.env.CIALIGHT_QA) {
+        await probeEncoders(false).catch((e) => log.warn('probe de encoders falhou', e))
+      }
+    }
 
     powerMonitor.on('shutdown', () => {
       log.warn('desligamento do sistema durante execução')

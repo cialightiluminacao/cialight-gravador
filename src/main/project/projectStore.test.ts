@@ -200,3 +200,19 @@ describe('ProjectStore.sessionUsage', () => {
     expect(u.has('s3')).toBe(false)
   })
 })
+
+describe('ProjectStore.projectDirs', () => {
+  it('só as pastas (para a limpeza de temporários)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cialight-proj-'))
+    try {
+      const store = new ProjectStore({ projectsRoot: () => root, trash: async () => {} })
+      store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
+      store.create(mk('p-b', '2026-10-01T10:00:00.000Z'))
+      writeFileSync(join(root, 'solto.txt'), 'x')
+      expect(store.projectDirs().sort()).toEqual([join(root, 'p-a'), join(root, 'p-b')])
+      expect(new ProjectStore({ projectsRoot: () => join(root, 'nao-existe'), trash: async () => {} }).projectDirs()).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
