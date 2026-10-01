@@ -4,6 +4,7 @@ import { findItem, updateItem } from '@shared/editor/ops'
 import type { MediaItem, Project, VisualProps } from '@shared/editor/project'
 import { cn } from '@/lib/cn'
 import { useEditorStore } from '../state/editorStore'
+import { usePausedPlayhead } from '../state/pausedPlayhead'
 import { cornerScale, hitTest, itemBoxes, rotateAngle, snapCenter, type Corner, type ItemBox, type Pt } from './viewerGeometry'
 
 // Manipulação direta no visualizador: clique seleciona (Ctrl/Shift alterna), arrastar move, cantos
@@ -30,12 +31,13 @@ function editable(p: Project, itemId: string): V | null {
 
 export function ViewerOverlay({ width, height, scale }: { width: number; height: number; scale: number }): React.JSX.Element | null {
   const project = useEditorStore((s) => s.project)
-  const playheadUs = useEditorStore((s) => s.playheadUs)
+  // alças só aparecem parado: tocando, nada aqui re-renderiza a cada quadro
+  const playheadUs = usePausedPlayhead()
   const selection = useEditorStore((s) => s.selection)
   const playing = useEditorStore((s) => s.playing)
   const [guides, setGuides] = useState({ x: false, y: false })
   const rootRef = useRef<HTMLDivElement>(null)
-  const boxes = useMemo(() => (project ? itemBoxes(project, playheadUs) : []), [project, playheadUs])
+  const boxes = useMemo(() => (project && !playing ? itemBoxes(project, playheadUs) : []), [project, playheadUs, playing])
   if (!project) return null
   const selected = selection.length === 1 && !playing ? boxes.find((b) => b.itemId === selection[0] && editable(project, b.itemId)) : undefined
 

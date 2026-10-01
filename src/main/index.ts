@@ -31,11 +31,13 @@ registerFileProtocolScheme()
 
 // Editor: decoders WebCodecs inativos não devem ser recuperados pelo Chromium (o DecoderPool ainda
 // recria por precaução). Vale para o app normal; o spike F0 pode medir sem a flag (CIALIGHT_SPIKE_NOFLAG).
-const reclaimFlag = !(process.env.CIALIGHT_SPIKE === 'editor' && process.env.CIALIGHT_SPIKE_NOFLAG)
+// Spikes de medição: só fora do pacote (o instalador não leva as páginas deles)
+const spikeMode = app.isPackaged ? undefined : process.env.CIALIGHT_SPIKE
+const reclaimFlag = !(spikeMode === 'editor' && process.env.CIALIGHT_SPIKE_NOFLAG)
 if (reclaimFlag) app.commandLine.appendSwitch('disable-features', 'ReclaimInactiveWebCodecs')
 
 // QA/testes rodam em paralelo (várias instâncias): sem lock nesses modos
-const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST || (process.env.CIALIGHT_QA && !app.isPackaged) || process.env.CIALIGHT_SPIKE === 'editor' ? true : app.requestSingleInstanceLock()
+const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST || (process.env.CIALIGHT_QA && !app.isPackaged) || spikeMode === 'editor' ? true : app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
@@ -68,11 +70,11 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     log.info(`CiaLight Gravador ${app.getVersion()} — Electron ${process.versions.electron}, Chromium ${process.versions.chrome}`)
-    if (process.env.CIALIGHT_SPIKE === 'editor') {
+    if (spikeMode === 'editor') {
       void runEditorSpike(reclaimFlag)
       return
     }
-    if (process.env.CIALIGHT_SPIKE) {
+    if (spikeMode) {
       void runSpike()
       return
     }

@@ -88,7 +88,7 @@ export function AdvancedTab(): React.JSX.Element {
 
       <Section title="Pastas e diagnóstico" className="rise-in rise-in-2">
         <SettingRows>
-          <SettingRow label="Onde ficam as gravações brutas" description="Cada gravação vira uma pasta com o vídeo original, a câmera e o áudio separados. A limpeza automática segue a retenção da aba Geral." stack>
+          <SettingRow label="Onde ficam as gravações brutas" description="Cada gravação vira uma pasta com o vídeo original, a câmera e o áudio separados. A limpeza automática segue a retenção da aba Geral. Os projetos do editor ficam na pasta Projetos ao lado desta: ao trocar de pasta, os projetos da pasta anterior deixam de aparecer (nada é apagado; voltar à pasta antiga os mostra de novo)." stack>
             <PathField value={settings.rawDir} defaultPath={appInfo?.paths.raw ?? null} onChange={(v) => void patch({ rawDir: v })} />
           </SettingRow>
           <SettingRow

@@ -81,7 +81,8 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     encoders: () => encoderFallbackChain(cachedEncoderProbe()),
     log
   })
-  ingest.on('progress', (j) => broadcastAll(IPC.media.progress, j))
+  // só o editor (janela do gravador) mostra o progresso: barra e overlays ocultas não precisam dele
+  ingest.on('progress', (j) => sendToRecorder(IPC.media.progress, j))
   // Escritor único do project.json: com o projeto aberto num editor, o renderer recebe o patch e o
   // aplica no próprio store (o autosave dele grava); salvar daqui disputaria com esse autosave e uma
   // das escritas se perderia. Sem nenhuma janela com o projeto aberto, o main aplica e salva.

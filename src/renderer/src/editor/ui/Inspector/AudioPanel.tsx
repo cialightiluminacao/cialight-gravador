@@ -2,6 +2,7 @@ import { useRef } from 'react'
 import type { MediaItem } from '@shared/editor/project'
 import { Slider, Toggle } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
+import { usePausedPlayhead } from '../../state/pausedPlayhead'
 import { NumberField } from './NumberField'
 import { PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
 
@@ -14,7 +15,8 @@ export const gainToDb = (g: number): number => (g <= 0.001 ? MIN_DB : Math.max(M
 export const dbToGain = (db: number): number => (db <= MIN_DB ? 0 : Math.pow(10, db / 20))
 
 export function AudioPanel({ item }: { item: MediaItem }): React.JSX.Element {
-  const playheadUs = useEditorStore((s) => s.playheadUs)
+  // tocando, o inspetor não acompanha o playhead (evita re-render a cada quadro)
+  const playheadUs = usePausedPlayhead()
   const local = localUs(item, playheadUs)
   const a = item.audio
   const id = item.id

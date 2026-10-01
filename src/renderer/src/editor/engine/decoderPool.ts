@@ -11,6 +11,8 @@
 // As ImageBitmap de `image()` pertencem ao pool (o chamador NÃO as fecha); as substituídas em
 // `setSources` só são fechadas em `flushRetired()`, chamado quando nenhum render as usa.
 // Se o decoder de uma entrada saudável falhar (ex.: recuperado pelo Chromium), ela é recriada uma vez.
+// Abertura que falhou (arquivo preso por outro programa, ausente…) vira placeholder e é tentada de novo
+// depois de OPEN_RETRY_MS — não a cada quadro, nem nunca mais até a URL mudar.
 import { ALL_FORMATS, Input, UrlSource, VideoSampleSink, type InputVideoTrack, type VideoSample } from 'mediabunny'
 import type { Us } from '@shared/editor/project'
 import { decoderMatrixOverride } from '@shared/editor/sourceColor'
@@ -18,6 +20,7 @@ import { decoderMatrixOverride } from '@shared/editor/sourceColor'
 // Salto à frente maior que isso reinicia o iterador no alvo (em vez de decodificar tudo no meio).
 const MAX_SKIP_S = 1
 const EPS_S = 1e-6
+const OPEN_RETRY_MS = 5000
 
 interface Opened {
   input: Input
@@ -30,6 +33,8 @@ interface Entry {
   url: string
   trackIndex: number | null // faixa de vídeo v:N; null = principal
   opened: Promise<Opened>
+  /** Instante em que a abertura falhou (nova tentativa após OPEN_RETRY_MS). */
+  openFailedAt: number | null
   it: AsyncGenerator<VideoSample, void, unknown> | null
   held: VideoSample | null // último sample com timestamp ≤ alvo (do pool)
   ahead: VideoSample | null // próximo sample já decodificado (do pool)
@@ -49,7 +54,14 @@ export class DecoderPool {
   private retired: Promise<ImageBitmap | null>[] = []
   private clock = 0
 
-  constructor(private readonly maxLive = 8) {}
+  private readonly now: () => number
+  private readonly openFn: (url: string, trackIndex: number | null) => Promise<Opened>
+
+  /** deps: relógio e abertura injetáveis (testes). */
+  constructor(private readonly maxLive = 8, deps: { now?: () => number; open?: (url: string, trackIndex: number | null) => Promise<Opened> } = {}) {
+    this.now = deps.now ?? (() => performance.now())
+    this.openFn = deps.open ?? open
+  }
 
   /**
    * assetId → URL (proxy ou original) e, para arquivos multi-faixa (rec.mp4 da sessão), assetId → índice v:N.
@@ -77,7 +89,9 @@ export class DecoderPool {
         try {
           await e.opened
         } catch {
-          return null // não abre (arquivo ausente/corrompido/codec): placeholder, sem tentar de novo
+          // não abre (arquivo ausente/preso/corrompido/codec): placeholder; reabre só após OPEN_RETRY_MS
+          e.openFailedAt ??= this.now()
+          return null
         }
         try {
           return await this.run(e, (o) => {
@@ -162,9 +176,13 @@ export class DecoderPool {
     const url = this.urls[assetId]
     if (!url) return null
     let e = this.entries.get(key)
+    if (e && e.openFailedAt !== null && e.busy === 0 && this.now() - e.openFailedAt >= OPEN_RETRY_MS) {
+      this.drop(key, e)
+      e = undefined
+    }
     if (!e) {
       const trackIndex = this.trackIdx[assetId] ?? null
-      e = { assetId, url, trackIndex, opened: open(url, trackIndex), it: null, held: null, ahead: null, done: false, lock: Promise.resolve(), busy: 0, lastUsed: 0 }
+      e = { assetId, url, trackIndex, opened: this.openFn(url, trackIndex), openFailedAt: null, it: null, held: null, ahead: null, done: false, lock: Promise.resolve(), busy: 0, lastUsed: 0 }
       e.opened.catch(() => {}) // falha tratada em frameAt/prefetch
       this.entries.set(key, e)
     }

@@ -2,7 +2,7 @@ import { RotateCcw } from 'lucide-react'
 import { defaultVisual } from '@shared/editor/factory'
 import type { MediaItem, VisualProps } from '@shared/editor/project'
 import { Segmented, Tip, Toggle } from '@/components/ui/primitives'
-import { useEditorStore } from '../../state/editorStore'
+import { usePausedPlayhead } from '../../state/pausedPlayhead'
 import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
 
@@ -24,7 +24,8 @@ const SHAPE_OPTIONS: { value: NonNullable<VisualProps['shape']>; label: string }
 ]
 
 export function VideoPanel({ item }: { item: V }): React.JSX.Element {
-  const playheadUs = useEditorStore((s) => s.playheadUs)
+  // tocando, o inspetor não acompanha o playhead (evita re-render a cada quadro)
+  const playheadUs = usePausedPlayhead()
   const local = localUs(item, playheadUs)
   const v = item.visual
   const t = v.transform
