@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from './factory'
-import type { Asset, MediaItem, Project } from './project'
+import type { Asset, Item, MediaItem, Project } from './project'
 import * as ops from './ops'
 import { validateProject } from './schema'
 const S = 1_000_000
@@ -200,5 +200,60 @@ describe('ops', () => {
     expect(ops.projectDurationUs(q)).toBe(10 * S)
     let h = ops.updateTrack(q, q.tracks[0].id, { hidden: true }); h = ops.updateTrack(h, h.tracks[1].id, { hidden: true })
     expect(ops.projectDurationUs(h)).toBe(0)
+  })
+
+  // --- correções da revisão ---
+  it('setSpeed escala fades, animações e transição e limita à nova duração', () => {
+    const { p, v } = base()
+    const q0 = ops.updateItem<MediaItem>(p, v, (d) => {
+      d.visual!.fadeInUs = S; d.visual!.fadeOutUs = S; d.audio.fadeInUs = S; d.audio.fadeOutUs = S
+      d.visual!.animIn = { preset: 'fade', durationUs: 2 * S }; d.visual!.animOut = { preset: 'zoom', durationUs: 20 * S }
+      d.transitionIn = { kind: 'crossfade', durationUs: 8 * S }
+    })
+    const it = items(ops.setSpeed(q0, v, 16), 0)[0]
+    expect([it.visual!.fadeInUs, it.visual!.fadeOutUs, it.audio.fadeInUs, it.audio.fadeOutUs]).toEqual([62_500, 62_500, 62_500, 62_500])
+    expect(it.visual!.animIn!.durationUs).toBe(125_000)
+    expect(it.visual!.animOut!.durationUs).toBe(625_000) // 1_250_000 limitado à duração
+    expect(it.transitionIn!.durationUs).toBe(312_500) // 500_000 limitado à metade da duração
+  })
+  it('deleteRange: cada linkId vincula pedaços no mesmo tempo', () => {
+    const { p, a } = base()
+    const q = ops.deleteRange(ops.trimItem(p, a, 'start', 3 * S, { includeLinked: false }), 2 * S, 5 * S)
+    const groups = new Map<string, Item[]>()
+    for (const t of q.tracks) for (const i of t.items) if (i.linkId) groups.set(i.linkId, [...(groups.get(i.linkId) ?? []), i])
+    expect(groups.size).toBe(1)
+    for (const g of groups.values()) { expect(g).toHaveLength(2); expect(new Set(g.map((i) => i.startUs)).size).toBe(1) }
+    expect(validateProject(q)).toEqual([])
+  })
+  it('closeGaps move os vinculados de outras faixas (ou pula se colidir)', () => {
+    let { p, v } = base(); p = ops.moveItems(p, [v], 2 * S)
+    const q = ops.closeGaps(p, p.tracks[0].id)
+    expect(items(q, 0)[0].startUs).toBe(0); expect(items(q, 1)[0].startUs).toBe(0)
+    p = ops.addAsset(p, { ...vid('a2', S), kind: 'audio', video: undefined })
+    p = ops.addMediaFromAsset(p, 'a2', 0).project
+    expect(items(p, 1)).toHaveLength(2)
+    const r = ops.closeGaps(p, p.tracks[0].id)
+    expect(items(r, 0)[0].startUs).toBe(0); expect(items(r, 1).map((i) => i.startUs)).toEqual([0, 2 * S])
+    expect(validateProject(r)).toEqual([])
+  })
+  it('deleteRange remove marcadores do trecho e puxa os posteriores', () => {
+    let { p } = base(); p = ops.addMarker(ops.addMarker(ops.addMarker(p, S), 3 * S), 6 * S)
+    expect(ops.deleteRange(p, 2 * S, 5 * S).markers.map((m) => m.tUs)).toEqual([S, 3 * S])
+  })
+  it('ripple desloca marcadores só quando aplicado a todas as faixas', () => {
+    let { p, v } = base(); p = ops.addMarker(ops.addMediaFromAsset(p, 'a1', 10 * S).project, 12 * S)
+    expect(ops.deleteItems(p, [v], { ripple: true }).markers[0].tUs).toBe(2 * S)
+    expect(ops.trimItem(p, v, 'end', 6 * S, { ripple: true }).markers[0].tUs).toBe(8 * S)
+    expect(ops.trimItem(p, v, 'end', 6 * S, { ripple: true, includeLinked: false }).markers[0].tUs).toBe(12 * S)
+    expect(ops.setSpeed(p, v, 0.5).markers[0].tUs).toBe(22 * S)
+  })
+  it('insertItems recusa ids repetidos; updateAsset ignora id', () => {
+    const { p, v } = base()
+    const dup = { ...items(p, 0)[0], startUs: 20 * S }
+    try { ops.insertItems(p, p.tracks[0].id, [dup], 'overwrite'); expect.unreachable() } catch (e) { expect((e as ops.EditError).code).toBe('invalid') }
+    const fresh = { ...dup, id: 'novo', linkId: undefined }
+    expect(() => ops.insertItems(p, p.tracks[0].id, [fresh, { ...fresh, startUs: 30 * S }], 'overwrite')).toThrow(ops.EditError)
+    expect(ops.updateAsset(p, 'a1', { id: 'x', name: 'n' }).assets[0]).toMatchObject({ id: 'a1', name: 'n' })
+    expect(v).toBeDefined()
   })
 })

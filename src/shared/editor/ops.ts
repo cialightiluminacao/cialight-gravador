@@ -160,24 +160,43 @@ function sliceItem<T extends Item>(it: T, from: Us, to: Us, clearCut: boolean): 
   return (clearCut ? clearEdges(out, from > s, to < e) : out) as T
 }
 
-/** Recorta/divide os itens da faixa que cruzam [from,to); pedaços menores que MIN_ITEM_US somem. */
-function overwriteRange(track: Track, from: Us, to: Us, linkMap: Map<string, string>): void {
+/**
+ * Recorta/divide os itens da faixa que cruzam [from,to); pedaços menores que MIN_ITEM_US somem.
+ * Acumula em `cutLinks` os linkIds de itens divididos em dois (para relinkAcross).
+ */
+function overwriteRange(track: Track, from: Us, to: Us, cutLinks: Set<string>): void {
   const out: Item[] = []
   for (const it of track.items) {
     const s = it.startUs, e = end(it)
     if (e <= from || s >= to) { out.push(it); continue }
-    if (s < from && from - s >= MIN_ITEM_US) out.push(sliceItem(it, s, from, true))
+    const left = s < from && from - s >= MIN_ITEM_US
+    if (left) out.push(sliceItem(it, s, from, true))
     if (e > to && e - to >= MIN_ITEM_US) {
       const right = sliceItem(it, to, e, true)
-      out.push(s < from ? withLink({ ...right, id: newId('i_') }, mapLink(linkMap, it.linkId)) : right)
+      out.push(left ? { ...right, id: newId('i_') } : right)
+      if (left && it.linkId) cutLinks.add(it.linkId)
     }
   }
   track.items = out
 }
 
+/**
+ * Depois de um corte em [from,to): nos grupos vinculados que foram divididos, os membros à direita
+ * (startUs ≥ to) recebem um linkId novo comum; o original fica só com os da esquerda (startUs < from).
+ */
+function relinkAcross(d: Project, from: Us, to: Us, cutLinks: Set<string>): void {
+  for (const link of cutLinks) {
+    const members = d.tracks.flatMap((t) => t.items.filter((i) => i.linkId === link))
+    if (!members.some((i) => i.startUs < from) || !members.some((i) => i.startUs >= to)) continue
+    const n = newId('l_')
+    for (const i of members) if (i.startUs >= to) i.linkId = n
+  }
+}
+
 /** Divide os alvos que contêm atUs com ≥ MIN_ITEM_US dos dois lados; 'all' = faixas desbloqueadas. */
-function splitInPlace(d: Project, targets: Set<string> | 'all', atUs: Us, linkMap: Map<string, string>): number {
+function splitInPlace(d: Project, targets: Set<string> | 'all', atUs: Us): number {
   let count = 0
+  const cutLinks = new Set<string>()
   for (const t of d.tracks) {
     if (targets === 'all' && t.locked) continue
     const out: Item[] = []
@@ -188,12 +207,14 @@ function splitInPlace(d: Project, targets: Set<string> | 'all', atUs: Us, linkMa
       if (!hit) { out.push(it); continue }
       assertUnlocked(t)
       out.push(sliceItem(it, s, atUs, true))
-      out.push(withLink({ ...sliceItem(it, atUs, e, true), id: newId('i_') }, mapLink(linkMap, it.linkId)))
+      out.push({ ...sliceItem(it, atUs, e, true), id: newId('i_') })
+      if (it.linkId) cutLinks.add(it.linkId)
       hits++
     }
     if (hits > 0) t.items = out
     count += hits
   }
+  relinkAcross(d, atUs, atUs, cutLinks)
   return count
 }
 
@@ -210,7 +231,7 @@ function makeRoom(d: Project, pointUs: Us, D: Us, targetTrackId: string): Us {
     if (point - cross.startUs < MIN_ITEM_US) point = cross.startUs
     else if (end(cross) - point < MIN_ITEM_US) point = end(cross)
   }
-  splitInPlace(d, 'all', point, new Map())
+  splitInPlace(d, 'all', point)
   for (const t of d.tracks) {
     if (t.locked) continue
     for (const it of t.items) if (it.startUs >= point) it.startUs += D
@@ -221,17 +242,20 @@ function makeRoom(d: Project, pointUs: Us, D: Us, targetTrackId: string): Us {
 /**
  * Desloca itens com startUs ≥ pivot por shift nas faixas desbloqueadas. Ao puxar para trás (shift < 0),
  * faixas fora de `forced` só se movem se o intervalo [pivot+shift, pivot) estiver vazio nelas.
+ * Os marcadores ≥ pivot só se deslocam se todas as faixas desbloqueadas foram deslocadas.
  */
 function rippleShift(d: Project, pivotUs: Us, shift: Us, exclude: Set<string>, forced: Set<string>): void {
   if (shift === 0) return
+  let all = true
   for (const t of d.tracks) {
     if (t.locked) continue
     if (shift < 0 && !forced.has(t.id)) {
       const g0 = pivotUs + shift
-      if (t.items.some((i) => !exclude.has(i.id) && i.startUs < pivotUs && end(i) > g0)) continue
+      if (t.items.some((i) => !exclude.has(i.id) && i.startUs < pivotUs && end(i) > g0)) { all = false; continue }
     }
     for (const it of t.items) if (!exclude.has(it.id) && it.startUs >= pivotUs) it.startUs += shift
   }
+  if (all) for (const m of d.markers) if (m.tUs >= pivotUs) m.tUs += shift
 }
 
 function isFree(t: Track, s: Us, e: Us, exclude?: Set<string>): boolean {
@@ -290,7 +314,7 @@ export function addAsset(p: Project, a: Asset): Project {
 export function updateAsset(p: Project, id: string, patch: Partial<Asset>): Project {
   const i = p.assets.findIndex((x) => x.id === id)
   if (i < 0) throw new EditError('notFound', `Asset não encontrado: ${id}`)
-  return produce(p, (d) => { Object.assign(d.assets[i], patch) })
+  return produce(p, (d) => { Object.assign(d.assets[i], omit(patch, 'id')) })
 }
 
 /** Remove o asset e todos os itens que o usam (inclusive em faixas bloqueadas). */
@@ -354,6 +378,8 @@ export function insertItems(p: Project, trackId: string, items: Item[], mode: In
     if (it.durationUs < MIN_ITEM_US) throw new EditError('invalid', `Item ${it.id} menor que a duração mínima`)
     if (it.startUs < 0) throw new EditError('bounds', `Item ${it.id} começa antes de 0`)
   }
+  const ids = items.map((i) => i.id)
+  if (new Set(ids).size !== ids.length || ids.some((id) => findItem(p, id))) throw new EditError('invalid', 'Id de item repetido')
   const sorted = [...items].sort((a, b) => a.startUs - b.startUs)
   return produce(p, (d) => {
     const t = mustTrack(d, trackId)
@@ -365,8 +391,11 @@ export function insertItems(p: Project, trackId: string, items: Item[], mode: In
       const point = makeRoom(d, first, Math.max(sum, span), trackId)
       placed = sorted.map((i) => ({ ...i, startUs: i.startUs + point - first }))
     } else {
-      const linkMap = new Map<string, string>()
-      for (const i of sorted) overwriteRange(t, i.startUs, end(i), linkMap)
+      for (const i of sorted) {
+        const cut = new Set<string>()
+        overwriteRange(t, i.startUs, end(i), cut)
+        relinkAcross(d, i.startUs, end(i), cut)
+      }
     }
     t.items.push(...placed)
     finalize(d)
@@ -433,7 +462,7 @@ export function splitAt(p: Project, itemIds: string[] | 'all', atUs: Us): Projec
   )
   if (!would) return p
   return produce(p, (d) => {
-    splitInPlace(d, targets, at, new Map())
+    splitInPlace(d, targets, at)
     finalize(d)
   })
 }
@@ -534,12 +563,13 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
       const point = makeRoom(d, blockStart, span, (moved.find((x) => primary.has(x.id)) ?? moved[0]).toTrackId)
       moved = moved.map((x) => ({ ...x, item: { ...x.item, startUs: x.item.startUs + point - blockStart } }))
     } else {
-      const linkMap = new Map<string, string>()
       for (const x of moved) {
         const t = mustTrack(d, x.toTrackId)
         if (isFree(t, x.item.startUs, end(x.item))) continue
         if (opts?.mode !== 'overwrite') throw new EditError('overlap', `Sobreposição na faixa "${t.name}"`)
-        overwriteRange(t, x.item.startUs, end(x.item), linkMap)
+        const cut = new Set<string>()
+        overwriteRange(t, x.item.startUs, end(x.item), cut)
+        relinkAcross(d, x.item.startUs, end(x.item), cut)
       }
     }
     for (const x of moved) mustTrack(d, x.toTrackId).items.push(x.item)
@@ -574,6 +604,8 @@ export function deleteItems(p: Project, itemIds: string[], opts?: { ripple?: boo
         else merged.push([r[0], r[1]])
       }
       for (const [s, e] of merged.reverse()) {
+        // tudo ou nada (intencional): só fecha se o trecho estiver vazio em todas as faixas desbloqueadas,
+        // para nunca dessincronizar as faixas entre si
         const empty = d.tracks.every((t) => t.locked || isFree(t, s, e))
         if (empty) rippleShift(d, e, -(e - s), new Set(), new Set())
       }
@@ -590,11 +622,14 @@ export function deleteRange(p: Project, fromUs: Us, toUs: Us, opts?: { trackIds?
     ? opts.trackIds.map((id) => { const t = mustTrack(p, id); assertUnlocked(t); return id })
     : p.tracks.filter((t) => !t.locked).map((t) => t.id)
   return produce(p, (d) => {
-    const linkMap = new Map<string, string>()
-    for (const id of trackIds) {
-      const t = mustTrack(d, id)
-      overwriteRange(t, from, to, linkMap)
-      for (const it of t.items) if (it.startUs >= to) it.startUs -= to - from
+    const cut = new Set<string>()
+    for (const id of trackIds) overwriteRange(mustTrack(d, id), from, to, cut)
+    relinkAcross(d, from, to, cut)
+    for (const id of trackIds) for (const it of mustTrack(d, id).items) if (it.startUs >= to) it.startUs -= to - from
+    // marcadores acompanham só quando o corte vale para todas as faixas desbloqueadas
+    if (d.tracks.every((t) => t.locked || trackIds.includes(t.id))) {
+      d.markers = d.markers.filter((m) => m.tUs < from || m.tUs >= to)
+      for (const m of d.markers) if (m.tUs >= to) m.tUs -= to - from
     }
     finalize(d)
   })
@@ -667,7 +702,24 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
     const dur = Math.round(f.item.durationUs * ratio)
     if (dur < MIN_ITEM_US) throw new EditError('invalid', 'Duração resultante menor que o mínimo')
     const scaled = mapAnims(f.item, (a) => (a.keys ? { ...a, keys: a.keys.map((k) => ({ ...k, tUs: Math.round(k.tUs * ratio) })) } : a))
-    changes.push({ id, item: { ...scaled, speed: s, durationUs: dur }, oldEnd: end(f.item) })
+    // fades, animações e transição acompanham a escala de tempo, limitados à nova duração
+    const fit = (us: Us, max: Us): Us => Math.min(max, Math.round(us * ratio))
+    let n: MediaItem = { ...scaled, speed: s, durationUs: dur, audio: { ...scaled.audio, fadeInUs: fit(scaled.audio.fadeInUs, dur), fadeOutUs: fit(scaled.audio.fadeOutUs, dur) } }
+    if (n.visual) {
+      const v = n.visual
+      n = {
+        ...n,
+        visual: {
+          ...v,
+          fadeInUs: fit(v.fadeInUs, dur),
+          fadeOutUs: fit(v.fadeOutUs, dur),
+          ...(v.animIn ? { animIn: { ...v.animIn, durationUs: fit(v.animIn.durationUs, dur) } } : {}),
+          ...(v.animOut ? { animOut: { ...v.animOut, durationUs: fit(v.animOut.durationUs, dur) } } : {})
+        }
+      }
+    }
+    if (n.transitionIn) n = { ...n, transitionIn: { ...n.transitionIn, durationUs: fit(n.transitionIn.durationUs, Math.floor(dur / 2)) } }
+    changes.push({ id, item: n, oldEnd: end(f.item) })
   }
   if (changes.length === 0) return p
   const idSet = new Set(changes.map((c) => c.id))
@@ -733,16 +785,34 @@ export function duplicateItems(p: Project, itemIds: string[], atUs?: Us): { proj
   return { project, itemIds: copies.map((c) => c.item.id) }
 }
 
-/** Encosta os itens da faixa a partir de 0, removendo os vãos. */
+/**
+ * Encosta os itens da faixa a partir de 0, removendo os vãos. Os vinculados de outras faixas se movem
+ * pelo mesmo delta; se colidirem com algo (ou a faixa estiver bloqueada), ficam onde estão.
+ */
 export function closeGaps(p: Project, trackId: string): Project {
   assertUnlocked(mustTrack(p, trackId))
   return produce(p, (d) => {
     const t = mustTrack(d, trackId)
     t.items = [...t.items].sort((a, b) => a.startUs - b.startUs)
+    const deltas = new Map<string, Us>()
     let cursor = 0
     for (const it of t.items) {
-      if (it.startUs !== cursor) it.startUs = cursor
+      const delta = cursor - it.startUs
+      if (delta !== 0) {
+        it.startUs = cursor
+        if (it.linkId && !deltas.has(it.linkId)) deltas.set(it.linkId, delta)
+      }
       cursor = end(it)
+    }
+    for (const o of d.tracks) {
+      if (o.id === trackId || o.locked) continue
+      // deltas são negativos: da esquerda para a direita, cada movimento libera espaço para os seguintes
+      for (const it of [...o.items].sort((a, b) => a.startUs - b.startUs)) {
+        const delta = it.linkId ? deltas.get(it.linkId) : undefined
+        if (!delta) continue
+        const ns = it.startUs + delta
+        if (ns >= 0 && isFree(o, ns, ns + it.durationUs, new Set([it.id]))) it.startUs = ns
+      }
     }
     finalize(d)
   })
