@@ -101,7 +101,8 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       throw e
     }
     if (next === history.present) return true
-    if (opts?.transient) {
+    // transient sem transação aberta cai num commit real (decisão: não abre transação implícita)
+    if (opts?.transient && txBase) {
       // dentro de transação: troca o present sem gravar histórico
       set({ ...derive({ ...history, present: next }) })
       return true
@@ -211,18 +212,23 @@ let flushImpl: (() => Promise<void>) | null = null
 export function startAutosave(save: (p: Project) => Promise<void>): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null
   let inflight: Promise<void> = Promise.resolve()
+  let failed = false // avisa só uma vez por sequência de falhas
 
   const run = (): Promise<void> => {
     inflight = inflight.then(async () => {
-      const { project, dirty } = useEditorStore.getState()
-      if (!project || !dirty) return
+      const { project, dirty, txBase } = useEditorStore.getState()
+      // nunca persiste estado não commitado; commitTx/cancelTx reagendam
+      if (!project || !dirty || txBase) return
       useEditorStore.setState({ saving: true })
       try {
         await save(project)
         // só limpa dirty se nada mudou durante o save
+        failed = false
         if (useEditorStore.getState().project === project) useEditorStore.getState().markSaved()
       } catch (e) {
         console.error('[editor] autosave falhou', e)
+        if (!failed) toast.error(`Não foi possível salvar o projeto: ${e instanceof Error ? e.message : String(e)}`)
+        failed = true
       } finally {
         useEditorStore.setState({ saving: false })
       }
@@ -231,13 +237,17 @@ export function startAutosave(save: (p: Project) => Promise<void>): () => void {
   }
 
   const unsub = useEditorStore.subscribe((s, prev) => {
-    if (s.project === prev.project || !s.project || !s.dirty || s.txBase) return
+    const txEnded = !!prev.txBase && !s.txBase
+    if ((s.project === prev.project && !txEnded) || !s.project || !s.dirty || s.txBase) return
     if (timer) clearTimeout(timer)
     timer = setTimeout(() => { timer = null; void run() }, AUTOSAVE_DEBOUNCE_MS)
   })
 
   const flush = async (): Promise<void> => {
-    if (timer) { clearTimeout(timer); timer = null; await run() } else await inflight
+    if (timer) { clearTimeout(timer); timer = null }
+    const { dirty, txBase } = useEditorStore.getState()
+    if (dirty && !txBase) await run()
+    else await inflight
   }
   flushImpl = flush
 

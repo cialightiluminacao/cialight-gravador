@@ -140,6 +140,53 @@ describe('editorStore', () => {
   })
 })
 
+describe('transações (casos de borda)', () => {
+  it('undo durante tx apenas cancela a tx', () => {
+    st().apply((p) => addMarker(p, 1))
+    const p1 = st().project!
+    st().begin()
+    st().apply((p) => addMarker(p, 2), { transient: true })
+    st().undo()
+    expect(st().project).toBe(p1)
+    expect(st().txBase).toBeNull()
+    expect(st().history.past).toHaveLength(1)
+  })
+
+  it('redo é ignorado durante tx', () => {
+    st().apply((p) => addMarker(p, 1))
+    st().undo()
+    st().begin()
+    st().redo()
+    expect(st().canRedo).toBe(true)
+    expect(st().project!.markers).toHaveLength(0)
+  })
+
+  it('apply não-transient durante tx fecha a tx em 1 entrada', () => {
+    const p0 = st().project!
+    st().begin()
+    st().apply((p) => addMarker(p, 1), { transient: true })
+    st().apply((p) => addMarker(p, 2))
+    expect(st().txBase).toBeNull()
+    expect(st().history.past).toEqual([p0])
+    expect(st().project!.markers).toHaveLength(2)
+  })
+
+  it('transient sem tx aberta vira commit real', () => {
+    st().apply((p) => addMarker(p, 1), { transient: true })
+    expect(st().history.past).toHaveLength(1)
+    expect(st().dirty).toBe(true)
+  })
+
+  it('commitTx atualiza updatedAt', () => {
+    const p0 = st().project!
+    st().begin()
+    st().apply((p) => addMarker(p, 1), { transient: true })
+    expect(st().project!.updatedAt).toBe(p0.updatedAt)
+    st().commitTx()
+    expect(st().project!.updatedAt).not.toBe(p0.updatedAt)
+  })
+})
+
 describe('autosave', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())
@@ -187,6 +234,60 @@ describe('autosave', () => {
     await vi.advanceTimersByTimeAsync(1100)
     expect(st().dirty).toBe(true)
     expect(st().saving).toBe(false)
+    stop()
+  })
+
+  it('timer disparando no meio de uma tx não persiste estado não commitado', async () => {
+    const save = vi.fn().mockResolvedValue(undefined)
+    const stop = startAutosave(save)
+    st().apply((p) => addMarker(p, 1))
+    await vi.advanceTimersByTimeAsync(900)
+    st().begin()
+    st().apply((p) => addMarker(p, 2), { transient: true })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(save).not.toHaveBeenCalled()
+    expect(st().dirty).toBe(true)
+    st().cancelTx() // volta ao estado commitado, ainda sujo: reagenda
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(save.mock.calls[0][0].markers).toHaveLength(1)
+    expect(st().dirty).toBe(false)
+    stop()
+  })
+
+  it('flush durante tx não salva', async () => {
+    const save = vi.fn().mockResolvedValue(undefined)
+    const stop = startAutosave(save)
+    st().apply((p) => addMarker(p, 1))
+    st().begin()
+    await flushAutosave()
+    expect(save).not.toHaveBeenCalled()
+    stop()
+  })
+
+  it('flush após save falho tenta de novo', async () => {
+    const save = vi.fn().mockRejectedValueOnce(new Error('disk')).mockResolvedValue(undefined)
+    const stop = startAutosave(save)
+    st().apply((p) => addMarker(p, 1))
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(st().dirty).toBe(true)
+    await flushAutosave()
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(st().dirty).toBe(false)
+    stop()
+  })
+
+  it('toast de erro uma vez por sequência de falhas', async () => {
+    vi.mocked(toast.error).mockClear()
+    const save = vi.fn().mockRejectedValue(new Error('disk'))
+    const stop = startAutosave(save)
+    st().apply((p) => addMarker(p, 1))
+    await vi.advanceTimersByTimeAsync(1100)
+    st().apply((p) => addMarker(p, 2))
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(toast.error).toHaveBeenCalledTimes(1)
+    expect(toast.error).toHaveBeenCalledWith('Não foi possível salvar o projeto: disk')
     stop()
   })
 })
