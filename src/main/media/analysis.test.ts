@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { filmstripPlan, PeaksAccumulator } from './analysis'
+import { filmstripPlan, partPath, PeaksAccumulator } from './analysis'
 
 describe('filmstripPlan', () => {
   it('1 quadro por segundo até 300 s', () => {
@@ -31,5 +31,16 @@ describe('PeaksAccumulator', () => {
   })
   it('sem amostras → vazio', () => {
     expect(new PeaksAccumulator(80).finish().length).toBe(0)
+  })
+})
+
+describe('partPath', () => {
+  it('único por chamada, mantém a extensão e a pasta', () => {
+    const a = partPath('C:/p/proxies/a1.mp4')
+    const b = partPath('C:/p/proxies/a1.mp4')
+    expect(a).not.toBe(b)
+    expect(a.startsWith(`C:/p/proxies/a1.part-${process.pid}-`)).toBe(true)
+    expect(a).toMatch(/^C:\/p\/proxies\/a1\.part-\d+-\d+\.mp4$/)
+    expect(partPath('C:/p.d/cache/semext')).toMatch(/^C:\/p\.d\/cache\/semext\.part-\d+-\d+$/)
   })
 })

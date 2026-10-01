@@ -2,7 +2,7 @@ import { execFile } from 'child_process'
 import { extname } from 'path'
 import type { AssetAudioInfo, AssetKind, AssetVideoInfo } from '@shared/editor/project'
 import { ffprobePath } from '../export/ffmpegPath'
-import { FfmpegError } from '../export/ffmpegRunner'
+import { FfmpegError, parseKeyframeTimes } from '../export/ffmpegRunner'
 
 // Ingestão: ffprobe → MediaInfo. `parseFfprobe` é puro (testável com JSON de fixture);
 // `probe` roda o ffprobe embutido e completa o GOP médio com `probeGopUs`.
@@ -120,15 +120,7 @@ function ffprobe(args: string[]): Promise<string> {
 /** GOP médio dos primeiros 20 s da faixa de vídeo (só keyframes são lidos). */
 export async function probeGopUs(path: string): Promise<number> {
   const out = await ffprobe(['-v', 'error', '-select_streams', 'v:0', '-skip_frame', 'nokey', '-show_entries', 'frame=pts_time', '-read_intervals', '%+20', '-of', 'csv=p=0', path])
-  const times: number[] = []
-  for (const line of out.split(/\r?\n/)) {
-    const t = line.trim().replace(/,$/, '')
-    if (!t) continue
-    const n = Number(t)
-    if (Number.isFinite(n)) times.push(n)
-  }
-  times.sort((x, y) => x - y)
-  return averageGopUs(times)
+  return averageGopUs(parseKeyframeTimes(out).sort((x, y) => x - y))
 }
 
 export async function probe(path: string): Promise<MediaInfo> {

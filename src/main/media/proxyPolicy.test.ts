@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { intermediateArgs, needsProxy, proxyArgs } from './proxyPolicy'
+import { derivedComplete, intermediateArgs, needsProxy, proxyArgs } from './proxyPolicy'
+import type { Asset } from '@shared/editor/project'
 import type { MediaInfo } from './probe'
 
 function video(over: Partial<NonNullable<MediaInfo['video']>> = {}, rest: Partial<MediaInfo> = {}): MediaInfo {
@@ -98,5 +99,32 @@ describe('intermediateArgs', () => {
     const a = intermediateArgs('in.mov', 'out.mp4', video({ codec: 'hevc' }), 'h264_nvenc')
     expect(valueAfter(a, '-cq')).toBe('19')
     expect(valueAfter(a, '-c:v')).toBe('h264_nvenc')
+  })
+})
+
+describe('derivedComplete', () => {
+  const base: Asset = {
+    id: 'a', name: 'a', kind: 'video', source: { type: 'file', path: 'x', size: 1, mtimeMs: 1 }, durationUs: 6_000_000, status: 'ready',
+    video: { width: 1920, height: 1080, fps: 30, codec: 'h264', rotation: 0, decodable: true, gopUs: 1_000_000 },
+    audio: { channels: 2, sampleRate: 48000, codec: 'aac' }
+  }
+  it('vídeo sem proxy necessário: filmstrip + peaks bastam', () => {
+    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p' })).toBe(true)
+    expect(derivedComplete({ ...base, filmstrip: 'f' })).toBe(false)
+    expect(derivedComplete({ ...base, peaks: 'p' })).toBe(false)
+    expect(derivedComplete({ ...base, audio: undefined, filmstrip: 'f' })).toBe(true)
+  })
+  it('GOP longo exige proxy; não decodificável exige intermediário', () => {
+    const long = { ...base, filmstrip: 'f', peaks: 'p', video: { ...base.video!, gopUs: 10_000_000 } }
+    expect(derivedComplete(long)).toBe(false)
+    expect(derivedComplete({ ...long, proxy: 'x' })).toBe(true)
+    const undec = { ...base, filmstrip: 'f', peaks: 'p', video: { ...base.video!, decodable: false } }
+    expect(derivedComplete(undec)).toBe(false)
+    expect(derivedComplete({ ...undec, intermediate: 'i' })).toBe(true)
+  })
+  it('áudio precisa de peaks; imagem sempre completa', () => {
+    expect(derivedComplete({ ...base, kind: 'audio', video: undefined })).toBe(false)
+    expect(derivedComplete({ ...base, kind: 'audio', video: undefined, peaks: 'p' })).toBe(true)
+    expect(derivedComplete({ ...base, kind: 'image', durationUs: null })).toBe(true)
   })
 })

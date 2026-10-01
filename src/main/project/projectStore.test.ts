@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ProjectStore } from './projectStore'
@@ -130,11 +130,20 @@ describe('ProjectStore', () => {
       { ...base, id: 'gone', status: 'ready', source: { type: 'file', path: join(root, 'nao-existe.mp4'), size: 10, mtimeMs: 1 } },
       { ...base, id: 'changed', status: 'processing', source: { type: 'file', path: media, size: 99, mtimeMs: 1 } },
       { ...base, id: 'back', status: 'missing', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
+      { ...base, id: 'backDone', status: 'missing', filmstrip: 'cache/b.strip.jpg', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
+      { ...base, id: 'backErr', status: 'missing', error: 'proxy: falhou', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
+      { ...base, id: 'err', status: 'error', error: 'x', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
       { ...base, id: 's', status: 'ready', source: { type: 'session', sessionId: 'x', stream: 'screen' } }
     ]
     const p = { ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets }
     const r = store.withMediaStatus(p)
-    expect(r.assets.map((a) => [a.id, a.status])).toEqual([['ok', 'ready'], ['gone', 'missing'], ['changed', 'missing'], ['back', 'ready'], ['s', 'ready']])
+    expect(r.assets.map((a) => [a.id, a.status])).toEqual([
+      ['ok', 'ready'], ['gone', 'missing'], ['changed', 'missing'],
+      ['back', 'processing'], // voltou sem derivados → reprocessar
+      ['backDone', 'ready'], // voltou com derivados completos
+      ['backErr', 'error'], // erro anterior não some enquanto faltam derivados
+      ['err', 'error'], ['s', 'ready']
+    ])
     expect(p.assets[1].status).toBe('ready') // não muta a entrada
     expect(store.withMediaStatus(r)).toBe(r) // nada mudou → mesma referência
   })
@@ -142,10 +151,27 @@ describe('ProjectStore', () => {
   it('cacheAssets acrescenta/substitui assets só na memória', () => {
     const p = mk('p-a', '2026-10-01T10:00:00.000Z')
     store.create(p)
-    const a: Asset = { id: 'a1', name: 'a', kind: 'audio', source: { type: 'file', path: 'C:\m\a.mp3', size: 1, mtimeMs: 1 }, durationUs: 1, status: 'processing' }
+    const a: Asset = { id: 'a1', name: 'a', kind: 'audio', source: { type: 'file', path: 'C:/m/a.mp3', size: 1, mtimeMs: 1 }, durationUs: 1, status: 'processing' }
     store.cacheAssets('p-a', [a])
     store.cacheAssets('P-A', [{ ...a, name: 'b' }])
     expect(store.cached('p-a').assets).toEqual([{ ...a, name: 'b' }])
     expect(store.load('p-a').assets).toEqual([]) // disco intocado
+  })
+
+  it('applyAssetPatch grava no disco mesclando assets só do cache e atualiza o cache', () => {
+    const disk: Asset = { id: 'd1', name: 'd', kind: 'audio', source: { type: 'file', path: 'C:/m/d.mp3', size: 1, mtimeMs: 1 }, durationUs: 1, status: 'ready' }
+    store.create({ ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets: [disk] })
+    const fresh: Asset = { ...disk, id: 'a1', name: 'novo', status: 'processing' }
+    store.cacheAssets('p-a', [fresh])
+    store.applyAssetPatch('p-a', 'a1', { peaks: 'cache/a1.peaks.bin', status: 'ready' }, '2026-10-02T00:00:00.000Z')
+    const onDisk = JSON.parse(readFileSync(join(root, 'p-a', 'project.json'), 'utf8')) as Project
+    expect(onDisk.assets.map((a) => [a.id, a.status, a.peaks])).toEqual([['d1', 'ready', undefined], ['a1', 'ready', 'cache/a1.peaks.bin']])
+    expect(onDisk.updatedAt).toBe('2026-10-02T00:00:00.000Z')
+    expect(store.cached('p-a').assets.find((a) => a.id === 'a1')?.peaks).toBe('cache/a1.peaks.bin')
+  })
+
+  it('applyAssetPatch de asset que não existe em lugar nenhum lança', () => {
+    store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
+    expect(() => store.applyAssetPatch('p-a', 'zz', { status: 'ready' }, '2026-10-02T00:00:00.000Z')).toThrow()
   })
 })

@@ -1,4 +1,5 @@
 import type { HwEncoder } from '@shared/types'
+import type { Asset } from '@shared/editor/project'
 import type { MediaInfo } from './probe'
 
 // Decide se um vídeo importado precisa de proxy (preview fluido) ou de intermediário
@@ -97,4 +98,18 @@ export function intermediateArgs(input: string, output: string, info: MediaInfo,
     ...audioArgs(info, '192k'),
     ...tail(output)
   ]
+}
+
+/**
+ * Derivados de um asset já prontos? Vídeo: filmstrip, peaks (se tem áudio) e proxy/intermediário
+ * quando a política pede (VFR não fica no Asset, então não entra aqui). Áudio: peaks. Imagem: sempre.
+ */
+export function derivedComplete(a: Asset): boolean {
+  if (a.kind === 'image') return true
+  if (a.kind === 'audio') return !!a.peaks
+  if (!a.filmstrip || (a.audio && !a.peaks)) return false
+  if (!a.video) return true
+  const { video } = a
+  const d = needsProxy({ durationUs: a.durationUs, kind: 'video', video, audio: a.audio, vfr: false, formatName: '' }, video.decodable)
+  return (!d.intermediate || !!a.intermediate) && (!d.proxy || !!a.proxy)
 }

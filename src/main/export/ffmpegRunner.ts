@@ -187,13 +187,20 @@ export function probeKeyframes(file: string): Promise<number[]> {
           resolve([])
           return
         }
-        const out: number[] = []
-        for (const line of stdout.split(/\r?\n/)) {
-          const n = Number(line.trim().replace(/,$/, ''))
-          if (Number.isFinite(n)) out.push(n)
-        }
-        resolve(out)
+        resolve(parseKeyframeTimes(stdout))
       }
     )
   })
+}
+
+/** Saída csv=p=0 do ffprobe (um pts_time por linha) → instantes em s. Linha vazia não vira 0 (Number('') === 0). */
+export function parseKeyframeTimes(stdout: string): number[] {
+  const out: number[] = []
+  for (const line of stdout.split(/\r?\n/)) {
+    const t = line.trim().replace(/,$/, '')
+    if (!t) continue
+    const n = Number(t)
+    if (Number.isFinite(n)) out.push(n)
+  }
+  return out
 }

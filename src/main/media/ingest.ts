@@ -98,13 +98,10 @@ export const THUMB_REL = 'cache/thumb.jpg'
 export class IngestQueue {
   private heavy = new Slots(1)
   private light = new Slots(2)
-  private controllers = new Map<string, AbortController>()
-  /** Assets em processamento ("projectId\nassetId") → controlador do lote em que entraram. */
-  private active = new Map<string, AbortController>()
+  /** Execução vigente de cada asset: projectId → assetId → seu AbortController. */
+  private active = new Map<string, Map<string, AbortController>>()
   private progressFns: ProgressFn[] = []
   private doneFns: DoneFn[] = []
-  /** Projetos com cache/thumb.jpg sendo gerado (dois vídeos simultâneos não disputam o arquivo). */
-  private thumbing = new Set<string>()
 
   constructor(private deps: IngestDeps) {}
 
@@ -115,44 +112,43 @@ export class IngestQueue {
     else this.doneFns.push(fn as DoneFn)
   }
 
-  /** Enfileira o processamento de um asset (com `video.decodable` já decidido pelo renderer). */
+  /**
+   * Enfileira o processamento de um asset (com `video.decodable` já decidido pelo renderer).
+   * Se o asset já está em processamento (ex.: relink), a execução anterior é cancelada e esta a
+   * substitui: só a execução vigente pode emitir 'done'.
+   */
   enqueue(projectId: string, asset: Asset): void {
-    const key = `${projectId}\n${asset.id}`
-    // repetido enquanto ativo é ignorado; um cancelado que ainda está terminando não bloqueia o reenvio
-    if (this.active.get(key)?.signal.aborted === false) return
-    let ctl = this.controllers.get(projectId)
-    if (!ctl) {
-      ctl = new AbortController()
-      this.controllers.set(projectId, ctl)
-    }
-    this.active.set(key, ctl)
-    const signal = ctl.signal
-    void this.run(projectId, asset, signal)
+    let runs = this.active.get(projectId)
+    if (!runs) this.active.set(projectId, (runs = new Map()))
+    runs.get(asset.id)?.abort()
+    const ctl = new AbortController()
+    runs.set(asset.id, ctl)
+    const current = (): boolean => this.active.get(projectId)?.get(asset.id) === ctl && !ctl.signal.aborted
+    void this.run(projectId, asset, ctl.signal)
       .then((patch) => {
-        if (!signal.aborted) this.emitDone(projectId, asset.id, patch)
+        if (current()) this.emitDone(projectId, asset.id, patch)
       })
       .catch((e) => {
-        if (signal.aborted || e instanceof CancelledError) return
-        this.emitDone(projectId, asset.id, { status: 'error', error: messageOf(e) })
+        if (current() && !(e instanceof CancelledError)) this.emitDone(projectId, asset.id, { status: 'error', error: messageOf(e) })
       })
       .finally(() => {
-        if (this.active.get(key) === ctl) this.active.delete(key)
-        if (!this.busy(projectId) && this.controllers.get(projectId) === ctl) this.controllers.delete(projectId)
+        const m = this.active.get(projectId)
+        if (m?.get(asset.id) === ctl) m.delete(asset.id)
+        if (m && m.size === 0 && this.active.get(projectId) === m) this.active.delete(projectId)
       })
   }
 
   /** Cancela tudo do projeto (fila e ffmpeg em execução); nenhum 'done' é emitido para eles. */
   cancel(projectId: string): void {
-    const ctl = this.controllers.get(projectId)
-    if (!ctl) return
-    this.controllers.delete(projectId)
-    ctl.abort()
+    const runs = this.active.get(projectId)
+    if (!runs) return
+    this.active.delete(projectId)
+    for (const c of runs.values()) c.abort()
   }
 
-  /** Há trabalho pendente ou em execução (não cancelado) para o projeto. */
+  /** Há trabalho pendente ou em execução para o projeto. */
   busy(projectId: string): boolean {
-    for (const [k, c] of this.active) if (!c.signal.aborted && k.startsWith(`${projectId}\n`)) return true
-    return false
+    return (this.active.get(projectId)?.size ?? 0) > 0
   }
 
   private emitProgress(j: IngestJob): void {
@@ -233,17 +229,15 @@ export class IngestQueue {
             const r = await buildFilmstrip(input.path, this.out(projectId, rel), durationUs, { signal, onProgress, map: input.videoMap })
             patch.filmstrip = rel
             patch.filmstripInfo = { frames: r.frames, everyUs: r.everyUs, tileW: r.tileW, tileH: r.tileH }
-            // miniatura do projeto: do primeiro vídeo cujo filmstrip ficar pronto
+            // miniatura do projeto: do primeiro vídeo cujo filmstrip ficar pronto (dois simultâneos
+            // gravam .part distintos e o último rename vence — inofensivo)
             const thumb = this.deps.projectFile(projectId, THUMB_REL)
-            if (!existsSync(thumb) && !this.thumbing.has(projectId)) {
-              this.thumbing.add(projectId)
+            if (!existsSync(thumb)) {
               try {
                 await buildThumb(input.path, thumb, durationUs, { signal, map: input.videoMap })
               } catch (e) {
                 if (e instanceof CancelledError) throw e
                 this.deps.log?.warn(`miniatura do projeto ${projectId} falhou`, e)
-              } finally {
-                this.thumbing.delete(projectId)
               }
             }
           })

@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { parseProject } from '@shared/editor/schema'
-import { projectDurationUs } from '@shared/editor/ops'
+import { projectDurationUs, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project } from '@shared/editor/project'
 import type { ProjectSummary } from '@shared/ipc'
 import type { SessionStore } from '../session/sessionStore'
+import { derivedComplete } from '../media/proxyPolicy'
 
 // Projetos do editor: uma pasta por projeto em <projectsRoot>/<projectId>/ com project.json
 // (escrita atômica), versions/NNN.json (histórico de segurança), proxies/, cache/, generated/.
@@ -25,6 +26,11 @@ export type AssetVariant = 'original' | 'proxy' | 'intermediate'
 const SUBDIRS = ['proxies', 'cache', 'generated', 'versions']
 const MAX_VERSIONS = 20
 const VERSION_MIN_INTERVAL_MS = 60_000
+
+function reappeared(a: Asset): Asset['status'] {
+  if (derivedComplete(a)) return 'ready'
+  return a.error ? 'error' : 'processing'
+}
 
 export class ProjectStore {
   // Cache em memória do último project.json carregado/salvo, chave = id minúsculo
@@ -117,8 +123,9 @@ export class ProjectStore {
   }
 
   /**
-   * Confere no disco os assets de arquivo importado: ausente ou com tamanho diferente → 'missing';
-   * 'missing' que voltou com o mesmo tamanho → 'ready'. Devolve a mesma referência se nada mudou.
+   * Confere no disco os assets de arquivo importado: ausente ou com tamanho diferente → 'missing'.
+   * 'missing' que voltou com o mesmo tamanho: 'ready' com derivados completos; senão 'error' se havia
+   * erro registrado, ou 'processing' (o editor reenfileira). Devolve a mesma referência se nada mudou.
    */
   withMediaStatus(p: Project): Project {
     let changed = false
@@ -130,7 +137,7 @@ export class ProjectStore {
       } catch {
         present = false
       }
-      const status: Asset['status'] = !present ? 'missing' : a.status === 'missing' ? 'ready' : a.status
+      const status: Asset['status'] = !present ? 'missing' : a.status === 'missing' ? reappeared(a) : a.status
       if (status === a.status) return a
       changed = true
       return { ...a, status }
@@ -151,6 +158,20 @@ export class ProjectStore {
     const p = this.cached(id)
     const ids = new Set(assets.map((a) => a.id))
     this.cache.set(p.id.toLowerCase(), { ...p, assets: [...p.assets.filter((a) => !ids.has(a.id)), ...assets] })
+  }
+
+  /**
+   * Aplica o resultado da ingestão direto no disco (sem editor com o projeto aberto): parte do
+   * project.json, acrescenta assets que só existem no cache (importados e ainda não salvos), aplica o
+   * patch e salva (o save atualiza o cache). Lança se o asset não existe em nenhum dos dois.
+   */
+  applyAssetPatch(id: string, assetId: string, patch: Partial<Asset>, nowIso: string): void {
+    const memo = this.cache.get(id.toLowerCase())
+    const disk = this.load(id)
+    const onDisk = new Set(disk.assets.map((a) => a.id))
+    const extra = (memo?.assets ?? []).filter((a) => !onDisk.has(a.id))
+    const merged = extra.length ? { ...disk, assets: [...disk.assets, ...extra] } : disk
+    this.save({ ...updateAsset(merged, assetId, patch), updatedAt: nowIso })
   }
 
   /** Projeto da memória (último load/save); senão carrega do disco. `id` pode vir em minúsculo. */

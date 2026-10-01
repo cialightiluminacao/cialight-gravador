@@ -34,10 +34,16 @@ export function filmstripPlan(durationUs: number): { everyUs: number; frames: nu
   return { everyUs, frames }
 }
 
-/** Nome temporário com a mesma extensão (o ffmpeg escolhe o formato pela extensão). */
-function partPath(out: string): string {
+let partSeq = 0
+
+/**
+ * Nome temporário único (pid + contador) com a mesma extensão (o ffmpeg escolhe o formato por ela):
+ * uma execução cancelada que limpa o próprio .part nunca apaga o .part da execução que a substituiu.
+ */
+export function partPath(out: string): string {
+  const tag = `.part-${process.pid}-${++partSeq}`
   const dot = out.lastIndexOf('.')
-  return dot > out.lastIndexOf('\\') && dot > out.lastIndexOf('/') ? `${out.slice(0, dot)}.part${out.slice(dot)}` : `${out}.part`
+  return dot > out.lastIndexOf('\\') && dot > out.lastIndexOf('/') ? `${out.slice(0, dot)}${tag}${out.slice(dot)}` : `${out}${tag}`
 }
 
 /** Roda o ffmpeg gravando em .part; renomeia no sucesso, apaga no erro/cancelamento. */

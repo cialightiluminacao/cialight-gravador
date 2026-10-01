@@ -12,9 +12,8 @@ import type { Asset } from '@shared/editor/project'
 import { projectFromSession } from '@shared/editor/fromSession'
 import { newId, newProjectId } from '@shared/editor/ids'
 import { parseProject } from '@shared/editor/schema'
-import { updateAsset } from '@shared/editor/ops'
 import { IngestQueue, assetFromInfo, type IngestInput } from './media/ingest'
-import { probe } from './media/probe'
+import { IMAGE_EXTENSIONS, probe } from './media/probe'
 import { getRecorderWindow, showRecorder, displayIdOfWindow } from './windows/recorderWindow'
 import { hideBar, showBar, toggleBar, updateBar, isBarHiddenByUser } from './windows/barWindow'
 import { hideOverlays, setOverlayMode, showOverlays, syncStrokesToOverlays } from './windows/overlayWindows'
@@ -31,7 +30,6 @@ import { trayBalloon } from './tray'
 
 const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'ts']
 const AUDIO_EXT = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
-const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg']
 
 // Registra todos os handlers IPC. Mantém a UI (renderer) desacoplada dos módulos do main.
 
@@ -47,6 +45,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   // ---- ingestão de mídia ----
   // Projeto aberto em cada janela do editor (webContents.id → projectId|null).
   const openProjects = new Map<number, string | null>()
+  const watchedContents = new Set<number>()
   const resolveIngestInput = (projectId: string, a: Asset): IngestInput => {
     switch (a.source.type) {
       case 'file':
@@ -80,8 +79,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       return
     }
     try {
-      const p = projects.load(projectId)
-      projects.save({ ...updateAsset(p, assetId, patch), updatedAt: new Date().toISOString() })
+      projects.applyAssetPatch(projectId, assetId, patch, new Date().toISOString())
     } catch (e) {
       log.warn(`ingestão: não foi possível gravar o resultado de ${assetId} em ${projectId}`, e)
     }
@@ -195,10 +193,10 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       title: 'Importar mídia',
       properties: ['openFile', 'multiSelections'],
       filters: [
-        { name: 'Todos os arquivos de mídia', extensions: [...VIDEO_EXT, ...AUDIO_EXT, ...IMAGE_EXT] },
+        { name: 'Todos os arquivos de mídia', extensions: [...VIDEO_EXT, ...AUDIO_EXT, ...IMAGE_EXTENSIONS] },
         { name: 'Vídeos', extensions: VIDEO_EXT },
         { name: 'Áudios', extensions: AUDIO_EXT },
-        { name: 'Imagens', extensions: IMAGE_EXT }
+        { name: 'Imagens', extensions: IMAGE_EXTENSIONS }
       ]
     }
     const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
@@ -211,14 +209,17 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     const assets: Asset[] = []
     for (const path of paths) {
       const id = newId('a_')
+      // tamanho/mtime reais mesmo se o probe falhar: senão o próximo load marcaria o asset como 'missing'
+      let st = { size: 0, mtimeMs: 0 }
       try {
-        const st = statSync(path)
+        st = statSync(path)
         assets.push(assetFromInfo(id, path, st, await probe(path)))
       } catch (e) {
         log.warn(`importação de ${path} falhou`, e)
         const ext = extname(path).slice(1).toLowerCase()
-        const kind = IMAGE_EXT.includes(ext) ? 'image' : AUDIO_EXT.includes(ext) ? 'audio' : 'video'
-        assets.push({ id, name: basename(path), kind, source: { type: 'file', path, size: 0, mtimeMs: 0 }, durationUs: null, status: 'error', error: `Não foi possível ler o arquivo: ${e instanceof Error ? e.message : String(e)}` })
+        const kind = IMAGE_EXTENSIONS.includes(ext) ? 'image' : AUDIO_EXT.includes(ext) ? 'audio' : 'video'
+        const source = { type: 'file' as const, path, size: st.size, mtimeMs: Math.round(st.mtimeMs) }
+        assets.push({ id, name: basename(path), kind, source, durationUs: null, status: 'error', error: `Não foi possível ler o arquivo: ${e instanceof Error ? e.message : String(e)}` })
       }
     }
     projects.cacheAssets(projectId, assets)
@@ -243,7 +244,17 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   })
   ipcMain.handle(IPC.media.setOpenProject, (e, projectId: string | null) => {
     const wc = e.sender
-    if (!openProjects.has(wc.id)) wc.once('destroyed', () => openProjects.delete(wc.id))
+    if (!watchedContents.has(wc.id)) {
+      // janela fechada, renderer caído ou recarregado/navegado: ninguém mais aplica os patches
+      watchedContents.add(wc.id)
+      const forget = (): void => void openProjects.delete(wc.id)
+      wc.once('destroyed', () => {
+        forget()
+        watchedContents.delete(wc.id)
+      })
+      wc.on('render-process-gone', forget)
+      wc.on('did-navigate', forget)
+    }
     openProjects.set(wc.id, projectId)
   })
 

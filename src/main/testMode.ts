@@ -220,9 +220,8 @@ function waitDone(queue: IngestQueue, projectId: string, assetId: string, timeou
   })
 }
 
-/** Intervalos entre keyframes, em quadros a `fps` (probeKeyframes devolve um 0 espúrio da linha vazia final: dedup + ordena). */
-function keyIntervals(raw: number[], fps: number): number[] {
-  const times = [...new Set(raw)].sort((a, b) => a - b)
+/** Intervalos entre keyframes, em quadros a `fps`. */
+function keyIntervals(times: number[], fps: number): number[] {
   const out: number[] = []
   for (let i = 1; i < times.length; i++) out.push(Math.round((times[i] - times[i - 1]) * fps))
   return out
