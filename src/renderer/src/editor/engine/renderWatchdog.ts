@@ -1,12 +1,13 @@
-// Watchdog do render do preview (spec §13): tocando, se nenhum `rendered` chega em 5 s o worker travou
-// (decoder/GPU pendurado) e é reiniciado. Puro (relógio injetável); quem chama `check` periodicamente e
+// Watchdog do render do preview (spec §13): tocando, se um pedido de quadro fica 5 s sem `rendered` o worker
+// travou (decoder/GPU pendurado) e é reiniciado. Só conta prazo com pedido pendente: tocando com o rAF
+// suspenso (janela minimizada) ninguém pede quadros e isso não é travamento. Puro (relógio injetável); quem chama `check` periodicamente e
 // reinicia é o motor do editor (editorEngine.ts).
 
 export const RENDER_STALL_MS = 5000
 
 export class RenderWatchdog {
   private last = 0
-  private wasPlaying = false
+  private armed = false
 
   constructor(
     private readonly timeoutMs = RENDER_STALL_MS,
@@ -19,17 +20,18 @@ export class RenderWatchdog {
   }
 
   /**
-   * Chamado periodicamente com o estado da reprodução; true = travou (reinicie). Começar a tocar e cada
-   * disparo dão um prazo inteiro novo (o worker reiniciado também precisa abrir os decoders).
+   * Chamado periodicamente com o estado da reprodução e se há pedido de quadro sem resposta; true = travou
+   * (reinicie). Armar (tocando com pedido pendente) e cada disparo dão um prazo inteiro novo (o worker
+   * reiniciado também precisa abrir os decoders).
    */
-  check(playing: boolean): boolean {
+  check(playing: boolean, pending: boolean): boolean {
     const t = this.now()
-    if (!playing) {
-      this.wasPlaying = false
+    if (!playing || !pending) {
+      this.armed = false
       return false
     }
-    if (!this.wasPlaying) {
-      this.wasPlaying = true
+    if (!this.armed) {
+      this.armed = true
       this.last = t
       return false
     }

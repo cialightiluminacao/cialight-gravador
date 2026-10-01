@@ -44,7 +44,7 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
     const asset = assetId ? useEditorStore.getState().project?.assets.find((a) => a.id === assetId) : undefined
     toast.error(asset ? `Não foi possível tocar o áudio de “${asset.name}”` : 'Problema na reprodução do áudio', { description: message })
   })
-  // watchdog (spec §13): tocando e sem quadro há 5 s → worker novo num canvas novo, mesmo projeto/estado
+  // watchdog (spec §13): tocando com pedido de quadro sem resposta há 5 s → worker novo num canvas novo, mesmo projeto/estado
   const watchdog = new RenderWatchdog(opts.stallMs ?? RENDER_STALL_MS)
   const offRender = render.onMessage((m) => {
     if (m.t === 'rendered') watchdog.rendered()
@@ -66,7 +66,7 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
     if (!s.playing && s.project) void render.requestFrame(s.playheadUs, false)
   }
   const watchTimer = setInterval(() => {
-    if (watchdog.check(useEditorStore.getState().playing)) restartRender()
+    if (watchdog.check(useEditorStore.getState().playing, render.pendingFrames > 0)) restartRender()
   }, Math.min(1000, Math.max(100, Math.round((opts.stallMs ?? RENDER_STALL_MS) / 5))))
 
   // store → workers, no máximo uma vez por quadro de tela

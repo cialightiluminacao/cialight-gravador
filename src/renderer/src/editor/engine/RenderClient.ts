@@ -116,6 +116,11 @@ export class RenderClient {
     })
   }
 
+  /** Pedidos de quadro ainda sem resposta (o watchdog só conta prazo com algum pendente). */
+  get pendingFrames(): number {
+    return this.frames.size
+  }
+
   /** Testes: pixels do último quadro (origem em cima à esquerda, linhas de cima para baixo). */
   readPixels(x: number, y: number, w: number, h: number): Promise<Uint8Array> {
     const id = ++this.pixelId
