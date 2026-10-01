@@ -187,3 +187,15 @@ export function projectFromSession(session: Session, opts: { projectId: string; 
     originSessionId: session.id
   }
 }
+
+/**
+ * Gravações (sessionId) de que o projeto depende: a de origem, as dos assets de sessão (rec.mp4) e as das
+ * anotações (session.json). Nenhuma delas pode ser apagada pela limpeza de brutos nem pelo Histórico.
+ */
+export function sessionRefs(p: Project): string[] {
+  const ids = new Set<string>()
+  if (p.originSessionId) ids.add(p.originSessionId)
+  for (const a of p.assets) if (a.source.type === 'session') ids.add(a.source.sessionId)
+  for (const t of p.tracks) for (const i of t.items) if (i.type === 'annotations') ids.add(i.sessionId)
+  return [...ids]
+}

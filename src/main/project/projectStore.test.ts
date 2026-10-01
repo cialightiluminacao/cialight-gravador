@@ -20,7 +20,7 @@ describe('ProjectStore', () => {
     root = mkdtempSync(join(tmpdir(), 'cialight-proj-'))
     trashed = []
     clock = 1_000_000
-    store = new ProjectStore({ projectsRoot: () => root, trash: async (p) => void trashed.push(p), now: () => clock })
+    store = new ProjectStore({ projectsRoot: () => root, trash: async (p) => void trashed.push(p), now: () => clock, sessionMediaExists: (id) => id !== 'apagada' })
   })
   afterEach(() => rmSync(root, { recursive: true, force: true }))
 
@@ -133,7 +133,9 @@ describe('ProjectStore', () => {
       { ...base, id: 'backDone', status: 'missing', filmstrip: 'cache/b.strip.jpg', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
       { ...base, id: 'backErr', status: 'missing', error: 'proxy: falhou', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
       { ...base, id: 'err', status: 'error', error: 'x', source: { type: 'file', path: media, size: 10, mtimeMs: 1 } },
-      { ...base, id: 's', status: 'ready', source: { type: 'session', sessionId: 'x', stream: 'screen' } }
+      { ...base, id: 's', status: 'ready', source: { type: 'session', sessionId: 'x', stream: 'screen' } },
+      { ...base, id: 'sGone', status: 'ready', source: { type: 'session', sessionId: 'apagada', stream: 'screen' } },
+      { ...base, id: 'sBack', status: 'missing', source: { type: 'session', sessionId: 'x', stream: 'mic' } }
     ]
     const p = { ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets }
     const r = store.withMediaStatus(p)
@@ -142,7 +144,9 @@ describe('ProjectStore', () => {
       ['back', 'processing'], // voltou sem derivados → reprocessar
       ['backDone', 'ready'], // voltou com derivados completos
       ['backErr', 'error'], // erro anterior não some enquanto faltam derivados
-      ['err', 'error'], ['s', 'ready']
+      ['err', 'error'], ['s', 'ready'],
+      ['sGone', 'missing'], // rec.mp4 da gravação sumiu (lixeira/limpeza)
+      ['sBack', 'ready'] // gravação voltou
     ])
     expect(p.assets[1].status).toBe('ready') // não muta a entrada
     expect(store.withMediaStatus(r)).toBe(r) // nada mudou → mesma referência
@@ -173,5 +177,26 @@ describe('ProjectStore', () => {
   it('applyAssetPatch de asset que não existe em lugar nenhum lança', () => {
     store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
     expect(() => store.applyAssetPatch('p-a', 'zz', { status: 'ready' }, '2026-10-02T00:00:00.000Z')).toThrow()
+  })
+})
+
+describe('ProjectStore.sessionUsage', () => {
+  let root: string
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cialight-proj-'))
+  })
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+  it('lista, por gravação, os projetos que a usam (origem, assets de sessão, anotações); ignora pastas inválidas', () => {
+    const store = new ProjectStore({ projectsRoot: () => root, trash: async () => {} })
+    const a: Asset = { id: 'x', name: 'x', kind: 'video', durationUs: 1, status: 'ready', source: { type: 'session', sessionId: 's2', stream: 'screen' } }
+    store.create({ ...mk('p-a', '2026-10-01T10:00:00.000Z'), originSessionId: 's1' })
+    store.create({ ...mk('p-b', '2026-10-01T10:00:00.000Z'), assets: [a] })
+    store.create({ ...mk('p-c', '2026-10-01T10:00:00.000Z'), originSessionId: 's1', assets: [a] })
+    writeFileSync(join(root, 'lixo.txt'), 'x')
+    const u = store.sessionUsage()
+    expect(u.get('s1')?.map((p) => p.id).sort()).toEqual(['p-a', 'p-c'])
+    expect(u.get('s2')?.map((p) => p.name).sort()).toEqual(['Projeto p-b', 'Projeto p-c'])
+    expect(u.has('s3')).toBe(false)
   })
 })

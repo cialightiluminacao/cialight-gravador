@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { join } from 'path'
 import { parseProject } from '@shared/editor/schema'
 import { projectDurationUs, updateAsset } from '@shared/editor/ops'
+import { sessionRefs } from '@shared/editor/fromSession'
 import type { Asset, Project } from '@shared/editor/project'
 import type { ProjectSummary } from '@shared/ipc'
 import type { SessionStore } from '../session/sessionStore'
@@ -19,6 +20,8 @@ export interface ProjectStoreDeps {
   log?: { warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void }
   /** Relógio injetável (testes). */
   now?: () => number
+  /** O rec.mp4 da gravação existe? (assets de sessão: sem ele → 'missing'). Ausente = não confere. */
+  sessionMediaExists?: (sessionId: string) => boolean
 }
 
 export type AssetVariant = 'original' | 'proxy' | 'intermediate'
@@ -125,11 +128,21 @@ export class ProjectStore {
   /**
    * Confere no disco os assets de arquivo importado: ausente ou com tamanho diferente → 'missing'.
    * 'missing' que voltou com o mesmo tamanho: 'ready' com derivados completos; senão 'error' se havia
-   * erro registrado, ou 'processing' (o editor reenfileira). Devolve a mesma referência se nada mudou.
+   * erro registrado, ou 'processing' (o editor reenfileira). Assets de gravação: sem o rec.mp4 (gravação
+   * apagada/na lixeira) → 'missing'; de volta → 'ready'. Devolve a mesma referência se nada mudou.
    */
   withMediaStatus(p: Project): Project {
     let changed = false
+    const sessionExists = this.deps.sessionMediaExists
     const assets = p.assets.map((a): Asset => {
+      if (a.source.type === 'session') {
+        if (!sessionExists) return a
+        const present = sessionExists(a.source.sessionId)
+        const status: Asset['status'] = !present ? 'missing' : a.status === 'missing' ? 'ready' : a.status
+        if (status === a.status) return a
+        changed = true
+        return { ...a, status }
+      }
       if (a.source.type !== 'file') return a
       let present = false
       try {
@@ -194,6 +207,34 @@ export class ProjectStore {
       }
     }
     out.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))
+    return out
+  }
+
+  /**
+   * Gravação → projetos que dependem dela (ver sessionRefs), lendo todos os project.json (e o projeto em
+   * memória, que pode ter assets ainda não salvos). Pastas que não são projeto válido são ignoradas.
+   */
+  sessionUsage(): Map<string, { id: string; name: string }[]> {
+    const out = new Map<string, { id: string; name: string }[]>()
+    const add = (p: Project): void => {
+      for (const s of sessionRefs(p)) {
+        const list = out.get(s) ?? []
+        if (!list.some((x) => x.id === p.id)) list.push({ id: p.id, name: p.name })
+        out.set(s, list)
+      }
+    }
+    const root = this.root()
+    if (existsSync(root)) {
+      for (const name of readdirSync(root)) {
+        try {
+          if (!statSync(join(root, name)).isDirectory()) continue
+          add(this.load(name))
+        } catch {
+          // pasta que não é projeto válido: ignora
+        }
+      }
+    }
+    for (const p of this.cache.values()) add(p)
     return out
   }
 

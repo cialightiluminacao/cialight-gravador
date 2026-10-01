@@ -7,6 +7,7 @@ import { createRecorderWindow, editorNeedsFlush, flushEditor, getRecorderWindow,
 import { installDisplayMediaHandler } from './capture/displayMediaHandler'
 import { listDisplays } from './capture/sources'
 import { dirname, join } from 'path'
+import { existsSync } from 'fs'
 import { SessionStore } from './session/sessionStore'
 import { ProjectStore } from './project/projectStore'
 import { getSettings, rawDir } from './settings/settingsStore'
@@ -52,7 +53,19 @@ if (!gotLock) {
 
     const store = new SessionStore({ rawRoot: rawDir, trash: (p) => shell.trashItem(p), log })
     // Projetos ficam ao lado dos brutos (<brutos>\..\Projetos); calculado a cada uso porque rawDir pode mudar nas Configurações.
-    const projects = new ProjectStore({ projectsRoot: () => join(dirname(rawDir()), 'Projetos'), trash: (p) => shell.trashItem(p), log })
+    const projects = new ProjectStore({
+      projectsRoot: () => join(dirname(rawDir()), 'Projetos'),
+      trash: (p) => shell.trashItem(p),
+      log,
+      // assets de gravação: sem o rec.mp4 (gravação apagada) o editor mostra "mídia indisponível"
+      sessionMediaExists: (id) => {
+        try {
+          return existsSync(store.filePath(id, 'rec.mp4'))
+        } catch {
+          return false
+        }
+      }
+    })
     installFileProtocol(store, projects)
     installDisplayMediaHandler()
     registerIpc(store, projects)
@@ -138,9 +151,17 @@ if (!gotLock) {
         log.info(`sessões interrompidas: ${unfinished.map((s) => s.id).join(', ')}`)
         win.webContents.send(IPC.recording.recover, unfinished)
       }
-      // limpeza de brutos antigos
+      // limpeza de brutos antigos: nunca as gravações que algum projeto do editor usa
       const days = getSettings().rawRetentionDays
-      if (days) void store.cleanupOld(days).then((n) => n && log.info(`limpeza: ${n} sessão(ões) antigas enviadas à lixeira`))
+      if (days) {
+        void Promise.resolve()
+          .then(() => {
+            const used = projects.sessionUsage()
+            return store.cleanupOld(days, (id) => used.has(id))
+          })
+          .then((n) => n && log.info(`limpeza: ${n} sessão(ões) antigas enviadas à lixeira`))
+          .catch((e) => log.warn('limpeza de brutos falhou', e))
+      }
     })
 
     powerMonitor.on('shutdown', () => {

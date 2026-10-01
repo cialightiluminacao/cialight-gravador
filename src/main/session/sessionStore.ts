@@ -159,12 +159,15 @@ export class SessionStore {
     return Math.floor((st.bavail * st.bsize) / 1048576)
   }
 
-  /** Remove sessões finalizadas com mais de `days` dias. Retorna quantas foram enviadas à lixeira. */
-  async cleanupOld(days: number): Promise<number> {
+  /**
+   * Remove sessões finalizadas com mais de `days` dias, exceto as protegidas (`keep`: usadas por projetos do
+   * editor). Retorna quantas foram enviadas à lixeira.
+   */
+  async cleanupOld(days: number, keep: (sessionId: string) => boolean = () => false): Promise<number> {
     const cutoff = Date.now() - days * 86400_000
     let n = 0
     for (const s of this.list()) {
-      if (s.state === 'recording') continue
+      if (s.state === 'recording' || keep(s.id)) continue
       if (new Date(s.createdAt).getTime() < cutoff) {
         await this.delete(s.id)
         n++

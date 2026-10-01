@@ -190,7 +190,12 @@ export interface IpcApi {
     save(session: Session): Promise<void>
     get(id: string): Promise<Session | null>
     list(): Promise<SessionSummary[]>
+    /** Envia à Lixeira; lança se algum projeto do editor usa a gravação (ver usedBy). */
     delete(id: string): Promise<void>
+    /** Projetos do editor que dependem da gravação (origem, mídia ou anotações). */
+    usedBy(id: string): Promise<{ id: string; name: string }[]>
+    /** Sessão pronta para o editor: gravação de fallback (MediaRecorder) é remuxada em rec.mp4 antes. */
+    prepareForEditor(id: string): Promise<Session | null>
     openFolder(id: string): Promise<void>
     freeSpaceMB(): Promise<number>
     unfinished(): Promise<Session[]>
@@ -324,6 +329,8 @@ export const IPC = {
     get: 'session:get',
     list: 'session:list',
     delete: 'session:delete',
+    usedBy: 'session:usedBy',
+    prepareForEditor: 'session:prepareForEditor',
     openFolder: 'session:openFolder',
     freeSpaceMB: 'session:freeSpaceMB',
     unfinished: 'session:unfinished',

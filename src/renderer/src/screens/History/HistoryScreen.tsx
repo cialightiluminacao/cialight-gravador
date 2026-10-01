@@ -9,6 +9,7 @@ import { Badge, Dialog, DialogContent, EmptyState, Tip } from '@/components/ui/p
 import { formatBytes, formatClock, formatDate } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { openRecordingInEditor } from '@/editor/ui/sessionProjects'
+import { ipcErrorMessage } from '@/lib/ipcError'
 
 // Histórico de gravações brutas (spec §4.3 item 5): cards com miniatura, data, duração,
 // tamanho, fonte e badges; abrir na Revisão, abrir pasta, excluir (com confirmação).
@@ -28,6 +29,8 @@ export function HistoryScreen(): React.JSX.Element {
   const setScreen = useAppStore((s) => s.setScreen)
   const [list, setList] = useState<ListState>({ status: 'loading' })
   const [toDelete, setToDelete] = useState<SessionSummary | null>(null)
+  // projetos do editor que usam a gravação a excluir: com algum, a exclusão é bloqueada (eles perderiam a mídia)
+  const [usedBy, setUsedBy] = useState<{ id: string; name: string }[]>([])
   const [busyId, setBusyId] = useState<string | null>(null)
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -36,7 +39,7 @@ export function HistoryScreen(): React.JSX.Element {
       items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       setList({ status: 'ready', items })
     } catch (e) {
-      setList({ status: 'error', message: e instanceof Error ? e.message : String(e) })
+      setList({ status: 'error', message: ipcErrorMessage(e) })
     }
   }, [api])
 
@@ -66,7 +69,19 @@ export function HistoryScreen(): React.JSX.Element {
     try {
       await openRecordingInEditor(s.id, { forceNew })
     } catch (e) {
-      toast.error(`Não foi possível abrir no editor: ${e instanceof Error ? e.message : String(e)}`)
+      toast.error(`Não foi possível abrir no editor: ${ipcErrorMessage(e)}`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const askDelete = async (s: SessionSummary): Promise<void> => {
+    setBusyId(s.id)
+    try {
+      setUsedBy(await api.session.usedBy(s.id))
+      setToDelete(s)
+    } catch (e) {
+      toast.error(`Não foi possível verificar os projetos desta gravação: ${ipcErrorMessage(e)}`)
     } finally {
       setBusyId(null)
     }
@@ -81,7 +96,7 @@ export function HistoryScreen(): React.JSX.Element {
       setToDelete(null)
       await refresh()
     } catch (e) {
-      toast.error(`Não foi possível excluir: ${e instanceof Error ? e.message : String(e)}`)
+      toast.error(`Não foi possível excluir: ${ipcErrorMessage(e)}`)
     } finally {
       setBusyId(null)
     }
@@ -136,13 +151,34 @@ export function HistoryScreen(): React.JSX.Element {
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
             {items.map((s, i) => (
-              <SessionCard key={s.id} s={s} index={i} busy={busyId === s.id} onOpen={() => void open(s)} onEdit={(forceNew) => void edit(s, forceNew)} onFolder={() => void api.session.openFolder(s.id)} onDelete={() => setToDelete(s)} />
+              <SessionCard key={s.id} s={s} index={i} busy={busyId === s.id} onOpen={() => void open(s)} onEdit={(forceNew) => void edit(s, forceNew)} onFolder={() => void api.session.openFolder(s.id)} onDelete={() => void askDelete(s)} />
             ))}
           </div>
         )}
       </div>
 
-      <Dialog open={toDelete !== null} onOpenChange={(o) => !o && setToDelete(null)}>
+      <Dialog open={toDelete !== null && usedBy.length > 0} onOpenChange={(o) => !o && setToDelete(null)}>
+        <DialogContent
+          title="Gravação usada no editor"
+          description={`Esta gravação é usada por ${usedBy.length === 1 ? '1 projeto' : `${usedBy.length} projetos`} do editor e não pode ser excluída enquanto ${usedBy.length === 1 ? 'ele existir' : 'eles existirem'}. Exclua ${usedBy.length === 1 ? 'o projeto' : 'os projetos'} em Projetos antes.`}
+          footer={
+            <Button variant="secondary" onClick={() => setToDelete(null)}>
+              Entendi
+            </Button>
+          }
+        >
+          <ul className="flex max-h-48 flex-col gap-1 overflow-y-auto rounded-xl border border-border bg-bg-2/60 px-3 py-2 text-[12px] text-fg-2">
+            {usedBy.map((p) => (
+              <li key={p.id} className="flex items-center gap-1.5 truncate">
+                <Scissors className="h-3.5 w-3.5 shrink-0 text-muted" />
+                <span className="truncate">{p.name}</span>
+              </li>
+            ))}
+          </ul>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={toDelete !== null && usedBy.length === 0} onOpenChange={(o) => !o && setToDelete(null)}>
         <DialogContent
           title="Excluir gravação bruta?"
           description={toDelete ? `A gravação de ${formatDate(toDelete.createdAt)} (${toDelete.sourceName}, ${formatBytes(toDelete.bytes)}) vai para a Lixeira. Vídeos já exportados não são afetados.` : undefined}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { pipRectAt } from '../compositor/pipMath'
 import type { PipKeyframe, Session } from '../types'
-import { projectFromSession, sessionAssets } from './fromSession'
+import { projectFromSession, sessionAssets, sessionRefs } from './fromSession'
 import type { Asset } from './project'
 import { resolveFrame } from './resolve'
 import type { MediaLayer } from './resolve'
@@ -151,5 +151,15 @@ describe('sessionAssets', () => {
   it('só tela quando não há outras fontes; sessão sem duração lança', () => {
     expect(sessionAssets(base, 'r', 'G').map((x) => x.id)).toEqual(['r-screen'])
     expect(() => sessionAssets({ ...base, durationMs: null } as unknown as Session, 'r', 'G')).toThrow()
+  })
+})
+
+describe('sessionRefs', () => {
+  it('reúne a gravação de origem, os assets de sessão e as anotações', () => {
+    const p = projectFromSession({ ...base, strokes: [stroke] } as Session, { projectId: 'p1', name: 'x', now: '2026-10-01T00:00:00.000Z' })
+    const extra = sessionAssets({ ...base, id: 'outra' } as Session, 'rec_', 'B')
+    const q = { ...p, originSessionId: 'origem', assets: [...p.assets, ...extra] }
+    expect(sessionRefs(q).sort()).toEqual(['2026-08-18T14-32-05', 'origem', 'outra'])
+    expect(sessionRefs({ ...q, originSessionId: undefined, assets: [], tracks: [] })).toEqual([])
   })
 })

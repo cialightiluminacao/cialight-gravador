@@ -43,6 +43,16 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     for (const w of BrowserWindow.getAllWindows()) if (!w.webContents.isDestroyed()) w.webContents.send(channel, ...args)
   }
 
+  /** Sessão para o editor: a de fallback (vários arquivos, ex.: recuperada após queda) vira rec.mp4 antes. */
+  const sessionForEditor = async (id: string): Promise<Session | null> => {
+    let session = store.get(id)
+    if (session?.files.fallback) {
+      session = await normalizeFallbackSession(session, store.dirOf(id))
+      store.save(session)
+    }
+    return session
+  }
+
   // ---- ingestão de mídia ----
   // Projeto aberto em cada janela do editor (webContents.id → projectId|null).
   const openProjects = new Map<number, string | null>()
@@ -160,7 +170,14 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ipcMain.handle(IPC.session.save, (_e, session: Session) => store.save(session))
   ipcMain.handle(IPC.session.get, (_e, id: string) => store.get(id))
   ipcMain.handle(IPC.session.list, () => store.list())
-  ipcMain.handle(IPC.session.delete, (_e, id: string) => store.delete(id))
+  ipcMain.handle(IPC.session.delete, (_e, id: string) => {
+    // projetos do editor apontam para o rec.mp4/session.json da gravação: apagá-la os deixaria sem mídia
+    const users = projects.sessionUsage().get(id) ?? []
+    if (users.length) throw new Error(`A gravação é usada por ${users.length === 1 ? '1 projeto' : `${users.length} projetos`} do editor (${users.map((p) => p.name).join(', ')}). Exclua os projetos antes.`)
+    return store.delete(id)
+  })
+  ipcMain.handle(IPC.session.usedBy, (_e, id: string) => projects.sessionUsage().get(id) ?? [])
+  ipcMain.handle(IPC.session.prepareForEditor, (_e, id: string) => sessionForEditor(id))
   ipcMain.handle(IPC.session.openFolder, async (_e, id: string) => {
     await shell.openPath(store.dirOf(id))
   })
@@ -178,8 +195,8 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     ingest.cancel(id)
     return projects.remove(id)
   })
-  ipcMain.handle(IPC.project.fromSession, (_e, sessionId: string) => {
-    const session = store.get(sessionId)
+  ipcMain.handle(IPC.project.fromSession, async (_e, sessionId: string) => {
+    const session = await sessionForEditor(sessionId)
     if (!session) throw new Error('Sessão não encontrada')
     const now = new Date()
     const d = new Date(session.createdAt)

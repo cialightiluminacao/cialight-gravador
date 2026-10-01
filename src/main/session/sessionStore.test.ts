@@ -83,6 +83,19 @@ describe('SessionStore', () => {
     expect(store.list().map((s) => s.id)).toEqual(['b'])
   })
 
+  it('cleanupOld nunca apaga gravação usada por um projeto', async () => {
+    for (const id of ['velha-usada', 'velha-livre']) {
+      const s = store.create(config, id, extra).session
+      s.state = 'finalized'
+      s.createdAt = '2020-01-01T00:00:00.000Z'
+      store.save(s)
+    }
+    const n = await store.cleanupOld(30, (id) => id === 'velha-usada')
+    expect(n).toBe(1)
+    expect(trashed).toEqual([join(root, 'velha-livre')])
+    expect(store.list().map((s) => s.id)).toEqual(['velha-usada'])
+  })
+
   it('rejeita ids e nomes perigosos', () => {
     expect(() => store.dirOf('../x')).toThrow()
     expect(() => store.filePath('a', '..\\b')).toThrow()

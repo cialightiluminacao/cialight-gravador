@@ -7,9 +7,10 @@ import { addAsset } from '@shared/editor/ops'
 import { newId } from '@shared/editor/ids'
 import { sessionAssets } from '@shared/editor/fromSession'
 import type { Asset } from '@shared/editor/project'
+import { ipcErrorMessage } from '@/lib/ipcError'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
 
-const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
+const errMsg = ipcErrorMessage
 
 export function mediaUrl(projectId: string, assetId: string, variant: 'original' | 'proxy' = 'original'): string {
   return `${FILE_PROTOCOL}://${FILE_HOST_MEDIA}/${encodeURIComponent(projectId)}/${encodeURIComponent(assetId)}?v=${variant}`
@@ -83,7 +84,7 @@ export async function importPaths(projectId: string, paths: string[]): Promise<A
 /** Gravação do Histórico → assets 'session' (tela, webcam, microfone, sistema) no projeto aberto. */
 export async function importSession(projectId: string, sessionId: string, label: string): Promise<Asset[]> {
   try {
-    const session = await window.api.session.get(sessionId)
+    const session = await window.api.session.prepareForEditor(sessionId)
     if (!session) throw new Error('gravação não encontrada no disco')
     const assets = sessionAssets(session, newId('rec_'), label)
     if (!useEditorStore.getState().apply((p) => assets.reduce((q, a) => addAsset(q, a), p))) return []
