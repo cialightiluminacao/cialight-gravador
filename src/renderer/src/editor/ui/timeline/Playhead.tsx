@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { useEditorStore } from '../../state/editorStore'
-import { usToPx } from './zoom'
+import { usToPx } from '../../state/zoom'
 
 // Playhead: linha vertical sobre a régua e as faixas, com a cabeça na régua. Assina só o que
 // precisa (playhead/zoom/scroll): durante a reprodução só este componente re-renderiza a 60 Hz.

@@ -1,4 +1,5 @@
 import { cn } from '@/lib/cn'
+import { fadeHandleLefts } from './dragMath'
 
 // Fades do item: rampa diagonal escurecendo o trecho de entrada/saída e alças arrastáveis nos cantos
 // superiores (data-fade, tratadas pelo useTimelineDrag). Coordenadas locais à caixa visível do item:
@@ -27,9 +28,10 @@ export function FadeHandles({ fadeInUs, fadeOutUs, pxPerSec, w, clipFrom, visW, 
   const fout = (fadeOutUs * pxPerSec) / 1e6
   const x0 = -clipFrom // início do item
   const x1 = w - clipFrom // fim do item
+  const lefts = fadeHandleLefts(fin, fout, x0, x1, FADE_HANDLE)
   const handle = (side: 'in' | 'out'): React.JSX.Element | null => {
     const fade = side === 'in' ? fin : fout
-    const left = side === 'in' ? Math.min(x0 + Math.max(0, fade - FADE_HANDLE / 2), x1 - FADE_HANDLE) : Math.max(x1 - Math.max(FADE_HANDLE, fade + FADE_HANDLE / 2), x0)
+    const left = lefts[side]
     if (left + FADE_HANDLE < 0 || left > visW) return null
     const label = side === 'in' ? 'Fade de entrada' : 'Fade de saída'
     return (

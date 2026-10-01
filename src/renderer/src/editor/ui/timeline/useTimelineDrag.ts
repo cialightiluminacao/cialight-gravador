@@ -7,7 +7,7 @@ import type { SnapPoint } from '@shared/editor/snap'
 import { useEditorStore } from '../../state/editorStore'
 import { edgeScrollPx, gestureSnapPoints, planFade, planMove, planTrim, type MoveInput, type MovePlan } from './dragMath'
 import { HEADER_W, itemsInBox, ROW_H, TOP_PAD, zoneAt, type Layout } from './layout'
-import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from './zoom'
+import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
 
 // Gestos da linha do tempo com Pointer Events, por delegação (um handler para todos os itens):
 //  • corpo do item → mover (com vinculados; Alt ignora o vínculo; outra faixa do mesmo tipo muda a faixa;
@@ -247,12 +247,14 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
         }
       }
 
-      // rolagem automática perto das bordas: rola e recalcula o gesto com o último evento
+      // rolagem automática perto das bordas: rola e recalcula o gesto com o último evento.
+      // `done` (deste gesto, não o `active` global): um rAF que sobrou de um gesto encerrado nunca roda
       let lastEv: PointerEvent | null = null
       let raf = 0
+      let done = false
       const tick = (): void => {
         raf = 0
-        if (!active || !lastEv || !started) return
+        if (done || !lastEv || !started) return
         const viewW = scroller.clientWidth - HEADER_W
         const dpx = edgeScrollPx(laneX(lastEv.clientX), viewW)
         if (dpx === 0) return
@@ -264,13 +266,14 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
         if (next === s.scrollUs) return
         s.setScroll(next)
         onMove(lastEv)
-        raf = requestAnimationFrame(tick)
+        // o recálculo pode ter encerrado o gesto (transação fechada por fora)
+        if (!done) raf = requestAnimationFrame(tick)
       }
 
       const move = (ev: PointerEvent): void => {
         lastEv = ev
         onMove(ev)
-        if (autoScroll && active && !raf) raf = requestAnimationFrame(tick)
+        if (autoScroll && !done && !raf) raf = requestAnimationFrame(tick)
       }
       const up = (): void => finish(true)
       const cancel = (): void => finish(false)
@@ -281,7 +284,6 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
         ev.stopPropagation()
         if (ev.key === 'Escape') finish(false)
       }
-      let done = false
       function finish(commit: boolean): void {
         if (done) return
         done = true

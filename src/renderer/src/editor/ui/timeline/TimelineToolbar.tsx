@@ -7,7 +7,7 @@ import type { PlaybackController } from '../../engine/PlaybackController'
 import { SHORTCUT_LABELS, type ShortcutAction } from '../../shortcuts'
 import { useEditorStore } from '../../state/editorStore'
 import { runShortcut } from '../editorActions'
-import { ZOOM_MAX, ZOOM_MIN } from './zoom'
+import { ZOOM_MAX, ZOOM_MIN } from '../../state/zoom'
 
 // Barra da linha do tempo: dividir, apagar, desfazer/refazer, ímã, marcador, entrada/saída e
 // "Apagar trecho I–O", zoom (−, slider logarítmico, +, ajustar). Tudo passa por runShortcut,

@@ -20,7 +20,7 @@ import { TimelineToolbar } from './TimelineToolbar'
 import { TrackHeader } from './TrackHeader'
 import { TrackLane } from './TrackLane'
 import { cancelActiveGesture, NO_OVERLAY, useTimelineDrag, type DragOverlay } from './useTimelineDrag'
-import { fitZoom, maxScrollUs, pxToDurUs, pxToUs, SNAP_PX, usToPx } from './zoom'
+import { fitZoom, maxScrollUs, pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
 
 // Linha do tempo multifaixa (spec §9). Rolagem horizontal virtual (scrollUs no store) e vertical
 // nativa; roda = rolar na horizontal, Ctrl+roda = zoom ancorado no mouse, Shift+roda = vertical.

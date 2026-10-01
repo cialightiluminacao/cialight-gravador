@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
 import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
-import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from '../ui/timeline/zoom'
+import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from './zoom'
 
 // Store do editor (zustand): projeto com histórico, transações (arrasto = 1 passo de undo),
 // seleção, viewport da timeline e autosave. Operações puras vivem em @shared/editor/ops.

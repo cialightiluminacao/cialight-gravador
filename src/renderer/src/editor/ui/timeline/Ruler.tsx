@@ -5,7 +5,7 @@ import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
 import { seekTo } from '../editorActions'
 import { RULER_H } from './layout'
-import { pxToDurUs, pxToUs, rulerLabel, rulerTicks, SNAP_PX, usToPx } from './zoom'
+import { pxToDurUs, pxToUs, rulerLabel, rulerTicks, SNAP_PX, usToPx } from '../../state/zoom'
 
 // Régua: ticks e timecode desenhados num <canvas> (só a janela visível), faixa I/O destacada e
 // marcadores (triângulos coloridos: clique vai até ele, duplo clique renomeia, botão direito abre

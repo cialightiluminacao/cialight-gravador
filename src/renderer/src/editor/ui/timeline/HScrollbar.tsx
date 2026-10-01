@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef } from 'react'
 import type { Us } from '@shared/editor/project'
 import { useEditorStore } from '../../state/editorStore'
-import { maxScrollUs } from './zoom'
+import { maxScrollUs } from '../../state/zoom'
 
 // Barra de rolagem horizontal da linha do tempo (a rolagem é virtual: scrollUs no store).
 // Arrastar o polegar rola; clicar no trilho avança uma página.

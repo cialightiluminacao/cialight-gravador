@@ -8,7 +8,7 @@ import { FadeHandles } from './FadeHandles'
 import { filmstripSlots } from './itemMedia'
 import { usePeaks } from './peaks'
 import { Waveform } from './Waveform'
-import { usToPx } from './zoom'
+import { usToPx } from '../../state/zoom'
 
 // Um item na faixa: posicionado por usToPx e recortado à área visível (+ margem), para que itens
 // enormes em zoom alto não virem caixas de milhões de px. Vídeo mostra o filmstrip (fatias do sprite

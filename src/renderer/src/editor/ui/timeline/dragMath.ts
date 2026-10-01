@@ -201,3 +201,16 @@ export function edgeScrollPx(x: number, viewW: number): number {
   if (x > viewW - EDGE_SCROLL_ZONE) return Math.round(EDGE_SCROLL_MAX * Math.min(1, (x - (viewW - EDGE_SCROLL_ZONE)) / EDGE_SCROLL_ZONE))
   return 0
 }
+
+/**
+ * Posição (left, px locais) das alças de fade de tamanho `size`: entrada centrada no fim do fade de entrada,
+ * saída no início do de saída, presas ao item [x0, x1]. Quando se encontrariam (ex.: fadeIn = duração),
+ * ficam lado a lado no ponto de encontro — a de cima nunca esconde a outra, e as duas seguem agarráveis.
+ */
+export function fadeHandleLefts(finPx: number, foutPx: number, x0: number, x1: number, size: number): { in: number; out: number } {
+  const inL = Math.min(x0 + Math.max(0, finPx - size / 2), x1 - size)
+  const outL = Math.max(x1 - Math.max(size, foutPx + size / 2), x0)
+  if (outL - inL >= size) return { in: inL, out: outL }
+  const meet = Math.min(x1 - size, Math.max(x0 + size, (inL + outL + size) / 2))
+  return { in: meet - size, out: meet }
+}

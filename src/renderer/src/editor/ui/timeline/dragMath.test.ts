@@ -3,7 +3,7 @@ import { createEmptyProject } from '@shared/editor/factory'
 import * as ops from '@shared/editor/ops'
 import type { Asset, MediaItem, Project } from '@shared/editor/project'
 import { snapPoints } from '@shared/editor/snap'
-import { canChangeTrack, dropTarget, edgeScrollPx, EDGE_SCROLL_MAX, gestureSnapPoints, planFade, planMove, planTrim } from './dragMath'
+import { canChangeTrack, dropTarget, edgeScrollPx, EDGE_SCROLL_MAX, fadeHandleLefts, gestureSnapPoints, planFade, planMove, planTrim } from './dragMath'
 
 const S = 1_000_000
 const vid = (id: string, dur = 10 * S): Asset => ({ id, name: id, kind: 'video', source: { type: 'file', path: `C:/${id}.mp4`, size: 1, mtimeMs: 1 }, durationUs: dur, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
@@ -206,5 +206,27 @@ describe('edgeScrollPx', () => {
     expect(edgeScrollPx(5, 1000)).toBeLessThan(0)
     expect(edgeScrollPx(-50, 1000)).toBe(-EDGE_SCROLL_MAX)
     expect(edgeScrollPx(2000, 1000)).toBe(EDGE_SCROLL_MAX)
+  })
+})
+
+describe('fadeHandleLefts', () => {
+  const H = 10
+  const overlap = (a: number, b: number): boolean => Math.abs(a - b) < H
+  it('alças nos cantos com fades curtos', () => {
+    expect(fadeHandleLefts(0, 0, 0, 200, H)).toEqual({ in: 0, out: 190 })
+    expect(fadeHandleLefts(50, 30, 0, 200, H)).toEqual({ in: 45, out: 165 })
+  })
+  it('fadeIn = duração: as duas alças continuam separadas (as duas podem ser agarradas)', () => {
+    const r = fadeHandleLefts(200, 0, 0, 200, H)
+    expect(overlap(r.in, r.out)).toBe(false)
+    expect(r.in).toBeGreaterThanOrEqual(0)
+    expect(r.out + H).toBeLessThanOrEqual(200)
+  })
+  it('fadeOut = duração e fades que se encontram no meio também não se sobrepõem', () => {
+    for (const [fin, fout] of [[0, 200], [100, 100], [120, 80]]) {
+      const r = fadeHandleLefts(fin, fout, -40, 160, H)
+      expect(overlap(r.in, r.out)).toBe(false)
+      expect(r.in).toBeLessThan(r.out)
+    }
   })
 })
