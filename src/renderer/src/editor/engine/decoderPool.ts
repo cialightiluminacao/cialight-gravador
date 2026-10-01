@@ -1,8 +1,16 @@
-// Pool de decodificadores (mediabunny/WebCodecs) por asset, com LRU de `maxLive` decoders vivos.
-// Reprodução (sequential) reaproveita um iterador `samples()` por asset; seek usa `getSample()`.
-// O VideoSample devolvido é do chamador (deve fechá-lo no mesmo quadro). As ImageBitmap de
-// `image()` pertencem ao pool (o chamador NÃO as fecha). Se o decoder de uma entrada saudável
-// falhar (ex.: recuperado pelo Chromium), a entrada é recriada uma vez de forma transparente.
+// Pool de decodificadores (mediabunny/WebCodecs) com LRU de `maxLive` decoders vivos.
+// Uma entrada por (asset, slot): slot 0 é o uso normal; slots ≥ 1 só quando o mesmo asset aparece em
+// mais de uma camada no mesmo quadro (cada camada precisa do seu próprio iterador).
+// Reprodução (sequential) reaproveita um iterador `samples()` por entrada; seek usa `getSample()`.
+//
+// Posse dos quadros: o VideoSample devolvido é do chamador, que o fecha no mesmo quadro. O pool guarda
+// no máximo 2 samples por entrada em reprodução (held = quadro atual, ahead = próximo já decodificado),
+// como buffer de decodificação — não são entregues ao compositor. Eles são liberados assim que deixam
+// de ser necessários: num pedido de seek (sequential = false), em `releaseExcept` (entrada fora do
+// quadro), em `releaseAll` (pausa/ociosidade) e ao descartar a entrada.
+// As ImageBitmap de `image()` pertencem ao pool (o chamador NÃO as fecha); as substituídas em
+// `setSources` só são fechadas em `flushRetired()`, chamado quando nenhum render as usa.
+// Se o decoder de uma entrada saudável falhar (ex.: recuperado pelo Chromium), ela é recriada uma vez.
 import { ALL_FORMATS, Input, UrlSource, VideoSampleSink, type VideoSample } from 'mediabunny'
 import type { Us } from '@shared/editor/project'
 
@@ -17,6 +25,7 @@ interface Opened {
 }
 
 interface Entry {
+  assetId: string
   url: string
   opened: Promise<Opened>
   it: AsyncGenerator<VideoSample, void, unknown> | null
@@ -24,14 +33,17 @@ interface Entry {
   ahead: VideoSample | null // próximo sample já decodificado (do pool)
   done: boolean
   lock: Promise<unknown>
-  busy: number
+  busy: number // contado desde a aquisição (inclui a espera de `opened`): não é despejada
   lastUsed: number
 }
+
+const keyOf = (assetId: string, slot: number): string => `${assetId}#${slot}`
 
 export class DecoderPool {
   private urls: Record<string, string> = {}
   private entries = new Map<string, Entry>()
   private images = new Map<string, { url: string; bmp: Promise<ImageBitmap | null> }>()
+  private retired: Promise<ImageBitmap | null>[] = []
   private clock = 0
 
   constructor(private readonly maxLive = 8) {}
@@ -39,29 +51,38 @@ export class DecoderPool {
   /** assetId → URL (proxy ou original). Entradas cuja URL mudou ou sumiu são descartadas. */
   setSources(urls: Record<string, string>): void {
     this.urls = { ...urls }
-    for (const [id, e] of this.entries) if (urls[id] !== e.url) this.drop(id)
+    for (const [key, e] of this.entries) if (urls[e.assetId] !== e.url) this.drop(key, e)
     for (const [id, img] of this.images) {
       if (urls[id] === img.url) continue
       this.images.delete(id)
-      void img.bmp.then((b) => b?.close())
+      this.retired.push(img.bmp)
     }
   }
 
   /** Sample em srcUs (maior timestamp ≤ srcUs). `sequential` reaproveita o iterador; null se fora/erro. */
-  async frameAt(assetId: string, srcUs: Us, sequential: boolean): Promise<VideoSample | null> {
+  async frameAt(assetId: string, srcUs: Us, sequential: boolean, slot = 0): Promise<VideoSample | null> {
     const t = srcUs / 1e6
+    const key = keyOf(assetId, slot)
     for (let attempt = 0; attempt < 2; attempt++) {
-      const e = this.entry(assetId)
+      const e = this.acquire(key, assetId)
       if (!e) return null
       try {
-        await e.opened
-      } catch {
-        return null // não abre (arquivo ausente/corrompido/codec): placeholder, sem tentar de novo
-      }
-      try {
-        return await this.run(e, (o) => (sequential ? this.sequential(e, o, t) : this.seek(o, t)))
-      } catch {
-        this.drop(assetId) // decoder perdido: recria uma vez
+        try {
+          await e.opened
+        } catch {
+          return null // não abre (arquivo ausente/corrompido/codec): placeholder, sem tentar de novo
+        }
+        try {
+          return await this.run(e, (o) => {
+            if (sequential) return this.sequential(e, o, t)
+            closeIter(e) // seek: o buffer de reprodução não serve mais
+            return this.seek(o, t)
+          })
+        } catch {
+          this.drop(key, e) // decoder perdido: recria uma vez
+        }
+      } finally {
+        e.busy--
       }
     }
     return null
@@ -83,8 +104,8 @@ export class DecoderPool {
   }
 
   /** Aquece o decoder do asset em srcUs (abre a entrada e posiciona o iterador). */
-  prefetch(assetId: string, srcUs: Us): void {
-    const e = this.entry(assetId)
+  prefetch(assetId: string, srcUs: Us, slot = 0): void {
+    const e = this.acquire(keyOf(assetId, slot), assetId)
     if (!e) return
     const t = srcUs / 1e6
     e.opened
@@ -96,39 +117,58 @@ export class DecoderPool {
         else e.ahead = r.value
       }))
       .catch(() => {})
+      .finally(() => {
+        e.busy--
+      })
+  }
+
+  /** Libera o buffer de reprodução das entradas fora de `used` ([assetId, slot]); mantém os decoders abertos. */
+  releaseExcept(used: [string, number][]): void {
+    const keep = new Set(used.map(([a, s]) => keyOf(a, s)))
+    for (const [key, e] of this.entries) if (!keep.has(key) && (e.it || e.held || e.ahead)) void this.run(e, async () => closeIter(e)).catch(() => {})
+  }
+
+  /** Pausa/ociosidade: libera todos os buffers de reprodução. */
+  releaseAll(): void {
+    this.releaseExcept([])
+  }
+
+  /** Fecha as ImageBitmap substituídas (chamar só quando nenhum render estiver em andamento). */
+  flushRetired(): void {
+    for (const b of this.retired) void b.then((bmp) => bmp?.close())
+    this.retired = []
   }
 
   dispose(): void {
-    for (const id of [...this.entries.keys()]) this.drop(id)
-    for (const img of this.images.values()) void img.bmp.then((b) => b?.close())
+    for (const [key, e] of [...this.entries]) this.drop(key, e)
+    for (const img of this.images.values()) this.retired.push(img.bmp)
     this.images.clear()
+    this.flushRetired()
     this.urls = {}
   }
 
   // ---- internos ----
 
-  private entry(assetId: string): Entry | null {
+  private acquire(key: string, assetId: string): Entry | null {
     const url = this.urls[assetId]
     if (!url) return null
-    let e = this.entries.get(assetId)
+    let e = this.entries.get(key)
     if (!e) {
-      e = { url, opened: open(url), it: null, held: null, ahead: null, done: false, lock: Promise.resolve(), busy: 0, lastUsed: 0 }
+      e = { assetId, url, opened: open(url), it: null, held: null, ahead: null, done: false, lock: Promise.resolve(), busy: 0, lastUsed: 0 }
       e.opened.catch(() => {}) // falha tratada em frameAt/prefetch
-      this.entries.set(assetId, e)
-      this.evict(assetId)
+      this.entries.set(key, e)
     }
+    e.busy++
     e.lastUsed = ++this.clock
+    this.evict()
     return e
   }
 
   /** Serializa operações por entrada (o iterador não é reentrante). */
   private run<T>(e: Entry, fn: (o: Opened) => Promise<T>): Promise<T> {
-    e.busy++
     const p = e.lock.then(() => e.opened).then(fn)
     e.lock = p.catch(() => {})
-    return p.finally(() => {
-      e.busy--
-    })
+    return p
   }
 
   private async seek(o: Opened, t: number): Promise<VideoSample | null> {
@@ -161,26 +201,21 @@ export class DecoderPool {
     e.it = o.sink.samples(Math.max(o.firstS, t))
   }
 
-  private evict(keep: string): void {
+  private evict(): void {
     while (this.entries.size > this.maxLive) {
-      let victim: string | null = null
-      let oldest = Infinity
-      for (const [id, e] of this.entries) {
-        if (id === keep || e.busy > 0) continue
-        if (e.lastUsed < oldest) {
-          oldest = e.lastUsed
-          victim = id
-        }
+      let victim: [string, Entry] | null = null
+      for (const [key, e] of this.entries) {
+        if (e.busy > 0) continue
+        if (!victim || e.lastUsed < victim[1].lastUsed) victim = [key, e]
       }
       if (!victim) return
-      this.drop(victim)
+      this.drop(victim[0], victim[1])
     }
   }
 
-  private drop(assetId: string): void {
-    const e = this.entries.get(assetId)
-    if (!e) return
-    this.entries.delete(assetId)
+  private drop(key: string, e: Entry): void {
+    if (this.entries.get(key) !== e) return // já substituída por outra entrada
+    this.entries.delete(key)
     // espera operações em curso antes de liberar o decoder
     void e.lock.then(() => {
       closeIter(e)

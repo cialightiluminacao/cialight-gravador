@@ -9,6 +9,8 @@ export type RenderIn =
   | { t: 'resize'; width: number; height: number }
   | { t: 'frame'; tUs: Us; seq: number; playing: boolean } // pede render do quadro tUs
   | { t: 'overlay'; selection: string[]; guides: boolean } // contorno do selecionado (só preview)
+  | { t: 'idle' } // pausa/ociosidade: libera os buffers de reprodução dos decoders
+  | { t: 'dispose' } // libera GL e decoders; responde `disposed`
   | { t: 'exportStart'; width: number; height: number; fps: number; fromUs: Us; toUs: Us; jobId: string; video: { codec: 'avc' | 'hevc'; bitrate: number; hw: 'prefer-hardware' | 'prefer-software' } }
   | { t: 'exportCancel'; jobId: string }
   | { t: 'chunkAck'; seq: number }
@@ -18,7 +20,9 @@ export type RenderIn =
 export type RenderOut =
   | { t: 'ready' }
   | { t: 'rendered'; seq: number; tUs: Us; ms: number; missing: string[] }
-  | { t: 'error'; message: string; fatal: boolean }
+  // seq: erro ao renderizar esse pedido de quadro (encerra os pedidos até ele); sem seq: erro de outra mensagem
+  | { t: 'error'; message: string; fatal: boolean; seq?: number }
+  | { t: 'disposed' }
   | { t: 'exportFrame'; jobId: string; frame: number; total: number } // progresso
   | { t: 'exportVideoChunk'; jobId: string; seq: number; data: Uint8Array; meta: unknown } // ver Task 12 (encoder vive no worker)
   | { t: 'exportDone'; jobId: string }

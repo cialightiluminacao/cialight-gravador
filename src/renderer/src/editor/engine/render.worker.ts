@@ -1,7 +1,7 @@
 // Render worker do editor: resolveFrame → fontes (DecoderPool) → Compositor WebGL2 → `rendered`.
 // Único caminho de render para preview e exportação. Pedidos de quadro que chegam durante um
 // render são coalescidos (fica só o último); o cliente resolve os intermediários com o resultado dele.
-import type { VideoSample } from 'mediabunny'
+// Todo VideoFrame entregue ao compositor é fechado no mesmo quadro (ver posse em decoderPool.ts).
 import { resolveFrame, type AnnotationsLayer } from '@shared/editor/resolve'
 import type { Project } from '@shared/editor/project'
 import type { Session } from '@shared/types'
@@ -15,6 +15,9 @@ type FrameMsg = Extract<RenderIn, { t: 'frame' }>
 
 const post = (m: RenderOut, transfer: Transferable[] = []): void => (self as unknown as Worker).postMessage(m, transfer)
 
+// Sessão indisponível: nova tentativa depois disso.
+const SESSION_RETRY_MS = 5000
+
 let compositor: Compositor | null = null
 let canvas: OffscreenCanvas | null = null
 let dpr = 1
@@ -23,9 +26,8 @@ let project: Project | null = null
 let selection: string[] = []
 let pending: FrameMsg | null = null
 let busy = false
-// Sessões das anotações: carregadas antes do draw (que é síncrono); null = indisponível
-const sessions = new Map<string, Promise<void>>()
-const loadedSessions = new Map<string, Session | null>()
+// Sessões das anotações: carregadas antes do draw (que é síncrono). Falha → null, nova tentativa após SESSION_RETRY_MS.
+const sessions = new Map<string, { load: Promise<void>; session: Session | null; failedAt: number | null }>()
 let annCanvas: OffscreenCanvas | null = null
 
 self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
@@ -45,6 +47,7 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
         const urls: Record<string, string> = {}
         for (const [id, u] of Object.entries(m.mediaUrls)) urls[id] = m.useProxy && u.proxy ? u.proxy : u.original
         pool.setSources(urls)
+        if (!busy) pool.flushRetired()
         break
       }
       case 'resize':
@@ -57,11 +60,22 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
       case 'overlay':
         selection = m.selection
         break
+      case 'idle':
+        pool.releaseAll()
+        break
       case 'readPixels': {
         const data = compositor ? compositor.readPixels(m.x, m.y, m.w, m.h) : new Uint8Array(0)
         post({ t: 'pixels', id: m.id, data }, [data.buffer])
         break
       }
+      case 'dispose':
+        pending = null
+        project = null
+        compositor?.dispose()
+        compositor = null
+        pool.dispose()
+        post({ t: 'disposed' })
+        break
       case 'exportStart':
         post({ t: 'exportError', jobId: m.jobId, message: 'exportação ainda não disponível' })
         break
@@ -83,8 +97,9 @@ async function pump(): Promise<void> {
       try {
         await renderFrame(m)
       } catch (err) {
-        post({ t: 'error', message: errMsg(err), fatal: false })
+        post({ t: 'error', message: errMsg(err), fatal: false, seq: m.seq })
       }
+      pool.flushRetired() // nenhuma ImageBitmap substituída está em uso entre quadros
     }
   } finally {
     busy = false
@@ -96,14 +111,21 @@ async function renderFrame(m: FrameMsg): Promise<void> {
   const comp = compositor
   const p = project
   if (!comp || !p || !canvas) throw new Error('render antes de init/project')
+  const W = canvas.width
+  const H = canvas.height
   const layers = resolveFrame(p, m.tUs)
   const sources = new Map<string, TexImageSource | VideoFrame | null>()
   const meta = new Map<string, SourceMeta>()
   const missing = new Set<string>()
   const frames: VideoFrame[] = []
+  // mesmo asset em mais de uma camada no quadro: cada uma com seu slot (iterador próprio)
+  const slots = new Map<string, number>()
+  const used: [string, number][] = []
 
   try {
-    await Promise.all(
+    // allSettled + try/catch por camada: nenhuma camada aborta a coleta das outras, e todo quadro
+    // obtido entra em `frames` antes do finally (sem vazamento quando uma camada falha).
+    await Promise.allSettled(
       layers.map(async (layer) => {
         if (layer.kind === 'annotations') {
           await loadSession(layer.sessionId)
@@ -111,59 +133,71 @@ async function renderFrame(m: FrameMsg): Promise<void> {
         }
         if (layer.kind !== 'media') return
         const asset = p.assets.find((a) => a.id === layer.assetId)
-        const fallback: SourceMeta = asset?.video ? { w: asset.video.width, h: asset.video.height, rotation: asset.video.rotation } : { w: canvas!.width, h: canvas!.height, rotation: 0 }
         let src: TexImageSource | VideoFrame | null = null
-        if (asset && asset.status !== 'missing') {
-          if (layer.srcUs === null) {
-            const bmp = await pool.image(asset.id)
-            if (bmp) {
-              src = bmp
-              meta.set(layer.itemId, { w: bmp.width, h: bmp.height, rotation: 0 })
-            }
-          } else {
-            let sample: VideoSample | null = null
-            try {
-              sample = await pool.frameAt(asset.id, layer.srcUs, m.playing)
-              if (sample) {
-                const frame = sample.toVideoFrame()
-                frames.push(frame)
-                src = frame
-                meta.set(layer.itemId, { w: frame.displayWidth, h: frame.displayHeight, rotation: sample.rotation })
+        try {
+          if (asset && asset.status !== 'missing') {
+            if (layer.srcUs === null) {
+              const bmp = await pool.image(asset.id)
+              if (bmp) {
+                src = bmp
+                meta.set(layer.itemId, { w: bmp.width, h: bmp.height, rotation: 0 })
               }
-            } finally {
-              sample?.close()
+            } else {
+              const slot = slots.get(asset.id) ?? 0
+              slots.set(asset.id, slot + 1)
+              used.push([asset.id, slot])
+              const sample = await pool.frameAt(asset.id, layer.srcUs, m.playing, slot)
+              if (sample) {
+                try {
+                  // O VideoFrame do decoder vem sem rotação (mediabunny guarda a do arquivo em sample.rotation)
+                  const frame = sample.toVideoFrame()
+                  frames.push(frame)
+                  src = frame
+                  meta.set(layer.itemId, { w: frame.displayWidth, h: frame.displayHeight, rotation: sample.rotation })
+                } finally {
+                  sample.close()
+                }
+              }
             }
           }
+        } catch {
+          src = null
         }
         if (!src) {
           missing.add(layer.assetId)
-          meta.set(layer.itemId, fallback)
+          meta.set(layer.itemId, asset?.video ? { w: asset.video.width, h: asset.video.height, rotation: asset.video.rotation } : { w: W, h: H, rotation: 0 })
         }
         sources.set(layer.itemId, src)
       })
     )
-
     comp.draw(layers, sources, p.canvas.background, { meta, annotations: drawAnnotations, selectionOutline: selection.map((itemId) => ({ itemId })) })
   } finally {
-    for (const f of frames) f.close() // inclusive se a coleta falhar no meio
+    for (const f of frames) f.close()
   }
+  // buffers de reprodução só para o que está no quadro e só durante a reprodução
+  if (m.playing) pool.releaseExcept(used)
+  else pool.releaseAll()
   post({ t: 'rendered', seq: m.seq, tUs: m.tUs, ms: performance.now() - t0, missing: [...missing] })
 }
 
 function loadSession(sessionId: string): Promise<void> {
-  let s = sessions.get(sessionId)
-  if (!s) {
-    s = fetch(`${FILE_PROTOCOL}://${encodeURIComponent(sessionId)}/session.json`)
-      .then((r) => (r.ok ? (r.json() as Promise<Session>) : null))
-      .catch(() => null)
-      .then((session) => void loadedSessions.set(sessionId, session))
-    sessions.set(sessionId, s)
-  }
-  return s
+  const cur = sessions.get(sessionId)
+  if (cur && (cur.failedAt === null || Date.now() - cur.failedAt < SESSION_RETRY_MS)) return cur.load
+  const entry: { load: Promise<void>; session: Session | null; failedAt: number | null } = { load: Promise.resolve(), session: null, failedAt: null }
+  entry.load = fetch(`${FILE_PROTOCOL}://${encodeURIComponent(sessionId)}/session.json`)
+    .then((r) => (r.ok ? (r.json() as Promise<Session>) : Promise.reject(new Error(`HTTP ${r.status}`))))
+    .then((s) => {
+      entry.session = s
+    })
+    .catch(() => {
+      entry.failedAt = Date.now()
+    })
+  sessions.set(sessionId, entry)
+  return entry.load
 }
 
 function drawAnnotations(layer: AnnotationsLayer): OffscreenCanvas | null {
-  const session = loadedSessions.get(layer.sessionId)
+  const session = sessions.get(layer.sessionId)?.session
   if (!session || !canvas || session.strokes.length === 0) return null
   const W = canvas.width
   const H = canvas.height
@@ -171,8 +205,7 @@ function drawAnnotations(layer: AnnotationsLayer): OffscreenCanvas | null {
   const ctx = annCanvas.getContext('2d')
   if (!ctx) return null
   ctx.clearRect(0, 0, W, H)
-  // autoFade das anotações ainda não faz parte do projeto: traços ficam até serem apagados
-  drawStrokes(ctx, W, H, session, layer.sessionMs, null)
+  drawStrokes(ctx, W, H, session, layer.sessionMs, layer.autoFadeMs)
   return annCanvas
 }
 

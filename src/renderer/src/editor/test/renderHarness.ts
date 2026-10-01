@@ -1,3 +1,4 @@
+import { ALL_FORMATS, Input, UrlSource, VideoSampleSink } from 'mediabunny'
 import type { RenderOut } from '../engine/protocol'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
@@ -55,6 +56,19 @@ export async function runRenderHarness(projectId: string): Promise<void> {
     report.seek = await client.requestFrame(2_500_000, false)
     report.videoDiff = meanAbsDiff(at1s, await region(W / 2, H / 2, 200))
 
+    // fonte com rotação 90 nos metadados (3–5 s, sozinha): contain num canvas 16:9 → 607,5×1080 centrado
+    const rotFrame = await client.requestFrame(4_000_000, false)
+    report.rotated = {
+      frame: rotFrame,
+      pillarLeft: await px(300, 540),
+      pillarRight: await px(1600, 540),
+      topLeft: await px(800, 270),
+      topRight: await px(1100, 270),
+      bottomLeft: await px(800, 810),
+      bottomRight: await px(1100, 810)
+    }
+    report.rotationDiag = await rotationDiag(mediaUrlsFor(project, 'export').a_rot?.original)
+
     // vários pedidos sem esperar: o worker coalesce, todos resolvem
     const burst = await Promise.all([0, 1, 2, 3, 4].map((i) => client.requestFrame(500_000 + i * 100_000, false)))
     report.burst = burst.map((r) => r.t)
@@ -64,6 +78,35 @@ export async function runRenderHarness(projectId: string): Promise<void> {
     errors.push(e instanceof Error ? (e.stack ?? e.message) : String(e))
   }
   window.__captureTestSend?.({ ok, report })
+}
+
+/** O que o mediabunny entrega para uma faixa girada: rotação no sample e dimensões do VideoFrame. */
+async function rotationDiag(url: string | undefined): Promise<Record<string, unknown>> {
+  if (!url) return { error: 'sem URL' }
+  const input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS })
+  try {
+    const track = await input.getPrimaryVideoTrack()
+    if (!track) return { error: 'sem vídeo' }
+    const sample = await new VideoSampleSink(track).getSample(0.5)
+    if (!sample) return { error: 'sem sample' }
+    const frame = sample.toVideoFrame()
+    const out = {
+      trackRotation: track.rotation,
+      sampleRotation: sample.rotation,
+      sampleCoded: `${sample.codedWidth}x${sample.codedHeight}`,
+      sampleDisplay: `${sample.displayWidth}x${sample.displayHeight}`,
+      frameCoded: `${frame.codedWidth}x${frame.codedHeight}`,
+      frameDisplay: `${frame.displayWidth}x${frame.displayHeight}`,
+      frameRotation: (frame as unknown as { rotation?: number }).rotation ?? null
+    }
+    frame.close()
+    sample.close()
+    return out
+  } catch (e) {
+    return { error: String(e) }
+  } finally {
+    input.dispose()
+  }
 }
 
 function mean(d: Uint8Array): number[] {

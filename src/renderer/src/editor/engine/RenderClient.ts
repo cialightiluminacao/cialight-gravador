@@ -33,11 +33,15 @@ export class RenderClient {
         this.pixels.get(m.id)?.(m.data)
         this.pixels.delete(m.id)
       } else if (m.t === 'error') {
-        if (m.fatal) onFail(new Error(m.message))
-        this.settleFrames(Infinity, m) // um erro de render encerra os pedidos em aberto
-      }
+        if (m.fatal) {
+          onFail(new Error(m.message))
+          this.settleFrames(Infinity, m) // worker inutilizável: encerra todos os pedidos
+        } else if (m.seq !== undefined) this.settleFrames(m.seq, m) // falha desse quadro (e dos coalescidos antes dele)
+        // erro de outra mensagem (sem seq): não afeta pedidos de quadro
+      } else if (m.t === 'disposed') this.worker.terminate()
       for (const l of this.listeners) l(m)
     })
+    this.ready.catch(() => {}) // quem não espera `ready` não gera rejeição não tratada
     this.worker.addEventListener('error', (e) => {
       const err: ErrorOut = { t: 'error', message: e.message || 'falha no render worker', fatal: true }
       onFail(new Error(err.message))
@@ -58,6 +62,11 @@ export class RenderClient {
 
   setOverlay(selection: string[], guides = false): void {
     this.send({ t: 'overlay', selection, guides })
+  }
+
+  /** Pausa/ociosidade: o worker libera os quadros que os decoders guardam para a reprodução. */
+  idle(): void {
+    this.send({ t: 'idle' })
   }
 
   /** Renderiza o quadro em tUs; resolve com `rendered` (ou `error`). */
@@ -84,8 +93,10 @@ export class RenderClient {
     return () => this.listeners.delete(cb)
   }
 
+  /** Pede ao worker para liberar GL/decoders e termina-o (ao receber `disposed`, ou após 1 s). */
   dispose(): void {
-    this.worker.terminate()
+    this.send({ t: 'dispose' })
+    setTimeout(() => this.worker.terminate(), 1000)
     this.settleFrames(Infinity, { t: 'error', message: 'render encerrado', fatal: true })
     this.pixels.clear()
     this.listeners.clear()

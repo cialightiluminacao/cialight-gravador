@@ -25,6 +25,8 @@ interface HarnessReport {
   errors: string[]
   first?: Rendered
   pixels?: { circleCenter: Rgba; boxCorner: Rgba; missing: Rgba; corrupt: Rgba; stroke: Rgba }
+  rotated?: { frame: Rendered; pillarLeft: Rgba; pillarRight: Rgba; topLeft: Rgba; topRight: Rgba; bottomLeft: Rgba; bottomRight: Rgba }
+  rotationDiag?: Record<string, unknown>
   videoMean?: number[]
   sequential?: Rendered[]
   seek?: Rendered
@@ -65,9 +67,16 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const video = join(dir, 'testsrc2.mp4')
   const red = join(dir, 'vermelho.png')
   const corrupt = join(dir, 'corrompido.mp4')
+  const quadRaw = join(dir, 'quadrante.mp4')
+  const rotated = join(dir, 'quadrante-girado.mp4')
   const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
   await gen(['-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30', '-t', '3', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '15', '-pix_fmt', 'yuv420p', video], 'editor: testsrc2')
   await gen(['-f', 'lavfi', '-i', 'color=c=red:s=256x256', '-frames:v', '1', '-update', '1', red], 'editor: vermelho')
+  // 1920×1080 azul com o quadrante superior esquerdo vermelho; depois giro horário de 90° só nos metadados
+  // (displaymatrix −90, como vídeo de celular — mesmo método da Task 6): exibido em pé 1080×1920 com o
+  // vermelho no quadrante superior DIREITO.
+  await gen(['-f', 'lavfi', '-i', 'color=c=blue:s=1920x1080:r=30,drawbox=x=0:y=0:w=960:h=540:color=red:t=fill', '-t', '2', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '15', '-pix_fmt', 'yuv420p', quadRaw], 'editor: quadrante')
+  await gen(['-display_rotation', '-90', '-i', quadRaw, '-c', 'copy', rotated], 'editor: quadrante girado')
   writeFileSync(corrupt, Buffer.alloc(64 * 1024, 0x5a)) // não é MP4: o decoder falha
   // sessão mínima com um traço verde horizontal (anotações v1 via cialight-file://<sessionId>/session.json)
   const sdir = sessions.dirOf(SESSION_ID)
@@ -78,6 +87,9 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
 
   const iVideo = await probe(video)
   const iRed = await probe(red)
+  const iRot = await probe(rotated)
+  check(iRot.video?.rotation === 90 && iRot.video?.width === 1920 && iRot.video?.height === 1080, `fixture girada: probe 1920×1080 rotation 90 (${iRot.video?.width}×${iRot.video?.height} r${iRot.video?.rotation})`, failures)
+  const aRot: Asset = { ...assetFromInfo('a_rot', rotated, statSync(rotated), iRot), status: 'ready' }
   const aVideo: Asset = { ...assetFromInfo('a_video', video, statSync(video), iVideo), status: 'ready' }
   const aRed = assetFromInfo('a_red', red, statSync(red), iRed)
   const aMissing: Asset = { ...aVideo, id: 'a_missing', name: 'nao-existe.mp4', source: { type: 'file', path: join(dir, 'nao-existe.mp4'), size: 1, mtimeMs: 0 } }
@@ -87,12 +99,15 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const project: Project = {
     ...base,
     id: PROJECT_ID,
-    assets: [aVideo, aRed, aMissing, aCorrupt],
+    assets: [aVideo, aRed, aMissing, aCorrupt, aRot],
     tracks: [
       track('t_video', 'Vídeo', { ...createMediaItem(aVideo, 0, 'video'), durationUs: 3_000_000 }),
       track('t_red', 'Vermelho', placed(aRed, 0.875, 0.125, 0.25, 'circle')),
       track('t_missing', 'Ausente', placed(aMissing, 0.125, 0.875, 0.25)),
       track('t_corrupt', 'Corrompido', placed(aCorrupt, 0.375, 0.875, 0.25)),
+      // mesmo asset do fundo numa 2ª camada simultânea (outro ponto da fonte): slot de decoder próprio
+      track('t_dup', 'Duplicado', { ...placed(aVideo, 0.625, 0.875, 0.25), inUs: 1_500_000, durationUs: 1_500_000 }),
+      track('t_rot', 'Girado', { ...placed(aRot, 0.5, 0.5, 1), startUs: 3_000_000, durationUs: 2_000_000 }),
       { id: 't_ann', kind: 'video', name: 'Anotações', muted: false, hidden: false, locked: false, volume: 1, items: [{ id: 'i_ann', type: 'annotations', sessionId: SESSION_ID, inUs: 0, startUs: 0, durationUs: 3_000_000 }] }
     ]
   }
@@ -118,7 +133,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const first = r.first
   check(first?.t === 'rendered', `quadro em t=1 s renderizado (${JSON.stringify(first)})`, failures)
   if (first?.t === 'rendered') {
-    check(first.missing.includes('a_missing') && first.missing.includes('a_corrupt') && !first.missing.includes('a_video') && !first.missing.includes('a_red'), `missing = ausente + corrompido (${first.missing.join(', ')})`, failures)
+    check(first.missing.length === 2 && first.missing.includes('a_missing') && first.missing.includes('a_corrupt'), `missing = ausente + corrompido (${first.missing.join(', ')})`, failures)
   }
   const px = r.pixels
   check(isRed(px?.circleCenter), `centro do círculo vermelho (${px?.circleCenter})`, failures)
@@ -131,6 +146,14 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!r.sequential && r.sequential.length === 5 && r.sequential.every((s) => s.t === 'rendered'), `reprodução sequencial: 5 quadros (${r.sequential?.map((s) => (s.t === 'rendered' ? `${s.ms.toFixed(1)} ms` : s.message)).join(', ')})`, failures)
   check(r.seek?.t === 'rendered', `seek para 2,5 s (${JSON.stringify(r.seek)})`, failures)
   check((r.videoDiff ?? 0) > 2, `quadro em 2,5 s difere do de 1 s (diferença média ${r.videoDiff?.toFixed(1)})`, failures)
+  const ro = r.rotated
+  const isBlack = (p: Rgba | undefined): boolean => !!p && p[0] < 16 && p[1] < 16 && p[2] < 16
+  const isBlue = (p: Rgba | undefined): boolean => !!p && p[2] > 200 && p[0] < 40 && p[1] < 40
+  console.log(`diagnóstico de rotação (mediabunny/VideoFrame): ${JSON.stringify(r.rotationDiag)}`)
+  check(ro?.frame.t === 'rendered', `girado: quadro em 4 s renderizado (${JSON.stringify(ro?.frame)})`, failures)
+  check(isBlack(ro?.pillarLeft) && isBlack(ro?.pillarRight), `girado: em pé com pillarbox de fundo (${ro?.pillarLeft} | ${ro?.pillarRight})`, failures)
+  check(isRed(ro?.topRight), `girado: vermelho no quadrante superior direito (${ro?.topRight})`, failures)
+  check(isBlue(ro?.topLeft) && isBlue(ro?.bottomLeft) && isBlue(ro?.bottomRight), `girado: azul nos outros quadrantes (${ro?.topLeft} | ${ro?.bottomLeft} | ${ro?.bottomRight})`, failures)
   check(!!r.burst && r.burst.length === 5 && r.burst.every((t) => t === 'rendered'), `rajada de 5 pedidos resolvida (${r.burst?.join(', ')})`, failures)
   check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
 

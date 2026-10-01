@@ -137,9 +137,17 @@ export class Compositor {
     return out
   }
 
+  /** Libera texturas, programas e buffers (o contexto em si some com o worker). */
   dispose(): void {
-    for (const t of this.textures.values()) this.gl.deleteTexture(t.tex)
+    const gl = this.gl
+    for (const t of this.textures.values()) gl.deleteTexture(t.tex)
     this.textures.clear()
+    gl.deleteProgram(this.media.program)
+    gl.deleteProgram(this.solid.program)
+    for (const b of [this.quad, this.loop]) {
+      for (const a of Object.values(b.attribs ?? {})) if (a.buffer) gl.deleteBuffer(a.buffer)
+      if (b.indices) gl.deleteBuffer(b.indices)
+    }
   }
 
   // ---- internos ----
