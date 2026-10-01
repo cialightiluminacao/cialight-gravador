@@ -5,7 +5,8 @@ import { redrawStill, type EditorEngine } from './editorEngine'
 import { Transport } from './Transport'
 import { ViewerOverlay } from './ViewerOverlay'
 
-// Visualizador: o canvas do compositor (criado pelo motor e transferido ao worker uma única vez) é
+// Visualizador: o canvas do compositor (criado pelo motor e transferido ao worker uma única vez; o watchdog
+// do motor pode trocá-lo por outro no mesmo lugar do DOM — por isso sempre `engine.canvas`) é
 // encaixado no palco mantendo a proporção do projeto (letterbox); ResizeObserver redimensiona o
 // render. Por cima, a camada de manipulação direta; embaixo, o transporte.
 
