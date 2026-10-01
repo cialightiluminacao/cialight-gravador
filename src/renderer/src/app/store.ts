@@ -6,7 +6,10 @@ import { DEFAULT_PIP, DEFAULT_SETTINGS } from '@shared/defaults'
 // Estado global do renderer do gravador (zustand). O engine e o controller ficam
 // fora do store (singletons em app/recordingController.ts); aqui só dados de UI.
 
-export type Screen = 'prepare' | 'recording' | 'review' | 'settings' | 'history'
+export type Screen = 'prepare' | 'recording' | 'review' | 'settings' | 'history' | 'editor' | 'projects'
+
+/** Telas "secundárias": voltar leva à última tela principal (returnScreen). */
+const SUB_SCREENS: Screen[] = ['settings', 'history', 'projects']
 
 export interface DevicesState {
   cameras: MediaDeviceInfo[]
@@ -39,6 +42,8 @@ export interface AppState {
   live: LiveState
   warnings: string[]
   reviewSession: Session | null
+  /** Projeto aberto na tela 'editor'. */
+  editorProjectId: string | null
   hotkeyStatus: HotkeyStatus[]
   updateStatus: UpdateStatus | null
   recoverable: Session[]
@@ -57,6 +62,10 @@ export interface AppState {
   pushWarning: (w: string) => void
   clearWarnings: () => void
   setReviewSession: (s: Session | null) => void
+  /** Abre o editor com o projeto. */
+  openEditor: (projectId: string) => void
+  /** Sai do editor para a lista de projetos (voltar de lá leva à tela inicial). */
+  closeEditor: () => void
   setHotkeyStatus: (h: HotkeyStatus[]) => void
   setUpdateStatus: (u: UpdateStatus | null) => void
   setRecoverable: (s: Session[]) => void
@@ -77,11 +86,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   live: { elapsedMs: 0, bytes: 0, micMuted: false, camOn: true, annotating: false, micLevel: 0, systemLevel: 0 },
   warnings: [],
   reviewSession: null,
+  editorProjectId: null,
   hotkeyStatus: [],
   updateStatus: null,
   recoverable: [],
 
-  setScreen: (s) => set((st) => ({ screen: s, returnScreen: s === 'settings' || s === 'history' ? (st.screen === 'settings' || st.screen === 'history' ? st.returnScreen : st.screen) : st.returnScreen })),
+  setScreen: (s) => set((st) => ({ screen: s, returnScreen: SUB_SCREENS.includes(s) && !SUB_SCREENS.includes(st.screen) ? st.screen : st.returnScreen })),
   goBack: () => set((st) => ({ screen: st.returnScreen })),
   setAppInfo: (appInfo) => set({ appInfo }),
   setSettings: (settings) => set({ settings, settingsLoaded: true }),
@@ -95,6 +105,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   pushWarning: (w) => set((st) => ({ warnings: st.warnings.includes(w) ? st.warnings : [...st.warnings, w] })),
   clearWarnings: () => set({ warnings: [] }),
   setReviewSession: (reviewSession) => set({ reviewSession }),
+  openEditor: (editorProjectId) => set({ editorProjectId, screen: 'editor' }),
+  closeEditor: () => set((st) => ({ editorProjectId: null, screen: 'projects', returnScreen: st.returnScreen === 'editor' ? 'prepare' : st.returnScreen })),
   setHotkeyStatus: (hotkeyStatus) => set({ hotkeyStatus }),
   setUpdateStatus: (updateStatus) => set({ updateStatus }),
   setRecoverable: (recoverable) => set({ recoverable })

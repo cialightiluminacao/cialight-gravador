@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { pipRectAt } from '../compositor/pipMath'
 import type { PipKeyframe, Session } from '../types'
-import { projectFromSession } from './fromSession'
+import { projectFromSession, sessionAssets } from './fromSession'
 import type { Asset } from './project'
 import { resolveFrame } from './resolve'
 import type { MediaLayer } from './resolve'
@@ -134,5 +134,20 @@ describe('projectFromSession', () => {
     // fonte 16:9 → alvo 1:1: corta a largura
     expect(cam.visual!.crop.l).toBeCloseTo((1 - 9 / 16) / 2)
     expect(cam.visual!.crop.t).toBe(0)
+  })
+})
+
+describe('sessionAssets', () => {
+  it('um asset por fonte gravada, com prefixo de id e nome com a data', () => {
+    const a = sessionAssets(full, 'rec1', 'Gravação 18/08')
+    expect(a.map((x) => x.id)).toEqual(['rec1-screen', 'rec1-webcam', 'rec1-mic', 'rec1-system'])
+    expect(a.map((x) => x.name)).toEqual(['Gravação 18/08 — Tela', 'Gravação 18/08 — Webcam', 'Gravação 18/08 — Microfone', 'Gravação 18/08 — Sistema'])
+    expect(a.every((x) => x.source.type === 'session' && x.durationUs === msToUs(10_000))).toBe(true)
+    expect(a[1].videoTrackIndex).toBe(1)
+    expect(a[3].audioTrackIndex).toBe(1)
+  })
+  it('só tela quando não há outras fontes; sessão sem duração lança', () => {
+    expect(sessionAssets(base, 'r', 'G').map((x) => x.id)).toEqual(['r-screen'])
+    expect(() => sessionAssets({ ...base, durationMs: null } as unknown as Session, 'r', 'G')).toThrow()
   })
 })

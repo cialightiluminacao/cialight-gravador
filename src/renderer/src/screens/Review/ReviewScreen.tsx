@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AppWindow, Clapperboard, LoaderCircle, Monitor, Pause, Play, RefreshCw, SkipBack, Video, Volume2, VolumeX } from 'lucide-react'
+import { AppWindow, Clapperboard, LoaderCircle, Monitor, Pause, Play, RefreshCw, Scissors, SkipBack, Video, Volume2, VolumeX } from 'lucide-react'
 import { toast } from 'sonner'
 import type { ExportOptions, ExportPresetId, Session } from '@shared/types'
 import { PRESETS } from '@shared/presets/presets'
@@ -126,6 +126,7 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
   const [assets, setAssets] = useState<AssetsState>({ status: 'loading', percent: 0 })
   const forceRegenRef = useRef(false)
   const [regen, setRegen] = useState(0)
+  const [openingEditor, setOpeningEditor] = useState(false)
   const [videoDurationMs, setVideoDurationMs] = useState<number | null>(null)
   const durationMs = session.durationMs ?? videoDurationMs ?? 0
   const [currentMs, setCurrentMs] = useState(0)
@@ -328,6 +329,18 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
     playerRef.current?.setMuted(m)
   }
 
+  const openInEditor = async (): Promise<void> => {
+    setOpeningEditor(true)
+    try {
+      playerRef.current?.pause()
+      const project = await api.project.fromSession(session.id)
+      useAppStore.getState().openEditor(project.id)
+    } catch (e) {
+      toast.error(`Não foi possível abrir no editor: ${e instanceof Error ? e.message : String(e)}`)
+      setOpeningEditor(false)
+    }
+  }
+
   const canExport = assets.status === 'ready' && durationMs > 0 && phase.kind === 'idle' && !busyElsewhere
   const SourceIcon = session.source.kind === 'window' ? AppWindow : Monitor
 
@@ -359,6 +372,11 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
               ) : null}
             </div>
           </div>
+          <Tip content="Criar um projeto no editor com esta gravação (cortes, faixas, efeitos)">
+            <Button variant="outline" size="sm" onClick={() => void openInEditor()} disabled={phase.kind === 'running' || openingEditor || !session.durationMs}>
+              {openingEditor ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />} Abrir no editor
+            </Button>
+          </Tip>
           <Tip content="Manter esta gravação no histórico e voltar para gravar outra">
             <Button variant="ghost" size="sm" onClick={goPrepare} disabled={phase.kind === 'running'}>
               <Video className="h-3.5 w-3.5" /> Nova gravação

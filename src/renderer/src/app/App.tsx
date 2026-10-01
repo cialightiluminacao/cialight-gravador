@@ -13,6 +13,8 @@ import { RecordingScreen } from '@/screens/Recording/RecordingScreen'
 import { ReviewScreen } from '@/screens/Review/ReviewScreen'
 import { SettingsScreen } from '@/screens/Settings/SettingsScreen'
 import { HistoryScreen } from '@/screens/History/HistoryScreen'
+import { EditorScreen } from '@/editor/ui/EditorScreen'
+import { ProjectsHome } from '@/editor/ui/ProjectsHome'
 
 // Shell do gravador: título, banner de atualização, tela atual, toasts.
 // A tela é escolhida pelo estado (`screen`) — sem router.
@@ -34,6 +36,11 @@ function useBoot(): void {
       if (screen.startsWith('settings:')) {
         sessionStorage.setItem('settingsTab', screen.slice(9))
         st.getState().setScreen('settings')
+        return
+      }
+      // 'editor:<projectId>' abre um projeto no editor
+      if (screen.startsWith('editor:')) {
+        st.getState().openEditor(screen.slice(7))
         return
       }
       if (screen.startsWith('review:')) {
@@ -78,6 +85,7 @@ export function App(): React.JSX.Element {
   useBoot()
   useDevices()
   const screen = useAppStore((s) => s.screen)
+  const editorProjectId = useAppStore((s) => s.editorProjectId)
   return (
     <TooltipProvider>
       <div className="app-bg flex h-full flex-col overflow-hidden">
@@ -89,6 +97,8 @@ export function App(): React.JSX.Element {
           {screen === 'review' && <ReviewScreen />}
           {screen === 'settings' && <SettingsScreen />}
           {screen === 'history' && <HistoryScreen />}
+          {screen === 'projects' && <ProjectsHome />}
+          {screen === 'editor' && editorProjectId && <EditorScreen key={editorProjectId} projectId={editorProjectId} />}
         </main>
         <RecoverDialog />
         <Toaster

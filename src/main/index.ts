@@ -20,6 +20,7 @@ import { destroyOverlays, watchDisplayChanges } from './windows/overlayWindows'
 import { destroyBar } from './windows/barWindow'
 import { log } from './log'
 import { runIntegrationTest } from './testMode'
+import { createQaEditorFixture } from './qaEditorFixture'
 
 // Bootstrap do processo principal.
 
@@ -32,7 +33,7 @@ const reclaimFlag = !(process.env.CIALIGHT_SPIKE === 'editor' && process.env.CIA
 if (reclaimFlag) app.commandLine.appendSwitch('disable-features', 'ReclaimInactiveWebCodecs')
 
 // QA/testes rodam em paralelo (várias instâncias): sem lock nesses modos
-const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST || process.env.CIALIGHT_SPIKE === 'editor' ? true : app.requestSingleInstanceLock()
+const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST || process.env.CIALIGHT_QA || process.env.CIALIGHT_SPIKE === 'editor' ? true : app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
@@ -70,6 +71,11 @@ if (!gotLock) {
     if (process.env.CIALIGHT_TEST) {
       await runIntegrationTest(process.env.CIALIGHT_TEST, store, projects)
       return
+    }
+
+    // QA visual do editor (fora do pacote): projeto de teste com mídia gerada; abrir com __navigate('editor:<id>')
+    if (process.env.CIALIGHT_QA === 'editor-fixture' && !app.isPackaged) {
+      await createQaEditorFixture(projects, join(app.getAppPath(), 'test-out')).catch((e) => log.error('QA: falha ao criar o projeto de teste', e))
     }
 
     const win = createRecorderWindow()

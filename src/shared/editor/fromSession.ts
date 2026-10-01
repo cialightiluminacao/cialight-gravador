@@ -113,21 +113,37 @@ function webcamVisual(session: Session, pipRaw: PipKeyframe[], totalUs: Us): Vis
   }
 }
 
-/** annotationsAutoFadeMs: sumiço automático das anotações (settings.annotations.autoFadeSec·1000 da v1) ou null. */
-export function projectFromSession(session: Session, opts: { projectId: string; name: string; now: string; annotationsAutoFadeMs?: number | null }): Project {
+function sessionTotalUs(session: Session): Us {
   if (session.durationMs == null || !Number.isFinite(session.durationMs) || session.durationMs <= 0) {
     throw new Error('Sessão sem duração: não é possível criar o projeto')
   }
+  return Math.max(msToUs(session.durationMs), MIN_ITEM_US)
+}
+
+const STREAM_NAMES: Record<SessionStream, string> = { screen: 'Tela', webcam: 'Webcam', mic: 'Microfone', system: 'Sistema' }
+
+/**
+ * Assets de uma gravação (tela + webcam/microfone/sistema quando gravados), com id `<idPrefix>-<fonte>`.
+ * `label` (opcional) prefixa os nomes ("Gravação 18/08 — Tela"); sem ele, só o nome da fonte.
+ */
+export function sessionAssets(session: Session, idPrefix: string, label?: string): Asset[] {
+  const total = sessionTotalUs(session)
+  const streams: SessionStream[] = ['screen']
+  if (session.webcam && session.tracks.webcam !== undefined) streams.push('webcam')
+  if (session.tracks.mic !== undefined) streams.push('mic')
+  if (session.tracks.system !== undefined) streams.push('system')
+  return streams.map((s) => sessionAsset(session, idPrefix, s, label ? `${label} — ${STREAM_NAMES[s]}` : STREAM_NAMES[s], total))
+}
+
+/** annotationsAutoFadeMs: sumiço automático das anotações (settings.annotations.autoFadeSec·1000 da v1) ou null. */
+export function projectFromSession(session: Session, opts: { projectId: string; name: string; now: string; annotationsAutoFadeMs?: number | null }): Project {
   const { projectId } = opts
-  const total = Math.max(msToUs(session.durationMs), MIN_ITEM_US)
+  const total = sessionTotalUs(session)
   const linkId = `${projectId}-link`
-  const assets: Asset[] = [sessionAsset(session, projectId, 'screen', 'Tela', total)]
-  const hasWebcam = !!session.webcam && session.tracks.webcam !== undefined
-  const hasMic = session.tracks.mic !== undefined
-  const hasSystem = session.tracks.system !== undefined
-  if (hasWebcam) assets.push(sessionAsset(session, projectId, 'webcam', 'Webcam', total))
-  if (hasMic) assets.push(sessionAsset(session, projectId, 'mic', 'Microfone', total))
-  if (hasSystem) assets.push(sessionAsset(session, projectId, 'system', 'Sistema', total))
+  const assets = sessionAssets(session, projectId)
+  const hasWebcam = assets.some((a) => a.id === `${projectId}-webcam`)
+  const hasMic = assets.some((a) => a.id === `${projectId}-mic`)
+  const hasSystem = assets.some((a) => a.id === `${projectId}-system`)
 
   const mediaItem = (stream: string, kind: TrackKind, visual?: VisualProps, link?: string): MediaItem => ({
     id: `${projectId}-${stream}-item`, type: 'media', assetId: `${projectId}-${stream}`,

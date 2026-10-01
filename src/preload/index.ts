@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { FILE_PROTOCOL, IPC, type IpcApi } from '@shared/ipc'
 
 // API tipada exposta ao renderer (contextIsolation ON). Cada janela recebe o
@@ -28,7 +28,15 @@ const api: IpcApi = {
     quit: () => ipcRenderer.invoke(IPC.app.quit),
     windowKind: () => kind,
     displayIdOfThisWindow: async () => argDisplay ?? (await ipcRenderer.invoke(IPC.app.displayIdOfThisWindow)),
-    fileSizes: (paths) => ipcRenderer.invoke(IPC.app.fileSizes, paths)
+    fileSizes: (paths) => ipcRenderer.invoke(IPC.app.fileSizes, paths),
+    setEditorMode: (on) => ipcRenderer.invoke(IPC.app.setEditorMode, on),
+    pathForFile: (file) => {
+      try {
+        return webUtils.getPathForFile(file)
+      } catch {
+        return ''
+      }
+    }
   },
   settings: {
     get: () => ipcRenderer.invoke(IPC.settings.get),

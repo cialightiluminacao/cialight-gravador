@@ -14,7 +14,7 @@ import { newId, newProjectId } from '@shared/editor/ids'
 import { parseProject } from '@shared/editor/schema'
 import { IngestQueue, assetFromInfo, type IngestInput } from './media/ingest'
 import { IMAGE_EXTENSIONS, probe } from './media/probe'
-import { getRecorderWindow, showRecorder, displayIdOfWindow } from './windows/recorderWindow'
+import { getRecorderWindow, showRecorder, displayIdOfWindow, setEditorMode } from './windows/recorderWindow'
 import { hideBar, showBar, toggleBar, updateBar, isBarHiddenByUser } from './windows/barWindow'
 import { hideOverlays, setOverlayMode, showOverlays, syncStrokesToOverlays } from './windows/overlayWindows'
 import { setProtection } from './windows/protection'
@@ -117,6 +117,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     const w = BrowserWindow.fromWebContents(e.sender)
     return w ? displayIdOfWindow(w) : null
   })
+  ipcMain.handle(IPC.app.setEditorMode, (_e, on: boolean) => setEditorMode(!!on))
   ipcMain.handle(IPC.app.fileSizes, (_e, paths: string[]) =>
     paths.map((p) => {
       try {

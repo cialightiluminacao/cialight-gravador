@@ -14,6 +14,8 @@ const BLOCK_US = 100_000
 const BLOCK_FRAMES = (BLOCK_US * SR) / 1e6 // 4800
 const AHEAD_S = 0.3
 const PUMP_MS = 25
+/** Sem nenhum bloco de áudio até aqui (worker travado/mídia com erro): o relógio começa assim mesmo. */
+const CLOCK_FALLBACK_MS = 500
 
 interface Scheduled { atS: number; endS: number; l: number; r: number }
 /** Nó agendado: bloco da timeline em fromUs, tocando a partir de startS (tempo do AudioContext). */
@@ -21,6 +23,8 @@ export interface ScheduledInfo { fromUs: Us; startS: number; offsetS: number }
 
 export class PlaybackController {
   private ctx: AudioContext | null = null
+  private master: GainNode | null = null
+  private volume = 1
   private gen = 0
   private active = false
   private t0 = 0 // ctx.currentTime do início (bloco 0)
@@ -32,10 +36,11 @@ export class PlaybackController {
   private scheduled: Scheduled[] = []
   private raf = 0
   private pumpTimer: ReturnType<typeof setInterval> | null = null
+  private fallbackTimer: ReturnType<typeof setTimeout> | null = null
   private frameInFlight = false
   /** Erros de áudio (mídia que não abre/decodifica, contexto que não inicia); a UI mostra como toast. */
   readonly errors: string[] = []
-  private readonly errorListeners = new Set<(message: string) => void>()
+  private readonly errorListeners = new Set<(message: string, assetId?: string) => void>()
   private readonly scheduleListeners = new Set<(s: ScheduledInfo) => void>()
 
   constructor(
@@ -43,10 +48,11 @@ export class PlaybackController {
     private readonly audio: AudioClient,
     private readonly store: typeof useEditorStore
   ) {
-    this.audio.onError((message) => this.fail(message))
+    this.audio.onError((message, assetId) => this.fail(message, assetId))
   }
 
-  onError(cb: (message: string) => void): () => void {
+  /** assetId presente quando a falha é de uma mídia específica. */
+  onError(cb: (message: string, assetId?: string) => void): () => void {
     this.errorListeners.add(cb)
     return () => this.errorListeners.delete(cb)
   }
@@ -113,6 +119,10 @@ export class PlaybackController {
     if (gen !== this.gen) return
     this.pump(gen)
     this.pumpTimer = setInterval(() => this.pump(gen), PUMP_MS)
+    this.fallbackTimer = setTimeout(() => {
+      this.fallbackTimer = null
+      if (gen === this.gen && !this.started) this.startClock(gen)
+    }, CLOCK_FALLBACK_MS)
   }
 
   pause(): void {
@@ -133,16 +143,28 @@ export class PlaybackController {
     if (wasPlaying) void this.play()
   }
 
+  /** Volume master do preview (0–1); não afeta a exportação. */
+  setVolume(v: number): void {
+    this.volume = Math.min(1, Math.max(0, v))
+    if (this.master) this.master.gain.value = this.volume
+  }
+
   dispose(): void {
     this.stop()
     void this.ctx?.close().catch(() => {})
     this.ctx = null
+    this.master = null
   }
 
   // ---- internos ----
 
   private ensureCtx(): AudioContext {
-    if (!this.ctx) this.ctx = new AudioContext({ sampleRate: SR, latencyHint: 'interactive' })
+    if (!this.ctx) {
+      this.ctx = new AudioContext({ sampleRate: SR, latencyHint: 'interactive' })
+      this.master = this.ctx.createGain()
+      this.master.gain.value = this.volume
+      this.master.connect(this.ctx.destination)
+    }
     return this.ctx
   }
 
@@ -156,10 +178,10 @@ export class PlaybackController {
     return out !== null && out > fromUs ? out : projectDurationUs(p)
   }
 
-  private fail(message: string): void {
+  private fail(message: string, assetId?: string): void {
     console.warn(`[áudio] ${message}`)
     this.errors.push(message)
-    for (const l of this.errorListeners) l(message)
+    for (const l of this.errorListeners) l(message, assetId)
   }
 
   private stop(): void {
@@ -170,6 +192,8 @@ export class PlaybackController {
     this.started = false
     if (this.pumpTimer !== null) clearInterval(this.pumpTimer)
     this.pumpTimer = null
+    if (this.fallbackTimer !== null) clearTimeout(this.fallbackTimer)
+    this.fallbackTimer = null
     cancelAnimationFrame(this.raf)
     for (const n of this.nodes) {
       try {
@@ -205,12 +229,7 @@ export class PlaybackController {
   private onBlock(gen: number, k: number, b: AudioBlock | null): void {
     const ctx = this.ctx
     if (gen !== this.gen || !ctx) return
-    if (!this.started) {
-      // 1º bloco pronto: o relógio começa agora
-      this.t0 = ctx.currentTime
-      this.started = true
-      this.raf = requestAnimationFrame(() => this.tick(gen))
-    }
+    if (!this.started) this.startClock(gen) // 1º bloco pronto: o relógio começa agora
     if (!b) return // erro do worker: silêncio neste bloco, o relógio segue
     const n = b.pcm.length / 2
     const buf = ctx.createBuffer(2, n, SR)
@@ -231,7 +250,7 @@ export class PlaybackController {
     if (late >= dur) return // perdido por inteiro
     const node = ctx.createBufferSource()
     node.buffer = buf
-    node.connect(ctx.destination)
+    node.connect(this.master ?? ctx.destination)
     // atrasado: começa agora, pulando o trecho já passado (nunca sobrepõe o bloco seguinte)
     const startS = late > 0 ? now : at
     const offsetS = late > 0 ? late : 0
@@ -244,6 +263,17 @@ export class PlaybackController {
     this.nodes.add(node)
     this.scheduled.push({ atS: at, endS: at + dur, l: pl, r: pr })
     this.scheduled.sort((x, y) => x.atS - y.atS)
+  }
+
+  /** Define t0 (relógio começa agora) e inicia o laço de vídeo. Blocos que chegarem depois entram atrasados (com offset). */
+  private startClock(gen: number): void {
+    const ctx = this.ctx
+    if (gen !== this.gen || !ctx || this.started) return
+    this.t0 = ctx.currentTime
+    this.started = true
+    if (this.fallbackTimer !== null) clearTimeout(this.fallbackTimer)
+    this.fallbackTimer = null
+    this.raf = requestAnimationFrame(() => this.tick(gen))
   }
 
   /** Chegou ao fim: para, deixa o playhead no fim e mostra o quadro. */

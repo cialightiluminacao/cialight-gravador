@@ -164,6 +164,10 @@ export interface IpcApi {
     displayIdOfThisWindow(): Promise<string | null>
     /** Tamanho em bytes de arquivos (null se não existir). */
     fileSizes(paths: string[]): Promise<(number | null)[]>
+    /** Editor: maximiza a janela ao entrar (on) e restaura o tamanho anterior ao sair. */
+    setEditorMode(on: boolean): Promise<void>
+    /** Caminho no disco de um File arrastado do Explorer (webUtils.getPathForFile); '' se não houver. */
+    pathForFile(file: File): string
   }
   settings: {
     get(): Promise<Settings>
@@ -283,7 +287,8 @@ export const IPC = {
     hideToTray: 'app:hideToTray',
     quit: 'app:quit',
     displayIdOfThisWindow: 'app:displayIdOfThisWindow',
-    fileSizes: 'app:fileSizes'
+    fileSizes: 'app:fileSizes',
+    setEditorMode: 'app:setEditorMode'
   },
   settings: { get: 'settings:get', set: 'settings:set', pickFolder: 'settings:pickFolder', changed: 'settings:changed' },
   sources: { list: 'sources:list', thumbnail: 'sources:thumbnail' },

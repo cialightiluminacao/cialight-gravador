@@ -9,7 +9,7 @@ export class AudioClient {
   private readonly worker: Worker
   private seq = 0
   private readonly pending = new Map<number, (b: AudioBlock | null) => void>()
-  private readonly errorListeners = new Set<(message: string) => void>()
+  private readonly errorListeners = new Set<(message: string, assetId?: string) => void>()
 
   constructor() {
     this.worker = new Worker(new URL('./audio.worker.ts', import.meta.url), { type: 'module' })
@@ -18,7 +18,7 @@ export class AudioClient {
       if (m.t === 'block') this.settle(m.seq, { fromUs: m.fromUs, pcm: m.pcm })
       else {
         if (m.seq !== undefined) this.settle(m.seq, null)
-        for (const l of this.errorListeners) l(m.message)
+        for (const l of this.errorListeners) l(m.message, m.assetId)
       }
     })
     this.worker.addEventListener('error', (e) => {
@@ -47,7 +47,8 @@ export class AudioClient {
     for (const [seq] of this.pending) this.settle(seq, null)
   }
 
-  onError(cb: (message: string) => void): () => void {
+  /** assetId: falha de mídia de um asset (o worker avisa uma vez por asset). */
+  onError(cb: (message: string, assetId?: string) => void): () => void {
     this.errorListeners.add(cb)
     return () => this.errorListeners.delete(cb)
   }

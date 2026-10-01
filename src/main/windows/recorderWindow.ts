@@ -93,6 +93,25 @@ export function moveRecorderToDisplay(displayId: string): void {
   win.setPosition(x, y)
 }
 
+// Editor: janela maximizada enquanto ele estiver aberto; ao sair, volta ao tamanho/posição de antes
+// (se o usuário já tinha maximizado, continua maximizada).
+let preEditor: { bounds: Electron.Rectangle; maximized: boolean } | null = null
+
+export function setEditorMode(on: boolean): void {
+  const win = getRecorderWindow()
+  if (!win) return
+  if (on) {
+    if (!preEditor) preEditor = { bounds: win.getNormalBounds(), maximized: win.isMaximized() }
+    if (!win.isMaximized()) win.maximize()
+    return
+  }
+  const prev = preEditor
+  preEditor = null
+  if (!prev || prev.maximized) return
+  if (win.isMaximized()) win.unmaximize()
+  win.setBounds(prev.bounds)
+}
+
 export function displayIdOfWindow(win: BrowserWindow): string {
   const b = win.getBounds()
   const d = screen.getDisplayMatching(b)

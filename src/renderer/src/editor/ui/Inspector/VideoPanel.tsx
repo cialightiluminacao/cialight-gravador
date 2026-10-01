@@ -1,0 +1,93 @@
+import { RotateCcw } from 'lucide-react'
+import { defaultVisual } from '@shared/editor/factory'
+import type { MediaItem, VisualProps } from '@shared/editor/project'
+import { Segmented, Tip, Toggle } from '@/components/ui/primitives'
+import { useEditorStore } from '../../state/editorStore'
+import { NumberField } from './NumberField'
+import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
+
+// Inspetor de vídeo do item de mídia: transformação (animável: grava no keyframe do playhead quando
+// a propriedade já tem keys), corte, ajuste, forma/borda (PiP), espelhar e fades.
+
+type TKey = keyof VisualProps['transform']
+type V = MediaItem & { visual: VisualProps }
+
+const FIT_OPTIONS: { value: VisualProps['fit']; label: string; title: string }[] = [
+  { value: 'contain', label: 'Conter', title: 'Mostra a imagem inteira (pode sobrar borda)' },
+  { value: 'cover', label: 'Cobrir', title: 'Preenche o quadro cortando o excesso' },
+  { value: 'fill', label: 'Esticar', title: 'Estica para o tamanho do quadro' }
+]
+const SHAPE_OPTIONS: { value: NonNullable<VisualProps['shape']>; label: string }[] = [
+  { value: 'rect', label: 'Retângulo' },
+  { value: 'rounded', label: 'Arredondado' },
+  { value: 'circle', label: 'Círculo' }
+]
+
+export function VideoPanel({ item }: { item: V }): React.JSX.Element {
+  const playheadUs = useEditorStore((s) => s.playheadUs)
+  const local = localUs(item, playheadUs)
+  const v = item.visual
+  const t = v.transform
+  const id = item.id
+
+  const setT = (key: TKey, value: number): void => editItemTransient<V>(id, (d) => { d.visual.transform[key] = withValue(d.visual.transform[key], local, value) })
+  const setCrop = (side: keyof VisualProps['crop'], pct: number): void => editItemTransient<V>(id, (d) => { d.visual.crop[side] = pct / 100 })
+  const halfSec = usToSec2(item.durationUs / 2)
+  const shape = v.shape ?? 'rect'
+
+  return (
+    <>
+      <PanelSection
+        title="Transformação"
+        aside={
+          <Tip content="Voltar posição, tamanho, corte e aparência ao padrão">
+            <button className="flex h-5 items-center gap-1 rounded px-1.5 text-[10px] font-semibold text-muted hover:bg-white/5 hover:text-fg" onClick={() => editItem<V>(id, (d) => { d.visual = { ...defaultVisual(), fadeInUs: d.visual.fadeInUs, fadeOutUs: d.visual.fadeOutUs } })}>
+              <RotateCcw className="h-3 w-3" /> Redefinir
+            </button>
+          </Tip>
+        }
+      >
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+          <NumberField compact label="X" value={animAt(t.x, local) * 100} precision={1} step={0.1} unit="%" onChange={(n) => setT('x', n / 100)} title="Posição horizontal do centro" />
+          <NumberField compact label="Y" value={animAt(t.y, local) * 100} precision={1} step={0.1} unit="%" onChange={(n) => setT('y', n / 100)} title="Posição vertical do centro" />
+        </div>
+        <NumberField label="Escala" value={animAt(t.scale, local) * 100} min={1} max={1000} precision={0} step={0.5} unit="%" onChange={(n) => setT('scale', n / 100)} />
+        <NumberField label="Rotação" value={animAt(t.rotation, local)} min={-360} max={360} precision={1} step={0.5} unit="°" onChange={(n) => setT('rotation', n)} />
+        <NumberField label="Opacidade" value={animAt(t.opacity, local) * 100} min={0} max={100} precision={0} step={0.5} unit="%" onChange={(n) => setT('opacity', n / 100)} />
+      </PanelSection>
+
+      <PanelSection title="Corte">
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+          <NumberField compact label="Esquerda" value={v.crop.l * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('l', n)} />
+          <NumberField compact label="Direita" value={v.crop.r * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('r', n)} />
+          <NumberField compact label="Topo" value={v.crop.t * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('t', n)} />
+          <NumberField compact label="Base" value={v.crop.b * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('b', n)} />
+        </div>
+        <FieldRow label="Ajuste">
+          <Segmented size="sm" className="w-full [&>*]:flex-1" value={v.fit} options={FIT_OPTIONS} onValueChange={(fit) => editItem<V>(id, (d) => { d.visual.fit = fit })} />
+        </FieldRow>
+      </PanelSection>
+
+      <PanelSection title="Forma e borda">
+        <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={shape} options={SHAPE_OPTIONS} onValueChange={(sh) => editItem<V>(id, (d) => { d.visual.shape = sh })} />
+        {shape === 'rounded' ? <NumberField label="Raio" value={v.radius ?? 0} min={0} max={1000} step={0.5} unit="px" onChange={(n) => editItemTransient<V>(id, (d) => { d.visual.radius = n })} title="0 = arredondamento automático" /> : null}
+        <NumberField label="Borda" value={v.border?.width ?? 0} min={0} max={100} step={0.2} unit="px" onChange={(n) => editItemTransient<V>(id, (d) => { d.visual.border = n > 0 ? { width: n, color: d.visual.border?.color ?? '#ffffff' } : undefined })} />
+        {v.border ? (
+          <FieldRow label="Cor da borda">
+            <ColorInput label="Cor da borda" value={v.border.color} onChange={(hex) => editItemTransient<V>(id, (d) => { if (d.visual.border) d.visual.border.color = hex })} />
+          </FieldRow>
+        ) : null}
+        <FieldRow label="Espelhar">
+          <Toggle size="sm" checked={!!v.mirror} onCheckedChange={(on) => editItem<V>(id, (d) => { d.visual.mirror = on })} aria-label="Espelhar horizontalmente" />
+        </FieldRow>
+      </PanelSection>
+
+      <PanelSection title="Fade de vídeo">
+        <div className="grid grid-cols-2 gap-x-3">
+          <NumberField compact label="Entrada" value={usToSec2(v.fadeInUs)} min={0} max={halfSec} precision={2} step={0.01} unit="s" onChange={(n) => editItemTransient<V>(id, (d) => { d.visual.fadeInUs = sec2ToUs(n) })} />
+          <NumberField compact label="Saída" value={usToSec2(v.fadeOutUs)} min={0} max={halfSec} precision={2} step={0.01} unit="s" onChange={(n) => editItemTransient<V>(id, (d) => { d.visual.fadeOutUs = sec2ToUs(n) })} />
+        </div>
+      </PanelSection>
+    </>
+  )
+}
