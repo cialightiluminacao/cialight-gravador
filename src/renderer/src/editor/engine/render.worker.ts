@@ -98,6 +98,13 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
       case 'idle':
         pool.releaseAll()
         break
+      case 'testStall': {
+        const until = performance.now() + m.ms
+        while (performance.now() < until) {
+          // espera ocupada de propósito: nenhum quadro sai até o watchdog trocar o worker
+        }
+        break
+      }
       case 'readPixels': {
         const data = compositor ? compositor.readPixels(m.x, m.y, m.w, m.h) : new Uint8Array(0)
         post({ t: 'pixels', id: m.id, data }, [data.buffer])

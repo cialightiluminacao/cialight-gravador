@@ -5,6 +5,7 @@ import { mediaUrlsFor } from '../engine/mediaUrls'
 import { AudioClient } from '../engine/audio/AudioClient'
 import { PlaybackController } from '../engine/PlaybackController'
 import { useEditorStore } from '../state/editorStore'
+import { createEditorEngine } from '../ui/editorEngine'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -79,6 +80,7 @@ export async function runRenderHarness(projectId: string): Promise<void> {
 
     report.playback = await playbackCheck(client, project)
     client.dispose()
+    report.watchdog = await watchdogCheck(project)
     ok = true
   } catch (e) {
     errors.push(e instanceof Error ? (e.stack ?? e.message) : String(e))
@@ -179,6 +181,61 @@ async function seekCheck(ctl: PlaybackController): Promise<Record<string, unknow
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * Watchdog do preview (spec §13) pelo motor real do editor (createEditorEngine, prazo de 1,5 s no teste):
+ * tocando, o worker é travado (testStall) → o motor troca o worker e o canvas (no mesmo lugar do DOM),
+ * restaura o projeto e a reprodução volta a receber quadros; parado, o quadro em 1 s é o mesmo de antes.
+ */
+async function watchdogCheck(project: Awaited<ReturnType<typeof window.api.project.load>>): Promise<Record<string, unknown>> {
+  const store = useEditorStore.getState()
+  store.open(project)
+  store.setPlayhead(500_000)
+  const engine = createEditorEngine({ stallMs: 1500 })
+  const host = document.createElement('div')
+  host.style.width = '480px'
+  document.body.appendChild(host)
+  host.appendChild(engine.canvas)
+  const first = engine.canvas
+  let rendered = 0
+  const off = engine.render.onMessage((m) => {
+    if (m.t === 'rendered') rendered++
+  })
+  try {
+    await engine.render.ready
+    engine.render.resize(W, H)
+    const pxAt1s = async (): Promise<number[]> => {
+      const r = await engine.render.requestFrame(1_000_000, false)
+      if (r.t !== 'rendered') return [-1]
+      // o motor desenha em CSS × devicePixelRatio: centro do círculo vermelho (1680, 135) nessa escala
+      const d = window.devicePixelRatio || 1
+      return [...(await engine.render.readPixels(Math.round(1680 * d), Math.round(135 * d), 1, 1))]
+    }
+    const before = await pxAt1s()
+    await engine.playback.play()
+    await sleep(500)
+    const renderedBeforeStall = rendered
+    const t0 = performance.now()
+    engine.render.testStall(60_000) // o worker antigo fica preso; o watchdog tem de trocá-lo
+    while (engine.canvas === first && performance.now() - t0 < 6000) await sleep(50)
+    const restartMs = Math.round(performance.now() - t0)
+    const swapped = engine.canvas !== first && !first.isConnected && engine.canvas.parentElement === host
+    const atRestart = rendered
+    const t1 = performance.now()
+    while (rendered === atRestart && performance.now() - t1 < 5000) await sleep(20)
+    const renderedAfterRestart = rendered - atRestart
+    const playing = useEditorStore.getState().playing
+    engine.playback.pause()
+    const after = await pxAt1s()
+    return { before, after, restartMs, swapped, renderedBeforeStall, renderedAfterRestart, playing }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) }
+  } finally {
+    off()
+    engine.dispose()
+    host.remove()
+  }
+}
 
 /** O que o mediabunny entrega para uma faixa girada: rotação no sample e dimensões do VideoFrame. */
 async function rotationDiag(url: string | undefined): Promise<Record<string, unknown>> {

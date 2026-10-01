@@ -5,11 +5,15 @@ import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
 import { PlaybackController } from '../engine/PlaybackController'
 import { mediaUrlsFor } from '../engine/mediaUrls'
+import { RENDER_STALL_MS, RenderWatchdog } from '../engine/renderWatchdog'
 import { useEditorStore } from '../state/editorStore'
 
 export interface EditorEngine {
-  /** Canvas do compositor: criado aqui (fora do React) para nunca ser transferido duas vezes. */
-  canvas: HTMLCanvasElement
+  /**
+   * Canvas do compositor: criado aqui (fora do React) para nunca ser transferido duas vezes. Muda quando o
+   * watchdog reinicia o render (canvas novo no mesmo lugar do DOM): leia sempre daqui.
+   */
+  readonly canvas: HTMLCanvasElement
   render: RenderClient
   audio: AudioClient
   playback: PlaybackController
@@ -17,10 +21,16 @@ export interface EditorEngine {
   dispose(): void
 }
 
-export function createEditorEngine(): EditorEngine {
+function makeCanvas(): HTMLCanvasElement {
   const canvas = document.createElement('canvas')
   canvas.className = 'block'
   canvas.setAttribute('aria-label', 'Visualização do projeto')
+  return canvas
+}
+
+/** stallMs: prazo do watchdog (testes usam um menor). */
+export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngine {
+  let canvas = makeCanvas()
   const render = new RenderClient(canvas, { width: 640, height: 360, dpr: window.devicePixelRatio || 1 })
   const audio = new AudioClient()
   const playback = new PlaybackController(render, audio, useEditorStore)
@@ -34,12 +44,30 @@ export function createEditorEngine(): EditorEngine {
     const asset = assetId ? useEditorStore.getState().project?.assets.find((a) => a.id === assetId) : undefined
     toast.error(asset ? `Não foi possível tocar o áudio de “${asset.name}”` : 'Problema na reprodução do áudio', { description: message })
   })
+  // watchdog (spec §13): tocando e sem quadro há 5 s → worker novo num canvas novo, mesmo projeto/estado
+  const watchdog = new RenderWatchdog(opts.stallMs ?? RENDER_STALL_MS)
   const offRender = render.onMessage((m) => {
+    if (m.t === 'rendered') watchdog.rendered()
     if (m.t === 'error' && m.fatal && !reported.has('render:fatal')) {
       reported.add('render:fatal')
       toast.error('O visualizador parou de funcionar', { description: m.message })
     }
   })
+  const restartRender = (): void => {
+    const next = makeCanvas()
+    next.style.cssText = canvas.style.cssText
+    canvas.replaceWith(next) // sem pai (fora do DOM): só troca a referência
+    canvas = next
+    render.restart(next)
+    reported.delete('render:fatal')
+    console.warn('[editor] render sem quadros há mais de 5 s: worker reiniciado')
+    toast.warning('O visualizador travou e foi reiniciado.', { description: 'A reprodução continua de onde estava.' })
+    const s = useEditorStore.getState()
+    if (!s.playing && s.project) void render.requestFrame(s.playheadUs, false)
+  }
+  const watchTimer = setInterval(() => {
+    if (watchdog.check(useEditorStore.getState().playing)) restartRender()
+  }, Math.min(1000, Math.max(100, Math.round((opts.stallMs ?? RENDER_STALL_MS) / 5))))
 
   // store → workers, no máximo uma vez por quadro de tela
   let raf = 0
@@ -72,7 +100,9 @@ export function createEditorEngine(): EditorEngine {
   schedule()
 
   return {
-    canvas,
+    get canvas() {
+      return canvas
+    },
     render,
     audio,
     playback,
@@ -80,6 +110,7 @@ export function createEditorEngine(): EditorEngine {
       unsub()
       offError()
       offRender()
+      clearInterval(watchTimer)
       cancelAnimationFrame(raf)
       playback.dispose()
       render.dispose()

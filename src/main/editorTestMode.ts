@@ -32,6 +32,7 @@ interface HarnessReport {
   seek?: Rendered
   videoDiff?: number
   burst?: string[]
+  watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
     clockAdvanceUs?: number; wallAdvanceUs?: number; playheadUs?: number; playing?: boolean; pausedPlaying?: boolean; audioErrors?: string[]
@@ -187,6 +188,13 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   console.log(`seek durante a reprodução: ${JSON.stringify(sk)}`)
   check(!!sk && !sk.error && sk.playing === true && sk.clockAfterUs != null && sk.seekToUs != null && sk.clockAfterUs >= sk.seekToUs && sk.clockAfterUs < sk.seekToUs + 700_000, `seek tocando: relógio continua do novo ponto (${sk?.clockAfterUs} a partir de ${sk?.seekToUs}) ${sk?.error ?? ''}`, failures)
   check(!!sk && (sk.scheduledAfter?.length ?? 0) > 0 && sk.badSchedules === 0, `seek tocando: nenhum nó do ponto antigo agendado depois do seek (${sk?.scheduledAfter?.length} agendados, ${sk?.badSchedules} inválidos)`, failures)
+  const wd = r.watchdog
+  console.log(`watchdog: ${JSON.stringify(wd)}`)
+  const wdBefore = wd?.before as Rgba | undefined
+  const wdAfter = wd?.after as Rgba | undefined
+  check(!!wd && !wd.error && (wd.renderedBeforeStall ?? 0) > 0 && wd.swapped === true && (wd.restartMs ?? Infinity) < 3500, `watchdog: worker travado tocando → reiniciado num canvas novo (${wd?.restartMs} ms, prazo 1,5 s) ${wd?.error ?? ''}`, failures)
+  check(!!wd && (wd.renderedAfterRestart ?? 0) > 0 && wd.playing === true, `watchdog: a reprodução continua recebendo quadros do worker novo (${wd?.renderedAfterRestart})`, failures)
+  check(isRed(wdBefore) && isRed(wdAfter), `watchdog: projeto restaurado — mesmo quadro em 1 s antes e depois (${wdBefore} → ${wdAfter})`, failures)
   check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
 
   writeFileSync(join(outDir, 'editor-render-report.json'), JSON.stringify({ result, failures }, null, 2))

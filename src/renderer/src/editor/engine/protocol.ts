@@ -34,6 +34,8 @@ export type RenderIn =
   | { t: 'chunkAck'; jobId: string; seq: number }
   // testes: lê pixels do último quadro (coordenadas do canvas, origem em cima à esquerda)
   | { t: 'readPixels'; id: number; x: number; y: number; w: number; h: number }
+  // testes: trava a thread do worker por `ms` (simula decoder/GPU pendurado para o watchdog)
+  | { t: 'testStall'; ms: number }
 
 export type RenderOut =
   | { t: 'ready' }
