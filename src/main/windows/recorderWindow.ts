@@ -1,4 +1,5 @@
-import { BrowserWindow, shell, screen } from 'electron'
+import { BrowserWindow, ipcMain, shell, screen } from 'electron'
+import { IPC } from '@shared/ipc'
 import { join } from 'path'
 import { getPhase } from '../recording/state'
 import { log } from '../log'
@@ -65,10 +66,22 @@ export function createRecorderWindow(): BrowserWindow {
       e.preventDefault()
       win.hide()
       log.info('janela do gravador escondida durante a gravação')
+      return
+    }
+    // editor aberto: grava o pendente antes de fechar (depois do flush este handler deixa passar)
+    if (editorNeedsFlush()) {
+      e.preventDefault()
+      void flushEditor().then(() => {
+        if (!win.isDestroyed()) win.close()
+      })
     }
   })
   win.on('closed', () => {
     recorderWin = null
+    // a próxima janela começa fora do editor
+    editorOn = false
+    editorFlushed = false
+    preEditor = null
   })
   loadPage(win, 'index.html')
   return win
@@ -96,8 +109,51 @@ export function moveRecorderToDisplay(displayId: string): void {
 // Editor: janela maximizada enquanto ele estiver aberto; ao sair, volta ao tamanho/posição de antes
 // (se o usuário já tinha maximizado, continua maximizada).
 let preEditor: { bounds: Electron.Rectangle; maximized: boolean } | null = null
+let editorOn = false
+let editorFlushed = false // flush do fechamento em curso já feito
+let flushing: Promise<void> | null = null
+let flushSeq = 0
+const EDITOR_FLUSH_TIMEOUT_MS = 2000
+
+/** O editor está aberto e ainda não salvou o pendente para o fechamento em curso. */
+export function editorNeedsFlush(): boolean {
+  return editorOn && !editorFlushed && !!getRecorderWindow()
+}
+
+/**
+ * Pede ao editor (renderer) que grave tudo o que estiver pendente; resolve com a confirmação ou após
+ * 2 s (renderer travado/caído). Chamadas simultâneas compartilham o mesmo pedido.
+ */
+export function flushEditor(): Promise<void> {
+  const win = getRecorderWindow()
+  if (!win || !editorOn || editorFlushed) return Promise.resolve()
+  if (!flushing) {
+    flushing = new Promise<void>((resolve) => {
+      const id = ++flushSeq
+      const done = (): void => {
+        clearTimeout(timer)
+        ipcMain.removeListener(IPC.editor.flushed, onAck)
+        editorFlushed = true
+        flushing = null
+        resolve()
+      }
+      const onAck = (_e: Electron.IpcMainEvent, ackId: number): void => {
+        if (ackId === id) done()
+      }
+      const timer = setTimeout(() => {
+        log.warn('editor: sem resposta ao pedido de salvar antes de fechar (2 s); fechando assim mesmo')
+        done()
+      }, EDITOR_FLUSH_TIMEOUT_MS)
+      ipcMain.on(IPC.editor.flushed, onAck)
+      win.webContents.send(IPC.editor.flush, id)
+    })
+  }
+  return flushing
+}
 
 export function setEditorMode(on: boolean): void {
+  editorOn = on
+  if (on) editorFlushed = false
   const win = getRecorderWindow()
   if (!win) return
   if (on) {

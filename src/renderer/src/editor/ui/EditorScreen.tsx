@@ -39,7 +39,7 @@ function readTimelineHeight(): number {
 }
 
 /** Teclas que pertencem a controles focados (listas, sliders, abas, diálogos) e não viram atalho. */
-const OWN_KEYS = '[role="listbox"],[role="menu"],[role="dialog"],[role="slider"],[role="tablist"],[role="group"],[role="radiogroup"]'
+const OWN_KEYS = ['listbox', 'option', 'menu', 'menuitem', 'dialog', 'slider', 'tab', 'tablist', 'group', 'radiogroup', 'switch', 'combobox'].map((r) => `[role="${r}"]`).join(',')
 
 export function EditorScreen({ projectId }: { projectId: string }): React.JSX.Element {
   const [engine, setEngine] = useState<EditorEngine | null>(null)
@@ -71,6 +71,19 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         toast.error(`Não foi possível processar “${name}”`, { description: d.patch.error })
       }
     })
+    // fechar a janela/sair com o editor aberto: o main pede para gravar tudo antes (e espera até 2 s)
+    const offFlush = api.editor.onFlushRequest(async () => {
+      // campo com texto digitado: o blur confirma o valor (commit síncrono)
+      const active = document.activeElement
+      if (active instanceof HTMLElement) active.blur()
+      const st = useEditorStore.getState()
+      if (st.txBase) st.commitTx()
+      await flushAutosave()
+      // daqui em diante o main grava sozinho os resultados de ingestão que chegarem
+      await api.media.setOpenProject(null)
+      // patches entregues antes da resposta acima já estão no store: grava de novo se algo mudou
+      await flushAutosave()
+    })
     void api.app.setEditorMode(true)
     void (async () => {
       try {
@@ -88,19 +101,20 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
 
     return () => {
       alive = false
+      offFlush()
       offProgress()
       offDone()
       eng.playback.pause()
       engineRef.current = null
       if (window.__qaEditor?.engine === eng) delete window.__qaEditor
       void (async () => {
-        // ordem: salvar → soltar o projeto no main (patches voltam a ser gravados por ele) → liberar o motor
+        // ordem: salvar → soltar o projeto no main (patches voltam a ser gravados por ele) → liberar o motor.
+        // Outra montagem pode começar durante cada await: só a mais recente solta projeto/janela/store.
         await flushAutosave().catch(() => {})
         stopAutosave()
-        const latest = token === mountSeq
-        if (latest) await api.media.setOpenProject(null).catch(() => {})
+        if (token === mountSeq) await api.media.setOpenProject(null).catch(() => {})
         eng.dispose()
-        if (latest) {
+        if (token === mountSeq) {
           useEditorStore.getState().close()
           void api.app.setEditorMode(false)
         }
@@ -112,6 +126,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.defaultPrevented || (e.repeat && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
+      if (useEditorStore.getState().project?.id !== projectId) return // outro projeto ainda no store (troca em curso)
       const t = e.target as Element | null
       if (!e.ctrlKey && t?.closest?.(OWN_KEYS)) return
       const action = shortcutFor(e)
@@ -131,7 +146,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       window.removeEventListener('dragover', blockDrop)
       window.removeEventListener('drop', blockDrop)
     }
-  }, [])
+  }, [projectId])
 
   const back = async (): Promise<void> => {
     engineRef.current?.playback.pause()
@@ -166,11 +181,12 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
-      <TopBar onBack={() => void back()} onExport={() => toast('A exportação do editor chega na próxima etapa.', { description: 'Por enquanto, exporte gravações pela Revisão.' })} />
+      {/* até o projeto desta tela estar no store, nada é editável (numa troca, o anterior ainda pode estar lá) */}
+      {loaded ? <TopBar onBack={() => void back()} onExport={() => toast('A exportação do editor chega na próxima etapa.', { description: 'Por enquanto, exporte gravações pela Revisão.' })} /> : <div className="h-12 shrink-0 border-b border-border bg-surface/70" />}
       <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)_320px]">
         {loaded ? <MediaBin projectId={projectId} /> : <div className="border-r border-border bg-surface/60" />}
-        <Viewer engine={engine} />
-        <Inspector />
+        <Viewer engine={loaded ? engine : null} />
+        {loaded ? <Inspector /> : <div className="border-l border-border bg-surface/60" />}
       </div>
       <div
         role="separator"
@@ -184,7 +200,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       </div>
       <div className="min-h-0 shrink-0" style={{ height: timelineH }}>
         {/* ==== TIMELINE (Task 11): trocar <TimelinePlaceholder> pela <Timeline> definitiva ==== */}
-        <TimelinePlaceholder playback={engine?.playback ?? null} />
+        {loaded ? <TimelinePlaceholder playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
       </div>
     </div>
   )

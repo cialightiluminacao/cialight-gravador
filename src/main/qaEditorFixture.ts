@@ -17,6 +17,8 @@ import { log } from './log'
 export const QA_PROJECT_ID = 'p-qa-editor-fixture'
 
 export async function createQaEditorFixture(projects: ProjectStore, outDir: string): Promise<string> {
+  // nunca na pasta real do usuário: sem CIALIGHT_RAW_DIR o projeto iria para <Vídeos>\CiaLight Gravador\Projetos
+  if (!process.env.CIALIGHT_RAW_DIR) throw new Error('CIALIGHT_QA=editor-fixture exige CIALIGHT_RAW_DIR (pasta de teste)')
   const dir = join(outDir, 'qa-editor')
   mkdirSync(dir, { recursive: true })
   const video = join(dir, 'testsrc2-voz.mp4')

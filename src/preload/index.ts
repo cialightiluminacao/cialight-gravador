@@ -83,6 +83,14 @@ const api: IpcApi = {
     onProgress: (cb) => on(IPC.media.progress, cb),
     onDone: (cb) => on(IPC.media.done, cb)
   },
+  editor: {
+    onFlushRequest: (cb) =>
+      on<number>(IPC.editor.flush, (id) => {
+        void cb()
+          .catch(() => {})
+          .finally(() => ipcRenderer.send(IPC.editor.flushed, id))
+      })
+  },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),
     barUpdate: (state) => ipcRenderer.send(IPC.recording.barUpdate, state),

@@ -6,6 +6,7 @@ import { PRESETS } from '@shared/presets/presets'
 import { estimateOutputMB } from '@shared/presets/sizeEstimate'
 import { defaultOutputName, sanitizeFileName } from '@shared/filenames'
 import { useAppStore } from '@/app/store'
+import { openRecordingInEditor } from '@/editor/ui/sessionProjects'
 import { Button } from '@/components/ui/Button'
 import { Badge, Kbd, Progress, Section, Tip } from '@/components/ui/primitives'
 import { formatBytes, formatClock, formatDate, formatMB, formatTimecode } from '@/lib/format'
@@ -333,8 +334,7 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
     setOpeningEditor(true)
     try {
       playerRef.current?.pause()
-      const project = await api.project.fromSession(session.id)
-      useAppStore.getState().openEditor(project.id)
+      await openRecordingInEditor(session.id)
     } catch (e) {
       toast.error(`Não foi possível abrir no editor: ${e instanceof Error ? e.message : String(e)}`)
       setOpeningEditor(false)
@@ -372,7 +372,7 @@ function ReviewBody({ session }: { session: Session }): React.JSX.Element {
               ) : null}
             </div>
           </div>
-          <Tip content="Criar um projeto no editor com esta gravação (cortes, faixas, efeitos)">
+          <Tip content="Editar no editor completo (cortes, faixas, efeitos); reabre o projeto desta gravação se já existir">
             <Button variant="outline" size="sm" onClick={() => void openInEditor()} disabled={phase.kind === 'running' || openingEditor || !session.durationMs}>
               {openingEditor ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />} Abrir no editor
             </Button>

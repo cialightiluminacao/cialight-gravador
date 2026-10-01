@@ -3,7 +3,7 @@ import { IPC } from '@shared/ipc'
 import { registerFileProtocolScheme, installFileProtocol } from './fileProtocol'
 import { runSpike } from './spike/spikeMain'
 import { runEditorSpike } from './spike/editorSpikeMain'
-import { createRecorderWindow, getRecorderWindow, setQuitting, showRecorder } from './windows/recorderWindow'
+import { createRecorderWindow, editorNeedsFlush, flushEditor, getRecorderWindow, setQuitting, showRecorder } from './windows/recorderWindow'
 import { installDisplayMediaHandler } from './capture/displayMediaHandler'
 import { listDisplays } from './capture/sources'
 import { dirname, join } from 'path'
@@ -33,7 +33,7 @@ const reclaimFlag = !(process.env.CIALIGHT_SPIKE === 'editor' && process.env.CIA
 if (reclaimFlag) app.commandLine.appendSwitch('disable-features', 'ReclaimInactiveWebCodecs')
 
 // QA/testes rodam em paralelo (várias instâncias): sem lock nesses modos
-const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST || process.env.CIALIGHT_QA || process.env.CIALIGHT_SPIKE === 'editor' ? true : app.requestSingleInstanceLock()
+const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST || (process.env.CIALIGHT_QA && !app.isPackaged) || process.env.CIALIGHT_SPIKE === 'editor' ? true : app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
@@ -167,6 +167,12 @@ if (!gotLock) {
         e.preventDefault()
         return
       }
+    }
+    // editor aberto: grava o pendente (transação, autosave) e só então sai de verdade
+    if (editorNeedsFlush()) {
+      e.preventDefault()
+      void flushEditor().then(() => app.quit())
+      return
     }
     setQuitting(true)
     setPhaseValue('idle')

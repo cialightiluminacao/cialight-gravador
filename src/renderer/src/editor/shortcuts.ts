@@ -71,9 +71,10 @@ export function isEditableTarget(t: EventTarget | null | undefined): boolean {
 }
 
 export function shortcutFor(e: KeyLike): ShortcutAction | null {
-  if (isEditableTarget(e.target)) return null
   const ctrl = e.ctrlKey || !!e.metaKey
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key
+  // num campo de texto só Ctrl+S (salvar) vale; o resto é da digitação
+  if (isEditableTarget(e.target)) return ctrl && !e.altKey && !e.shiftKey && k === 's' ? 'save' : null
   if (ctrl) {
     if (e.altKey) return null
     if (k === 'z') return e.shiftKey ? 'redo' : 'undo'

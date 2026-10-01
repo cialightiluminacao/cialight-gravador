@@ -47,5 +47,7 @@ describe('shortcutFor', () => {
     expect(shortcutFor(key('z', { ctrlKey: true, target: { tagName: 'DIV', isContentEditable: true } as unknown as EventTarget }))).toBeNull()
     expect(isEditableTarget({ tagName: 'INPUT', type: 'checkbox' } as unknown as EventTarget)).toBe(false)
     expect(shortcutFor(key(' ', { target: { tagName: 'BUTTON' } as unknown as EventTarget }))).toBe('playPause')
+    // Ctrl+S salva mesmo digitando num campo
+    expect(shortcutFor(key('s', { ctrlKey: true, target: { tagName: 'INPUT', type: 'text' } as unknown as EventTarget }))).toBe('save')
   })
 })

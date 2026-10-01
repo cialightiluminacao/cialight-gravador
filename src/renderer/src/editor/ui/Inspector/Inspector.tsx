@@ -10,11 +10,11 @@ import { ColorInput, FieldRow, PanelSection } from './common'
 import { VideoPanel } from './VideoPanel'
 import { AudioPanel } from './AudioPanel'
 import { SpeedPanel } from './SpeedPanel'
+import { ITEM_TYPE_LABEL, itemLabel } from '../itemLabel'
 
 // Inspetor (coluna direita): propriedades do item selecionado; sem seleção, as do projeto.
 
 const FPS_OPTIONS = [24, 25, 30, 50, 60].map((f) => ({ value: String(f), label: `${f} fps` }))
-const ITEM_KIND: Record<Item['type'], string> = { media: 'Mídia', text: 'Texto', shape: 'Forma', effect: 'Efeito', annotations: 'Anotações' }
 
 export function Inspector(): React.JSX.Element {
   const project = useEditorStore((s) => s.project)
@@ -31,7 +31,7 @@ export function Inspector(): React.JSX.Element {
     body = <p className="px-3 py-4 text-[11px] leading-relaxed text-muted">Vários itens selecionados. Selecione um só para editar as propriedades.</p>
   } else if (found) {
     const asset = found.item.type === 'media' ? project.assets.find((a) => a.id === (found.item as MediaItem).assetId) : undefined
-    title = found.item.name ?? asset?.name ?? ITEM_KIND[found.item.type]
+    title = itemLabel(project, found.item)
     icon = found.track.kind === 'audio' ? <Music className="h-3.5 w-3.5" /> : asset?.kind === 'image' ? <ImageIcon className="h-3.5 w-3.5" /> : <Film className="h-3.5 w-3.5" />
     body = <ItemPanels key={found.item.id} project={project} item={found.item} trackKind={found.track.kind} />
   } else body = <ProjectPanel project={project} />
@@ -53,7 +53,7 @@ function ItemPanels({ project, item, trackKind }: { project: Project; item: Item
   const [tab, setTab] = useState(trackKind === 'video' ? 'video' : 'audio')
   if (item.type !== 'media') {
     return (
-      <PanelSection title={ITEM_KIND[item.type]}>
+      <PanelSection title={ITEM_TYPE_LABEL[item.type]}>
         <Timing item={item} fps={project.canvas.fps} />
         <p className="pt-1 text-[11px] leading-relaxed text-muted">As propriedades deste tipo de item chegam numa próxima versão do editor.</p>
       </PanelSection>

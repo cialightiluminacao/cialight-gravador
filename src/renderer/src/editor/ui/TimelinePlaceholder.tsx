@@ -7,13 +7,13 @@ import type { PlaybackController } from '../engine/PlaybackController'
 import { useEditorStore } from '../state/editorStore'
 import { addAssetAtPlayhead, seekTo } from './editorActions'
 import { ASSET_MIME } from './MediaCard'
+import { itemLabel } from './itemLabel'
 
 // ==== PROVISÓRIO — substituído pela Timeline da Task 11 ====
 // Régua mínima para testar reprodução e seek (arrastar move o playhead) e uma visão só-leitura das
 // faixas (clique seleciona; Ctrl/Shift alterna). Soltar um cartão da biblioteca adiciona no playhead.
 
 const NO_TRACKS: Project['tracks'] = []
-const TYPE_LABEL = { media: 'Mídia', text: 'Texto', shape: 'Forma', effect: 'Efeito', annotations: 'Anotações' } as const
 
 export function TimelinePlaceholder({ playback }: { playback: PlaybackController | null }): React.JSX.Element {
   const project = useEditorStore((s) => s.project)
@@ -98,7 +98,7 @@ export function TimelinePlaceholder({ playback }: { playback: PlaybackController
                   style={{ left: pct(it.startUs), width: pct(it.durationUs) }}
                   onClick={(e) => useEditorStore.getState().select([it.id], e.ctrlKey || e.shiftKey ? 'toggle' : 'set')}
                 >
-                  {it.name ?? (it.type === 'media' ? project?.assets.find((a) => a.id === it.assetId)?.name : TYPE_LABEL[it.type])}
+                  {project ? itemLabel(project, it) : null}
                 </button>
               ))}
             </div>

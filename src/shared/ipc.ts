@@ -228,6 +228,13 @@ export interface IpcApi {
     onProgress(cb: (j: IngestJob) => void): Unsubscribe
     onDone(cb: (d: IngestDone) => void): Unsubscribe
   }
+  editor: {
+    /**
+     * Main → editor antes de fechar a janela/sair com o editor aberto: o callback grava tudo o que estiver
+     * pendente (transação aberta, autosave) e solta o projeto; o preload responde ao main ao terminar.
+     */
+    onFlushRequest(cb: () => Promise<void>): Unsubscribe
+  }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
     barUpdate(state: BarState): void
@@ -324,6 +331,7 @@ export const IPC = {
     progress: 'media:progress',
     done: 'media:done'
   },
+  editor: { flush: 'editor:flush', flushed: 'editor:flushed' },
   recording: {
     setPhase: 'recording:setPhase',
     barUpdate: 'recording:barUpdate',

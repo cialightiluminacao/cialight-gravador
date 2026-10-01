@@ -120,7 +120,7 @@ function sessionTotalUs(session: Session): Us {
   return Math.max(msToUs(session.durationMs), MIN_ITEM_US)
 }
 
-const STREAM_NAMES: Record<SessionStream, string> = { screen: 'Tela', webcam: 'Webcam', mic: 'Microfone', system: 'Sistema' }
+const STREAM_NAMES: Record<SessionStream, string> = { screen: 'Tela', webcam: 'Webcam', mic: 'Microfone', system: 'Áudio do sistema' }
 
 /**
  * Assets de uma gravação (tela + webcam/microfone/sistema quando gravados), com id `<idPrefix>-<fonte>`.
@@ -145,8 +145,8 @@ export function projectFromSession(session: Session, opts: { projectId: string; 
   const hasMic = assets.some((a) => a.id === `${projectId}-mic`)
   const hasSystem = assets.some((a) => a.id === `${projectId}-system`)
 
-  const mediaItem = (stream: string, kind: TrackKind, visual?: VisualProps, link?: string): MediaItem => ({
-    id: `${projectId}-${stream}-item`, type: 'media', assetId: `${projectId}-${stream}`,
+  const mediaItem = (stream: SessionStream, kind: TrackKind, visual?: VisualProps, link?: string): MediaItem => ({
+    id: `${projectId}-${stream}-item`, type: 'media', assetId: `${projectId}-${stream}`, name: STREAM_NAMES[stream],
     startUs: 0, durationUs: total, inUs: 0, speed: 1, reverse: false,
     audio: defaultAudio(),
     ...(kind === 'video' ? { visual: visual ?? defaultVisual() } : {}),
@@ -156,18 +156,18 @@ export function projectFromSession(session: Session, opts: { projectId: string; 
     id: `${projectId}-t-${id}`, kind, name, muted: false, hidden: false, locked: false, volume: 1, ...(role ? { role } : {}), items
   })
 
-  const tracks: Track[] = [track('screen', 'video', 'Tela', [mediaItem('screen', 'video', undefined, linkId)])]
+  const tracks: Track[] = [track('screen', 'video', STREAM_NAMES.screen, [mediaItem('screen', 'video', undefined, linkId)])]
   // Sem keyframes de PiP a v1 não desenha a webcam: não há onde posicioná-la, então não cria a faixa.
   if (hasWebcam && session.pip.length > 0) {
-    tracks.push(track('webcam', 'video', 'Webcam', [mediaItem('webcam', 'video', webcamVisual(session, session.pip, total))]))
+    tracks.push(track('webcam', 'video', STREAM_NAMES.webcam, [mediaItem('webcam', 'video', webcamVisual(session, session.pip, total))]))
   }
   if (session.strokes.length > 0) {
     tracks.push(track('annotations', 'video', 'Anotações', [
-      { id: `${projectId}-annotations-item`, type: 'annotations', sessionId: session.id, inUs: 0, startUs: 0, durationUs: total, autoFadeMs: opts.annotationsAutoFadeMs ?? null }
+      { id: `${projectId}-annotations-item`, type: 'annotations', name: 'Anotações', sessionId: session.id, inUs: 0, startUs: 0, durationUs: total, autoFadeMs: opts.annotationsAutoFadeMs ?? null }
     ]))
   }
-  if (hasMic) tracks.push(track('mic', 'audio', 'Microfone', [mediaItem('mic', 'audio', undefined, linkId)], 'voice'))
-  if (hasSystem) tracks.push(track('system', 'audio', 'Sistema', [mediaItem('system', 'audio', undefined, linkId)], 'sfx'))
+  if (hasMic) tracks.push(track('mic', 'audio', STREAM_NAMES.mic, [mediaItem('mic', 'audio', undefined, linkId)], 'voice'))
+  if (hasSystem) tracks.push(track('system', 'audio', STREAM_NAMES.system, [mediaItem('system', 'audio', undefined, linkId)], 'sfx'))
 
   return {
     version: 1,

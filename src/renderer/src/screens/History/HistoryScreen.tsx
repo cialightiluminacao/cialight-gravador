@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Camera, Clapperboard, FolderOpen, History, LoaderCircle, RefreshCw, Scissors, Trash2, Video } from 'lucide-react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import { Camera, ChevronDown, Clapperboard, FilePlus2, FolderOpen, History, LoaderCircle, RefreshCw, Scissors, Trash2, Video } from 'lucide-react'
 import { toast } from 'sonner'
 import type { SessionState, SessionSummary } from '@shared/types'
 import { useAppStore } from '@/app/store'
@@ -7,6 +8,7 @@ import { Button } from '@/components/ui/Button'
 import { Badge, Dialog, DialogContent, EmptyState, Tip } from '@/components/ui/primitives'
 import { formatBytes, formatClock, formatDate } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { openRecordingInEditor } from '@/editor/ui/sessionProjects'
 
 // Histórico de gravações brutas (spec §4.3 item 5): cards com miniatura, data, duração,
 // tamanho, fonte e badges; abrir na Revisão, abrir pasta, excluir (com confirmação).
@@ -24,7 +26,6 @@ export function HistoryScreen(): React.JSX.Element {
   const api = window.api
   const setReviewSession = useAppStore((s) => s.setReviewSession)
   const setScreen = useAppStore((s) => s.setScreen)
-  const openEditor = useAppStore((s) => s.openEditor)
   const [list, setList] = useState<ListState>({ status: 'loading' })
   const [toDelete, setToDelete] = useState<SessionSummary | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -59,12 +60,11 @@ export function HistoryScreen(): React.JSX.Element {
     }
   }
 
-  /** Cria um projeto do editor a partir da gravação e o abre. */
-  const edit = async (s: SessionSummary): Promise<void> => {
+  /** Abre no editor o projeto mais recente desta gravação (ou cria um); forceNew sempre cria. */
+  const edit = async (s: SessionSummary, forceNew = false): Promise<void> => {
     setBusyId(s.id)
     try {
-      const project = await api.project.fromSession(s.id)
-      openEditor(project.id)
+      await openRecordingInEditor(s.id, { forceNew })
     } catch (e) {
       toast.error(`Não foi possível abrir no editor: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -136,7 +136,7 @@ export function HistoryScreen(): React.JSX.Element {
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
             {items.map((s, i) => (
-              <SessionCard key={s.id} s={s} index={i} busy={busyId === s.id} onOpen={() => void open(s)} onEdit={() => void edit(s)} onFolder={() => void api.session.openFolder(s.id)} onDelete={() => setToDelete(s)} />
+              <SessionCard key={s.id} s={s} index={i} busy={busyId === s.id} onOpen={() => void open(s)} onEdit={(forceNew) => void edit(s, forceNew)} onFolder={() => void api.session.openFolder(s.id)} onDelete={() => setToDelete(s)} />
             ))}
           </div>
         )}
@@ -162,7 +162,7 @@ export function HistoryScreen(): React.JSX.Element {
   )
 }
 
-function SessionCard({ s, index, busy, onOpen, onEdit, onFolder, onDelete }: { s: SessionSummary; index: number; busy: boolean; onOpen: () => void; onEdit: () => void; onFolder: () => void; onDelete: () => void }): React.JSX.Element {
+function SessionCard({ s, index, busy, onOpen, onEdit, onFolder, onDelete }: { s: SessionSummary; index: number; busy: boolean; onOpen: () => void; onEdit: (forceNew: boolean) => void; onFolder: () => void; onDelete: () => void }): React.JSX.Element {
   const [thumbOk, setThumbOk] = useState(true)
   const badge = STATE_BADGE[s.state]
   const thumbUrl = s.thumb ? window.api.session.fileUrl(s.id, 'thumbs/001.jpg') : null
@@ -218,11 +218,27 @@ function SessionCard({ s, index, busy, onOpen, onEdit, onFolder, onDelete }: { s
               <Trash2 className="h-4 w-4" />
             </button>
           </Tip>
-          <Tip content="Criar um projeto no editor com esta gravação">
-            <Button size="sm" variant="outline" className="ml-1" onClick={onEdit} disabled={busy || !s.durationMs}>
-              <Scissors className="h-3.5 w-3.5" /> Editar
-            </Button>
-          </Tip>
+          <div className="ml-1 flex">
+            <Tip content="Abrir no editor (reabre o projeto desta gravação, se já existir)">
+              <Button size="sm" variant="outline" className="rounded-r-none border-r-0" onClick={() => onEdit(false)} disabled={busy || !s.durationMs}>
+                <Scissors className="h-3.5 w-3.5" /> Editar
+              </Button>
+            </Tip>
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild disabled={busy || !s.durationMs}>
+                <Button size="sm" variant="outline" className="w-6 rounded-l-none px-0" aria-label="Mais opções de edição">
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </Button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content align="end" sideOffset={6} className="z-50 min-w-[220px] rounded-xl border border-border-strong bg-surface-3 p-1 shadow-2xl animate-in fade-in-0 zoom-in-95">
+                  <DropdownMenu.Item className="flex cursor-pointer select-none items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-fg outline-none data-[highlighted]:bg-white/8" onSelect={() => onEdit(true)}>
+                    <FilePlus2 className="h-4 w-4 text-muted" /> Novo projeto desta gravação
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          </div>
           <Button size="sm" variant="secondary" onClick={onOpen} disabled={busy}>
             Revisar
           </Button>

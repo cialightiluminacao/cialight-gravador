@@ -36,7 +36,9 @@ const opts = { projectId: 'p1', name: 'Gravação', now: '2026-10-01T00:00:00.00
 describe('projectFromSession', () => {
   it('sessão completa → 5 faixas na ordem, válido', () => {
     const p = projectFromSession(full, opts)
-    expect(p.tracks.map((t) => t.name)).toEqual(['Tela', 'Webcam', 'Anotações', 'Microfone', 'Sistema'])
+    expect(p.tracks.map((t) => t.name)).toEqual(['Tela', 'Webcam', 'Anotações', 'Microfone', 'Áudio do sistema'])
+    // nomes dos itens aparecem na linha do tempo/inspetor (pt-BR)
+    expect(p.tracks.map((t) => t.items[0].name)).toEqual(['Tela', 'Webcam', 'Anotações', 'Microfone', 'Áudio do sistema'])
     expect(p.tracks.map((t) => t.kind)).toEqual(['video', 'video', 'video', 'audio', 'audio'])
     expect(p.tracks[3].role).toBe('voice')
     expect(p.tracks[4].role).toBe('sfx')
@@ -141,7 +143,7 @@ describe('sessionAssets', () => {
   it('um asset por fonte gravada, com prefixo de id e nome com a data', () => {
     const a = sessionAssets(full, 'rec1', 'Gravação 18/08')
     expect(a.map((x) => x.id)).toEqual(['rec1-screen', 'rec1-webcam', 'rec1-mic', 'rec1-system'])
-    expect(a.map((x) => x.name)).toEqual(['Gravação 18/08 — Tela', 'Gravação 18/08 — Webcam', 'Gravação 18/08 — Microfone', 'Gravação 18/08 — Sistema'])
+    expect(a.map((x) => x.name)).toEqual(['Gravação 18/08 — Tela', 'Gravação 18/08 — Webcam', 'Gravação 18/08 — Microfone', 'Gravação 18/08 — Áudio do sistema'])
     expect(a.every((x) => x.source.type === 'session' && x.durationUs === msToUs(10_000))).toBe(true)
     expect(a[1].videoTrackIndex).toBe(1)
     expect(a[3].audioTrackIndex).toBe(1)

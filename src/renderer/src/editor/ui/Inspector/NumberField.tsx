@@ -47,7 +47,14 @@ export function NumberField({ label, value, onChange, min = -Infinity, max = Inf
 
   const store = useEditorStore.getState
 
+  // Enter só tira o foco (o commit acontece uma única vez, no onBlur); Esc marca o rascunho para descarte
+  const discardRef = useRef(false)
   const commitTyped = (): void => {
+    if (discardRef.current) {
+      discardRef.current = false
+      setDraft(null)
+      return
+    }
     if (draft === null) return
     const parsed = Number(draft.replace(',', '.').trim())
     setDraft(null)
@@ -65,6 +72,19 @@ export function NumberField({ label, value, onChange, min = -Infinity, max = Inf
     const startX = e.clientX
     const start = value
     let dragging = false
+    // encerra o gesto: remove todos os listeners e restaura o cursor; commit=false descarta a transação
+    const finish = (commit: boolean, focus: boolean): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', cancel)
+      window.removeEventListener('keydown', esc, true)
+      document.body.style.cursor = ''
+      if (dragging) {
+        dragging = false
+        if (commit) store().commitTx()
+        else store().cancelTx()
+      } else if (focus && target !== inputRef.current) inputRef.current?.focus()
+    }
     const move = (ev: PointerEvent): void => {
       const dx = ev.clientX - startX
       if (!dragging) {
@@ -76,26 +96,17 @@ export function NumberField({ label, value, onChange, min = -Infinity, max = Inf
       const k = ev.shiftKey ? 10 : ev.altKey ? 0.1 : 1
       onChange(clamp(round(start + dx * step * k)))
     }
-    const end = (ev: PointerEvent): void => {
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', end)
-      window.removeEventListener('pointercancel', end)
-      window.removeEventListener('keydown', esc, true)
-      document.body.style.cursor = ''
-      if (dragging) {
-        if (ev.type === 'pointercancel') store().cancelTx()
-        else store().commitTx()
-      } else if (target !== inputRef.current) inputRef.current?.focus()
-    }
+    const up = (): void => finish(true, true)
+    const cancel = (): void => finish(false, false)
     const esc = (ev: KeyboardEvent): void => {
-      if (ev.key !== 'Escape' || !dragging) return
+      if (ev.key !== 'Escape') return
       ev.stopPropagation()
-      dragging = false
-      store().cancelTx()
+      ev.preventDefault()
+      finish(false, false)
     }
     window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', end)
-    window.addEventListener('pointercancel', end)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
     window.addEventListener('keydown', esc, true)
     if (target !== inputRef.current) e.preventDefault()
   }
@@ -146,11 +157,10 @@ export function NumberField({ label, value, onChange, min = -Infinity, max = Inf
           onBlur={commitTyped}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
-              commitTyped()
               e.currentTarget.blur()
             } else if (e.key === 'Escape') {
               e.stopPropagation()
-              setDraft(null)
+              discardRef.current = true
               e.currentTarget.blur()
             } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
               e.preventDefault()

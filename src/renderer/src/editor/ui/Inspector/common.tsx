@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { evalAnim, setValue } from '@shared/editor/anim'
 import { updateItem } from '@shared/editor/ops'
 import type { Anim, Item, Us } from '@shared/editor/project'
@@ -50,9 +51,10 @@ export const withValue = (a: Anim<number>, local: Us, v: number): Anim<number> =
 export const usToSec2 = (us: Us): number => Math.round(us / 10_000) / 100
 export const sec2ToUs = (s: number): Us => Math.round(s * 1e6)
 
-/** Seletor de cor: o arrasto no seletor nativo é uma transação só (abre no foco, fecha ao sair). */
+/** Seletor de cor: o arrasto no seletor nativo é uma transação só (abre na 1ª mudança, fecha ao sair). */
 export function ColorInput({ value, label, onChange }: { value: string; label: string; onChange: (hex: string) => void }): React.JSX.Element {
   const st = useEditorStore.getState
+  const opened = useRef(false) // transação aberta por este seletor
   return (
     <input
       type="color"
@@ -60,10 +62,15 @@ export function ColorInput({ value, label, onChange }: { value: string; label: s
       title={label}
       className="h-6 w-10 cursor-pointer rounded border border-border-strong bg-transparent"
       value={value}
-      onFocus={() => st().begin()}
-      onBlur={() => st().commitTx()}
+      onBlur={() => {
+        if (opened.current) st().commitTx()
+        opened.current = false
+      }}
       onChange={(e) => {
-        if (!st().txBase) st().begin()
+        if (!opened.current) {
+          st().begin()
+          opened.current = true
+        }
         onChange(e.target.value)
       }}
     />
