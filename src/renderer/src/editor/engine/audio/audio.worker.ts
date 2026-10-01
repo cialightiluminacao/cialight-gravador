@@ -1,6 +1,8 @@
 // Audio worker do editor: decodifica (AssetPcm) e mixa (mixBlock) blocos de PCM pedidos pelo AudioClient.
 // A thread principal só agenda os AudioBufferSourceNode. Pedidos atendidos em ordem; depois de cada
 // bloco, aquece o cache do segundo seguinte (mídia que vai começar já fica decodificada).
+// Exportação: uma instância própria recebe uma MessagePort ('port') e atende pela porta os pedidos do
+// render worker de exportação, em ordem e com memória constante (cache LRU de chunks por asset).
 import { planAudio, type AudioSegment } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
@@ -8,7 +10,7 @@ import { AssetPcm } from './assetPcm'
 import { mixBlock, SR, type PcmSource } from './mixer'
 import type { AudioIn, AudioOut } from './protocol'
 
-type RenderMsg = Extract<AudioIn, { t: 'render' }>
+type RenderMsg = Extract<AudioIn, { t: 'render' }> & { reply: (m: AudioOut, transfer?: Transferable[]) => void }
 
 const LOOKAHEAD_US = 1_000_000
 
@@ -29,9 +31,16 @@ self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
         setProject(m.project, m.mediaUrls, m.useProxy)
         break
       case 'render':
-        queue.push(m)
-        if (!busy) void pump()
+        enqueue(m, post)
         break
+      case 'port': {
+        const port = m.port
+        const reply = (out: AudioOut, transfer: Transferable[] = []): void => port.postMessage(out, transfer)
+        port.onmessage = (ev: MessageEvent<AudioIn>) => {
+          if (ev.data.t === 'render') enqueue(ev.data, reply)
+        }
+        break
+      }
       case 'cancel':
         queue.length = 0
         epoch++
@@ -47,6 +56,11 @@ self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
     post({ t: 'error', message: errMsg(err) })
   }
 })
+
+function enqueue(m: Extract<AudioIn, { t: 'render' }>, reply: RenderMsg['reply']): void {
+  queue.push({ ...m, reply })
+  if (!busy) void pump()
+}
 
 function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean): void {
   segments = planAudio(project)
@@ -88,11 +102,11 @@ async function pump(): Promise<void> {
         await prepare(segs, m.fromUs, m.frames, stale)
         if (stale()) continue // cancelado durante a decodificação: o cliente já descartou
         const pcm = mixBlock(segs, m.fromUs, m.frames, sources as Map<string, PcmSource>)
-        post({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm }, [pcm.buffer])
+        m.reply({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm }, [pcm.buffer])
         const endUs = m.fromUs + Math.round((m.frames * 1e6) / SR)
         void prepare(segs, endUs, Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
       } catch (err) {
-        post({ t: 'error', message: errMsg(err), seq: m.seq })
+        m.reply({ t: 'error', message: errMsg(err), seq: m.seq })
       }
     }
   } finally {

@@ -8,6 +8,8 @@ export type AudioIn =
   | { t: 'render'; fromUs: Us; frames: number; seq: number } // mixa [fromUs, fromUs + frames/48 kHz)
   | { t: 'cancel' } // seek/pausa: descarta os pedidos na fila e o aquecimento ainda não iniciado
   | { t: 'dispose' }
+  // exportação: porta (MessageChannel) pela qual o render worker pede blocos ('render') e recebe 'block'/'error'
+  | { t: 'port'; port: MessagePort }
 
 export type AudioOut =
   | { t: 'block'; seq: number; fromUs: Us; pcm: Float32Array } // estéreo intercalado 48 kHz (transferido)

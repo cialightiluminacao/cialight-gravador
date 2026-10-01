@@ -2,8 +2,7 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import { createHash } from 'crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import type { ExportOptions, ExportPresetId, RecordingConfig, Session } from '@shared/types'
-import { DEFAULT_PIP } from '@shared/defaults'
+import type { ExportOptions, ExportPresetId, Session } from '@shared/types'
 import { PRESET_ORDER } from '@shared/presets/presets'
 import type { SessionStore } from './session/sessionStore'
 import { probeFile, probeKeyframes, runFfmpeg } from './export/ffmpegRunner'
@@ -21,8 +20,10 @@ import { buildReviewAssets } from './export/reviewAssets'
 import { preloadPath, loadPage } from './windows/recorderWindow'
 import { log } from './log'
 import { testEditorRender } from './editorTestMode'
+import { testEditorExport } from './editorExportTestMode'
+import { isFastStart, makeSyntheticSession } from './testFixtures'
 
-// Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render). Roda no Electron
+// Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render|editor-export). Roda no Electron
 // real com o ffmpeg embutido; escreve um relatório JSON em test-out/ e sai com
 // código 0 (sucesso) ou 1 (falha). Chamado por `npm run test:ffmpeg|test:capture|test:ingest|test:editor`.
 
@@ -31,51 +32,6 @@ const outDir = join(app.getAppPath(), 'test-out')
 function ok(cond: boolean, msg: string, failures: string[]): void {
   if (!cond) failures.push(msg)
   console.log(`${cond ? 'OK ' : 'FAIL'} ${msg}`)
-}
-
-/** Verifica se o 'moov' vem antes do 'mdat' (faststart) lendo os primeiros MB. */
-function isFastStart(file: string): boolean {
-  const buf = readFileSync(file)
-  const head = buf.subarray(0, Math.min(buf.length, 4 * 1024 * 1024))
-  const moov = head.indexOf('moov')
-  const mdat = head.indexOf('mdat')
-  return moov >= 0 && (mdat < 0 || moov < mdat)
-}
-
-async function makeSyntheticSession(store: SessionStore): Promise<Session> {
-  const id = 'test-ffmpeg-session'
-  const cfg: RecordingConfig = {
-    source: { kind: 'screen', id: 'screen:0:0', name: 'Monitor 1' },
-    quality: '1080p',
-    fps: 30,
-    countdownSec: 0,
-    webcam: { deviceId: 'x', label: 'Cam', mirrored: true },
-    mic: { deviceId: 'y', label: 'Mic', echoCancellation: false, noiseSuppression: true, autoGainControl: true },
-    systemAudio: true,
-    pipInitial: DEFAULT_PIP
-  }
-  const { dir, session } = store.create(cfg, id, { bounds: { x: 0, y: 0, width: 1920, height: 1080 }, scaleFactor: 1, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1.640028', bitrate: 12e6 } })
-  const rec = join(dir, 'rec.mp4')
-  // 12 s: tela testsrc2 1080p30, webcam testsrc 720p30, mic seno 440 Hz, sistema seno 880 Hz
-  await runFfmpeg([
-    '-hide_banner', '-nostdin', '-y',
-    '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30',
-    '-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30',
-    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
-    '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000',
-    '-t', '12', '-map', '0:v', '-map', '1:v', '-map', '2:a', '-map', '3:a',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-ac', '2',
-    '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-progress', 'pipe:1', '-nostats', rec
-  ], { label: 'sintético' })
-  session.tracks = { screen: 0, webcam: 1, mic: 0, system: 1 }
-  session.webcam!.width = 1280
-  session.webcam!.height = 720
-  session.state = 'stopped'
-  session.durationMs = 12000
-  session.strokes = [{ id: 's1', tMs: 2000, tool: 'arrow', points: [{ x: 0.2, y: 0.2, tMs: 2000 }, { x: 0.5, y: 0.5, tMs: 2400 }], color: '#ff3b30', width: 6 }]
-  session.pip = [DEFAULT_PIP, { ...DEFAULT_PIP, tMs: 5000, x: 0.05, y: 0.05 }]
-  store.save(session)
-  return session
 }
 
 async function runExport(store: SessionStore, session: Session, presetId: ExportPresetId, extra: Partial<ExportOptions>, outFolder: string): Promise<{ outputs: string[]; error?: string; message?: string }> {
@@ -108,7 +64,7 @@ async function testFfmpeg(store: SessionStore): Promise<number> {
   const probe = await probeEncoders(true)
   console.log('encoders:', JSON.stringify(probe))
   ok(probe.available.includes('libx264'), 'libx264 disponível', failures)
-  const session = await makeSyntheticSession(store)
+  const session = await makeSyntheticSession(store, 'test-ffmpeg-session')
   const dir = store.dirOf(session.id)
   const p0 = await probeFile(join(dir, 'rec.mp4'))
   ok(p0.streams.length === 4, `rec.mp4 sintético tem 4 faixas (${p0.streams.length})`, failures)
@@ -386,6 +342,7 @@ export async function runIntegrationTest(mode: string, store: SessionStore, proj
     else if (mode === 'capture') code = await testCapture(store)
     else if (mode === 'ingest') code = await testIngest()
     else if (mode === 'editor-render') code = await testEditorRender(projects, store, outDir)
+    else if (mode === 'editor-export') code = await testEditorExport(projects, store, outDir)
     else console.error(`modo de teste desconhecido: ${mode}`)
   } catch (e) {
     console.error('teste falhou com exceção:', e)

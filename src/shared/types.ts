@@ -131,7 +131,7 @@ export type HotkeyAction =
 
 export type MicMode = 'headset' | 'speakers'
 
-export type HwEncoder = 'h264_nvenc' | 'h264_qsv' | 'h264_mf' | 'libx264'
+export type HwEncoder = 'h264_nvenc' | 'h264_qsv' | 'h264_amf' | 'h264_mf' | 'libx264'
 
 export interface EncoderProbe {
   gpuKey: string

@@ -84,6 +84,9 @@ describe('proxyArgs', () => {
   it('encoder de hardware usado quando informado', () => {
     expect(valueAfter(proxyArgs('i', 'o', video(), 'h264_nvenc'), '-c:v')).toBe('h264_nvenc')
     expect(valueAfter(proxyArgs('i', 'o', video(), 'h264_qsv'), '-c:v')).toBe('h264_qsv')
+    const amf = proxyArgs('i', 'o', video(), 'h264_amf')
+    expect(valueAfter(amf, '-c:v')).toBe('h264_amf')
+    expect(valueAfter(amf, '-bf')).toBe('0')
   })
 })
 

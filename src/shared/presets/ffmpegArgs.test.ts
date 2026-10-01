@@ -167,6 +167,13 @@ describe('buildFfmpegArgs — max (tutorial interno)', () => {
       ...AAC(256), '-movflags', '+faststart', ...TAIL, OUT
     ])
   })
+  it('AMD AMF: quantizador constante pelo hwCq do preset', () => {
+    const args = buildFfmpegArgs(base({ preset: PRESETS.max, encoder: 'h264_amf' })).steps[0].args
+    const i = args.indexOf('-c:v')
+    expect(args.slice(i, i + 18)).toEqual([
+      '-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '19', '-qp_p', '19', '-qp_b', '19', '-bf', '2', '-profile:v', 'high', '-g', '60'
+    ])
+  })
   it('libx264 → -crf 17 sem -flags +cgop, gop 2 s', () => {
     const args = buildFfmpegArgs(base({ preset: PRESETS.max })).steps[0].args
     const i = args.indexOf('-c:v')

@@ -81,6 +81,7 @@ export const LOW_SPACE_STOP_MB = 300
 export const ENCODER_LABELS: Record<HwEncoder, string> = {
   h264_nvenc: 'NVIDIA NVENC (hardware)',
   h264_qsv: 'Intel Quick Sync (hardware)',
+  h264_amf: 'AMD AMF (hardware)',
   h264_mf: 'Media Foundation (hardware/Windows)',
   libx264: 'libx264 (software)'
 }

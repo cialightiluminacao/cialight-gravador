@@ -1,15 +1,38 @@
 // Render worker do editor: resolveFrame → fontes (DecoderPool) → Compositor WebGL2 → `rendered`.
-// Único caminho de render para preview e exportação. Pedidos de quadro que chegam durante um
-// render são coalescidos (fica só o último); o cliente resolve os intermediários com o resultado dele.
+// Único caminho de render para preview e exportação ("preview = export"). Pedidos de quadro que chegam
+// durante um render são coalescidos (fica só o último); o cliente resolve os intermediários com o resultado dele.
 // Todo VideoFrame entregue ao compositor é fechado no mesmo quadro (ver posse em decoderPool.ts).
+//
+// Exportação (`exportStart`, numa instância própria com o canvas na resolução de saída): para n = 0..N−1,
+// tUs = fromUs + frameToUs(n, fps) → o mesmo composeAt do preview (fontes originais/intermediárias, sequencial)
+// → VideoSample(canvas) → VideoSampleSource H.264; o áudio vem em blocos de 100 ms do audio worker de
+// exportação pela MessagePort, em ordem, → AudioSampleSource (AAC, ou Opus se AAC indisponível). O MP4
+// (mdat antes do moov; o main remuxa com faststart) sai em chunks `exportChunk` com contrapressão por `chunkAck`.
+import {
+  AudioSample,
+  AudioSampleSource,
+  canEncodeAudio,
+  Mp4OutputFormat,
+  Output,
+  Quality,
+  StreamTarget,
+  VideoSample,
+  VideoSampleSource,
+  type StreamTargetChunk
+} from 'mediabunny'
 import { resolveFrame, type AnnotationsLayer } from '@shared/editor/resolve'
-import type { Project } from '@shared/editor/project'
+import type { Project, Us } from '@shared/editor/project'
+import { frameToUs } from '@shared/editor/time'
 import type { Session } from '@shared/types'
 import { drawStrokes } from '@shared/compositor'
 import { FILE_PROTOCOL } from '@shared/ipc'
+import { h264LevelFor } from '@/engine/encoderSupport'
 import { Compositor, type SourceMeta } from './compositor/compositor'
 import { DecoderPool } from './decoderPool'
-import type { RenderIn, RenderOut } from './protocol'
+import { SR } from './audio/mixer'
+import type { AudioIn, AudioOut } from './audio/protocol'
+import { frameCount } from '../export/exportPlan'
+import type { ExportJobSpec, RenderIn, RenderOut } from './protocol'
 
 type FrameMsg = Extract<RenderIn, { t: 'frame' }>
 
@@ -89,10 +112,13 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
         post({ t: 'disposed' })
         break
       case 'exportStart':
-        post({ t: 'exportError', jobId: m.jobId, message: 'exportação ainda não disponível' })
+        startExport(m.job, m.audioPort)
         break
       case 'exportCancel':
+        if (exporting?.jobId === m.jobId) exporting.abort.abort()
+        break
       case 'chunkAck':
+        if (exporting?.jobId === m.jobId) exporting.outbox.ack(m.seq)
         break
     }
   } catch (err) {
@@ -120,12 +146,29 @@ async function pump(): Promise<void> {
 
 async function renderFrame(m: FrameMsg): Promise<void> {
   const t0 = performance.now()
-  const comp = compositor
   const p = project
-  if (!comp || !p || !canvas) throw new Error('render antes de init/project')
+  if (!compositor || !p || !canvas) throw new Error('render antes de init/project')
+  const { missing, used } = await composeAt(p, m.tUs, m.playing)
+  // buffers de reprodução só para o que está no quadro (e o que vai começar) e só durante a reprodução
+  if (m.playing) pool.releaseExcept([...used, ...prefetchUpcoming(p, m.tUs, used)])
+  else {
+    prefetched.clear()
+    pool.releaseAll()
+  }
+  post({ t: 'rendered', seq: m.seq, tUs: m.tUs, ms: performance.now() - t0, missing: [...missing] })
+}
+
+/**
+ * Desenha o quadro tUs no canvas (resolveFrame → fontes → compositor). Os VideoFrames obtidos são fechados
+ * antes de retornar; o desenho fica no canvas (preserveDrawingBuffer). `sequential`: reprodução/exportação
+ * (iterador por entrada do pool); senão, seek. Devolve os assets ausentes e as entradas [asset, slot] usadas.
+ */
+async function composeAt(p: Project, tUs: Us, sequential: boolean): Promise<{ missing: Set<string>; used: [string, number][] }> {
+  const comp = compositor
+  if (!comp || !canvas) throw new Error('render antes de init')
   const W = canvas.width
   const H = canvas.height
-  const layers = resolveFrame(p, m.tUs)
+  const layers = resolveFrame(p, tUs)
   const sources = new Map<string, TexImageSource | VideoFrame | null>()
   const meta = new Map<string, SourceMeta>()
   const missing = new Set<string>()
@@ -158,7 +201,7 @@ async function renderFrame(m: FrameMsg): Promise<void> {
               const slot = slots.get(asset.id) ?? 0
               slots.set(asset.id, slot + 1)
               used.push([asset.id, slot])
-              const sample = await pool.frameAt(asset.id, layer.srcUs, m.playing, slot)
+              const sample = await pool.frameAt(asset.id, layer.srcUs, sequential, slot)
               if (sample) {
                 try {
                   // O VideoFrame do decoder vem sem rotação (mediabunny guarda a do arquivo em sample.rotation)
@@ -186,13 +229,7 @@ async function renderFrame(m: FrameMsg): Promise<void> {
   } finally {
     for (const f of frames) f.close()
   }
-  // buffers de reprodução só para o que está no quadro (e o que vai começar) e só durante a reprodução
-  if (m.playing) pool.releaseExcept([...used, ...prefetchUpcoming(p, m.tUs, used)])
-  else {
-    prefetched.clear()
-    pool.releaseAll()
-  }
-  post({ t: 'rendered', seq: m.seq, tUs: m.tUs, ms: performance.now() - t0, missing: [...missing] })
+  return { missing, used }
 }
 
 /**
@@ -256,6 +293,227 @@ function drawAnnotations(layer: AnnotationsLayer): OffscreenCanvas | null {
   ctx.clearRect(0, 0, W, H)
   drawStrokes(ctx, W, H, session, layer.sessionMs, layer.autoFadeMs)
   return annCanvas
+}
+
+// ---------------------------------------------------------------- exportação
+
+// Chunks do StreamTarget (agrupados) e quantos podem estar em voo antes de esperar o ack do cliente.
+const EXPORT_CHUNK_BYTES = 2 * 1024 * 1024
+const EXPORT_MAX_INFLIGHT = 4
+// Áudio: blocos de 100 ms; até AUDIO_AHEAD pedidos adiantados; o áudio anda AUDIO_LEAD_US à frente do vídeo.
+const AUDIO_BLOCK_FRAMES = SR / 10
+const AUDIO_BLOCK_US = 100_000
+const AUDIO_AHEAD = 4
+const AUDIO_LEAD_US = 200_000
+const AUDIO_CHANNELS = 2
+
+let exporting: { jobId: string; abort: AbortController; outbox: ChunkOutbox } | null = null
+
+class Cancelled extends Error {
+  constructor() {
+    super('cancelado')
+    this.name = 'Cancelled'
+  }
+}
+
+/** Fila de chunks do MP4 com contrapressão: com muitos em voo, espera o ack do cliente (gravou no disco). */
+class ChunkOutbox {
+  private seq = 0
+  private acked = 0
+  private waiter: (() => void) | null = null
+
+  constructor(private readonly jobId: string, private readonly signal: AbortSignal) {
+    signal.addEventListener('abort', () => this.release())
+  }
+
+  get lastSeq(): number {
+    return this.seq
+  }
+
+  ack(seq: number): void {
+    this.acked = Math.max(this.acked, seq)
+    if (this.seq - this.acked <= EXPORT_MAX_INFLIGHT) this.release()
+  }
+
+  private release(): void {
+    const w = this.waiter
+    this.waiter = null
+    w?.()
+  }
+
+  async send(chunk: StreamTargetChunk): Promise<void> {
+    if (this.signal.aborted) throw new Cancelled()
+    const data = chunk.data.slice()
+    this.seq++
+    post({ t: 'exportChunk', jobId: this.jobId, seq: this.seq, data, position: chunk.position }, [data.buffer])
+    if (this.seq - this.acked > EXPORT_MAX_INFLIGHT) {
+      await new Promise<void>((resolve) => {
+        this.waiter = resolve
+      })
+      if (this.signal.aborted) throw new Cancelled()
+    }
+  }
+}
+
+/** Blocos de áudio mixado pedidos em ordem ao audio worker de exportação (memória constante). */
+class AudioFeed {
+  private readonly totalFrames: number
+  private readonly blocks: number
+  private next = 0
+  private readonly pending = new Map<number, Promise<Float32Array>>()
+  private readonly waiting = new Map<number, { resolve: (pcm: Float32Array) => void; reject: (e: Error) => void }>()
+
+  constructor(private readonly port: MessagePort, private readonly fromUs: Us, durationUs: Us, signal: AbortSignal) {
+    this.totalFrames = Math.round((durationUs * SR) / 1e6)
+    this.blocks = Math.ceil(this.totalFrames / AUDIO_BLOCK_FRAMES)
+    port.onmessage = (e: MessageEvent<AudioOut>) => {
+      const m = e.data
+      if (m.seq === undefined) return // aviso de mídia (o bloco sai com silêncio no lugar dela)
+      const w = this.waiting.get(m.seq)
+      this.waiting.delete(m.seq)
+      if (m.t === 'block') w?.resolve(m.pcm)
+      else w?.reject(new Error(`falha ao mixar o áudio: ${m.message}`))
+    }
+    signal.addEventListener('abort', () => {
+      for (const w of this.waiting.values()) w.reject(new Cancelled())
+      this.waiting.clear()
+    })
+  }
+
+  /** Adiciona ao encoder os blocos que começam antes de `untilRelUs` (tempo do arquivo, 0 = início). */
+  async feed(src: AudioSampleSource, untilRelUs: number): Promise<void> {
+    while (this.next < this.blocks && this.next * AUDIO_BLOCK_US < untilRelUs) {
+      for (let k = this.next; k < Math.min(this.blocks, this.next + AUDIO_AHEAD); k++) if (!this.pending.has(k)) this.request(k)
+      const k = this.next
+      const pcm = await this.pending.get(k)!
+      this.pending.delete(k)
+      const sample = new AudioSample({ data: pcm, format: 'f32', numberOfChannels: AUDIO_CHANNELS, sampleRate: SR, timestamp: (k * AUDIO_BLOCK_FRAMES) / SR })
+      try {
+        await src.add(sample)
+      } finally {
+        sample.close()
+      }
+      this.next++
+    }
+  }
+
+  close(): void {
+    this.port.onmessage = null
+    this.port.close()
+  }
+
+  private request(k: number): void {
+    const frames = Math.min(AUDIO_BLOCK_FRAMES, this.totalFrames - k * AUDIO_BLOCK_FRAMES)
+    const p = new Promise<Float32Array>((resolve, reject) => this.waiting.set(k, { resolve, reject }))
+    p.catch(() => {}) // tratado em feed (ou abandonado no cancelamento)
+    this.pending.set(k, p)
+    this.port.postMessage({ t: 'render', fromUs: this.fromUs + k * AUDIO_BLOCK_US, frames, seq: k } satisfies AudioIn)
+  }
+}
+
+function startExport(job: ExportJobSpec, audioPort: MessagePort | null): void {
+  if (exporting) {
+    post({ t: 'exportError', jobId: job.jobId, message: 'Já existe uma exportação em andamento neste worker', cancelled: false, beforeFirstPacket: false })
+    return
+  }
+  const abort = new AbortController()
+  const outbox = new ChunkOutbox(job.jobId, abort.signal)
+  const me = { jobId: job.jobId, abort, outbox }
+  exporting = me
+  const state = { packets: 0 }
+  runExport(job, audioPort, abort.signal, outbox, state)
+    .then((done) => post({ t: 'exportDone', jobId: job.jobId, lastSeq: outbox.lastSeq, ...done }))
+    .catch((err: unknown) => {
+      const cancelled = abort.signal.aborted || err instanceof Cancelled
+      post({ t: 'exportError', jobId: job.jobId, message: cancelled ? 'cancelado' : errMsg(err), cancelled, beforeFirstPacket: !cancelled && state.packets === 0 })
+    })
+    .finally(() => {
+      if (exporting === me) exporting = null
+      prefetched.clear()
+      pool.releaseAll()
+    })
+}
+
+async function runExport(
+  job: ExportJobSpec,
+  audioPort: MessagePort | null,
+  signal: AbortSignal,
+  outbox: ChunkOutbox,
+  state: { packets: number }
+): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: ExportJobSpec['video']['hw'] }> {
+  const p = project
+  if (!compositor || !canvas || !p) throw new Error('exportação antes de init/project')
+  compositor.resize(job.width, job.height)
+  selection = []
+  prefetched.clear()
+  const durationUs = job.toUs - job.fromUs
+  const total = frameCount(job.fromUs, job.toUs, job.fps)
+  if (total <= 0) throw new Error('Intervalo de exportação vazio')
+
+  let audioCodec: 'aac' | 'opus' | null = null
+  if (job.audio && audioPort) {
+    const opts = { numberOfChannels: AUDIO_CHANNELS, sampleRate: SR, quality: new Quality({ bitrate: job.audio.bitrate }) }
+    if (await canEncodeAudio('aac', opts)) audioCodec = 'aac'
+    else if (await canEncodeAudio('opus', opts)) audioCodec = 'opus'
+    else throw new Error('Nenhum codificador de áudio disponível (AAC ou Opus)')
+  }
+
+  const videoCodec = h264LevelFor(job.width, job.height, job.fps)
+  const output = new Output({
+    format: new Mp4OutputFormat({ fastStart: false }),
+    target: new StreamTarget(new WritableStream<StreamTargetChunk>({ write: (chunk) => outbox.send(chunk) }), { chunked: true, chunkSize: EXPORT_CHUNK_BYTES })
+  })
+  const video = new VideoSampleSource({
+    codec: 'avc',
+    fullCodecString: videoCodec,
+    quality: new Quality({ bitrate: job.video.bitrate }),
+    keyFrameInterval: job.video.keyFrameIntervalS,
+    latencyMode: 'quality',
+    hardwareAcceleration: job.video.hw,
+    onEncodedPacket: () => {
+      state.packets++
+    }
+  })
+  output.addVideoTrack(video, { frameRate: job.fps })
+  const audio = audioCodec ? new AudioSampleSource({ codec: audioCodec, quality: new Quality({ bitrate: job.audio!.bitrate }) }) : null
+  if (audio) output.addAudioTrack(audio)
+  const feed = audio && audioPort ? new AudioFeed(audioPort, job.fromUs, durationUs, signal) : null
+
+  try {
+    await output.start()
+    if (job.simulateHwFailure && job.video.hw === 'prefer-hardware') throw new Error('falha simulada do encoder de hardware')
+    const frameDur = 1 / job.fps
+    let lastReport = 0
+    for (let n = 0; n < total; n++) {
+      if (signal.aborted) throw new Cancelled()
+      const relUs = frameToUs(n, job.fps)
+      const tUs = job.fromUs + relUs
+      if (feed) await feed.feed(audio!, relUs + AUDIO_LEAD_US)
+      const { used } = await composeAt(p, tUs, true)
+      // VideoSample(canvas) copia o quadro já desenhado (mesma task do draw: nada o altera no meio)
+      const sample = new VideoSample(canvas, { timestamp: relUs / 1e6, duration: frameDur })
+      try {
+        await video.add(sample, n === 0 ? { keyFrame: true } : undefined)
+      } finally {
+        sample.close()
+      }
+      pool.releaseExcept([...used, ...prefetchUpcoming(p, tUs, used)])
+      const now = performance.now()
+      if (n === total - 1 || now - lastReport > 200) {
+        lastReport = now
+        post({ t: 'exportProgress', jobId: job.jobId, frame: n + 1, total })
+      }
+    }
+    if (feed) await feed.feed(audio!, Infinity)
+    if (signal.aborted) throw new Cancelled()
+    await output.finalize()
+    return { videoCodec, audioCodec, hardware: job.video.hw }
+  } catch (err) {
+    if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {})
+    throw err
+  } finally {
+    feed?.close()
+  }
 }
 
 function errMsg(err: unknown): string {

@@ -2,7 +2,7 @@
 // resolve as promessas. Pedidos coalescidos pelo worker são resolvidos com o quadro posterior que os cobriu.
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from './mediaUrls'
-import type { RenderIn, RenderOut } from './protocol'
+import type { ExportJobSpec, RenderIn, RenderOut } from './protocol'
 
 type Rendered = Extract<RenderOut, { t: 'rendered' }>
 type ErrorOut = Extract<RenderOut, { t: 'error' }>
@@ -16,8 +16,11 @@ export class RenderClient {
   private readonly listeners = new Set<(m: RenderOut) => void>()
   readonly ready: Promise<void>
 
-  /** `width`/`height` em pixels CSS; o worker desenha em width·dpr × height·dpr. */
-  constructor(canvas: HTMLCanvasElement, size: { width: number; height: number; dpr?: number }) {
+  /**
+   * `width`/`height` em pixels CSS; o worker desenha em width·dpr × height·dpr. Um OffscreenCanvas (instância
+   * de exportação, sem elemento na página) é transferido direto.
+   */
+  constructor(canvas: HTMLCanvasElement | OffscreenCanvas, size: { width: number; height: number; dpr?: number }) {
     this.worker = new Worker(new URL('./render.worker.ts', import.meta.url), { type: 'module' })
     let onReady: () => void = () => {}
     let onFail: (e: Error) => void = () => {}
@@ -48,7 +51,7 @@ export class RenderClient {
       this.settleFrames(Infinity, err)
       for (const l of this.listeners) l(err)
     })
-    const off = canvas.transferControlToOffscreen()
+    const off = canvas instanceof OffscreenCanvas ? canvas : canvas.transferControlToOffscreen()
     this.send({ t: 'init', canvas: off, width: size.width, height: size.height, dpr: size.dpr ?? 1 }, [off])
   }
 
@@ -85,6 +88,20 @@ export class RenderClient {
       this.pixels.set(id, resolve)
       this.send({ t: 'readPixels', id, x, y, w, h })
     })
+  }
+
+  /** Exportação: inicia o job (a porta do audio worker de exportação é transferida). */
+  exportStart(job: ExportJobSpec, audioPort: MessagePort | null): void {
+    this.send({ t: 'exportStart', job, audioPort }, audioPort ? [audioPort] : [])
+  }
+
+  exportCancel(jobId: string): void {
+    this.send({ t: 'exportCancel', jobId })
+  }
+
+  /** Chunk `seq` gravado: libera o encoder (contrapressão). */
+  chunkAck(jobId: string, seq: number): void {
+    this.send({ t: 'chunkAck', jobId, seq })
   }
 
   /** Mensagens do worker (progresso/chunks de exportação, erros). Devolve a função de remoção. */

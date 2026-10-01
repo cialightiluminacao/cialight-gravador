@@ -235,6 +235,18 @@ export interface IpcApi {
      */
     onFlushRequest(cb: () => Promise<void>): Unsubscribe
   }
+  /**
+   * Arquivo da exportação do editor: `open` cria `<pasta>/<nome>.mp4.part` (nome livre: " (2)", " (3)"…),
+   * `write` grava bytes por posição, `close` fecha, `finalize` fecha + remuxa com faststart no nome final
+   * (apaga o .part) e `cancel` apaga o parcial. Uma exportação por vez.
+   */
+  editorExport: {
+    open(outputDir: string, fileName: string): Promise<{ jobId: string; path: string }>
+    write(jobId: string, data: Uint8Array, position: number): Promise<void>
+    close(jobId: string): Promise<void>
+    finalize(jobId: string): Promise<{ path: string; size: number }>
+    cancel(jobId: string): Promise<void>
+  }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
     barUpdate(state: BarState): void
@@ -332,6 +344,13 @@ export const IPC = {
     done: 'media:done'
   },
   editor: { flush: 'editor:flush', flushed: 'editor:flushed' },
+  editorExport: {
+    open: 'editorExport:open',
+    write: 'editorExport:write',
+    close: 'editorExport:close',
+    finalize: 'editorExport:finalize',
+    cancel: 'editorExport:cancel'
+  },
   recording: {
     setPhase: 'recording:setPhase',
     barUpdate: 'recording:barUpdate',

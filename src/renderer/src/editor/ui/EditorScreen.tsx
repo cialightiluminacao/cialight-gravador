@@ -8,6 +8,7 @@ import { createEditorEngine, type EditorEngine } from './editorEngine'
 import { runShortcut } from './editorActions'
 import { enqueuePending, importPaths } from './mediaImport'
 import { TopBar } from './TopBar'
+import { ExportDialog } from './ExportDialog'
 import { MediaBin } from './MediaBin'
 import { Viewer } from './Viewer'
 import { Inspector } from './Inspector/Inspector'
@@ -21,7 +22,7 @@ import { gestureActive } from './timeline/useTimelineDrag'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]> }
+    __qaEditor?: { store: typeof useEditorStore; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string }
   }
 }
 
@@ -46,6 +47,7 @@ const OWN_KEYS = ['listbox', 'option', 'menu', 'menuitem', 'dialog', 'slider', '
 export function EditorScreen({ projectId }: { projectId: string }): React.JSX.Element {
   const [engine, setEngine] = useState<EditorEngine | null>(null)
   const [timelineH, setTimelineH] = useState(readTimelineHeight)
+  const [exportOpen, setExportOpen] = useState(false)
   const loaded = useEditorStore((s) => s.project?.id === projectId)
   const engineRef = useRef<EditorEngine | null>(null)
 
@@ -132,6 +134,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       if (e.defaultPrevented || (e.repeat && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
       if (useEditorStore.getState().project?.id !== projectId) return // outro projeto ainda no store (troca em curso)
       if (gestureActive()) return // arraste na linha do tempo: o teclado é do gesto
+      if (document.querySelector('[role="dialog"]')) return // diálogo aberto (ex.: exportação): o teclado é dele
       const t = e.target as Element | null
       if (!e.ctrlKey && t?.closest?.(OWN_KEYS)) return
       const action = shortcutFor(e)
@@ -187,7 +190,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
       {/* até o projeto desta tela estar no store, nada é editável (numa troca, o anterior ainda pode estar lá) */}
-      {loaded ? <TopBar onBack={() => void back()} onExport={() => toast('A exportação do editor chega na próxima etapa.', { description: 'Por enquanto, exporte gravações pela Revisão.' })} /> : <div className="h-12 shrink-0 border-b border-border bg-surface/70" />}
+      {loaded ? <TopBar onBack={() => void back()} onExport={() => setExportOpen(true)} /> : <div className="h-12 shrink-0 border-b border-border bg-surface/70" />}
       <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)_320px]">
         {loaded ? <MediaBin projectId={projectId} /> : <div className="border-r border-border bg-surface/60" />}
         <Viewer engine={loaded ? engine : null} />
@@ -206,6 +209,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       <div className="min-h-0 shrink-0" style={{ height: timelineH }}>
         {loaded ? <Timeline playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
       </div>
+      {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} /> : null}
     </div>
   )
 }

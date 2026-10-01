@@ -24,6 +24,7 @@ import { probeEncoders } from './export/encoderProbe'
 import { buildReviewAssets } from './export/reviewAssets'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
+import { EditorExportJobs } from './export/editorExportJob'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
@@ -323,6 +324,30 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ipcMain.on(IPC.bar.setPosition, () => {
     /* posição é persistida no evento 'moved' da janela */
   })
+
+  // ---- exportação do editor (arquivo .part → faststart) ----
+  const editorExports = new EditorExportJobs()
+  const exportOwners = new Set<number>()
+  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string) => {
+    const wc = e.sender
+    if (!exportOwners.has(wc.id)) {
+      // janela fechada, renderer caído ou recarregado: o parcial não fica órfão
+      exportOwners.add(wc.id)
+      const drop = (): void => editorExports.cancelOwnedBy(wc.id)
+      wc.once('destroyed', () => {
+        drop()
+        exportOwners.delete(wc.id)
+      })
+      wc.on('render-process-gone', drop)
+      wc.on('did-navigate', drop)
+    }
+    return editorExports.open(outputDir, fileName, wc.id)
+  })
+  ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => editorExports.write(jobId, data, position))
+  ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))
+  ipcMain.handle(IPC.editorExport.finalize, (_e, jobId: string) => editorExports.finalize(jobId))
+  ipcMain.handle(IPC.editorExport.cancel, (_e, jobId: string) => editorExports.cancel(jobId))
+  app.on('will-quit', () => editorExports.cancelOwnedBy(null))
 
   // ---- export ----
   ipcMain.handle(IPC.export.run, (_e, req: ExportRequest) => {

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, Tip } from '@/components/ui/primitives'
 import { formatBytes } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { copyOutputFile, showOutputInFolder } from './outputActions'
 
 // Estado "concluído" da exportação: arquivos gerados e ações (abrir pasta, copiar arquivo,
 // copiar caminho, reexportar, nova gravação, excluir gravação bruta).
@@ -32,10 +33,7 @@ export function ExportDone({ outputs, sizes, warning, onReexport, onNewRecording
   const outputDir = first ? dirName(first) : ''
   const api = window.api
 
-  const copyFile = async (p: string): Promise<void> => {
-    await api.app.copyFile(p)
-    toast.success('Arquivo copiado — cole no WhatsApp, e-mail ou Explorer.')
-  }
+  const copyFile = copyOutputFile
   const copyPath = async (p: string): Promise<void> => {
     await api.app.copyText(p)
     toast.success('Caminho copiado.')
@@ -101,7 +99,7 @@ export function ExportDone({ outputs, sizes, warning, onReexport, onNewRecording
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-2">
-          <Button variant="primary" size="lg" className="col-span-2" onClick={() => first && void api.app.showItemInFolder(first)} disabled={!first}>
+          <Button variant="primary" size="lg" className="col-span-2" onClick={() => first && showOutputInFolder(first)} disabled={!first}>
             <FolderOpen className="h-4 w-4" /> Abrir pasta
           </Button>
           <Button variant="secondary" onClick={() => first && void copyFile(first)} disabled={!first}>

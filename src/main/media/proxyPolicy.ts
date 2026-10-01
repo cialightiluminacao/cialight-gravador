@@ -43,6 +43,8 @@ function videoCodecArgs(encoder: HwEncoder, quality: number, gop: number, speed:
       return ['-c:v', 'h264_nvenc', '-preset', speed === 'fast' ? 'p3' : 'p5', '-rc', 'vbr', '-cq', String(quality), '-b:v', '0', '-g', g, '-no-scenecut', '1', '-bf', '0', '-pix_fmt', 'yuv420p']
     case 'h264_qsv':
       return ['-c:v', 'h264_qsv', '-preset', speed === 'fast' ? 'veryfast' : 'medium', '-global_quality', String(quality), '-g', g, '-bf', '0', '-pix_fmt', 'nv12']
+    case 'h264_amf':
+      return ['-c:v', 'h264_amf', '-quality', speed === 'fast' ? 'speed' : 'quality', '-rc', 'cqp', '-qp_i', String(quality), '-qp_p', String(quality), '-g', g, '-bf', '0', '-pix_fmt', 'nv12']
     case 'h264_mf':
       return ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', speed === 'fast' ? '60' : '85', '-g', g, '-bf', '0', '-pix_fmt', 'nv12']
   }

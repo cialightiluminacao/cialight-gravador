@@ -91,6 +91,13 @@ const api: IpcApi = {
           .finally(() => ipcRenderer.send(IPC.editor.flushed, id))
       })
   },
+  editorExport: {
+    open: (outputDir, fileName) => ipcRenderer.invoke(IPC.editorExport.open, outputDir, fileName),
+    write: (jobId, data, position) => ipcRenderer.invoke(IPC.editorExport.write, jobId, data, position),
+    close: (jobId) => ipcRenderer.invoke(IPC.editorExport.close, jobId),
+    finalize: (jobId) => ipcRenderer.invoke(IPC.editorExport.finalize, jobId),
+    cancel: (jobId) => ipcRenderer.invoke(IPC.editorExport.cancel, jobId)
+  },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),
     barUpdate: (state) => ipcRenderer.send(IPC.recording.barUpdate, state),

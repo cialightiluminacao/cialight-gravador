@@ -1,0 +1,275 @@
+import { useEffect, useRef, useState } from 'react'
+import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, TriangleAlert, Upload, X } from 'lucide-react'
+import { sanitizeFileName } from '@shared/filenames'
+import { projectDurationUs } from '@shared/editor/ops'
+import { Button } from '@/components/ui/Button'
+import { Dialog, DialogContent, Progress, Segmented } from '@/components/ui/primitives'
+import { PathField } from '@/components/ui/PathField'
+import { useAppStore } from '@/app/store'
+import { formatBytes, formatClock } from '@/lib/format'
+import { cn } from '@/lib/cn'
+import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
+import { useEditorStore } from '../state/editorStore'
+import { EditorExportCancelled, editorExportRunning, runEditorExport, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
+import { AUDIO_KBPS, EDITOR_EXPORT_PRESETS, estimateBytes, exportRange, hasInOut, outputSize, presetVideoBitrate, type EditorExportPresetId } from '../export/exportPlan'
+
+// Diálogo de exportação do editor: preset, intervalo (tudo / I–O), nome e pasta, estimativa de tamanho;
+// depois progresso (%, velocidade × tempo real, tempo restante, cancelar) e o resultado (abrir pasta /
+// copiar arquivo). A exportação usa workers próprios: o preview continua vivo (pausado ao começar).
+
+type Phase =
+  | { kind: 'form' }
+  | { kind: 'running'; progress: EditorExportProgress | null; cancelling: boolean }
+  | { kind: 'done'; result: EditorExportResult }
+  | { kind: 'error'; message: string }
+
+const formatMbps = (bps: number): string => `${(bps / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} Mbps`
+
+export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boolean; onOpenChange: (open: boolean) => void; onBeforeExport: () => void }): React.JSX.Element | null {
+  const project = useEditorStore((s) => s.project)
+  const inUs = useEditorStore((s) => s.inUs)
+  const outUs = useEditorStore((s) => s.outUs)
+  const settings = useAppStore((s) => s.settings)
+  const appInfo = useAppStore((s) => s.appInfo)
+  const [phase, setPhase] = useState<Phase>({ kind: 'form' })
+  const [preset, setPreset] = useState<EditorExportPresetId>('high1080')
+  const [rangeMode, setRangeMode] = useState<'all' | 'inout'>('all')
+  const [fileName, setFileName] = useState('')
+  const [folder, setFolder] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const totalUs = project ? projectDurationUs(project) : 0
+  const inOutUsable = hasInOut(totalUs, inUs, outUs)
+
+  // ao abrir (fora de uma exportação): formulário com os padrões do projeto
+  useEffect(() => {
+    if (!open || !project || phase.kind === 'running') return
+    setPhase({ kind: 'form' })
+    setFileName(`${sanitizeFileName(project.name) || 'Vídeo'}.mp4`)
+    setRangeMode(hasInOut(projectDurationUs(project), useEditorStore.getState().inUs, useEditorStore.getState().outUs) ? 'inout' : 'all')
+  }, [open])
+
+  // diálogo desmontado (editor fechado) no meio da exportação: cancela
+  useEffect(() => () => abortRef.current?.abort(), [])
+
+  if (!project) return null
+  const range = exportRange(totalUs, inUs, outUs, rangeMode)
+  const durationUs = range.toUs - range.fromUs
+  const size = outputSize(preset, project.canvas)
+  const fps = project.canvas.fps
+  const videoBps = presetVideoBitrate(preset, fps, durationUs)
+  const estimate = estimateBytes(videoBps, AUDIO_KBPS * 1000, durationUs)
+  // QA (só fora do pacote): window.__qaEditor.exportDir troca a pasta padrão (o QA nunca grava na pasta real)
+  const qaDir = appInfo?.isPackaged === false ? window.__qaEditor?.exportDir : undefined
+  const defaultFolder = qaDir ?? settings.outputDir ?? appInfo?.paths.output ?? null
+  const targetFolder = folder ?? defaultFolder
+  const name = sanitizeFileName(fileName.trim())
+  const running = phase.kind === 'running'
+  const blocker = !size
+    ? 'Mude a proporção do projeto para 9:16 para usar o preset Vertical.'
+    : durationUs <= 0
+      ? 'A linha do tempo está vazia.'
+      : !targetFolder
+        ? 'Escolha a pasta de destino.'
+        : !name
+          ? 'Dê um nome ao arquivo.'
+          : null
+
+  const start = async (): Promise<void> => {
+    if (!size || !targetFolder || blocker || editorExportRunning()) return
+    onBeforeExport()
+    const snapshot = useEditorStore.getState().project ?? project
+    const ac = new AbortController()
+    abortRef.current = ac
+    setPhase({ kind: 'running', progress: null, cancelling: false })
+    try {
+      const result = await runEditorExport(
+        {
+          project: snapshot,
+          width: size.width,
+          height: size.height,
+          fps,
+          fromUs: range.fromUs,
+          toUs: range.toUs,
+          videoBitrate: videoBps,
+          audioBitrate: AUDIO_KBPS * 1000,
+          outputDir: targetFolder,
+          fileName: name
+        },
+        { signal: ac.signal, onProgress: (progress) => setPhase((p) => (p.kind === 'running' ? { ...p, progress } : p)) }
+      )
+      setPhase({ kind: 'done', result })
+    } catch (e) {
+      if (e instanceof EditorExportCancelled) setPhase({ kind: 'form' })
+      else setPhase({ kind: 'error', message: e instanceof Error ? e.message : String(e) })
+    } finally {
+      if (abortRef.current === ac) abortRef.current = null
+    }
+  }
+
+  const cancel = (): void => {
+    abortRef.current?.abort()
+    setPhase((p) => (p.kind === 'running' ? { ...p, cancelling: true } : p))
+  }
+
+  const title = phase.kind === 'done' ? 'Vídeo exportado' : phase.kind === 'running' ? 'Exportando…' : phase.kind === 'error' ? 'A exportação falhou' : 'Exportar vídeo'
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !running && onOpenChange(o)}>
+      <DialogContent title={title} hideClose={running} className="w-[min(600px,94vw)]">
+        {phase.kind === 'form' ? (
+          <div className="flex flex-col gap-4">
+            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Preset de exportação">
+              {EDITOR_EXPORT_PRESETS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={preset === p.id}
+                  onClick={() => setPreset(p.id)}
+                  className={cn(
+                    'rounded-xl border px-3 py-2.5 text-left transition-colors',
+                    preset === p.id ? 'border-accent/70 bg-accent/10' : 'border-border-strong bg-bg-2 hover:border-white/20'
+                  )}
+                >
+                  <span className="block text-[13px] font-semibold text-fg">{p.label}</span>
+                  <span className="block text-[11px] text-muted">{p.hint}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[12px] font-medium text-fg-2">Intervalo</span>
+              <Segmented
+                size="sm"
+                value={rangeMode}
+                onValueChange={setRangeMode}
+                options={[
+                  { value: 'all', label: 'Tudo' },
+                  { value: 'inout', label: 'Entrada–Saída (I–O)', disabled: !inOutUsable, title: inOutUsable ? undefined : 'Marque a entrada (I) e/ou a saída (O) na linha do tempo' }
+                ]}
+              />
+            </div>
+
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[12px] font-medium text-fg-2">Nome do arquivo</span>
+              <input
+                className="h-10 rounded-xl border border-border-strong bg-bg-2 px-3 text-[13px] text-fg outline-none focus:border-accent/60"
+                value={fileName}
+                onChange={(e) => setFileName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !blocker) void start()
+                }}
+                spellCheck={false}
+              />
+            </label>
+
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[12px] font-medium text-fg-2">Pasta</span>
+              <PathField value={folder} defaultPath={defaultFolder} onChange={setFolder} />
+            </div>
+
+            <div className="rounded-xl border border-border bg-bg-2/60 px-3 py-2.5 text-[12px] text-fg-2">
+              {size ? (
+                <span>
+                  {size.width}×{size.height} · {fps} fps · {formatClock(durationUs / 1000, false)} · H.264 {formatMbps(videoBps)} + AAC {AUDIO_KBPS} kbps ·{' '}
+                  <span className="font-semibold text-fg">≈ {formatBytes(estimate)}</span>
+                </span>
+              ) : null}
+              {blocker ? (
+                <span className={cn('flex items-start gap-1.5 text-warn', size && 'mt-1.5')}>
+                  <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  {blocker}
+                </span>
+              ) : null}
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => onOpenChange(false)}>
+                Cancelar
+              </Button>
+              <Button variant="primary" disabled={!!blocker} onClick={() => void start()}>
+                <Upload className="h-4 w-4" /> Exportar
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {phase.kind === 'running' ? <RunningView progress={phase.progress} cancelling={phase.cancelling} onCancel={cancel} /> : null}
+
+        {phase.kind === 'done' ? (
+          <div className="flex flex-col gap-4">
+            <div className="flex items-start gap-3 rounded-xl border border-border bg-bg-2/60 p-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-ok/15 text-ok">
+                <CircleCheckBig className="h-5 w-5" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-semibold" title={phase.result.path}>
+                  {phase.result.path.split(/[\\/]/).pop()}
+                </span>
+                <span className="block text-[11px] text-muted">
+                  MP4 · {formatBytes(phase.result.size)}
+                  {phase.result.fellBackToSoftware ? ' · codificado em software (o encoder de hardware falhou)' : ''}
+                </span>
+              </span>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => onOpenChange(false)}>
+                Fechar
+              </Button>
+              <Button variant="secondary" onClick={() => void copyOutputFile(phase.result.path)}>
+                <Copy className="h-4 w-4" /> Copiar arquivo
+              </Button>
+              <Button variant="primary" onClick={() => showOutputInFolder(phase.result.path)}>
+                <FolderOpen className="h-4 w-4" /> Abrir pasta
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {phase.kind === 'error' ? (
+          <div className="flex flex-col gap-4">
+            <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2.5 text-[12px] text-danger">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="min-w-0 break-words">{phase.message}</span>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => onOpenChange(false)}>
+                Fechar
+              </Button>
+              <Button variant="secondary" onClick={() => setPhase({ kind: 'form' })}>
+                Voltar
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function RunningView({ progress, cancelling, onCancel }: { progress: EditorExportProgress | null; cancelling: boolean; onCancel: () => void }): React.JSX.Element {
+  const pct = progress?.percent ?? 0
+  const finalizing = progress?.stage === 'finalize'
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="flex items-center gap-2 text-[13px] text-fg-2">
+          <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+          {cancelling ? 'Cancelando…' : finalizing ? 'Finalizando o arquivo…' : progress ? `Quadro ${progress.frame} de ${progress.total}` : 'Preparando…'}
+        </span>
+        <span className="font-mono text-[13px] font-semibold tabular-nums text-fg">{Math.floor(pct)}%</span>
+      </div>
+      <Progress value={pct} />
+      <div className="flex justify-between text-[11px] text-muted">
+        <span>{progress?.speed ? `${progress.speed.toLocaleString('pt-BR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })}× tempo real` : '—'}</span>
+        <span>{progress?.etaS != null && !finalizing ? `faltam ${formatClock(progress.etaS * 1000, false)}` : ''}</span>
+      </div>
+      <div className="flex justify-end">
+        <Button variant="secondary" onClick={onCancel} disabled={cancelling || finalizing}>
+          <X className="h-4 w-4" /> Cancelar
+        </Button>
+      </div>
+    </div>
+  )
+}

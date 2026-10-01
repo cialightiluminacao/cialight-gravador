@@ -110,11 +110,13 @@ const settingsInputSchema = z.looseObject({
     .object({
       gpuKey: z.string(),
       probedAt: z.string(),
-      available: z.array(z.enum(['h264_nvenc', 'h264_qsv', 'h264_mf', 'libx264'])),
-      preferred: z.enum(['h264_nvenc', 'h264_qsv', 'h264_mf', 'libx264'])
+      available: z.array(z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264'])),
+      preferred: z.enum(['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264'])
     })
     .nullable()
-    .optional(),
+    .optional()
+    // cache de probe ilegível (ex.: encoder desconhecido) só refaz o probe; não derruba as outras configurações
+    .catch(null),
   lastSource: z.object({ kind: z.enum(['screen', 'window']), id: z.string(), name: z.string() }).nullable().optional(),
   barPositions: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).optional()
 })

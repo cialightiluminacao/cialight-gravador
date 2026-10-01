@@ -74,3 +74,16 @@ export function uniqueName(existing: Set<string>, name: string): string {
     if (!taken.has(candidate.toLowerCase())) return candidate
   }
 }
+
+/**
+ * Nome livre no estilo do Explorer: `x.mp4` → `x (2).mp4`, `x (3).mp4`… enquanto `taken(nome)` for true.
+ * Nunca sobrescreve em silêncio um arquivo existente.
+ */
+export function numberedName(name: string, taken: (candidate: string) => boolean): string {
+  if (!taken(name)) return name
+  const { base, ext } = splitExt(name)
+  for (let n = 2; ; n++) {
+    const candidate = `${base} (${n})${ext}`
+    if (!taken(candidate)) return candidate
+  }
+}

@@ -47,6 +47,11 @@ export class AudioClient {
     for (const [seq] of this.pending) this.settle(seq, null)
   }
 
+  /** Exportação: o worker passa a atender pedidos de blocos também por esta porta (do render worker). */
+  connectPort(port: MessagePort): void {
+    this.worker.postMessage({ t: 'port', port } satisfies AudioIn, [port])
+  }
+
   /** assetId: falha de mídia de um asset (o worker avisa uma vez por asset). */
   onError(cb: (message: string, assetId?: string) => void): () => void {
     this.errorListeners.add(cb)

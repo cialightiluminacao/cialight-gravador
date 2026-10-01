@@ -24,6 +24,13 @@ describe('parseSettings', () => {
     expect(s.pip.w).toBe(DEFAULT_SETTINGS.pip.w)
     expect(s.rawRetentionDays).toBeNull()
   })
+  it('probe de encoders: aceita AMF; probe ilegível vira null sem perder o resto', () => {
+    const probe = { gpuKey: 'AMD:1:1', probedAt: 'x', available: ['h264_amf', 'libx264'], preferred: 'h264_amf' }
+    expect(parseSettings({ lastEncoderProbe: probe }).lastEncoderProbe).toEqual(probe)
+    const s = parseSettings({ quality: '720p', lastEncoderProbe: { ...probe, preferred: 'h264_vaapi' } })
+    expect(s.lastEncoderProbe).toBeNull()
+    expect(s.quality).toBe('720p')
+  })
   it('campo desconhecido é ignorado', () => {
     const s = parseSettings({ foo: 1, quality: '720p' })
     expect(s.quality).toBe('720p')

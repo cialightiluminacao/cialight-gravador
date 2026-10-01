@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defaultOutputName, sanitizeFileName, sessionIdFor, uniqueName } from './filenames'
+import { defaultOutputName, numberedName, sanitizeFileName, sessionIdFor, uniqueName } from './filenames'
 
 describe('sessionIdFor', () => {
   it('formata com zero à esquerda', () => {
@@ -69,5 +69,16 @@ describe('uniqueName', () => {
   })
   it('compara sem diferenciar maiúsculas (Windows)', () => {
     expect(uniqueName(new Set(['X.MP4']), 'x.mp4')).toBe('x-2.mp4')
+  })
+})
+
+describe('numberedName', () => {
+  it('nome livre fica igual; ocupado ganha " (2)", " (3)"…', () => {
+    expect(numberedName('Vídeo.mp4', () => false)).toBe('Vídeo.mp4')
+    const taken = new Set(['vídeo.mp4', 'vídeo (2).mp4'])
+    expect(numberedName('Vídeo.mp4', (n) => taken.has(n.toLowerCase()))).toBe('Vídeo (3).mp4')
+  })
+  it('sem extensão', () => {
+    expect(numberedName('x', (n) => n === 'x')).toBe('x (2)')
   })
 })

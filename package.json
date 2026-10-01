@@ -22,6 +22,7 @@
     "test:capture": "electron-vite build && cross-env CIALIGHT_TEST=capture CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:ingest": "electron-vite build && cross-env CIALIGHT_TEST=ingest CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:editor": "electron-vite build && cross-env CIALIGHT_TEST=editor-render CIALIGHT_RAW_DIR=test-out/raw electron .",
+    "test:editor-export": "electron-vite build && cross-env CIALIGHT_TEST=editor-export CIALIGHT_RAW_DIR=test-out/raw electron .",
     "icons": "node scripts/make-icons.mjs",
     "release:publish": "electron-vite build && electron-builder --win --publish always"
   },

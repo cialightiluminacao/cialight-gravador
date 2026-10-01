@@ -1,0 +1,242 @@
+import { app, BrowserWindow, ipcMain } from 'electron'
+import { createHash } from 'crypto'
+import { execFile } from 'child_process'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
+import type { ExportOptions } from '@shared/types'
+import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
+import { addAsset, addMediaFromAsset, deleteRange, updateItem } from '@shared/editor/ops'
+import { clampPip, pipPixelRect, pipRectAt } from '@shared/compositor/pipMath'
+import type { ProjectStore } from './project/projectStore'
+import type { SessionStore } from './session/sessionStore'
+import { probeFile, runFfmpeg } from './export/ffmpegRunner'
+import { ffprobePath } from './export/ffmpegPath'
+import { startExportJob } from './export/exportJob'
+import { probe } from './media/probe'
+import { assetFromInfo } from './media/ingest'
+import { isFastStart, makeSyntheticSession } from './testFixtures'
+import { loadPage, preloadPath } from './windows/recorderWindow'
+
+// Teste de integração da exportação do editor (CIALIGHT_TEST=editor-export, `npm run test:editor-export`).
+// Cenário: testsrc2 1280×720@30 10 s + senoide, trecho [2 s, 5 s) apagado com deleteRange, imagem sobreposta
+// por 2 s, fade-in de áudio de 1 s → exporta 1280×720@30 pelo render worker e valida com ffprobe/ffmpeg
+// (faixas, duração, quadros, níveis de áudio, PSNR do quadro após o corte, faststart). Também: fallback do
+// encoder (falha simulada do hardware), nome sem sobrescrever, cancelamento sem parcial e paridade com a v1
+// (sessão sintética com webcam circular: editor × composição v1 + job ffmpeg, PSNR no centro da PiP).
+// Não grava settings.json (o app instalado divide a pasta userData): o teste confere o hash.
+
+const PROJECT_ID = 'p-editor-export-test'
+const SESSION_ID = 'test-editor-export-session'
+const W = 1280
+const H = 720
+const FPS = 30
+const FRAME_MS = 1000 / FPS
+// fonte marcada como BT.709 (como as gravações do app): sem a marcação, o Chromium e o ffmpeg convertem o
+// YUV para RGB com matrizes diferentes e a comparação de pixels mediria a matriz, não a exportação
+const BT709 = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv']
+
+interface ExportOut { path?: string; size?: number; error?: string; fellBackToSoftware?: boolean; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
+interface HarnessReport {
+  errors: string[]
+  scenario?: ExportOut
+  fallback?: ExportOut
+  cancel?: { error?: string; cancelled: boolean; afterFrames: number }
+  parity?: ExportOut
+  v1Composed?: { path?: string; error?: string }
+  previewUntouched?: { before: number[]; after: number[] } | { error: string }
+}
+
+function check(cond: boolean, msg: string, failures: string[]): void {
+  if (!cond) failures.push(msg)
+  console.log(`${cond ? 'OK ' : 'FAIL'} ${msg}`)
+}
+
+function settingsHash(): string | null {
+  const f = join(app.getPath('userData'), 'settings.json')
+  return existsSync(f) ? createHash('sha1').update(readFileSync(f)).digest('hex') : null
+}
+
+const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
+
+/** Quadro em tSec (decodificação exata a partir do keyframe anterior), recortado, como RGB24. */
+async function frameRgb(file: string, tSec: number, out: string, crop?: { x: number; y: number; w: number; h: number }): Promise<Uint8Array> {
+  const vf = crop ? ['-vf', `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`] : []
+  await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', tSec.toFixed(3), '-i', file, '-frames:v', '1', ...vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', out], { label: 'teste: quadro' })
+  return new Uint8Array(readFileSync(out))
+}
+
+/** PSNR (dB) entre duas imagens RGB24 do mesmo tamanho. */
+function psnr(a: Uint8Array, b: Uint8Array): number {
+  if (a.length !== b.length || a.length === 0) return -1
+  let se = 0
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i] - b[i]
+    se += d * d
+  }
+  const mse = se / a.length
+  return mse === 0 ? 99 : 10 * Math.log10((255 * 255) / mse)
+}
+
+/** RMS geral (dB) do áudio em [from, to) s pelo astats. */
+async function rmsDb(file: string, from: number, to: number): Promise<number> {
+  const r = await runFfmpeg(['-hide_banner', '-nostdin', '-i', file, '-vn', '-af', `atrim=start=${from}:end=${to},astats=measure_perchannel=none`, '-f', 'null', '-'], { label: 'teste: astats' })
+  const m = /RMS level dB:\s*(-?[\d.]+|-inf)/.exec(r.stderrTail.split('Overall').pop() ?? '')
+  return m ? (m[1] === '-inf' ? -Infinity : Number(m[1])) : NaN
+}
+
+/** Quadros decodificados da faixa de vídeo (ffprobe -count_frames). */
+function countFrames(file: string): Promise<number> {
+  return new Promise((resolve) => {
+    execFile(ffprobePath(), ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', file], { windowsHide: true }, (err, stdout) => {
+      resolve(err ? -1 : Number(String(stdout).trim().replace(/,$/, '')))
+    })
+  })
+}
+
+function scenarioProject(video: Asset, red: Asset): Project {
+  let p: Project = { ...createEmptyProject('Exportação de teste', { width: W, height: H, fps: FPS, background: '#000000' }), id: PROJECT_ID }
+  p = addAsset(addAsset(p, video), red)
+  const added = addMediaFromAsset(p, video.id, 0)
+  p = added.project
+  // apaga [2 s, 5 s) em todas as faixas: o quadro em 2,0 s da saída é o 5,0 s da fonte
+  p = deleteRange(p, 2_000_000, 5_000_000)
+  // fade-in de áudio de 1 s no item de áudio do início
+  const audioTrack = p.tracks.find((t) => t.kind === 'audio')!
+  const first = audioTrack.items.find((i) => i.startUs === 0)!
+  p = updateItem(p, first.id, (d) => {
+    if (d.type === 'media') d.audio.fadeInUs = 1_000_000
+  })
+  // imagem sobreposta de 4 s a 6 s (canto superior direito, ¼ da largura), numa faixa acima do vídeo
+  const img: MediaItem = { ...createMediaItem(red, 4_000_000, 'video'), durationUs: 2_000_000 }
+  const v = img.visual!
+  const overlay: MediaItem = { ...img, visual: { ...v, transform: { ...v.transform, x: { value: 0.85 }, y: { value: 0.2 }, scale: { value: 0.25 } } } }
+  const track: Track = { id: 't_overlay', kind: 'video', name: 'Imagem', muted: false, hidden: false, locked: false, volume: 1, items: [overlay] }
+  const firstAudio = p.tracks.findIndex((t) => t.kind === 'audio')
+  return { ...p, tracks: [...p.tracks.slice(0, firstAudio), track, ...p.tracks.slice(firstAudio)] }
+}
+
+export async function testEditorExport(projects: ProjectStore, sessions: SessionStore, outDir: string): Promise<number> {
+  const failures: string[] = []
+  const hashBefore = settingsHash()
+  const dir = join(outDir, 'editor-export')
+  const exportsDir = join(dir, 'saidas')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(exportsDir, { recursive: true })
+
+  const src = join(dir, 'testsrc2-seno.mp4')
+  const red = join(dir, 'vermelho.png')
+  await gen(['-f', 'lavfi', '-i', `testsrc2=size=${W}x${H}:rate=${FPS}`, '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000,volume=4', '-t', '10', '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', ...BT709, '-c:a', 'aac', '-b:a', '160k', '-ac', '2', src], 'editor-export: fonte')
+  await gen(['-f', 'lavfi', '-i', 'color=c=red:s=320x180', '-frames:v', '1', '-update', '1', red], 'editor-export: imagem')
+  const aVideo: Asset = { ...assetFromInfo('a_src', src, statSync(src), await probe(src)), status: 'ready' }
+  const aRed: Asset = { ...assetFromInfo('a_red', red, statSync(red), await probe(red)), status: 'ready' }
+  const project = scenarioProject(aVideo, aRed)
+  rmSync(projects.dirOf(PROJECT_ID), { recursive: true, force: true })
+  projects.create(project)
+
+  // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
+  rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
+  const session = await makeSyntheticSession(sessions, SESSION_ID)
+
+  const win = new BrowserWindow({ width: 800, height: 600, show: false, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
+  const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 240 s'] } }), 240_000)
+    ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
+      clearTimeout(timer)
+      resolve(r)
+    })
+    win.webContents.on('console-message', (e) => {
+      if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
+    })
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir }))
+    loadPage(win, `index.html#editor-export-test/${params}`)
+  })
+  // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
+  const r = result.report
+  console.log(`relatório do harness: ${JSON.stringify(r)}`)
+  check(result.ok && r.errors.length === 0, `harness sem exceção (${JSON.stringify(r.errors)})`, failures)
+
+  // ---- cenário principal ----
+  const out = r.scenario?.path
+  check(!!out && existsSync(out) && out.endsWith('cenario.mp4'), `cenário exportado (${out ?? r.scenario?.error}) em ${r.scenario?.ms} ms, ${r.scenario?.speed?.toFixed(2)}× tempo real, ${r.scenario?.hardware}`, failures)
+  if (out && existsSync(out)) {
+    const pr = await probeFile(out)
+    const vs = pr.streams.filter((s) => s.type === 'video')
+    const as = pr.streams.filter((s) => s.type === 'audio')
+    check(vs.length === 1 && vs[0].codec === 'h264' && vs[0].width === W && vs[0].height === H, `1 faixa H.264 ${W}×${H} (${JSON.stringify(vs)})`, failures)
+    check(as.length === 1 && as[0].codec === 'aac' && as[0].sampleRate === 48000 && as[0].channels === 2, `1 faixa AAC 48 kHz estéreo (${JSON.stringify(as)})`, failures)
+    check(Math.abs(pr.durationMs - 7000) <= FRAME_MS, `duração 7,0 s ± 1 quadro (${pr.durationMs} ms)`, failures)
+    check(Math.abs((vs[0]?.fps ?? 0) - FPS) < 0.01, `30 fps (${vs[0]?.fps})`, failures)
+    const frames = await countFrames(out)
+    check(Math.abs(frames - 210) <= 1, `210 ± 1 quadros (${frames})`, failures)
+    const rms0 = await rmsDb(out, 0, 0.1)
+    const rms2 = await rmsDb(out, 2, 3)
+    const rms3 = await rmsDb(out, 3, 4)
+    check(rms0 < -30, `fade-in: RMS dos primeiros 100 ms < −30 dB (${rms0.toFixed(1)} dB)`, failures)
+    check(rms2 > -20 && rms3 > -20, `áudio cheio no segundo 3 (> −20 dB): [2,3) ${rms2.toFixed(1)} dB, [3,4) ${rms3.toFixed(1)} dB`, failures)
+    const a = await frameRgb(out, 2.0, join(dir, 'q-saida-2s.rgb'))
+    const b = await frameRgb(src, 5.0, join(dir, 'q-fonte-5s.rgb'))
+    const p25 = psnr(a, b)
+    const b4 = await frameRgb(src, 4.0, join(dir, 'q-fonte-4s.rgb'))
+    check(p25 > 30, `quadro 2,0 s da saída = quadro 5,0 s da fonte (PSNR ${p25.toFixed(1)} dB > 30; contra 4,0 s: ${psnr(a, b4).toFixed(1)} dB)`, failures)
+    // imagem sobreposta em 5 s: centro em (0,85·W, 0,2·H)
+    const ov = await frameRgb(out, 5.0, join(dir, 'q-saida-5s-overlay.rgb'), { x: Math.round(0.85 * W) - 8, y: Math.round(0.2 * H) - 8, w: 16, h: 16 })
+    const mean = [0, 1, 2].map((c) => ov.filter((_, i) => i % 3 === c).reduce((s, v) => s + v, 0) / (ov.length / 3))
+    check(mean[0] > 200 && mean[1] < 50 && mean[2] < 50, `imagem sobreposta visível em 5 s (RGB médio ${mean.map((v) => v.toFixed(0)).join(',')})`, failures)
+    check(isFastStart(out), 'faststart: moov antes do mdat', failures)
+  }
+
+  // ---- fallback de encoder + nome sem sobrescrever ----
+  const fb = r.fallback
+  check(!!fb?.path && fb.fellBackToSoftware === true && fb.hardware === 'prefer-software', `falha do hardware → refeito em software (${JSON.stringify(fb)})`, failures)
+  check(!!fb?.path && fb.path.endsWith('cenario (2).mp4') && existsSync(fb.path), `nome ocupado → "cenario (2).mp4" (${fb?.path})`, failures)
+  if (fb?.path && existsSync(fb.path)) {
+    const pr = await probeFile(fb.path)
+    check(Math.abs(pr.durationMs - 7000) <= FRAME_MS && pr.streams.some((s) => s.codec === 'h264'), `saída do software válida (${pr.durationMs} ms)`, failures)
+  }
+
+  // ---- cancelamento ----
+  check(!!r.cancel?.cancelled && r.cancel.afterFrames > 0, `cancelamento no meio interrompe (${JSON.stringify(r.cancel)})`, failures)
+  const left = readdirSync(exportsDir)
+  check(!left.some((n) => n.endsWith('.part') || n.startsWith('cancelado')), `sem parcial nem arquivo do cancelado (${left.join(', ')})`, failures)
+
+  // ---- preview intocado durante a exportação ----
+  const pv = r.previewUntouched
+  check(!!pv && !('error' in pv) && pv.before.length > 0 && pv.before.every((v, i) => Math.abs(v - pv.after[i]) <= 2), `preview continua vivo e igual depois da exportação (${JSON.stringify(pv)})`, failures)
+
+  // ---- paridade com a v1 (webcam circular) ----
+  const ed = r.parity?.path
+  let v1Out: string | null = null
+  if (r.v1Composed?.path) {
+    const options: ExportOptions = {
+      presetId: 'max', trimStartMs: 0, trimEndMs: null, includeWebcam: true, includeAnnotations: true, audioMode: 'mix', micOffsetMs: 0,
+      targetSizeMB: null, reels: false, outputDir: exportsDir, fileName: 'paridade-v1', pipOverride: null
+    }
+    const v1 = await new Promise<{ outputs: string[]; error?: string }>((resolve) => {
+      startExportJob({ sessionId: session.id, options, composedFile: r.v1Composed!.path! }, sessions, (p) => {
+        if (p.stage === 'done') resolve({ outputs: p.outputs ?? [] })
+        else if (p.stage === 'error' || p.stage === 'cancelled') resolve({ outputs: [], error: p.error ?? p.stage })
+      })
+    })
+    v1Out = v1.outputs[0] ?? null
+    check(!!v1Out && existsSync(v1Out), `v1 (composição + job ffmpeg, como __qaExport) exportou (${v1Out ?? v1.error})`, failures)
+  } else check(false, `v1: composição falhou (${r.v1Composed?.error})`, failures)
+  check(!!ed && existsSync(ed), `editor: projeto da sessão exportado (${ed ?? r.parity?.error})`, failures)
+  if (ed && v1Out && existsSync(ed) && existsSync(v1Out)) {
+    const tMs = 3000
+    const rect = pipRectAt(session.pip, tMs)!
+    const px = pipPixelRect(clampPip(rect), session.video.width, session.video.height)
+    const side = Math.round(px.w * 0.5)
+    const crop = { x: Math.round(px.x + px.w / 2 - side / 2), y: Math.round(px.y + px.h / 2 - side / 2), w: side, h: side }
+    const fe = await frameRgb(ed, tMs / 1000, join(dir, 'pip-editor.rgb'), crop)
+    const fv = await frameRgb(v1Out, tMs / 1000, join(dir, 'pip-v1.rgb'), crop)
+    const p = psnr(fe, fv)
+    check(p > 28, `paridade: centro da PiP em 3 s ≈ v1 (PSNR ${p.toFixed(1)} dB > 28; recorte ${JSON.stringify(crop)})`, failures)
+  }
+
+  check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
+  win.destroy()
+  writeFileSync(join(outDir, 'editor-export-report.json'), JSON.stringify({ result, failures }, null, 2))
+  console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE EXPORTAÇÃO DO EDITOR PASSOU')
+  return failures.length ? 1 : 0
+}

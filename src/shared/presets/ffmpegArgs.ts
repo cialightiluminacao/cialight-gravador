@@ -174,6 +174,11 @@ function videoCodecArgs(i: ArgsInput): string[] {
         '-c:v', 'h264_qsv', '-preset', 'slower', '-global_quality', String(p.hwCq ?? 23), '-look_ahead', '1', '-look_ahead_depth', '20',
         '-bf', bf, '-profile:v', prof, '-g', gop
       ]
+    case 'h264_amf': {
+      // AMD AMF: quantizador constante (equivalente ao CQ dos outros encoders de hardware)
+      const q = String(p.hwCq ?? 23)
+      return ['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', q, '-qp_p', q, '-qp_b', q, '-bf', bf, '-profile:v', prof, '-g', gop]
+    }
     case 'h264_mf':
       return ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '70', '-profile:v', prof, '-g', gop]
   }

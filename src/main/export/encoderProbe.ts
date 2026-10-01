@@ -9,15 +9,16 @@ import { log } from '../log'
 // `-encoders` só diz o que foi compilado). Ordem por vendor da GPU ativa.
 // Cache em settings.lastEncoderProbe por chave de GPU/driver.
 
-const CANDIDATES: HwEncoder[] = ['h264_nvenc', 'h264_qsv', 'h264_mf']
+export const PROBE_CANDIDATES: HwEncoder[] = ['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf']
 
 export function gpuVendorOrder(gpus: { vendor: string }[]): HwEncoder[] {
   const v = gpus.map((g) => g.vendor.toLowerCase()).join(' ')
   const hasNvidia = /nvidia|0x10de/.test(v)
   const hasIntel = /intel|0x8086/.test(v)
-  if (hasNvidia) return ['h264_nvenc', 'h264_qsv', 'h264_mf', 'libx264']
-  if (hasIntel) return ['h264_qsv', 'h264_mf', 'h264_nvenc', 'libx264']
-  return ['h264_mf', 'h264_qsv', 'h264_nvenc', 'libx264']
+  // AMF (AMD) é testado logo depois do QSV em todas as ordens
+  if (hasNvidia) return ['h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'libx264']
+  if (hasIntel) return ['h264_qsv', 'h264_amf', 'h264_mf', 'h264_nvenc', 'libx264']
+  return ['h264_mf', 'h264_qsv', 'h264_amf', 'h264_nvenc', 'libx264']
 }
 
 interface GpuDeviceInfo {
@@ -77,7 +78,7 @@ export async function probeEncoders(force = false): Promise<EncoderProbe> {
       available.push('libx264')
       continue
     }
-    if (!CANDIDATES.includes(enc)) continue
+    if (!PROBE_CANDIDATES.includes(enc)) continue
     if (await testEncoder(enc)) available.push(enc)
   }
   const preferred = order.find((e) => available.includes(e)) ?? 'libx264'
