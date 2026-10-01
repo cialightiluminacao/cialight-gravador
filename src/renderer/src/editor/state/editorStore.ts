@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
 import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
+import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from '../ui/timeline/zoom'
 
 // Store do editor (zustand): projeto com histórico, transações (arrasto = 1 passo de undo),
 // seleção, viewport da timeline e autosave. Operações puras vivem em @shared/editor/ops.
@@ -51,8 +52,6 @@ export interface EditorState {
 }
 
 const HISTORY_LIMIT = 300
-const MIN_ZOOM = 1
-const MAX_ZOOM = 4000
 
 const touch = (p: Project): Project => ({ ...p, updatedAt: new Date().toISOString() })
 
@@ -72,7 +71,7 @@ const INITIAL = {
   selection: [] as string[],
   playheadUs: 0,
   playing: false,
-  zoomPxPerSec: 100,
+  zoomPxPerSec: ZOOM_DEFAULT,
   scrollUs: 0,
   snapping: true,
   inUs: null,
@@ -190,11 +189,10 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
 
   setZoom: (pxPerSec, anchorUs) =>
     set((s) => {
-      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, pxPerSec))
-      if (anchorUs === undefined) return { zoomPxPerSec: zoom }
-      // mantém o instante âncora na mesma posição de tela
-      const scroll = anchorUs - ((anchorUs - s.scrollUs) * s.zoomPxPerSec) / zoom
-      return { zoomPxPerSec: zoom, scrollUs: Math.max(0, Math.round(scroll)) }
+      if (anchorUs === undefined) return { zoomPxPerSec: clampZoom(pxPerSec) }
+      // mantém o instante âncora na mesma posição de tela (mesma conta do zoom pela roda/slider)
+      const r = zoomAround(s.zoomPxPerSec, pxPerSec / s.zoomPxPerSec, anchorUs, s.scrollUs, usToPx(anchorUs, s.zoomPxPerSec, s.scrollUs))
+      return { zoomPxPerSec: r.pxPerSec, scrollUs: r.scrollUs }
     }),
 
   setScroll: (us) => set({ scrollUs: Math.max(0, Math.round(us)) }),

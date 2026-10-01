@@ -11,6 +11,7 @@ import { addAssetAt, registerZoomFit } from '../editorActions'
 import { ASSET_MIME } from '../MediaCard'
 import { ContextMenu, type MenuEntry } from './ContextMenu'
 import { HScrollbar } from './HScrollbar'
+import { dropTarget } from './dragMath'
 import { itemMenuEntries, markerMenuEntries } from './itemMenu'
 import { buildLayout, displayNeighborIndex, HEADER_W, RULER_H, SEP_H, zoneAt } from './layout'
 import { Playhead } from './Playhead'
@@ -18,8 +19,8 @@ import { Ruler } from './Ruler'
 import { TimelineToolbar } from './TimelineToolbar'
 import { TrackHeader } from './TrackHeader'
 import { TrackLane } from './TrackLane'
-import { cancelActiveGesture, NO_OVERLAY, SNAP_PX, useTimelineDrag, type DragOverlay } from './useTimelineDrag'
-import { fitZoom, maxScrollUs, pxToDurUs, pxToUs, usToPx, zoomAround } from './zoom'
+import { cancelActiveGesture, NO_OVERLAY, useTimelineDrag, type DragOverlay } from './useTimelineDrag'
+import { fitZoom, maxScrollUs, pxToDurUs, pxToUs, SNAP_PX, usToPx } from './zoom'
 
 // Linha do tempo multifaixa (spec §9). Rolagem horizontal virtual (scrollUs no store) e vertical
 // nativa; roda = rolar na horizontal, Ctrl+roda = zoom ancorado no mouse, Shift+roda = vertical.
@@ -73,10 +74,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
   // ---- zoom
   const zoomTo = useCallback((z: number, anchorPx: number) => {
     const s = st()
-    const anchorUs = pxToUs(anchorPx, s.zoomPxPerSec, s.scrollUs)
-    const r = zoomAround(s.zoomPxPerSec, z / s.zoomPxPerSec, anchorUs, s.scrollUs, anchorPx)
-    s.setZoom(r.pxPerSec)
-    s.setScroll(r.scrollUs)
+    s.setZoom(z, pxToUs(anchorPx, s.zoomPxPerSec, s.scrollUs))
   }, [])
   const zoomFit = useCallback(() => {
     const p = st().project
@@ -174,7 +172,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
     let atUs = Math.max(0, pxToUs(Math.max(0, e.clientX - r.left - HEADER_W), s.zoomPxPerSec, s.scrollUs))
     if (s.snapping && s.project) atUs += snapDelta([atUs], snapPoints(s.project, s.playheadUs, []), pxToDurUs(SNAP_PX, s.zoomPxPerSec)).deltaUs
     const zone = zoneAt(layoutRef.current, e.clientY - r.top + scroller.scrollTop)
-    addAssetAt(assetId, Math.max(0, atUs), zone?.kind === 'track' ? { trackId: zone.trackId } : zone ? { newTrack: zone.trackKind } : undefined)
+    addAssetAt(assetId, Math.max(0, atUs), s.project ? dropTarget(s.project, assetId, zone) : undefined)
   }
 
   if (!project) return null
@@ -230,6 +228,15 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
                 style={{ top: ghost.y, height: ghost.h, left: HEADER_W + Math.max(-4, x(ghost.startUs)), width: Math.max(6, (ghost.durationUs * pps) / 1e6) }}
               >
                 {ghost.tone === 'new' && ghost.h >= 20 ? 'Nova faixa' : null}
+              </div>
+            ) : null}
+            {overlay.label ? (
+              <div
+                data-drag-label=""
+                className="pointer-events-none absolute z-20 whitespace-nowrap rounded-md border border-border-strong bg-surface-3 px-2 py-0.5 font-mono text-[10px] text-fg shadow-lg"
+                style={{ left: HEADER_W + Math.max(4, x(overlay.label.us) + 8), top: Math.max(0, overlay.label.y - 20) }}
+              >
+                {overlay.label.text}
               </div>
             ) : null}
             {box ? (

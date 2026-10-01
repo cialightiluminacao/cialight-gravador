@@ -4,6 +4,7 @@ import type { Asset, Item, MediaItem, TrackKind } from '@shared/editor/project'
 import { cn } from '@/lib/cn'
 import { mediaUrl, projectFileUrl } from '../mediaImport'
 import { ITEM_TYPE_LABEL } from '../itemLabel'
+import { FadeHandles } from './FadeHandles'
 import { filmstripSlots } from './itemMedia'
 import { usePeaks } from './peaks'
 import { Waveform } from './Waveform'
@@ -74,7 +75,7 @@ function Filmstrip({ item, asset, projectId, h, pxPerSec, clipFrom, clipTo }: { 
 }
 
 function ItemWave({ item, asset, projectId, pxPerSec, clipFrom, clipTo, height, color }: { item: MediaItem; asset: Asset; projectId: string; pxPerSec: number; clipFrom: number; clipTo: number; height: number; color: string }): React.JSX.Element | null {
-  const peaks = usePeaks(asset.peaks && asset.status !== 'missing' ? projectFileUrl(projectId, asset.peaks) : null)
+  const peaks = usePeaks(asset.id, asset.peaks && asset.status !== 'missing' ? projectFileUrl(projectId, asset.peaks) : null)
   if (!peaks) return null
   return <Waveform peaks={peaks} item={item} pxPerSec={pxPerSec} clipFromPx={clipFrom} clipToPx={clipTo} height={height} color={color} gain={item.audio.enabled ? item.audio.volume.value : 0.15} />
 }
@@ -94,6 +95,9 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
   const Icon = item.type !== 'media' ? TYPE_ICON[item.type] : null
   const narrow = visR - visL < 36
   const edgeW = Math.max(3, Math.min(EDGE_W, w / 4))
+  // fades: item de faixa de vídeo usa os do visual; de faixa de áudio, os do áudio
+  const fades = media ? (!isAudio && media.visual ? { in: media.visual.fadeInUs, out: media.visual.fadeOutUs } : { in: media.audio.fadeInUs, out: media.audio.fadeOutUs }) : null
+  const fadeEditable = !!fades && !locked && w >= 30
 
   return (
     <div
@@ -120,8 +124,9 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
       ) : null}
       {broken ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(255,92,92,0.22)_0_6px,transparent_6px_12px)]" /> : null}
       {locked ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(0,0,0,0.28)_0_4px,transparent_4px_9px)]" /> : null}
+      {fades ? <FadeHandles fadeInUs={fades.in} fadeOutUs={fades.out} pxPerSec={pxPerSec} w={w} clipFrom={clipFrom} visW={visR - visL} h={h} editable={fadeEditable} selected={selected} /> : null}
       {!narrow ? (
-        <span className="pointer-events-none absolute left-0 top-0 flex max-w-full items-center gap-1 rounded-br-[5px] bg-black/55 px-1.5 py-[1px] text-[10px] font-semibold leading-[14px] text-white/90">
+        <span className={cn('pointer-events-none absolute top-0 z-[2] flex max-w-full items-center gap-1 rounded-br-[5px] bg-black/55 px-1.5 py-[1px] text-[10px] font-semibold leading-[14px] text-white/90', fadeEditable && clipFrom === 0 ? 'left-[11px]' : 'left-0')}>
           {broken ? <AlertTriangle className="h-3 w-3 shrink-0 text-danger" /> : null}
           {Icon ? <Icon className="h-3 w-3 shrink-0 opacity-80" /> : null}
           {item.linkId ? <Link2 className="h-3 w-3 shrink-0 opacity-80" aria-label="Vinculado" /> : null}
@@ -130,9 +135,9 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
           {media?.reverse ? <Rewind className="h-3 w-3 shrink-0 text-warn" aria-label="Reverso" /> : null}
         </span>
       ) : null}
-      {/* alças de trim: só nas bordas reais (não nas de recorte) */}
-      {clipFrom === 0 ? <span data-edge="start" className={cn('absolute inset-y-0 left-0 z-[2] block cursor-ew-resize group-hover:bg-white/25', selected && 'bg-accent/70 group-hover:bg-accent')} style={{ width: edgeW }} /> : null}
-      {clipTo >= w - 0.5 ? <span data-edge="end" className={cn('absolute inset-y-0 right-0 z-[2] block cursor-ew-resize group-hover:bg-white/25', selected && 'bg-accent/70 group-hover:bg-accent')} style={{ width: edgeW }} /> : null}
+      {/* alças de trim: só nas bordas reais (não nas de recorte) e fora de faixa bloqueada */}
+      {!locked && clipFrom === 0 ? <span data-edge="start" className={cn('absolute inset-y-0 left-0 z-[2] block cursor-ew-resize group-hover:bg-white/25', selected && 'bg-accent/70 group-hover:bg-accent')} style={{ width: edgeW }} /> : null}
+      {!locked && clipTo >= w - 0.5 ? <span data-edge="end" className={cn('absolute inset-y-0 right-0 z-[2] block cursor-ew-resize group-hover:bg-white/25', selected && 'bg-accent/70 group-hover:bg-accent')} style={{ width: edgeW }} /> : null}
     </div>
   )
 })

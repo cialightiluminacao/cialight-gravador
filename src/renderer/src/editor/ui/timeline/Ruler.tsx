@@ -5,14 +5,12 @@ import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
 import { seekTo } from '../editorActions'
 import { RULER_H } from './layout'
-import { pxToDurUs, pxToUs, rulerLabel, rulerTicks, usToPx } from './zoom'
+import { pxToDurUs, pxToUs, rulerLabel, rulerTicks, SNAP_PX, usToPx } from './zoom'
 
 // Régua: ticks e timecode desenhados num <canvas> (só a janela visível), faixa I/O destacada e
 // marcadores (triângulos coloridos: clique vai até ele, duplo clique renomeia, botão direito abre
 // o menu). Clicar/arrastar na régua move o playhead (seek); com o ímã ligado encaixa em bordas e
 // marcadores a 8 px.
-
-const SNAP_PX = 8
 
 interface Props {
   viewW: number
@@ -62,7 +60,7 @@ function MarkerLabelEditor({ marker, x, onDone }: { marker: Marker; x: number; o
       autoFocus
       aria-label="Nome do marcador"
       placeholder="Marcador"
-      className="absolute top-0.5 z-30 h-5 w-36 rounded border border-accent/60 bg-bg-2 px-1 text-[11px] text-fg outline-none"
+      className="absolute top-0.5 z-40 h-5 w-36 rounded border border-accent/60 bg-bg-2 px-1 text-[11px] text-fg outline-none"
       style={{ left: x + 6 }}
       value={draft}
       onPointerDown={(e) => e.stopPropagation()}
@@ -94,6 +92,9 @@ export const Ruler = memo(function Ruler({ viewW, fps, playback, onMarkerMenu }:
   const markers = useEditorStore((s) => s.project?.markers)
   const rootRef = useRef<HTMLDivElement>(null)
   const [editing, setEditing] = useState<string | null>(null)
+  // arraste em curso: listeners da janela saem também se a régua desmontar no meio
+  const dragCleanup = useRef<(() => void) | null>(null)
+  useEffect(() => () => dragCleanup.current?.(), [])
 
   const onPointerDown = (e: React.PointerEvent): void => {
     if (e.button !== 0) return
@@ -117,7 +118,10 @@ export const Ruler = memo(function Ruler({ viewW, fps, playback, onMarkerMenu }:
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
+      dragCleanup.current = null
     }
+    dragCleanup.current?.()
+    dragCleanup.current = up
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)
@@ -153,7 +157,7 @@ export const Ruler = memo(function Ruler({ viewW, fps, playback, onMarkerMenu }:
               data-marker-id={m.id}
               title={m.label ? `${m.label} — duplo clique para renomear` : 'Marcador — duplo clique para renomear'}
               aria-label={m.label || 'Marcador'}
-              className="absolute bottom-0 z-10 h-[11px] w-[12px] -translate-x-1/2 [clip-path:polygon(0_0,100%_0,50%_100%)] hover:brightness-125"
+              className="absolute bottom-0 z-30 h-[11px] w-[12px] -translate-x-1/2 [clip-path:polygon(0_0,100%_0,50%_100%)] hover:brightness-125"
               style={{ left: mx, backgroundColor: m.color }}
               onPointerDown={(e) => {
                 e.stopPropagation()
@@ -167,7 +171,7 @@ export const Ruler = memo(function Ruler({ viewW, fps, playback, onMarkerMenu }:
               }}
             />
             {m.label && editing !== m.id ? (
-              <span className="pointer-events-none absolute top-[2px] max-w-[120px] truncate rounded-sm px-1 text-[9px] font-semibold leading-[11px] text-black" style={{ left: mx + 3, backgroundColor: m.color }}>
+              <span className="pointer-events-none absolute top-[2px] z-30 max-w-[120px] truncate rounded-sm px-1 text-[9px] font-semibold leading-[11px] text-black" style={{ left: mx + 3, backgroundColor: m.color }}>
                 {m.label}
               </span>
             ) : null}

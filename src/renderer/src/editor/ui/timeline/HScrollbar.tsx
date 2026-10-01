@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import type { Us } from '@shared/editor/project'
 import { useEditorStore } from '../../state/editorStore'
 import { maxScrollUs } from './zoom'
@@ -17,6 +17,9 @@ export const HScrollbar = memo(function HScrollbar({ viewW, durationUs }: { view
   const thumbW = Math.max(28, thumbFrac * viewW)
   const thumbX = posFrac * Math.max(0, viewW - thumbW)
   const setScroll = useEditorStore((s) => s.setScroll)
+  // arraste do polegar em curso: listeners da janela saem também ao desmontar
+  const dragCleanup = useRef<(() => void) | null>(null)
+  useEffect(() => () => dragCleanup.current?.(), [])
 
   const onTrack = (e: React.PointerEvent): void => {
     if (e.button !== 0 || e.target !== e.currentTarget) return
@@ -34,7 +37,10 @@ export const HScrollbar = memo(function HScrollbar({ viewW, durationUs }: { view
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
+      dragCleanup.current = null
     }
+    dragCleanup.current?.()
+    dragCleanup.current = up
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)

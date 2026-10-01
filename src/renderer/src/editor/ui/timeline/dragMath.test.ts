@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from '@shared/editor/factory'
 import * as ops from '@shared/editor/ops'
-import type { Asset, Project } from '@shared/editor/project'
+import type { Asset, MediaItem, Project } from '@shared/editor/project'
 import { snapPoints } from '@shared/editor/snap'
-import { canChangeTrack, planMove, planTrim } from './dragMath'
+import { canChangeTrack, dropTarget, edgeScrollPx, EDGE_SCROLL_MAX, gestureSnapPoints, planFade, planMove, planTrim } from './dragMath'
 
 const S = 1_000_000
 const vid = (id: string, dur = 10 * S): Asset => ({ id, name: id, kind: 'video', source: { type: 'file', path: `C:/${id}.mp4`, size: 1, mtimeMs: 1 }, durationUs: dur, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
@@ -147,5 +147,64 @@ describe('planTrim', () => {
     const r = planTrim(p, { itemId: v0, edge: 'end', deltaUs: 900_000, ripple: false, includeLinked: true, snap })
     expect(r.project).toBe(p)
     expect(r.guideUs).toBeNull()
+  })
+})
+
+describe('gestureSnapPoints', () => {
+  it('com vínculo exclui os vinculados; com Alt as bordas do vinculado viram pontos', () => {
+    let { p, v1, a1 } = fixture()
+    // desloca o áudio vinculado para ter bordas próprias (6,5 s)
+    p = ops.moveItems(p, [a1], S / 2, { includeLinked: false })
+    const linked = gestureSnapPoints(p, 0, [v1], true).map((x) => x.us)
+    const alt = gestureSnapPoints(p, 0, [v1], false).map((x) => x.us)
+    expect(linked).not.toContain(6.5 * S)
+    expect(alt).toContain(6.5 * S)
+    expect(alt).not.toContain(6 * S + 4 * S) // fim do próprio v1 (10 s) não entra
+  })
+})
+
+describe('planFade', () => {
+  it('fade de entrada do vídeo (visual) e de saída do áudio (audio), limitado à duração', () => {
+    const { p, v0, a0 } = fixture()
+    const r = planFade(p, { itemId: v0, side: 'in', deltaUs: S })
+    const v = at(r.project!, v0).item as MediaItem
+    expect(v.visual!.fadeInUs).toBe(S)
+    const r2 = planFade(r.project!, { itemId: v0, side: 'out', deltaUs: -10 * S })
+    expect((at(r2.project!, v0).item as MediaItem).visual!.fadeOutUs).toBe(3 * S) // 4 s − 1 s de entrada
+    const r3 = planFade(p, { itemId: a0, side: 'out', deltaUs: -1.5 * S })
+    expect((at(r3.project!, a0).item as MediaItem).audio.fadeOutUs).toBe(1.5 * S)
+    expect(planFade(p, { itemId: v0, side: 'in', deltaUs: -S }).project).toBe(p)
+  })
+  it('faixa bloqueada → erro', () => {
+    const { p, v0 } = fixture()
+    const locked = ops.updateTrack(p, at(p, v0).track.id, { locked: true })
+    expect(planFade(locked, { itemId: v0, side: 'in', deltaUs: S }).error?.code).toBe('locked')
+  })
+})
+
+describe('dropTarget', () => {
+  const audioAsset = (): Asset => ({ id: 'm', name: 'm', kind: 'audio', source: { type: 'file', path: 'C:/m.m4a', size: 1, mtimeMs: 1 }, durationUs: S, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
+  it('só passa a faixa quando o tipo bate com o que a mídia gera', () => {
+    const p = ops.addAsset(fixture().p, audioAsset())
+    const vTrack = p.tracks.find((t) => t.kind === 'video')!.id
+    const aTrack = p.tracks.find((t) => t.kind === 'audio')!.id
+    expect(dropTarget(p, 'm', { kind: 'track', trackId: vTrack })).toBeUndefined()
+    expect(dropTarget(p, 'm', { kind: 'track', trackId: aTrack })).toEqual({ trackId: aTrack })
+    expect(dropTarget(p, 'm', { kind: 'newTrack', trackKind: 'video' })).toBeUndefined()
+    expect(dropTarget(p, 'm', { kind: 'newTrack', trackKind: 'audio' })).toEqual({ newTrack: 'audio' })
+    expect(dropTarget(p, 'a', { kind: 'track', trackId: vTrack })).toEqual({ trackId: vTrack })
+    expect(dropTarget(p, 'a', { kind: 'newTrack', trackKind: 'audio' })).toEqual({ newTrack: 'audio' })
+    expect(dropTarget(p, 'a', null)).toBeUndefined()
+  })
+})
+
+describe('edgeScrollPx', () => {
+  it('zero no meio; cresce perto das bordas; negativo à esquerda', () => {
+    expect(edgeScrollPx(500, 1000)).toBe(0)
+    expect(edgeScrollPx(990, 1000)).toBeGreaterThan(edgeScrollPx(970, 1000))
+    expect(edgeScrollPx(970, 1000)).toBeGreaterThan(0)
+    expect(edgeScrollPx(5, 1000)).toBeLessThan(0)
+    expect(edgeScrollPx(-50, 1000)).toBe(-EDGE_SCROLL_MAX)
+    expect(edgeScrollPx(2000, 1000)).toBe(EDGE_SCROLL_MAX)
   })
 })

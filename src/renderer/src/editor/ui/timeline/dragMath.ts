@@ -1,8 +1,9 @@
-import { addTrack, EditError, findItem, linkedIds, moveItems, trimItem } from '@shared/editor/ops'
-import type { Project, TrackKind, Us } from '@shared/editor/project'
-import { snapDelta, type SnapPoint } from '@shared/editor/snap'
+import { addTrack, EditError, findItem, linkedIds, moveItems, trimItem, updateItem } from '@shared/editor/ops'
+import type { MediaItem, Project, TrackKind, Us } from '@shared/editor/project'
+import { snapDelta, snapPoints, type SnapPoint } from '@shared/editor/snap'
 import { itemEndUs } from '@shared/editor/time'
 import type { DropZone } from './layout'
+import { assetProduces } from './assetKinds'
 
 // Matemática pura dos gestos da linha do tempo. Cada evento recalcula o resultado a partir do
 // projeto do início do gesto (base da transação) com o deslocamento total: nada se acumula.
@@ -138,4 +139,65 @@ export function planTrim(base: Project, input: TrimInput): GestureResult {
     if (e instanceof EditError) return { project: null, error: e, guideUs: null }
     throw e
   }
+}
+
+/**
+ * Pontos do ímã para um gesto sobre `ids`: com vínculo ativo os vinculados se movem junto e saem da
+ * lista; com Alt (sem vínculo) eles ficam parados e as bordas deles também atraem.
+ */
+export function gestureSnapPoints(base: Project, playheadUs: Us, ids: string[], includeLinked: boolean): SnapPoint[] {
+  const exclude = includeLinked ? [...new Set(ids.flatMap((id) => linkedIds(base, id)))] : ids
+  return snapPoints(base, playheadUs, exclude)
+}
+
+export interface FadeInput { itemId: string; side: 'in' | 'out'; deltaUs: Us }
+
+/**
+ * Alça de fade no canto do item: entrada cresce para a direita, saída para a esquerda. Item de faixa de
+ * vídeo usa visual.fade*, de faixa de áudio usa audio.fade*. Limite: entrada + saída ≤ duração.
+ */
+export function planFade(base: Project, input: FadeInput): GestureResult & { fadeUs: Us } {
+  const f = findItem(base, input.itemId)
+  if (!f || f.item.type !== 'media') return { project: base, error: null, guideUs: null, fadeUs: 0 }
+  const it = f.item
+  const useVisual = f.track.kind === 'video' && !!it.visual
+  const cur = useVisual ? { in: it.visual!.fadeInUs, out: it.visual!.fadeOutUs } : { in: it.audio.fadeInUs, out: it.audio.fadeOutUs }
+  const other = input.side === 'in' ? cur.out : cur.in
+  const raw = input.side === 'in' ? cur.in + input.deltaUs : cur.out - input.deltaUs
+  const fadeUs = Math.max(0, Math.min(it.durationUs - other, Math.round(raw)))
+  if (fadeUs === cur[input.side]) return { project: base, error: null, guideUs: null, fadeUs }
+  const key = input.side === 'in' ? 'fadeInUs' : 'fadeOutUs'
+  try {
+    const project = updateItem<MediaItem>(base, it.id, (d) => {
+      if (useVisual && d.visual) d.visual[key] = fadeUs
+      else d.audio[key] = fadeUs
+    })
+    return { project, error: null, guideUs: null, fadeUs }
+  } catch (e) {
+    if (e instanceof EditError) return { project: null, error: e, guideUs: null, fadeUs: cur[input.side] }
+    throw e
+  }
+}
+
+/**
+ * Mídia solta da biblioteca: a faixa sob o ponteiro só vale se for do tipo que a mídia gera (vídeo/imagem
+ * → vídeo; com áudio → áudio). Nunca cria faixa vazia do tipo errado.
+ */
+export function dropTarget(p: Project, assetId: string, zone: DropZone): { trackId: string } | { newTrack: TrackKind } | undefined {
+  const asset = p.assets.find((a) => a.id === assetId)
+  if (!asset || !zone) return undefined
+  const kinds = assetProduces(asset)
+  if (zone.kind === 'newTrack') return kinds.includes(zone.trackKind) ? { newTrack: zone.trackKind } : undefined
+  const t = p.tracks.find((x) => x.id === zone.trackId)
+  return t && kinds.includes(t.kind) ? { trackId: t.id } : undefined
+}
+
+export const EDGE_SCROLL_ZONE = 48
+export const EDGE_SCROLL_MAX = 24
+
+/** Rolagem automática perto das bordas durante um gesto: px por quadro (negativo = para a esquerda), mais rápido quanto mais perto. */
+export function edgeScrollPx(x: number, viewW: number): number {
+  if (x < EDGE_SCROLL_ZONE) return -Math.round(EDGE_SCROLL_MAX * Math.min(1, (EDGE_SCROLL_ZONE - x) / EDGE_SCROLL_ZONE))
+  if (x > viewW - EDGE_SCROLL_ZONE) return Math.round(EDGE_SCROLL_MAX * Math.min(1, (x - (viewW - EDGE_SCROLL_ZONE)) / EDGE_SCROLL_ZONE))
+  return 0
 }

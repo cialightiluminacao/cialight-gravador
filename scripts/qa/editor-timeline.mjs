@@ -202,6 +202,72 @@ async function main() {
     check('Ctrl+Z desfaz o arraste inteiro', r.undone.v === 4 * S && r.undone.a === 4 * S && r.undone.dp === 0, r.undone)
   }
 
+  console.log('patch de ingestão no meio do arraste')
+  {
+    const r = await ev(`const p0 = T.past(); const e = T.item('${ids.v2}'); const a = T.pt(e, 0.3)
+      await T.drag(e, a, { x: a.x + 100, y: a.y }, { release: false })
+      T.st().applyAssetPatch('a_qa_music', { name: 'Trilha (patch no meio do arraste)' })
+      T.move(a.x + 150, a.y); await T.settle(); T.up(a.x + 150, a.y); await T.settle()
+      const out = { v: T.find('${ids.v2}').s, name: T.st().project.assets.find((x) => x.id === 'a_qa_music').name, dp: T.past() - p0, tx: !!T.st().txBase }
+      await T.key('z', { ctrlKey: true })
+      out.afterUndo = { v: T.find('${ids.v2}').s, name: T.st().project.assets.find((x) => x.id === 'a_qa_music').name }
+      return out`)
+    check('arraste concluído (+1,5 s) com 1 passo', r.v === 5.5 * S && r.dp === 1 && !r.tx, r)
+    check('patch do asset sobreviveu ao commit e ao desfazer', r.name === 'Trilha (patch no meio do arraste)' && r.afterUndo.name === r.name && r.afterUndo.v === 4 * S, r)
+  }
+
+  console.log('teclado no meio do arraste')
+  {
+    const r = await ev(`const p0 = T.past(); const e = T.item('${ids.v2}'); const a = T.pt(e, 0.3)
+      await T.drag(e, a, { x: a.x + 100, y: a.y }, { release: false })
+      await T.key('z', { ctrlKey: true }); await T.key('Delete'); await T.key('s')
+      const mid = { tx: !!T.st().txBase, v: T.find('${ids.v2}')?.s ?? null, dp: T.past() - p0 }
+      T.up(a.x + 100, a.y); await T.settle()
+      const out = { mid, v: T.find('${ids.v2}').s, a: T.find('${ids.a2}').s, dp: T.past() - p0, pieces: T.byAsset('a_qa_video').length }
+      await T.key('z', { ctrlKey: true }); return out`)
+    check('Ctrl+Z/Delete/S engolidos no meio do arraste (transação intacta, sem histórico)', r.mid.tx && r.mid.v === 5 * S && r.mid.dp === 0, r.mid)
+    check('ao soltar: um único estado coerente (1 passo, vinculado junto, nada apagado/dividido)', r.dp === 1 && r.v === 5 * S && r.a === 5 * S && r.pieces === 4, r)
+  }
+
+  console.log('perder o foco cancela o gesto')
+  {
+    const r = await ev(`const before = JSON.stringify(T.tracks()); const p0 = T.past(); const e = T.item('${ids.v2}'); const a = T.pt(e, 0.3)
+      await T.drag(e, a, { x: a.x + 120, y: a.y }, { release: false }); window.dispatchEvent(new Event('blur')); await T.settle()
+      T.move(a.x + 300, a.y); T.up(a.x + 300, a.y); await T.settle()
+      return { same: JSON.stringify(T.tracks()) === before, dp: T.past() - p0, tx: !!T.st().txBase }`)
+    check('blur: estado igual, sem histórico, sem transação', r.same && r.dp === 0 && !r.tx, r)
+  }
+
+  console.log('rolagem automática na borda')
+  {
+    const r = await ev(`const p0 = T.past(); const e = T.item('${ids.v2}'); const a = T.pt(e, 0.05); const lanes = T.el('[data-timeline-lanes]').getBoundingClientRect()
+      const tx = lanes.right - 6; const dx = tx - a.x
+      await T.drag(e, a, { x: tx, y: a.y }, { release: false }); const s0 = T.st().scrollUs
+      await new Promise((r) => setTimeout(r, 500)); const s1 = T.st().scrollUs; const v = T.find('${ids.v2}').s
+      T.up(tx, a.y); await T.settle(); const out = { s0, s1, v, noScroll: 4e6 + Math.round(dx * 1e4), dp: T.past() - p0, committed: T.find('${ids.v2}').s }
+      await T.key('z', { ctrlKey: true }); T.st().setScroll(0); await T.settle(); return out`)
+    check('perto da borda direita a vista rola sozinha', r.s1 > r.s0 + 500_000, r)
+    check('o item acompanha a rolagem (delta recalculado pelo scroll) e solta em 1 passo', r.v > r.noScroll + 400_000 && r.committed === r.v && r.dp === 1, r)
+  }
+
+  console.log('fades nos cantos')
+  {
+    const mid = await ev(`const e = T.el('[data-item-id="${ids.v}"] [data-fade="in"]'); const a = T.pt(e)
+      await T.drag(e, a, { x: a.x + 50, y: a.y }, { release: false }); window.__tlLast = { x: a.x + 50, y: a.y }
+      return { label: document.querySelector('[data-drag-label]')?.textContent ?? null }`)
+    await shot('timeline-fade.png')
+    const r = await ev(`const p0 = T.past(); T.up(window.__tlLast.x, window.__tlLast.y); await T.settle()
+      const it = () => T.st().project.tracks.flatMap((t) => t.items)
+      const v = it().find((i) => i.id === '${ids.v}'); const out = { fin: v.visual.fadeInUs, dp: T.past() - p0 }
+      const e = T.el('[data-item-id="${ids.music}"] [data-fade="out"]'); const a = T.pt(e)
+      await T.drag(e, a, { x: a.x - 3000, y: a.y }); const m = it().find((i) => i.id === '${ids.music}')
+      out.mout = m.audio.fadeOutUs; out.min = m.audio.fadeInUs; out.mdur = m.durationUs; out.dp2 = T.past() - p0; return out`)
+    check('dica com a duração durante o arraste', mid.label === 'Fade de entrada: 0,50 s', mid)
+    check('fade de entrada do vídeo (visual) = 0,5 s em 1 passo', r.fin === 500_000 && r.dp === 1, r)
+    check('fade de saída do áudio limitado à duração do item', r.mout === r.mdur - r.min && r.dp2 === 2, r)
+    await ev(`await T.key('z', { ctrlKey: true }); await T.key('z', { ctrlKey: true }); return 1`)
+  }
+
   console.log('trim')
   {
     const r = await ev(`const p0 = T.past(); const e = T.edge('${ids.music}', 'end'); const a = T.pt(e)
@@ -253,11 +319,12 @@ async function main() {
     const r = await ev(`const v2 = T.tracks().find((t) => t.name === 'Vídeo 2'); T.el('[data-track-header="' + v2.id + '"] [aria-label="Bloquear faixa"]').click(); await T.settle()
       const p0 = T.past(); const e = T.item('${ids.logo}'); const a = T.pt(e)
       await T.drag(e, a, { x: a.x + 100, y: a.y }, { release: false }); window.__tlLast = { x: a.x + 100, y: a.y }
-      return { ghost: !!document.querySelector('[data-timeline-lanes] .border-danger'), s: T.find('${ids.logo}').s, locked: T.tracks().find((t) => t.id === v2.id).locked, p0 }`)
+      return { ghost: !!document.querySelector('[data-timeline-lanes] .border-danger'), s: T.find('${ids.logo}').s, locked: T.tracks().find((t) => t.id === v2.id).locked, p0, handles: e.querySelectorAll('[data-edge],[data-fade]').length }`)
     await shot('timeline-locked.png')
     const r2 = await ev(`T.up(window.__tlLast.x, window.__tlLast.y); await T.settle(); const out = { s: T.find('${ids.logo}').s, dp: T.past() - ${r.p0} }
       const v2 = T.tracks().find((t) => t.name === 'Vídeo 2'); T.el('[data-track-header="' + v2.id + '"] [aria-label="Desbloquear faixa"]').click(); await T.settle(); return out`)
     check('sombra vermelha na faixa bloqueada, item parado', r.locked && r.ghost && r.s === 1 * S, r)
+    check('item de faixa bloqueada sem alças de trim/fade', r.handles === 0, r.handles)
     check('soltar não muda nada (sem passo de desfazer)', r2.s === 1 * S && r2.dp === 0, r2)
   }
 
@@ -302,6 +369,12 @@ async function main() {
       lanes.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: T.xOf(8e6), clientY: row.top + 20, dataTransfer: dt })); await T.settle()
       const added = T.byAsset('a_qa_logo').filter((i) => i.s === 8e6); return { n0, n1: T.byAsset('a_qa_logo').length, added, v2: v2.id }`)
     check('soltar mídia da biblioteca: no instante e na faixa sob o ponteiro', dr.n1 === dr.n0 + 1 && dr.added.length === 1 && dr.added[0].track === 'Vídeo 2', dr)
+    const wk = await ev(`const v2 = T.tracks().find((t) => t.name === 'Vídeo 2'); const row = T.rowOf(v2.id).getBoundingClientRect(); const lanes = T.el('[data-timeline-lanes]'); const top = lanes.getBoundingClientRect().top
+      const drop = (y) => { const dt = new DataTransfer(); dt.setData('application/x-cialight-asset', 'a_qa_music'); lanes.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: T.xOf(9e6), clientY: y, dataTransfer: dt })) }
+      const nv = () => T.tracks().filter((t) => t.kind === 'video').length; const v0 = nv()
+      drop(row.top + 20); await T.settle(); drop(top + 6); await T.settle()
+      return { v0, v1: nv(), music: T.byAsset('a_qa_music').filter((i) => i.s === 9e6).map((i) => i.kind) }`)
+    check('áudio solto em faixa/área de vídeo vai para o áudio, sem criar faixa de vídeo vazia', wk.v1 === wk.v0 && wk.music.length === 2 && wk.music.every((k) => k === 'audio'), wk)
     const jkl = await ev(`const c = window.__qaEditor.controller; c.seek(8e6); await T.settle(); await T.key('j'); const afterJ = T.st().playheadUs
       await T.key('l'); await new Promise((r) => setTimeout(r, 700)); const playing = T.st().playing; const t0 = T.st().playheadUs
       await T.key('l'); await new Promise((r) => setTimeout(r, 100)); const t1 = T.st().playheadUs; const stillPlaying = T.st().playing
@@ -365,6 +438,15 @@ async function main() {
     console.log(`  itens renderizados: ${r.n}; por evento de arraste: média ${avg.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, máx ${t[t.length - 1].toFixed(2)} ms`)
     check('200 itens renderizados', r.n >= 200, r.n)
     check('média < 8 ms por evento de arraste', avg < 8, { avg, p95 })
+  }
+
+  console.log('forma de onda e marcador sobre o playhead')
+  await ev(`const s = T.st(); s.select([]); s.setZoom(160); s.setScroll(0); window.__qaEditor.controller.seek(4e6); await T.settle(); return 1`)
+  await sleep(1200)
+  await shot('timeline-waveform.png')
+  {
+    const r = await ev(`const m = T.el('[data-marker-id]'); const ph = T.el('[data-playhead]'); return { m: getComputedStyle(m).zIndex, p: getComputedStyle(ph).zIndex }`)
+    check('marcador desenhado acima do playhead', Number(r.m) > Number(r.p), r)
   }
 
   console.log('screenshots finais')

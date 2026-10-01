@@ -7,8 +7,10 @@ import { formatTimecodeUs } from '@shared/editor/time'
 export const ZOOM_MIN = 1
 export const ZOOM_MAX = 4000
 export const ZOOM_DEFAULT = 100
+/** Tolerância do ímã (px), convertida em µs pelo zoom. */
+export const SNAP_PX = 8
 
-const clampZoom = (z: number): number => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))
+export const clampZoom = (z: number): number => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))
 
 export function usToPx(us: Us, pxPerSec: number, scrollUs: Us): number {
   return ((us - scrollUs) * pxPerSec) / 1e6

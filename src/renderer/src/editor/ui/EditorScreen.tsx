@@ -12,6 +12,8 @@ import { MediaBin } from './MediaBin'
 import { Viewer } from './Viewer'
 import { Inspector } from './Inspector/Inspector'
 import { Timeline } from './timeline/Timeline'
+import { invalidatePeaks } from './timeline/peaks'
+import { gestureActive } from './timeline/useTimelineDrag'
 
 // Tela do editor (spec §9): [Biblioteca 280 | Visualizador | Inspetor 320] em cima e a linha do
 // tempo embaixo (altura redimensionável, salva no localStorage). Monta o motor (render, áudio,
@@ -66,6 +68,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       const st = useEditorStore.getState()
       st.setIngest(d.assetId, null)
       st.applyAssetPatch(d.assetId, d.patch)
+      // peaks regravados no mesmo caminho: a linha do tempo relê
+      if (d.patch.peaks) invalidatePeaks(d.assetId)
       if (d.patch.status === 'error') {
         const name = st.project?.assets.find((a) => a.id === d.assetId)?.name ?? 'mídia'
         toast.error(`Não foi possível processar “${name}”`, { description: d.patch.error })
@@ -127,6 +131,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     const onKey = (e: KeyboardEvent): void => {
       if (e.defaultPrevented || (e.repeat && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
       if (useEditorStore.getState().project?.id !== projectId) return // outro projeto ainda no store (troca em curso)
+      if (gestureActive()) return // arraste na linha do tempo: o teclado é do gesto
       const t = e.target as Element | null
       if (!e.ctrlKey && t?.closest?.(OWN_KEYS)) return
       const action = shortcutFor(e)
