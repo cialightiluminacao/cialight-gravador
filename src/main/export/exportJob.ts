@@ -63,6 +63,11 @@ function uniquifyPlanBase(outDir: string, base: string, sample: string[]): strin
 }
 
 /** override.encoder: força o encoder (testes: não dispara o probe, que grava no settings.json do usuário). */
+/** Exportação v1 em andamento (a manutenção adia o probe de encoders). */
+export function hasActiveExportJobs(): boolean {
+  return jobs.size > 0
+}
+
 export function startExportJob(req: ExportRequest, store: SessionStore, emit: (p: ExportProgress) => void, override: { encoder?: HwEncoder } = {}): { jobId: string; cancel: () => void } {
   const jobId = `exp-${Date.now()}-${++seq}`
   const abort = new AbortController()

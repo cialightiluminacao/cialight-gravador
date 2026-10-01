@@ -8,6 +8,7 @@ import { ingestVideoCodecArgs } from '../media/proxyPolicy'
 import { ffmpegPath } from './ffmpegPath'
 import { getSettings, setSettings } from '../settings/settingsStore'
 import { log } from '../log'
+import { singleFlight } from './singleFlight'
 
 // Detecta encoders H.264 de hardware por encode-teste real (a listagem
 // `-encoders` só diz o que foi compilado), com os MESMOS argumentos da exportação v1 (cada preset) e do
@@ -107,7 +108,13 @@ export function cachedEncoderProbe(): EncoderProbe | null {
   return usableCachedProbe(getSettings(), null)
 }
 
-export async function probeEncoders(force = false): Promise<EncoderProbe> {
+/**
+ * Probe (ou o cache, sem `force`). Uma execução por vez: a exportação v1 que chega durante o probe da
+ * manutenção adiada reaproveita o mesmo, em vez de rodar um segundo encode-teste em paralelo.
+ */
+export const probeEncoders: (force?: boolean) => Promise<EncoderProbe> = singleFlight(runProbe)
+
+async function runProbe(force: boolean): Promise<EncoderProbe> {
   const { vendors, key } = await gpuInfo()
   const cached = usableCachedProbe(getSettings(), key)
   if (!force && cached) return cached

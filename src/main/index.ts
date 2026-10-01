@@ -12,6 +12,8 @@ import { SessionStore } from './session/sessionStore'
 import { ProjectStore } from './project/projectStore'
 import { getSettings, outputDir, rawDir } from './settings/settingsStore'
 import { sweepStaleParts, type SweepTarget } from './maintenance/partSweep'
+import { runWhenIdle } from './maintenance/whenIdle'
+import { hasActiveExportJobs } from './export/exportJob'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { registerIpc } from './ipc'
 import { applyHotkeys, onHotkeyStatus, unregisterAllHotkeys } from './hotkeys/globalShortcuts'
@@ -29,6 +31,8 @@ import { confirmQuit, createQuitGuard, isEditorExportBusy, setAppQuitGuard, type
 // Bootstrap do processo principal.
 
 const MAINTENANCE_DELAY_MS = 15_000
+/** Gravando/exportando, o probe de encoders da manutenção espera e confere de novo neste intervalo. */
+const MAINTENANCE_RETRY_MS = 60_000
 
 app.setAppUserModelId('com.cialight.gravador')
 registerFileProtocolScheme()
@@ -190,7 +194,8 @@ if (!gotLock) {
     /**
      * Manutenção adiada: limpeza de brutos antigos (nunca as gravações que algum projeto do editor usa),
      * .part com mais de 1 dia (proxies/cache dos projetos e exportação na pasta de saída) e o probe de
-     * encoders quando o cache não vale mais (probe antigo, sem a validação com os argumentos reais).
+     * encoders quando o cache não vale mais (probe antigo, sem a validação com os argumentos reais) — este só
+     * com o app ocioso: o encode-teste disputa a GPU com a gravação e as exportações (v1 e editor).
      */
     const runMaintenance = async (): Promise<void> => {
       const days = getSettings().rawRetentionDays
@@ -212,7 +217,21 @@ if (!gotLock) {
         log.warn('limpeza de temporários falhou', e)
       }
       if (!cachedEncoderProbe() && !process.env.CIALIGHT_SHOT && !process.env.CIALIGHT_QA) {
-        await probeEncoders(false).catch((e) => log.warn('probe de encoders falhou', e))
+        let told = false
+        await runWhenIdle(
+          async () => {
+            if (cachedEncoderProbe()) return // uma exportação v1 já fez o probe enquanto esperávamos
+            await probeEncoders(false).catch((e) => log.warn('probe de encoders falhou', e))
+          },
+          {
+            isBusy: () => isRecordingActive() || isEditorExportBusy() || hasActiveExportJobs(),
+            retryMs: MAINTENANCE_RETRY_MS,
+            onPostpone: () => {
+              if (!told) log.info('probe de encoders adiado: gravação ou exportação em andamento')
+              told = true
+            }
+          }
+        )
       }
     }
 
