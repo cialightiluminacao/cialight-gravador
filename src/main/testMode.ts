@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { createHash } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { basename, join } from 'path'
 import type { ExportOptions, ExportPresetId, Session } from '@shared/types'
 import { PRESET_ORDER } from '@shared/presets/presets'
 import type { SessionStore } from './session/sessionStore'
@@ -186,7 +186,40 @@ function keyIntervals(times: number[], fps: number): number[] {
 
 const uniq = (xs: number[]): string => [...new Set(xs)].join(',')
 
-async function testIngest(): Promise<number> {
+type Decodable = { video: boolean; audio: boolean }
+let decodeRuns = 0
+
+/**
+ * `decodable` de vídeo/áudio com o WebCodecs real (janela oculta, rota #decode-test). Os arquivos são copiados
+ * para uma "sessão" de fixtures em <brutos>/ingest-decode-fixtures e servidos por cialight-file://.
+ */
+async function decodeInRenderer(store: SessionStore, files: { name: string; path: string; kind: 'video' | 'audio' }[]): Promise<{ results: Record<string, Decodable>; errors: string[] }> {
+  const sid = `ingest-decode-fixtures-${++decodeRuns}`
+  const sdir = store.dirOf(sid)
+  try {
+    rmSync(sdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  } catch (e) {
+    log.warn('fixtures de decodificação antigas não removidas', e)
+  }
+  mkdirSync(sdir, { recursive: true })
+  const items = files.map((f) => {
+    const name = basename(f.path)
+    copyFileSync(f.path, join(sdir, name))
+    return { name: f.name, kind: f.kind, url: `cialight-file://${sid}/${encodeURIComponent(name)}` }
+  })
+  // a janela fica aberta até o fim do teste (app.exit): fechar a última janela encerraria o app no meio
+  const win = new BrowserWindow({ width: 400, height: 300, show: false, webPreferences: { preload: preloadPath(), sandbox: false, additionalArguments: ['--cialight-window=recorder'] } })
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ results: {}, errors: ['timeout de 30 s no harness de decodificação'] }), 30_000)
+    ipcMain.once('test:result', (_e, r: { results: Record<string, Decodable>; errors: string[] }) => {
+      clearTimeout(timer)
+      resolve(r)
+    })
+    loadPage(win, `index.html#decode-test/${encodeURIComponent(JSON.stringify({ items }))}`)
+  })
+}
+
+async function testIngest(store: SessionStore): Promise<number> {
   const failures: string[] = []
   const hashBefore = settingsHash()
   const dir = join(outDir, 'ingest')
@@ -309,6 +342,61 @@ async function testIngest(): Promise<number> {
     ok(iv.length >= 4 && iv.every((n) => n === 30), `intermediário: GOP 1 s (${uniq(iv)})`, failures)
   }
 
+  // áudio que o WebCodecs pode não decodificar (FLAC; ALAC em .m4a; AC-3 num MKV com vídeo H.264): decisão real
+  // no renderer → o não decodificável ganha intermediário AAC (só áudio → .m4a; vídeo → vídeo copiado + AAC),
+  // que passa a decodificar; o decodificável fica sem intermediário
+  const flac = join(dir, 'seno.flac')
+  const alac = join(dir, 'seno-alac.m4a')
+  const mkvAc3 = join(dir, 'video-ac3.mkv')
+  await gen(['-f', 'lavfi', '-i', 'sine=frequency=660:sample_rate=44100', '-t', '4', '-c:a', 'flac', flac], 'ingest: flac')
+  await gen(['-f', 'lavfi', '-i', 'sine=frequency=550:sample_rate=44100', '-t', '4', '-c:a', 'alac', alac], 'ingest: alac')
+  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=330:sample_rate=48000', '-t', '4',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'ac3', '-b:a', '192k', mkvAc3], 'ingest: mkv ac3')
+  const dec = await decodeInRenderer(store, [
+    { name: 'flac', path: flac, kind: 'audio' },
+    { name: 'alac', path: alac, kind: 'audio' },
+    { name: 'mkvAc3', path: mkvAc3, kind: 'video' },
+    { name: 'mp3', path: mp3, kind: 'audio' },
+    { name: 'mp4', path: src, kind: 'video' }
+  ])
+  console.log(`decodable (WebCodecs): ${JSON.stringify(dec)}`)
+  ok(dec.errors.length === 0, `harness de decodificação sem erro (${dec.errors.join('; ')})`, failures)
+  ok(dec.results.alac?.audio === false, `alac (.m4a): áudio não decodificável (${JSON.stringify(dec.results.alac)})`, failures)
+  ok(dec.results.mkvAc3?.video === true && dec.results.mkvAc3?.audio === false, `mkv: vídeo H.264 decodificável, áudio AC-3 não (${JSON.stringify(dec.results.mkvAc3)})`, failures)
+  ok(dec.results.mp3?.audio === true && dec.results.mp4?.video === true && dec.results.mp4?.audio === true, `controles mp3/mp4 decodificáveis (${JSON.stringify(dec.results.mp3)} ${JSON.stringify(dec.results.mp4)})`, failures)
+  const iFlac = await probe(flac)
+  const iAlac = await probe(alac)
+  const iMkv = await probe(mkvAc3)
+  const withAudio = (a: Asset, audioDecodable: boolean): Asset => (a.audio ? { ...a, audio: { ...a.audio, decodable: audioDecodable } } : a)
+  const flacDecodable = dec.results.flac?.audio ?? false
+  const wFlac = waitDone(queue, project.id, 'a_flac')
+  const wAlac = waitDone(queue, project.id, 'a_alac')
+  const wMkv = waitDone(queue, project.id, 'a_mkv')
+  queue.enqueue(project.id, withAudio(mk('a_flac', flac, iFlac), flacDecodable))
+  queue.enqueue(project.id, withAudio(mk('a_alac', alac, iAlac), dec.results.alac?.audio ?? true))
+  queue.enqueue(project.id, withAudio(mk('a_mkv', mkvAc3, iMkv, dec.results.mkvAc3?.video ?? true), dec.results.mkvAc3?.audio ?? true))
+  const [pFlac, pAlac, pMkv] = await Promise.all([wFlac, wAlac, wMkv])
+  // FLAC: o WebCodecs desta versão do Chromium pode decodificar (sem intermediário) ou não (com .m4a)
+  ok(pFlac.status === 'ready' && !!pFlac.peaks && (flacDecodable ? !pFlac.intermediate : exists(pFlac.intermediate)), `flac (decodable=${flacDecodable}): ${flacDecodable ? 'sem' : 'com'} intermediário (${JSON.stringify(pFlac)})`, failures)
+  ok(pAlac.status === 'ready' && pAlac.intermediate === 'proxies/a_alac.intermediate.m4a' && exists(pAlac.intermediate) && !!pAlac.peaks && pAlac.audio?.decodable === false, `alac: intermediário .m4a + peaks (${JSON.stringify(pAlac)})`, failures)
+  ok(pMkv.status === 'ready' && pMkv.intermediate === 'proxies/a_mkv.intermediate.mp4' && exists(pMkv.intermediate) && !pMkv.proxy, `mkv: intermediário .mp4, sem proxy (${pMkv.intermediate} ${pMkv.proxy ?? ''}${pMkv.error ? ` — ${pMkv.error}` : ''})`, failures)
+  if (exists(pAlac.intermediate)) {
+    const s = (await probeFile(abs(pAlac.intermediate))).streams
+    ok(s.length === 1 && s[0].type === 'audio' && s[0].codec === 'aac', `alac: intermediário só com áudio AAC (${s.map((x) => `${x.type}:${x.codec}`).join(', ')})`, failures)
+  }
+  if (exists(pMkv.intermediate)) {
+    const s = (await probeFile(abs(pMkv.intermediate))).streams
+    const v = s.find((x) => x.type === 'video')
+    ok(v?.codec === 'h264' && v.width === 640 && s.some((x) => x.type === 'audio' && x.codec === 'aac'), `mkv: intermediário com o vídeo H.264 copiado + AAC (${s.map((x) => `${x.type}:${x.codec}`).join(', ')})`, failures)
+  }
+  if (exists(pAlac.intermediate) && exists(pMkv.intermediate)) {
+    const after = await decodeInRenderer(store, [
+      { name: 'alacInt', path: abs(pAlac.intermediate), kind: 'audio' },
+      { name: 'mkvInt', path: abs(pMkv.intermediate), kind: 'video' }
+    ])
+    ok(after.results.alacInt?.audio === true && after.results.mkvInt?.video === true && after.results.mkvInt?.audio === true, `intermediários decodificam no WebCodecs (${JSON.stringify(after.results)})`, failures)
+  }
+
   // proxy com cada encoder do cache de probe (somente leitura; nada é gravado nas configurações)
   for (const enc of cached?.available ?? []) {
     if (enc === encoder) continue
@@ -338,7 +426,7 @@ async function testIngest(): Promise<number> {
   ok(leftovers.length === 0, `cancelamento: sem arquivos .part (${leftovers.join(', ')})`, failures)
 
   ok(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
-  writeFileSync(join(outDir, 'ingest-report.json'), JSON.stringify({ encoder: cached?.preferred ?? 'libx264', available: cached?.available ?? [], probes: { src: iSrc, rotated: iRot, mp3: iMp3, png: iPng }, patches: { pLong, pRot, pMp3, pPng, pUndec }, failures }, null, 2))
+  writeFileSync(join(outDir, 'ingest-report.json'), JSON.stringify({ encoder: cached?.preferred ?? 'libx264', available: cached?.available ?? [], probes: { src: iSrc, rotated: iRot, mp3: iMp3, png: iPng }, patches: { pLong, pRot, pMp3, pPng, pUndec, pFlac, pAlac, pMkv }, decodable: dec.results, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE INGESTÃO PASSOU')
   return failures.length ? 1 : 0
 }
@@ -348,7 +436,7 @@ export async function runIntegrationTest(mode: string, store: SessionStore, proj
   try {
     if (mode === 'ffmpeg') code = await testFfmpeg(store)
     else if (mode === 'capture') code = await testCapture(store)
-    else if (mode === 'ingest') code = await testIngest()
+    else if (mode === 'ingest') code = await testIngest(store)
     else if (mode === 'editor-render') code = await testEditorRender(projects, store, outDir)
     else if (mode === 'editor-export') code = await testEditorExport(projects, store, outDir)
     else console.error(`modo de teste desconhecido: ${mode}`)

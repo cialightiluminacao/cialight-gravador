@@ -153,4 +153,11 @@ describe('IngestQueue', () => {
     await drain()
     expect(done.map((d) => d.assetId)).toEqual(['c'])
   })
+
+  it('áudio não decodificável num vídeo com GOP longo: intermediário (áudio AAC) e proxy, os dois no slot pesado', async () => {
+    queue.enqueue('p', { ...asset('a'), audio: { ...info.audio!, decodable: false } })
+    await drain()
+    expect(h.calls.filter((c) => c.kind === 'heavy')).toHaveLength(2)
+    expect(done[0].patch).toMatchObject({ status: 'ready', intermediate: 'proxies/a.intermediate.mp4', proxy: 'proxies/a.mp4', audio: { decodable: false } })
+  })
 })

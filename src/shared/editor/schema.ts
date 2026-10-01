@@ -121,7 +121,7 @@ const asset = z.object({
       gopUs: us
     })
     .optional(),
-  audio: z.object({ channels: z.number(), sampleRate: z.number(), codec: z.string() }).optional(),
+  audio: z.object({ channels: z.number(), sampleRate: z.number(), codec: z.string(), decodable: z.boolean().optional() }).optional(),
   audioTrackIndex: z.number().int().nonnegative().optional(),
   videoTrackIndex: z.number().int().nonnegative().optional(),
   proxy: z.string().optional(),

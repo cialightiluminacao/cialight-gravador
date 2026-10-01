@@ -11,7 +11,8 @@ export type AssetSource =
   | { type: 'generated'; file: string }
 export interface AssetVideoInfo { width: number; height: number; fps: number; codec: string; rotation: 0 | 90 | 180 | 270; decodable: boolean; gopUs: number }
 export interface FilmstripInfo { frames: number; everyUs: Us; tileW: number; tileH: number }
-export interface AssetAudioInfo { channels: number; sampleRate: number; codec: string }
+/** decodable: o WebCodecs desta máquina decodifica a faixa de áudio (ausente = sim; false → intermediário AAC). */
+export interface AssetAudioInfo { channels: number; sampleRate: number; codec: string; decodable?: boolean }
 export interface Asset {
   id: string; name: string; kind: AssetKind; source: AssetSource
   durationUs: Us | null

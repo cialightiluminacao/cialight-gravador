@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assetFromInfo, filmstripRel, intermediateRel, peaksRel, proxyRel } from './ingest'
+import { assetFromInfo, audioIntermediateRel, filmstripRel, intermediateRel, peaksRel, proxyRel } from './ingest'
 import type { MediaInfo } from './probe'
 
 const info: MediaInfo = {
@@ -36,6 +36,7 @@ describe('caminhos de saída', () => {
   it('relativos à pasta do projeto', () => {
     expect(proxyRel('a1')).toBe('proxies/a1.mp4')
     expect(intermediateRel('a1')).toBe('proxies/a1.intermediate.mp4')
+    expect(audioIntermediateRel('a1')).toBe('proxies/a1.intermediate.m4a')
     expect(filmstripRel('a1')).toBe('cache/a1.strip.jpg')
     expect(peaksRel('a1')).toBe('cache/a1.peaks.bin')
   })

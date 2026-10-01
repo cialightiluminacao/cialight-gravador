@@ -12,6 +12,10 @@ if (params.get('test') === 'capture') {
   // teste de integração do render do editor (CIALIGHT_TEST=editor-render): só o harness, sem UI
   const projectId = decodeURIComponent(location.hash.slice('#editor-test/'.length))
   void import('./editor/test/renderHarness').then(({ runRenderHarness }) => runRenderHarness(projectId))
+} else if (location.hash.startsWith('#decode-test/')) {
+  // teste de integração da ingestão (CIALIGHT_TEST=ingest): decodable de vídeo/áudio com o WebCodecs real
+  const params = JSON.parse(decodeURIComponent(location.hash.slice('#decode-test/'.length)))
+  void import('./editor/test/decodeHarness').then(({ runDecodeHarness }) => runDecodeHarness(params))
 } else if (location.hash.startsWith('#editor-export-test/')) {
   // teste de integração da exportação do editor (CIALIGHT_TEST=editor-export): só o harness, sem UI
   const params = JSON.parse(decodeURIComponent(location.hash.slice('#editor-export-test/'.length)))

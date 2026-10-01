@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { derivedComplete, intermediateArgs, needsProxy, proxyArgs } from './proxyPolicy'
+import { audioIntermediateArgs, derivedComplete, intermediateArgs, needsProxy, proxyArgs } from './proxyPolicy'
 import type { Asset } from '@shared/editor/project'
 import type { MediaInfo } from './probe'
 
@@ -41,6 +41,17 @@ describe('needsProxy', () => {
   })
   it('VFR → proxy', () => {
     expect(needsProxy(video({}, { vfr: true }), true)).toEqual({ proxy: true, intermediate: false, reasons: ['vfr'] })
+  })
+  it('áudio não decodificável (FLAC, AC-3…) → intermediário só de áudio', () => {
+    const flac: MediaInfo = { durationUs: 1, kind: 'audio', audio: { channels: 2, sampleRate: 44100, codec: 'flac' }, vfr: false, formatName: 'flac' }
+    expect(needsProxy(flac, true, false)).toEqual({ proxy: false, intermediate: true, audioOnly: true, reasons: ['audioUndecodable'] })
+    expect(needsProxy(flac, true, true)).toEqual({ proxy: false, intermediate: false, reasons: [] })
+  })
+  it('vídeo decodificável com áudio não decodificável → intermediário de áudio (vídeo copiado); proxy continua quando pedido', () => {
+    expect(needsProxy(video(), true, false)).toEqual({ proxy: false, intermediate: true, audioOnly: true, reasons: ['audioUndecodable'] })
+    expect(needsProxy(video({ gopUs: 10_000_000 }), true, false)).toEqual({ proxy: true, intermediate: true, audioOnly: true, reasons: ['longGop', 'audioUndecodable'] })
+    // vídeo não decodificável: o intermediário completo já leva o áudio em AAC
+    expect(needsProxy(video({ codec: 'hevc' }), false, false)).toEqual({ proxy: false, intermediate: true, reasons: ['undecodable', 'audioUndecodable'] })
   })
   it('áudio e imagem nunca precisam', () => {
     expect(needsProxy({ durationUs: 1, kind: 'audio', audio: { channels: 2, sampleRate: 44100, codec: 'mp3' }, vfr: false, formatName: 'mp3' }, false).proxy).toBe(false)
@@ -105,6 +116,24 @@ describe('intermediateArgs', () => {
   })
 })
 
+describe('audioIntermediateArgs', () => {
+  it('só áudio: AAC 192k sem vídeo (capa ignorada)', () => {
+    const a = audioIntermediateArgs('in.flac', 'out.m4a', { durationUs: 1, kind: 'audio', audio: { channels: 2, sampleRate: 44100, codec: 'flac' }, vfr: false, formatName: 'flac' })
+    expect(valueAfter(a, '-map')).toBe('0:a:0')
+    expect(a).toContain('-vn')
+    expect(valueAfter(a, '-c:a')).toBe('aac')
+    expect(valueAfter(a, '-b:a')).toBe('192k')
+    expect(a[a.length - 1]).toBe('out.m4a')
+  })
+  it('vídeo: copia o vídeo e converte o áudio para AAC', () => {
+    const a = audioIntermediateArgs('in.mkv', 'out.mp4', video({}, { audio: { channels: 6, sampleRate: 48000, codec: 'ac3' } }))
+    expect(valueAfter(a, '-c:v')).toBe('copy')
+    expect(valueAfter(a, '-c:a')).toBe('aac')
+    expect(a.filter((x) => x === '-map')).toHaveLength(2)
+    expect(valueAfter(a, '-movflags')).toBe('+faststart')
+  })
+})
+
 describe('derivedComplete', () => {
   const base: Asset = {
     id: 'a', name: 'a', kind: 'video', source: { type: 'file', path: 'x', size: 1, mtimeMs: 1 }, durationUs: 6_000_000, status: 'ready',
@@ -124,6 +153,14 @@ describe('derivedComplete', () => {
     const undec = { ...base, filmstrip: 'f', peaks: 'p', video: { ...base.video!, decodable: false } }
     expect(derivedComplete(undec)).toBe(false)
     expect(derivedComplete({ ...undec, intermediate: 'i' })).toBe(true)
+  })
+  it('áudio não decodificável exige o intermediário (só áudio ou vídeo)', () => {
+    const flac: Asset = { ...base, kind: 'audio', video: undefined, peaks: 'p', audio: { channels: 2, sampleRate: 44100, codec: 'flac', decodable: false } }
+    expect(derivedComplete(flac)).toBe(false)
+    expect(derivedComplete({ ...flac, intermediate: 'i' })).toBe(true)
+    const ac3: Asset = { ...base, filmstrip: 'f', peaks: 'p', audio: { channels: 6, sampleRate: 48000, codec: 'ac3', decodable: false } }
+    expect(derivedComplete(ac3)).toBe(false)
+    expect(derivedComplete({ ...ac3, intermediate: 'i' })).toBe(true)
   })
   it('áudio precisa de peaks; imagem sempre completa', () => {
     expect(derivedComplete({ ...base, kind: 'audio', video: undefined })).toBe(false)

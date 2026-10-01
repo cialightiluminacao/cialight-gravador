@@ -22,32 +22,37 @@ export function projectFileUrl(projectId: string, rel: string): string {
 }
 
 /**
- * O WebCodecs desta máquina decodifica a mídia? Vídeo: faixa de vídeo principal; só áudio: faixa de áudio.
- * Gravações do app (H.264) sempre decodificam. Falha ao abrir = não decodificável (o main gera intermediário).
+ * O WebCodecs desta máquina decodifica as faixas da mídia em `url`? `video`: faixa de vídeo principal (mídia
+ * só de áudio: true); `audio`: faixa de áudio principal (sem faixa de áudio: true). FLAC, HE-AAC, AC-3…
+ * costumam falhar no áudio. Falha ao abrir = nada decodifica (o main gera intermediário).
  */
-export async function decideDecodable(projectId: string, a: Asset): Promise<boolean> {
-  if (a.kind === 'image' || a.source.type === 'session') return true
-  const input = new Input({ source: new UrlSource(mediaUrl(projectId, a.id)), formats: ALL_FORMATS })
+export async function decodableTracks(url: string, kind: 'video' | 'audio'): Promise<{ video: boolean; audio: boolean }> {
+  const input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS })
   try {
-    if (a.kind === 'video') {
-      const track = await input.getPrimaryVideoTrack()
-      return !!track && (await track.canDecode())
-    }
-    const track = await input.getPrimaryAudioTrack()
-    return !!track && (await track.canDecode())
+    const v = kind === 'video' ? await input.getPrimaryVideoTrack() : null
+    const video = kind === 'video' ? !!v && (await v.canDecode()) : true
+    const a = await input.getPrimaryAudioTrack()
+    const audio = a ? await a.canDecode() : kind === 'video'
+    return { video, audio }
   } catch (e) {
-    console.warn(`[editor] canDecode de ${a.name} falhou`, e)
-    return false
+    console.warn(`[editor] canDecode de ${url} falhou`, e)
+    return { video: false, audio: false }
   } finally {
     input.dispose()
   }
 }
 
+/** `decodable`/`audioDecodable` para media.enqueue. Gravações do app (H.264 + AAC) sempre decodificam. */
+export async function decideDecodable(projectId: string, a: Asset): Promise<{ decodable: boolean; audioDecodable: boolean }> {
+  if (a.kind === 'image' || a.source.type === 'session') return { decodable: true, audioDecodable: true }
+  const r = await decodableTracks(mediaUrl(projectId, a.id), a.kind)
+  return a.kind === 'audio' ? { decodable: r.audio, audioDecodable: r.audio } : { decodable: r.video, audioDecodable: r.audio }
+}
+
 /** Decide `decodable` e põe o asset na fila de ingestão do main. */
 export async function enqueueAsset(projectId: string, a: Asset): Promise<void> {
   try {
-    const decodable = await decideDecodable(projectId, a)
-    await window.api.media.enqueue(projectId, a.id, { decodable })
+    await window.api.media.enqueue(projectId, a.id, await decideDecodable(projectId, a))
   } catch (e) {
     toast.error(`Não foi possível processar “${a.name}”: ${errMsg(e)}`)
   }

@@ -7,14 +7,28 @@ import type { MediaInfo } from './probe'
 // (codec que o WebCodecs não decodifica) e monta os argumentos do ffmpeg para gerá-los.
 // O autorotate padrão do ffmpeg aplica a rotação de exibição: proxy/intermediário saem "em pé".
 
-export type ProxyReason = 'undecodable' | 'longGop' | 'highRes' | 'vfr'
+export type ProxyReason = 'undecodable' | 'audioUndecodable' | 'longGop' | 'highRes' | 'vfr'
 
 const LONG_GOP_US = 2_000_000
 const HIGH_RES_HEIGHT = 1440
 const PROXY_SHORT_SIDE = 720
 const STANDARD_RATES = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 120]
 
-export function needsProxy(info: MediaInfo, decodable: boolean): { proxy: boolean; intermediate: boolean; reasons: ProxyReason[] } {
+export interface ProxyDecision {
+  proxy: boolean
+  intermediate: boolean
+  /** Intermediário só para o áudio (AAC): o vídeo, decodificável, é copiado (mídia só de áudio: .m4a). */
+  audioOnly?: true
+  reasons: ProxyReason[]
+}
+
+/**
+ * `decodable`: faixa de vídeo; `audioDecodable`: faixa de áudio (FLAC, HE-AAC, AC-3… o WebCodecs pode não
+ * decodificar — sem o intermediário a mídia tocaria e exportaria em silêncio).
+ */
+export function needsProxy(info: MediaInfo, decodable: boolean, audioDecodable = true): ProxyDecision {
+  const audioBad = !audioDecodable && !!info.audio && info.kind !== 'image'
+  if (info.kind === 'audio') return audioBad ? { proxy: false, intermediate: true, audioOnly: true, reasons: ['audioUndecodable'] } : { proxy: false, intermediate: false, reasons: [] }
   const v = info.video
   if (info.kind !== 'video' || !v) return { proxy: false, intermediate: false, reasons: [] }
   const reasons: ProxyReason[] = []
@@ -22,9 +36,13 @@ export function needsProxy(info: MediaInfo, decodable: boolean): { proxy: boolea
   if (v.gopUs > LONG_GOP_US) reasons.push('longGop')
   if (v.height > HIGH_RES_HEIGHT) reasons.push('highRes')
   if (info.vfr) reasons.push('vfr')
-  // Não decodificável: o intermediário full-res (GOP 1 s, CFR) serve de preview e de fonte do export.
+  if (audioBad) reasons.push('audioUndecodable')
+  // Não decodificável: o intermediário full-res (GOP 1 s, CFR, áudio AAC) serve de preview e de fonte do export.
   if (!decodable) return { proxy: false, intermediate: true, reasons }
-  return { proxy: reasons.length > 0, intermediate: false, reasons }
+  const proxy = reasons.some((r) => r !== 'audioUndecodable')
+  // Só o áudio não decodifica: intermediário com o vídeo copiado + AAC (o proxy, se pedido, já sai com AAC)
+  if (audioBad) return { proxy, intermediate: true, audioOnly: true, reasons }
+  return { proxy, intermediate: false, reasons }
 }
 
 /** Taxa de saída CFR: encaixa em uma taxa padrão próxima (±2 %), senão arredonda a 3 casas. */
@@ -107,15 +125,28 @@ export function intermediateArgs(input: string, output: string, info: MediaInfo,
 }
 
 /**
+ * Intermediário de áudio (AAC 192k, faststart): mídia só de áudio → `-vn` (capa ignorada, saída .m4a);
+ * vídeo → vídeo copiado sem recodificar + áudio convertido (saída .mp4).
+ */
+export function audioIntermediateArgs(input: string, output: string, info: MediaInfo): string[] {
+  const head = ['-hide_banner', '-nostdin', '-y', '-i', input]
+  const audio = ['-c:a', 'aac', '-b:a', '192k']
+  if (info.kind === 'audio') return [...head, '-map', '0:a:0', '-vn', ...audio, ...tail(output)]
+  return [...head, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', ...audio, ...tail(output)]
+}
+
+/**
  * Derivados de um asset já prontos? Vídeo: filmstrip, peaks (se tem áudio) e proxy/intermediário
- * quando a política pede (VFR não fica no Asset, então não entra aqui). Áudio: peaks. Imagem: sempre.
+ * quando a política pede (VFR não fica no Asset, então não entra aqui). Áudio: peaks (e o intermediário
+ * quando o WebCodecs não decodifica). Imagem: sempre.
  */
 export function derivedComplete(a: Asset): boolean {
   if (a.kind === 'image') return true
-  if (a.kind === 'audio') return !!a.peaks
+  const audioDecodable = a.audio?.decodable !== false
+  if (a.kind === 'audio') return !!a.peaks && (audioDecodable || !!a.intermediate)
   if (!a.filmstrip || (a.audio && !a.peaks)) return false
   if (!a.video) return true
   const { video } = a
-  const d = needsProxy({ durationUs: a.durationUs, kind: 'video', video, audio: a.audio, vfr: false, formatName: '' }, video.decodable)
+  const d = needsProxy({ durationUs: a.durationUs, kind: 'video', video, audio: a.audio, vfr: false, formatName: '' }, video.decodable, audioDecodable)
   return (!d.intermediate || !!a.intermediate) && (!d.proxy || !!a.proxy)
 }

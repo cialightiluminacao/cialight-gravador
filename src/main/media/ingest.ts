@@ -4,7 +4,7 @@ import type { Asset } from '@shared/editor/project'
 import type { HwEncoder } from '@shared/types'
 import type { IngestJob, IngestStep } from '@shared/ipc'
 import { probe, type MediaInfo } from './probe'
-import { intermediateArgs, needsProxy, proxyArgs } from './proxyPolicy'
+import { audioIntermediateArgs, intermediateArgs, needsProxy, proxyArgs } from './proxyPolicy'
 import { FfmpegError } from '../export/ffmpegRunner'
 import { buildFilmstrip, buildPeaks, buildThumb, CancelledError, runToFile } from './analysis'
 
@@ -91,6 +91,8 @@ export function assetFromInfo(id: string, path: string, st: { size: number; mtim
 
 export const proxyRel = (assetId: string): string => `proxies/${assetId}.mp4`
 export const intermediateRel = (assetId: string): string => `proxies/${assetId}.intermediate.mp4`
+/** Intermediário de mídia só de áudio (AAC). */
+export const audioIntermediateRel = (assetId: string): string => `proxies/${assetId}.intermediate.m4a`
 export const filmstripRel = (assetId: string): string => `cache/${assetId}.strip.jpg`
 export const peaksRel = (assetId: string): string => `cache/${assetId}.peaks.bin`
 export const THUMB_REL = 'cache/thumb.jpg'
@@ -185,7 +187,7 @@ export class IngestQueue {
     let info: MediaInfo | null = null
     if (!input.analyzeOnly) info = await this.step(this.light, signal, { ...id, step: 'probe' }, () => probe(input.path))
     const durationUs = info?.durationUs ?? asset.durationUs ?? 0
-    const decision = info ? needsProxy(info, asset.video?.decodable ?? true) : { proxy: false, intermediate: false, reasons: [] }
+    const decision = info ? needsProxy(info, asset.video?.decodable ?? true, asset.audio?.decodable ?? true) : { proxy: false, intermediate: false, reasons: [] }
     if (decision.reasons.length) this.deps.log?.info(`ingestão ${asset.id}: ${decision.reasons.join(', ')}`)
 
     const patch: Partial<Asset> = {}
@@ -201,20 +203,45 @@ export class IngestQueue {
     }
     const tasks: Promise<void>[] = []
 
-    if (info && (decision.proxy || decision.intermediate)) {
-      const intermediate = decision.intermediate
-      const rel = intermediate ? intermediateRel(asset.id) : proxyRel(asset.id)
+    if (info && decision.intermediate) {
       const mi = info
+      const audioOnly = !!decision.audioOnly
+      const rel = audioOnly && mi.kind === 'audio' ? audioIntermediateRel(asset.id) : intermediateRel(asset.id)
       tasks.push(
         guard(
-          intermediate ? 'intermediário' : 'proxy',
-          this.step(this.heavy, signal, { ...id, step: intermediate ? 'intermediate' : 'proxy' }, async (onProgress) => {
-            const encoder = this.deps.encoder()
+          'intermediário',
+          this.step(this.heavy, signal, { ...id, step: 'intermediate' }, async (onProgress) => {
             const out = this.out(projectId, rel)
-            const build = (tmp: string): string[] => (intermediate ? intermediateArgs : proxyArgs)(input.path, tmp, mi, encoder)
-            await runToFile(build, out, { signal, onProgress }, durationUs, intermediate ? 'intermediário' : 'proxy')
-            if (intermediate) patch.intermediate = rel
-            else patch.proxy = rel
+            const opts = { signal, onProgress }
+            if (!audioOnly) {
+              const encoder = this.deps.encoder()
+              await runToFile((tmp) => intermediateArgs(input.path, tmp, mi, encoder), out, opts, durationUs, 'intermediário')
+            } else {
+              try {
+                await runToFile((tmp) => audioIntermediateArgs(input.path, tmp, mi), out, opts, durationUs, 'intermediário de áudio')
+              } catch (e) {
+                // vídeo que não cabe no MP4 sem recodificar (ex.: VP8): intermediário completo
+                if (mi.kind === 'audio' || signal.aborted || e instanceof CancelledError) throw e
+                this.deps.log?.warn(`ingestão ${asset.id}: cópia do vídeo falhou; recodificando`, e)
+                const encoder = this.deps.encoder()
+                await runToFile((tmp) => intermediateArgs(input.path, tmp, mi, encoder), out, opts, durationUs, 'intermediário')
+              }
+            }
+            patch.intermediate = rel
+          })
+        )
+      )
+    }
+    if (info && decision.proxy) {
+      const mi = info
+      const rel = proxyRel(asset.id)
+      tasks.push(
+        guard(
+          'proxy',
+          this.step(this.heavy, signal, { ...id, step: 'proxy' }, async (onProgress) => {
+            const encoder = this.deps.encoder()
+            await runToFile((tmp) => proxyArgs(input.path, tmp, mi, encoder), this.out(projectId, rel), { signal, onProgress }, durationUs, 'proxy')
+            patch.proxy = rel
           })
         )
       )
@@ -265,6 +292,7 @@ export class IngestQueue {
     const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected')
     if (rejected) throw rejected.reason
     if (asset.video) patch.video = { ...asset.video }
+    if (asset.audio) patch.audio = { ...asset.audio }
     if (errors.length) return { ...patch, status: 'error', error: errors.join('; ') }
     return { ...patch, status: 'ready', error: undefined }
   }
