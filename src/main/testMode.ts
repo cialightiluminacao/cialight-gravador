@@ -14,6 +14,7 @@ import { probe, type MediaInfo } from './media/probe'
 import { needsProxy } from './media/proxyPolicy'
 import { IngestQueue, assetFromInfo, type IngestJob } from './media/ingest'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
+import { getSettings } from './settings/settingsStore'
 import { startExportJob } from './export/exportJob'
 import { buildReviewAssets } from './export/reviewAssets'
 import { preloadPath, loadPage } from './windows/recorderWindow'
@@ -229,7 +230,8 @@ async function testIngest(): Promise<number> {
   }
   project.assets = [mk('a_long', src, iSrc), mk('a_rot', rotated, iRot), mk('a_mp3', mp3, iMp3), mk('a_png', png, iPng)]
   projects.create(project)
-  const cached = cachedEncoderProbe()
+  // só leitura do cache (V2; numa instalação que ainda só tem o cache da v1, a lista dele serve para exercitar os encoders)
+  const cached = cachedEncoderProbe() ?? getSettings().lastEncoderProbe
   let encoder: HwEncoder = cached?.preferred ?? 'libx264'
   const queue = new IngestQueue({
     projectFile: (pid, rel) => projects.filePath(pid, rel),
@@ -257,6 +259,9 @@ async function testIngest(): Promise<number> {
     ok(v?.height === 720 && v?.width === 1280, `proxy: 1280×720 (${v?.width}×${v?.height})`, failures)
     ok(Math.abs(pp.durationMs - 6000) <= 34, `proxy: duração 6 s ±1 quadro (${pp.durationMs} ms)`, failures)
     ok(pp.streams.some((s) => s.type === 'audio' && s.codec === 'aac'), 'proxy: áudio AAC', failures)
+    // regra única de cor: fonte 1080p sem marcação → proxy marcado BT.709 limitado (timeline, preview e export concordam)
+    const pc = (await probe(abs(pLong.proxy))).color
+    ok(iSrc.color?.space === null && pc?.space === 'bt709' && pc.primaries === 'bt709' && pc.transfer === 'bt709' && pc.range === 'tv', `proxy: marcações de cor pela regra (fonte ${JSON.stringify(iSrc.color)} → proxy ${JSON.stringify(pc)})`, failures)
     const iv = keyIntervals(await probeKeyframes(abs(pLong.proxy)), 30)
     ok(iv.length >= 11 && iv.every((n) => n === 15), `proxy: keyframes a cada 15 quadros (${iv.length + 1} keyframes, intervalos ${uniq(iv)})`, failures)
     ok(isFastStart(abs(pLong.proxy)), 'proxy: faststart', failures)
@@ -298,6 +303,8 @@ async function testIngest(): Promise<number> {
   if (exists(pUndec.intermediate)) {
     const v = (await probeFile(abs(pUndec.intermediate))).streams.find((s) => s.type === 'video')
     ok(v?.width === 1920 && v?.height === 1080, `intermediário: 1920×1080 (${v?.width}×${v?.height})`, failures)
+    const ic = (await probe(abs(pUndec.intermediate))).color
+    ok(ic?.space === 'bt709' && ic.range === 'tv', `intermediário: marcações de cor pela regra (${JSON.stringify(ic)})`, failures)
     const iv = keyIntervals(await probeKeyframes(abs(pUndec.intermediate)), 30)
     ok(iv.length >= 4 && iv.every((n) => n === 30), `intermediário: GOP 1 s (${uniq(iv)})`, failures)
   }
@@ -313,6 +320,8 @@ async function testIngest(): Promise<number> {
     const v = exists(r.proxy) ? (await probeFile(abs(r.proxy))).streams.find((s) => s.type === 'video') : undefined
     const iv = exists(r.proxy) ? keyIntervals(await probeKeyframes(abs(r.proxy)), 30) : []
     ok(r.status === 'ready' && v?.height === 720 && iv.length >= 10 && iv.every((n) => n === 15), `proxy com ${enc}: 720p, keyframes a cada 15 (${v?.height}, ${uniq(iv)}${r.error ? ` — ${r.error}` : ''})`, failures)
+    const ec = exists(r.proxy) ? (await probe(abs(r.proxy))).color : undefined
+    ok(ec?.space === 'bt709' && ec.primaries === 'bt709' && ec.transfer === 'bt709' && ec.range === 'tv', `proxy com ${enc}: marcações de cor (${JSON.stringify(ec)})`, failures)
   }
 
   // cancelamento: nenhum 'done' e nenhum .part sobrando

@@ -1,4 +1,5 @@
 import type { HwEncoder } from '@shared/types'
+import { colorTagArgs } from '@shared/editor/sourceColor'
 import type { Asset } from '@shared/editor/project'
 import type { MediaInfo } from './probe'
 
@@ -83,6 +84,8 @@ export function proxyArgs(input: string, output: string, info: MediaInfo, encode
     '-vf', scale,
     ...(info.vfr ? ['-fps_mode', 'cfr', '-r', String(fps)] : []),
     ...videoCodecArgs(encoder, encoder === 'libx264' ? 23 : 25, Math.max(1, Math.round(fps / 2)), 'fast'),
+    // o YUV passa sem conversão de matriz: a marcação diz como lê-lo (regra única, sourceColor.ts)
+    ...colorTagArgs(info.color, v.width, v.height),
     ...audioArgs(info, '128k'),
     ...tail(output)
   ]
@@ -97,6 +100,7 @@ export function intermediateArgs(input: string, output: string, info: MediaInfo,
     ...commonHead(input),
     ...(info.vfr ? ['-fps_mode', 'cfr', '-r', String(fps)] : []),
     ...videoCodecArgs(encoder, encoder === 'h264_nvenc' ? 19 : 18, Math.max(1, Math.round(fps)), 'quality'),
+    ...colorTagArgs(info.color, v.width, v.height),
     ...audioArgs(info, '192k'),
     ...tail(output)
   ]

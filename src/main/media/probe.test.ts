@@ -40,6 +40,13 @@ describe('parseFfprobe', () => {
     expect(i.formatName).toBe('mov,mp4,m4a,3gp,3g2,mj2')
   })
 
+  it('cor declarada da faixa de vídeo (sem marcação → campos nulos)', () => {
+    const j = structuredClone(phone) as { streams: Record<string, unknown>[] }
+    Object.assign(j.streams[0], { color_space: 'smpte170m', color_primaries: 'smpte170m', color_transfer: 'smpte170m', color_range: 'tv' })
+    expect(parseFfprobe(j, 'a.mp4').color).toEqual({ space: 'smpte170m', primaries: 'smpte170m', transfer: 'smpte170m', range: 'tv' })
+    expect(parseFfprobe(phone, 'a.mp4').color).toEqual({ space: null, primaries: null, transfer: null, range: null })
+  })
+
   it('tags.rotate é usado quando não há displaymatrix', () => {
     const j = structuredClone(phone) as { streams: Record<string, unknown>[] }
     delete j.streams[0].side_data_list

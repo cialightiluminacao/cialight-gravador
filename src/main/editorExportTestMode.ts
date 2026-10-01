@@ -8,6 +8,7 @@ import type { ExportOptions } from '@shared/types'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset, deleteRange, updateItem } from '@shared/editor/ops'
 import { clampPip, pipPixelRect, pipRectAt } from '@shared/compositor/pipMath'
+import { untaggedFamily } from '@shared/editor/sourceColor'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { probeFile, runFfmpeg } from './export/ffmpegRunner'
@@ -248,9 +249,10 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     const f = await frameRgb(colorSrc[COLOR_601], 1.0, join(dir, 'cor601-fonte.rgb'))
     check(psnr(e, f) > 30, `fonte BT.601 marcada: RGB do quadro exportado ≈ fonte (ffmpeg seguindo as marcações) PSNR ${psnr(e, f).toFixed(1)} dB > 30`, failures)
   } else check(false, `fonte BT.601 exportada (${c601?.export.error})`, failures)
-  // Sem marcação, cada um adivinha: o ffmpeg (swscale) usa sempre BT.601; o Chromium entrega o VideoFrame como
-  // BT.709 limitado (mesmo em SD — medido abaixo). O compositor relê essas fontes como BT.601 (BT709_TO_BT601),
-  // igual ao ffmpeg que gerou o arquivo e às miniaturas: a saída tem de bater com a leitura padrão do ffmpeg.
+  // Sem marcação, cada um adivinha: o ffmpeg (swscale) usa sempre BT.601; o Chromium (e o mediabunny, que copia o
+  // padrão dele) decodifica como BT.709 limitado, mesmo em SD — o colorDiag mostra o VideoFrame de um sink sem
+  // ajuste. Regra única (shared/editor/sourceColor.ts, convenção dos players): HD → BT.709, SD → BT.601 (o
+  // DecoderPool declara BT.601 ao decoder só em SD). A saída tem de bater com a fonte lida pela regra.
   for (const id of [COLOR_UNTAGGED, COLOR_UNTAGGED_SD]) {
     const cu = color[id]
     const cs = (cu?.frame as { colorSpace?: { matrix?: string; fullRange?: boolean } } | undefined)?.colorSpace
@@ -263,8 +265,10 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     const interp: Record<string, number> = {}
     for (const m of ['bt601', 'bt709'] as const) for (const rg of ['tv', 'pc'] as const) interp[`${m}/${rg}`] = +psnr(e, await frameRgbAs(colorSrc[id], 1.0, join(dir, `${id}-fonte-${m}-${rg}.rgb`), m, rg)).toFixed(1)
     const ffDefault = +psnr(e, await frameRgb(colorSrc[id], 1.0, join(dir, `${id}-fonte.rgb`))).toFixed(1)
+    const [sw, sh] = id === COLOR_UNTAGGED_SD ? [640, 480] : [W, H]
+    const rule = `${untaggedFamily(sw, sh)}/tv`
     console.log(`${id}: PSNR da saída × fonte em cada interpretação ${JSON.stringify(interp)}; padrão do ffmpeg ${ffDefault} dB`)
-    check(ffDefault > 30, `${id}: saída = fonte lida como o ffmpeg lê (BT.601) apesar do Chromium decodificar como ${cs.matrix}/${cs.fullRange ? 'pc' : 'tv'} (${ffDefault} dB > 30; ${JSON.stringify(interp)})`, failures)
+    check(interp[rule] > 30, `${id} (${sw}×${sh}): saída = fonte lida pela regra (${rule}: ${interp[rule]} dB > 30; Chromium sem ajuste: ${cs.matrix}/${cs.fullRange ? 'pc' : 'tv'}; ${JSON.stringify(interp)})`, failures)
   }
 
   // ---- preview intocado durante a exportação ----

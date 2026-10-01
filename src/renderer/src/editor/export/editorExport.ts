@@ -11,6 +11,7 @@ import { AudioClient } from '../engine/audio/AudioClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
 import { KEYFRAME_INTERVAL_S, resizeBitrate } from './exportPlan'
+import { EditorExportCancelled, finalizeOrCancel, type Finalized } from './finalize'
 
 export interface EditorExportRequest {
   project: Project
@@ -58,12 +59,7 @@ export interface EditorExportResult {
   warnings: string[]
 }
 
-export class EditorExportCancelled extends Error {
-  constructor() {
-    super('Exportação cancelada')
-    this.name = 'EditorExportCancelled'
-  }
-}
+export { EditorExportCancelled }
 
 class AttemptError extends Error {
   constructor(message: string, readonly retryInSoftware: boolean) {
@@ -104,21 +100,10 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
       const off = api.editorExport.onFinalizeProgress((p) => {
         if (p.jobId === enc.jobId) opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98 + 2 * p.fraction, speed: null, etaS: null })
       })
-      let out: Awaited<ReturnType<typeof api.editorExport.finalize>>
+      let out: Finalized
       try {
         opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98, speed: null, etaS: null })
-        const pending = api.editorExport.finalize(enc.jobId, { durationUs, maxBytes: pass === 1 ? req.targetBytes : undefined })
-        // cancelar durante o remux: o main interrompe o ffmpeg e apaga o parcial e a saída
-        const onAbort = (): void => void api.editorExport.cancel(enc.jobId).catch(() => {})
-        signal.addEventListener('abort', onAbort)
-        try {
-          out = await pending
-        } catch (e) {
-          if (signal.aborted) throw new EditorExportCancelled()
-          throw e
-        } finally {
-          signal.removeEventListener('abort', onAbort)
-        }
+        out = await finalizeOrCancel(api.editorExport, enc.jobId, { durationUs, maxBytes: pass === 1 ? req.targetBytes : undefined }, signal)
       } finally {
         off()
       }

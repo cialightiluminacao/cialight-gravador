@@ -13,6 +13,7 @@
 // Se o decoder de uma entrada saudável falhar (ex.: recuperado pelo Chromium), ela é recriada uma vez.
 import { ALL_FORMATS, Input, UrlSource, VideoSampleSink, type InputVideoTrack, type VideoSample } from 'mediabunny'
 import type { Us } from '@shared/editor/project'
+import { decoderMatrixOverride } from '@shared/editor/sourceColor'
 
 // Salto à frente maior que isso reinicia o iterador no alvo (em vez de decodificar tudo no meio).
 const MAX_SKIP_S = 1
@@ -239,7 +240,7 @@ async function open(url: string, trackIndex: number | null): Promise<Opened> {
     const track = trackIndex === null ? await input.getPrimaryVideoTrack() : ((await input.getVideoTracks())[trackIndex] ?? null)
     if (!track) throw new Error(trackIndex === null ? 'sem faixa de vídeo' : `faixa de vídeo v:${trackIndex} inexistente`)
     if (!(await track.canDecode())) throw new Error(`codec não decodificável: ${track.codec}`)
-    await assumeBt601WhenUntagged(track)
+    await applySourceColorRule(track)
     const firstS = await track.getFirstTimestamp()
     return { input, sink: new VideoSampleSink(track), firstS }
   } catch (err) {
@@ -249,19 +250,21 @@ async function open(url: string, trackIndex: number | null): Promise<Opened> {
 }
 
 /**
- * Faixa sem matriz de cor declarada: o Chromium (e o mediabunny, que copia o padrão dele) decodifica como BT.709;
- * o ffmpeg — que gera a maioria desses arquivos (RGB → YUV com a matriz padrão BT.601, sem marcar) e as miniaturas
- * da linha do tempo — lê como BT.601. Declarar BT.601 na configuração do decoder faz o VideoFrame sair igual ao
- * ffmpeg, sem a perda de cores saturadas que uma correção depois da conversão (já recortada em 0–255) teria.
- * Só a matriz muda (primárias/transferência BT.709 = sem conversão de gama nem de gamut, como o ffmpeg).
+ * Regra única de cor (shared/editor/sourceColor.ts): marcada → a marcação; sem marcação → convenção dos players,
+ * HD = BT.709 (o padrão do Chromium/mediabunny, nada a fazer) e SD = BT.601. Para SD sem marcação, declara
+ * `matrix: smpte170m` na configuração do decoder: o VideoFrame já sai convertido certo (sem a perda de cores
+ * saturadas de uma correção depois da conversão). Só a matriz muda (primárias/transferência BT.709, sem
+ * conversão de gamut nem de gama — como o ffmpeg). Devolve se trocou.
  */
-export async function assumeBt601WhenUntagged(track: Pick<InputVideoTrack, 'getColorSpace' | 'getDecoderConfig'>): Promise<boolean> {
+export async function applySourceColorRule(track: Pick<InputVideoTrack, 'getColorSpace' | 'getDecoderConfig' | 'getCodedWidth' | 'getCodedHeight'>): Promise<boolean> {
   const cs = await track.getColorSpace().catch(() => null)
-  if (!cs || cs.matrix) return false
+  if (!cs) return false
+  const matrix = decoderMatrixOverride(!!cs.matrix, await track.getCodedWidth(), await track.getCodedHeight())
+  if (!matrix) return false
   const original = track.getDecoderConfig.bind(track)
   track.getDecoderConfig = async () => {
     const config = await original()
-    return config ? { ...config, colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'smpte170m', fullRange: cs.fullRange ?? false } } : config
+    return config ? { ...config, colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix, fullRange: cs.fullRange ?? false } } : config
   }
   return true
 }

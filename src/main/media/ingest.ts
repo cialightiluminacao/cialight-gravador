@@ -226,7 +226,8 @@ export class IngestQueue {
           'filmstrip',
           this.step(this.light, signal, { ...id, step: 'filmstrip' }, async (onProgress) => {
             const rel = filmstripRel(asset.id)
-            const r = await buildFilmstrip(input.path, this.out(projectId, rel), durationUs, { signal, onProgress, map: input.videoMap })
+            const source = info?.video ? { color: info.color, width: info.video.width, height: info.video.height } : null
+            const r = await buildFilmstrip(input.path, this.out(projectId, rel), durationUs, { signal, onProgress, map: input.videoMap, source })
             patch.filmstrip = rel
             patch.filmstripInfo = { frames: r.frames, everyUs: r.everyUs, tileW: r.tileW, tileH: r.tileH }
             // miniatura do projeto: do primeiro vídeo cujo filmstrip ficar pronto (dois simultâneos
@@ -234,7 +235,7 @@ export class IngestQueue {
             const thumb = this.deps.projectFile(projectId, THUMB_REL)
             if (!existsSync(thumb)) {
               try {
-                await buildThumb(input.path, thumb, durationUs, { signal, map: input.videoMap })
+                await buildThumb(input.path, thumb, durationUs, { signal, map: input.videoMap, source })
               } catch (e) {
                 if (e instanceof CancelledError) throw e
                 this.deps.log?.warn(`miniatura do projeto ${projectId} falhou`, e)

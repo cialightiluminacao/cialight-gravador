@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'child_process'
 import { renameSync, rmSync, writeFileSync } from 'fs'
 import { ffmpegPath } from '../export/ffmpegPath'
+import { jpegScaleColorOpts, type SourceColor } from '@shared/editor/sourceColor'
 import { FfmpegError, probeFile, runFfmpeg } from '../export/ffmpegRunner'
 import { log } from '../log'
 
@@ -18,6 +19,8 @@ export interface AnalysisOpts {
   onProgress?: (percent: number) => void
   /** Stream de entrada (ex.: '0:v:1' para a webcam do rec.mp4); padrão 1ª faixa do tipo. */
   map?: string
+  /** Cor da fonte (probe) para ler o YUV pela regra única (sourceColor.ts); ausente = gravação do app (marcada). */
+  source?: { color?: SourceColor | null; width: number; height: number } | null
 }
 
 export class CancelledError extends Error {
@@ -74,7 +77,7 @@ export async function buildFilmstrip(
     (tmp) => [
       '-hide_banner', '-nostdin', '-y', '-i', input, '-map', opts.map ?? '0:v:0', '-an',
       // fps racional exato (1e6/everyUs quadros por segundo); tile completa com preto se faltar quadro no fim
-      '-vf', `fps=1000000/${everyUs},scale=-2:${FILMSTRIP_TILE_H},tile=${frames}x1`,
+      '-vf', `fps=1000000/${everyUs},scale=-2:${FILMSTRIP_TILE_H}:${jpegScaleColorOpts(opts.source ?? null)},tile=${frames}x1`,
       '-frames:v', '1', '-q:v', '5', '-update', '1', '-progress', 'pipe:1', '-nostats', tmp
     ],
     outJpg,
@@ -93,7 +96,7 @@ export async function buildFilmstrip(
 export async function buildThumb(input: string, outJpg: string, durationUs: number, opts: AnalysisOpts = {}): Promise<string> {
   const atSec = Math.min(1, durationUs / 2 / 1_000_000)
   await runToFile(
-    (tmp) => ['-hide_banner', '-nostdin', '-y', '-ss', atSec.toFixed(3), '-i', input, '-map', opts.map ?? '0:v:0', '-an', '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '3', '-update', '1', '-progress', 'pipe:1', '-nostats', tmp],
+    (tmp) => ['-hide_banner', '-nostdin', '-y', '-ss', atSec.toFixed(3), '-i', input, '-map', opts.map ?? '0:v:0', '-an', '-frames:v', '1', '-vf', `scale=320:-2:${jpegScaleColorOpts(opts.source ?? null)}`, '-q:v', '3', '-update', '1', '-progress', 'pipe:1', '-nostats', tmp],
     outJpg,
     opts,
     durationUs,

@@ -1,4 +1,5 @@
 import { execFile } from 'child_process'
+import type { SourceColor } from '@shared/editor/sourceColor'
 import { extname } from 'path'
 import type { AssetAudioInfo, AssetKind, AssetVideoInfo } from '@shared/editor/project'
 import { ffprobePath } from '../export/ffmpegPath'
@@ -15,6 +16,8 @@ export interface MediaInfo {
   audio?: AssetAudioInfo
   vfr: boolean
   formatName: string
+  /** Cor declarada da faixa de vídeo (nomes do ffmpeg; ausente = sem marcação). */
+  color?: SourceColor
 }
 
 export const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'tif', 'tiff']
@@ -97,7 +100,9 @@ export function parseFfprobe(json: unknown, path: string): MediaInfo {
       durationUs = ds.length ? Math.max(...ds) : null
     }
   }
-  return { durationUs, kind, video, audio, vfr, formatName: String(format.format_name ?? '') }
+  const str = (x: unknown): string | null => (typeof x === 'string' && x ? x : null)
+  const color: SourceColor | undefined = v && kind === 'video' ? { space: str(v.color_space), primaries: str(v.color_primaries), transfer: str(v.color_transfer), range: str(v.color_range) } : undefined
+  return { durationUs, kind, video, audio, vfr, formatName: String(format.format_name ?? ''), ...(color ? { color } : {}) }
 }
 
 /** Média dos intervalos entre keyframes (s → µs); 1 keyframe ou nenhum → 10 s. */

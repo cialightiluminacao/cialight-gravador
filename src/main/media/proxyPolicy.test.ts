@@ -131,3 +131,14 @@ describe('derivedComplete', () => {
     expect(derivedComplete({ ...base, kind: 'image', durationUs: null })).toBe(true)
   })
 })
+
+describe('marcações de cor em proxy e intermediário (regra única)', () => {
+  it('sem marcação: HD → BT.709, SD → BT.601; marcada → a marcação', () => {
+    const hd = proxyArgs('i', 'o', video({ width: 1920, height: 1080 }), 'libx264')
+    expect([valueAfter(hd, '-colorspace'), valueAfter(hd, '-color_primaries'), valueAfter(hd, '-color_trc'), valueAfter(hd, '-color_range')]).toEqual(['bt709', 'bt709', 'bt709', 'tv'])
+    const sd = intermediateArgs('i', 'o', video({ width: 640, height: 480 }), 'libx264')
+    expect(valueAfter(sd, '-colorspace')).toBe('smpte170m')
+    const tagged = proxyArgs('i', 'o', video({ width: 1920, height: 1080 }, { color: { space: 'smpte170m', primaries: 'smpte170m', transfer: 'smpte170m', range: 'tv' } }), 'h264_qsv')
+    expect(valueAfter(tagged, '-colorspace')).toBe('smpte170m')
+  })
+})
