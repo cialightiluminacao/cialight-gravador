@@ -54,6 +54,7 @@ interface HarnessReport {
   parity?: ExportOut
   sized?: ExportOut
   nonEncoder?: ExportOut
+  missingMedia?: { preflight: { assetId: string; status: string }[]; export: ExportOut }
   color?: Record<string, { export: ExportOut; frame: unknown }>
   v1Composed?: { path?: string; error?: string }
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
@@ -235,6 +236,12 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   const ne = r.nonEncoder
   check(!!ne?.error && ne.error.includes('Intervalo de exportação vazio') && !ne.error.includes('codificar'), `erro fora do codificador mostra a causa real, sem refazer em software (${ne?.error})`, failures)
   check(!readdirSync(exportsDir).some((n) => n.startsWith('vazio')), 'erro: nenhum arquivo deixado', failures)
+
+  // ---- mídia ausente: pré-checagem + aviso no resultado ----
+  const mm = r.missingMedia
+  check(!!mm && mm.preflight.length === 1 && mm.preflight[0].assetId === 'a_ausente' && mm.preflight[0].status === 'missing', `pré-checagem lista a mídia ausente (${JSON.stringify(mm?.preflight)})`, failures)
+  const mw = mm?.export.warnings ?? []
+  check(!!mm?.export.path && existsSync(mm.export.path) && mw.some((w) => w.includes('apagado.mp4') && w.includes('30 quadros')), `mídia ausente exportada → aviso com a mídia e os quadros, não sucesso silencioso (${mm?.export.error ?? JSON.stringify(mw)})`, failures)
 
   // ---- tamanho-alvo ----
   const sz = r.sized

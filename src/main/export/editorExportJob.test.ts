@@ -96,26 +96,34 @@ describe('EditorExportJobs', () => {
     expect(jobs.busy).toBe(false)
   })
 
-  it('falha no remux apaga o .part e a saída que ESTE job criou, nunca um arquivo alheio', async () => {
+  it('falha no remux (ex.: antivírus segurando o arquivo) não perde o render: o .part vira o arquivo final, com aviso', async () => {
     runFfmpeg.mockImplementationOnce(async (args: string[]) => {
       writeFileSync(args[args.length - 1], 'meio')
       throw new Error('ffmpeg falhou')
     })
     const jobs = new EditorExportJobs(plenty)
-    const { jobId } = await jobs.open(dir, 'y')
-    await expect(jobs.finalize(jobId)).rejects.toThrow('ffmpeg falhou')
-    expect(readdirSync(dir)).toEqual([])
+    const { jobId, path } = await jobs.open(dir, 'y')
+    await jobs.write(jobId, new Uint8Array([1, 2, 3]), 0)
+    const r = await jobs.finalize(jobId)
+    expect(r.path).toBe(path)
+    expect(r.size).toBe(3)
+    expect(r.warning).toMatch(/otimização/)
+    expect([...readFileSync(path)]).toEqual([1, 2, 3]) // o render, não a saída pela metade do ffmpeg
+    expect(readdirSync(dir)).toEqual(['y.mp4'])
 
-    // arquivos alheios (inclusive o criado no último instante, que o ffmpeg -n recusa) nunca são apagados
+    // arquivos alheios (inclusive o criado no último instante, que o ffmpeg -n recusa) nunca são apagados nem sobrescritos
     const j2 = await jobs.open(dir, 'w')
     writeFileSync(join(dir, 'w.mp4'), 'alheio')
     writeFileSync(join(dir, 'w (2).mp4'), 'alheio 2')
+    await jobs.write(j2.jobId, new Uint8Array([7]), 0)
     runFfmpeg.mockImplementationOnce(async () => {
       throw new Error('already exists')
     })
-    await expect(jobs.finalize(j2.jobId)).rejects.toThrow()
+    const r2 = await jobs.finalize(j2.jobId)
+    expect(r2.path).toBe(join(dir, 'w (3).mp4'))
     expect(readFileSync(join(dir, 'w.mp4'), 'utf8')).toBe('alheio')
     expect(readFileSync(join(dir, 'w (2).mp4'), 'utf8')).toBe('alheio 2')
+    expect([...readFileSync(r2.path)]).toEqual([7])
   })
 
   it('maxBytes: saída maior que o alvo é apagada e volta oversize', async () => {

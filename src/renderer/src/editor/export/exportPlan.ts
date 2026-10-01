@@ -1,6 +1,6 @@
 // Cálculos puros da exportação do editor: presets (resolução e bitrate), intervalo, número de quadros,
 // bitrate para tamanho-alvo e estimativa de tamanho. Sem DOM: testado em node.
-import type { Us } from '@shared/editor/project'
+import type { Asset, Project, Us } from '@shared/editor/project'
 
 export type EditorExportPresetId = 'high1080' | 'whatsapp' | 'original' | 'vertical'
 
@@ -112,4 +112,46 @@ export function hasInOut(projectDurUs: Us, inUs: Us | null, outUs: Us | null): b
 export function resizeBitrate(videoBps: number, targetBytes: number, actualBytes: number): number {
   if (!(actualBytes > 0)) return videoBps
   return Math.max(MIN_TARGET_BPS, Math.floor(videoBps * (targetBytes / actualBytes) * 0.97))
+}
+
+export interface ExportMediaIssue {
+  assetId: string
+  name: string
+  status: Exclude<Asset['status'], 'ready'>
+}
+
+/**
+ * Pré-checagem: assets usados em [fromUs, toUs) que sairiam como "mídia indisponível" (quadriculado) ou
+ * silêncio — ausentes, com erro ou ainda em processamento (intermediário/proxy não pronto). Considera
+ * faixas de vídeo visíveis, faixas de áudio não mudas e as anotações (gravação ausente). Um por asset.
+ */
+export function exportMediaIssues(p: Project, fromUs: Us, toUs: Us): ExportMediaIssue[] {
+  const out: ExportMediaIssue[] = []
+  const seen = new Set<string>()
+  const add = (a: Asset | undefined): void => {
+    if (!a || a.status === 'ready' || seen.has(a.id)) return
+    seen.add(a.id)
+    out.push({ assetId: a.id, name: a.name, status: a.status })
+  }
+  for (const t of p.tracks) {
+    if (t.kind === 'video' ? t.hidden : t.muted) continue
+    for (const it of t.items) {
+      if (it.startUs >= toUs || it.startUs + it.durationUs <= fromUs) continue
+      if (it.type === 'media') {
+        if (t.kind === 'audio' && !it.audio.enabled) continue
+        add(p.assets.find((a) => a.id === it.assetId))
+      } else if (it.type === 'annotations') {
+        for (const a of p.assets) if (a.source.type === 'session' && a.source.sessionId === it.sessionId && a.status === 'missing') add(a)
+      }
+    }
+  }
+  return out
+}
+
+/** Avisos da tela de concluído para as mídias que não puderam ser lidas durante a exportação. */
+export function missingMediaWarnings(p: Pick<Project, 'assets'> | { assets: { id: string; name: string }[] }, missing: { assetId: string; frames: number }[]): string[] {
+  return missing.map(({ assetId, frames }) => {
+    const name = p.assets.find((a) => a.id === assetId)?.name ?? assetId
+    return `“${name}” não pôde ser lido em ${frames} ${frames === 1 ? 'quadro' : 'quadros'} e saiu como “mídia indisponível”.`
+  })
 }

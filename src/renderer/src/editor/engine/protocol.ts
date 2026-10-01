@@ -44,7 +44,9 @@ export type RenderOut =
   | { t: 'exportProgress'; jobId: string; frame: number; total: number }
   // bytes do MP4 a gravar em `position` (o cliente responde chunkAck depois de gravar: contrapressão)
   | { t: 'exportChunk'; jobId: string; seq: number; data: Uint8Array; position: number }
-  | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: HwPref }
+  // missing: assets desenhados como "mídia indisponível" (quadros por asset); missingAnnotations: gravações
+  // cujas anotações não puderam ser lidas — viram avisos na tela de concluído
+  | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: HwPref; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }
   // encoderError: a falha veio do codificador; beforeFirstPacket: antes de qualquer pacote de vídeo
   // (só as duas juntas justificam tentar outro modo de hardware)
   | { t: 'exportError'; jobId: string; message: string; cancelled: boolean; beforeFirstPacket: boolean; encoderError: boolean }

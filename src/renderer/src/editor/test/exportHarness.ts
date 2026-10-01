@@ -1,6 +1,8 @@
 import { ALL_FORMATS, Input, UrlSource, VideoSampleSink } from 'mediabunny'
 import { projectDurationUs } from '@shared/editor/ops'
-import type { Project } from '@shared/editor/project'
+import { createMediaItem } from '@shared/editor/factory'
+import type { Asset, Project } from '@shared/editor/project'
+import { exportMediaIssues } from '../export/exportPlan'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import { EditorExportCancelled, runEditorExport, type EditorExportRequest } from '../export/editorExport'
@@ -62,6 +64,13 @@ export async function runExportHarness(params: Params): Promise<void> {
     report.cancel = await cancelOnce(base(project, 'cancelado.mp4'))
     // falha que não é do codificador (intervalo vazio): mostra a causa real, sem tentar em software
     report.nonEncoder = await exportOnce({ ...base(project, 'vazio.mp4'), toUs: 0 })
+    // mídia ausente no intervalo: a pré-checagem do diálogo a lista e, exportando mesmo assim, o resultado
+    // traz o aviso (nunca uma exportação "ok" silenciosa com o quadriculado)
+    const withMissing = projectWithMissingAsset(project)
+    report.missingMedia = {
+      preflight: exportMediaIssues(withMissing, 0, projectDurationUs(withMissing)),
+      export: await exportOnce(base(withMissing, 'midia-ausente.mp4'))
+    }
     // tamanho-alvo pequeno forçado: 1ª passada passa do alvo → refeita com bitrate corrigido
     report.sized = await exportOnce({ ...base(project, 'alvo.mp4'), targetBytes: params.targetBytes })
     // cor: fontes BT.601 marcada e sem marcação (o que o Chromium entrega no VideoFrame + o export)
@@ -172,4 +181,14 @@ async function composeV1(sessionId: string): Promise<Record<string, unknown>> {
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/** O projeto com uma mídia ausente (arquivo apagado) numa faixa de vídeo nova, no primeiro segundo. */
+function projectWithMissingAsset(p: Project): Project {
+  const gone: Asset = {
+    id: 'a_ausente', name: 'apagado.mp4', kind: 'video', source: { type: 'file', path: 'C:/nao-existe/apagado.mp4', size: 1, mtimeMs: 1 }, durationUs: 1_000_000,
+    video: { width: 640, height: 360, fps: 30, codec: 'h264', rotation: 0, decodable: true, gopUs: 1_000_000 }, status: 'missing'
+  }
+  const item = { ...createMediaItem(gone, 0, 'video'), durationUs: 1_000_000 }
+  return { ...p, assets: [...p.assets, gone], tracks: [{ id: 't_ausente', kind: 'video', name: 'Ausente', muted: false, hidden: false, locked: false, volume: 1, items: [item] }, ...p.tracks] }
 }

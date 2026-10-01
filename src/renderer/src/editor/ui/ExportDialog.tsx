@@ -13,7 +13,7 @@ import { ipcErrorMessage } from '@/lib/ipcError'
 import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
 import { useEditorStore } from '../state/editorStore'
 import { EditorExportCancelled, editorExportRunning, runEditorExport, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
-import { AUDIO_KBPS, EDITOR_EXPORT_PRESETS, estimateBytes, exportRange, hasInOut, outputSize, presetVideoBitrate, WHATSAPP_TARGET_MB, type EditorExportPresetId } from '../export/exportPlan'
+import { AUDIO_KBPS, EDITOR_EXPORT_PRESETS, estimateBytes, exportMediaIssues, exportRange, hasInOut, outputSize, presetVideoBitrate, WHATSAPP_TARGET_MB, type EditorExportPresetId, type ExportMediaIssue } from '../export/exportPlan'
 
 // Diálogo de exportação do editor: preset, intervalo (tudo / I–O), nome e pasta, estimativa de tamanho;
 // depois progresso (%, velocidade × tempo real, tempo restante, cancelar) e o resultado (abrir pasta /
@@ -26,6 +26,7 @@ type Phase =
   | { kind: 'error'; message: string }
 
 const formatMbps = (bps: number): string => `${(bps / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} Mbps`
+const ISSUE_LABEL: Record<ExportMediaIssue['status'], string> = { missing: 'ausente', processing: 'ainda processando', error: 'com erro' }
 
 export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boolean; onOpenChange: (open: boolean) => void; onBeforeExport: () => void }): React.JSX.Element | null {
   const project = useEditorStore((s) => s.project)
@@ -63,6 +64,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
   const hasAudio = planAudio(project).length > 0
   const audioBps = hasAudio ? AUDIO_KBPS * 1000 : 0
   const estimate = estimateBytes(videoBps, audioBps, durationUs)
+  // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
+  const issues = durationUs > 0 ? exportMediaIssues(project, range.fromUs, range.toUs) : []
   // QA (só fora do pacote): window.__qaEditor.exportDir troca a pasta padrão (o QA nunca grava na pasta real)
   const qaDir = appInfo?.isPackaged === false ? window.__qaEditor?.exportDir : undefined
   const defaultFolder = qaDir ?? settings.outputDir ?? appInfo?.paths.output ?? null
@@ -164,7 +167,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
                 value={fileName}
                 onChange={(e) => setFileName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !blocker) void start()
+                  // com mídia indisponível, só o botão "Exportar mesmo assim" confirma
+                  if (e.key === 'Enter' && !blocker && !issues.length) void start()
                 }}
                 spellCheck={false}
               />
@@ -191,12 +195,28 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
               ) : null}
             </div>
 
+            {issues.length ? (
+              <div className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-2.5 text-[12px] text-warn" role="alert">
+                <span className="flex items-start gap-1.5 font-semibold">
+                  <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  {issues.length === 1 ? 'Uma mídia deste trecho não está disponível' : `${issues.length} mídias deste trecho não estão disponíveis`} e vai sair como “mídia indisponível” (ou em silêncio):
+                </span>
+                <ul className="mt-1.5 flex max-h-28 flex-col gap-0.5 overflow-y-auto pl-5">
+                  {issues.map((i) => (
+                    <li key={i.assetId} className="truncate" title={i.name}>
+                      {i.name} — {ISSUE_LABEL[i.status]}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 Cancelar
               </Button>
-              <Button variant="primary" disabled={!!blocker} onClick={() => void start()}>
-                <Upload className="h-4 w-4" /> Exportar
+              <Button variant={issues.length ? 'secondary' : 'primary'} disabled={!!blocker} onClick={() => void start()}>
+                <Upload className="h-4 w-4" /> {issues.length ? 'Exportar mesmo assim' : 'Exportar'}
               </Button>
             </div>
           </div>

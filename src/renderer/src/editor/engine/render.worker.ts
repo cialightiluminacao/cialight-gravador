@@ -163,7 +163,7 @@ async function renderFrame(m: FrameMsg): Promise<void> {
  * antes de retornar; o desenho fica no canvas (preserveDrawingBuffer). `sequential`: reprodução/exportação
  * (iterador por entrada do pool); senão, seek. Devolve os assets ausentes e as entradas [asset, slot] usadas.
  */
-async function composeAt(p: Project, tUs: Us, sequential: boolean): Promise<{ missing: Set<string>; used: [string, number][] }> {
+async function composeAt(p: Project, tUs: Us, sequential: boolean): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][] }> {
   const comp = compositor
   if (!comp || !canvas) throw new Error('render antes de init')
   const W = canvas.width
@@ -172,6 +172,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean): Promise<{ mi
   const sources = new Map<string, TexImageSource | VideoFrame | null>()
   const meta = new Map<string, SourceMeta>()
   const missing = new Set<string>()
+  const missingAnnotations = new Set<string>()
   const frames: VideoFrame[] = []
   // mesmo asset em mais de uma camada no quadro: cada uma com seu slot (iterador próprio)
   const slots = new Map<string, number>()
@@ -184,6 +185,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean): Promise<{ mi
       layers.map(async (layer) => {
         if (layer.kind === 'annotations') {
           await loadSession(layer.sessionId)
+          if (!sessions.get(layer.sessionId)?.session) missingAnnotations.add(layer.sessionId)
           return
         }
         if (layer.kind !== 'media') return
@@ -229,7 +231,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean): Promise<{ mi
   } finally {
     for (const f of frames) f.close()
   }
-  return { missing, used }
+  return { missing, missingAnnotations, used }
 }
 
 /**
@@ -465,7 +467,7 @@ async function runExport(
   signal: AbortSignal,
   outbox: ChunkOutbox,
   state: { packets: number }
-): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: ExportJobSpec['video']['hw'] }> {
+): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }> {
   const p = project
   if (!compositor || !canvas || !p) throw new Error('exportação antes de init/project')
   compositor.resize(job.width, job.height)
@@ -509,12 +511,19 @@ async function runExport(
     if (job.simulateHwFailure && job.video.hw === 'prefer-hardware') throw new EncoderError('falha simulada do encoder de hardware')
     const frameDur = 1 / job.fps
     let lastReport = 0
+    // fontes que falharam (arquivo ausente, decoder que quebrou no meio…): o quadro sai com o placeholder,
+    // e a contagem vira aviso no fim — nunca uma exportação "ok" silenciosa
+    const missingFrames = new Map<string, number>()
+    const missingAnnotations = new Set<string>()
     for (let n = 0; n < total; n++) {
       if (signal.aborted) throw new Cancelled()
       const relUs = frameToUs(n, job.fps)
       const tUs = job.fromUs + relUs
       if (feed) await feed.feed(audio!, relUs + AUDIO_LEAD_US)
-      const { used } = await composeAt(p, tUs, true)
+      const composed = await composeAt(p, tUs, true)
+      const { used } = composed
+      for (const id of composed.missing) missingFrames.set(id, (missingFrames.get(id) ?? 0) + 1)
+      for (const s of composed.missingAnnotations) missingAnnotations.add(s)
       // VideoSample(canvas) copia o quadro já desenhado (mesma task do draw: nada o altera no meio)
       const sample = new VideoSample(canvas, { timestamp: relUs / 1e6, duration: frameDur })
       try {
@@ -532,7 +541,7 @@ async function runExport(
     if (feed) await feed.feed(audio!, Infinity)
     if (signal.aborted) throw new Cancelled()
     await encoderCall(() => output.finalize())
-    return { videoCodec, audioCodec, hardware: job.video.hw }
+    return { videoCodec, audioCodec, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations] }
   } catch (err) {
     if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {})
     throw err

@@ -10,7 +10,7 @@ import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
-import { KEYFRAME_INTERVAL_S, resizeBitrate } from './exportPlan'
+import { KEYFRAME_INTERVAL_S, missingMediaWarnings, resizeBitrate } from './exportPlan'
 import { EditorExportCancelled, finalizeOrCancel, type Finalized } from './finalize'
 import { ipcErrorMessage } from '@/lib/ipcError'
 
@@ -113,6 +113,7 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
         console.warn(`exportação: ${out.size} bytes > alvo ${req.targetBytes}; refazendo a ${videoBitrate} bps`)
         continue
       }
+      if (out.warning) warnings.add(out.warning)
       if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}. Ele pode não ser aceito pelo WhatsApp.`)
       opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 100, speed: null, etaS: null })
       return { path: out.path, size: out.size, videoCodec: enc.videoCodec, audioCodec: enc.audioCodec, hardware: hw, fellBackToSoftware: fellBack, passes: pass, warnings: [...warnings] }
@@ -267,7 +268,11 @@ function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, stage: 're
         case 'exportDone':
           if (m.jobId !== jobId) return
           void writes.then(
-            () => finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, warnings: [...audioWarnings] } }),
+            () => {
+              const media = missingMediaWarnings(req.project, m.missing)
+              const ann = m.missingAnnotations.length ? [`As anotações de ${m.missingAnnotations.length === 1 ? 'uma gravação' : `${m.missingAnnotations.length} gravações`} não puderam ser lidas e ficaram de fora.`] : []
+              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, warnings: [...media, ...ann, ...audioWarnings] } })
+            },
             () => {}
           )
           break

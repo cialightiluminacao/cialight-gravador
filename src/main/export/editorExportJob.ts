@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, promises as fsp, rmSync, statSync } from 'fs'
+import { existsSync, mkdirSync, promises as fsp, renameSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import { numberedName, sanitizeFileName } from '@shared/filenames'
 import { runFfmpeg } from './ffmpegRunner'
@@ -6,8 +6,9 @@ import { log } from '../log'
 
 // Arquivo de saída da exportação do editor (main). O render worker gera o MP4 (mdat antes do moov) e o
 // renderer manda os bytes por IPC: gravados (assíncrono) em `<saída>.part` por posição. No fim, `finalize`
-// remuxa com `ffmpeg -c copy -movflags +faststart` para o nome final e apaga o .part; `cancel` apaga o
-// parcial — e, no meio do remux, interrompe o ffmpeg e apaga também a saída que este job criou.
+// remuxa com `ffmpeg -c copy -movflags +faststart` para o nome final e apaga o .part; se o remux falhar (não
+// cancelado), o .part — um MP4 válido, só sem faststart — vira o arquivo final com um aviso: o render não se
+// perde. `cancel` apaga o parcial — e, no meio do remux, interrompe o ffmpeg e apaga a saída deste job.
 // Nunca sobrescreve: nome ocupado ganha " (2)", " (3)"… Uma exportação por vez.
 
 /** Espaço livre exigido = estimativa × isto (o .part e a cópia do remux coexistem no fim). */
@@ -41,6 +42,8 @@ export interface EditorExportFinalized {
   size: number
   /** finalize com maxBytes: a saída passou do limite e foi apagada (o renderer refaz com bitrate menor). */
   oversize?: boolean
+  /** O remux falhou e o arquivo ficou como o render o gerou (sem faststart). */
+  warning?: string
 }
 
 export interface EditorExportDeps {
@@ -177,12 +180,36 @@ export class EditorExportJobs {
     } catch (e) {
       if (!existedBefore && existsSync(out)) job.createdOut = out
       if (job.createdOut) safeRm(job.createdOut)
-      throw e
+      job.createdOut = null
+      if (abort.signal.aborted) throw e
+      // o remux falhou de verdade: o .part já é um MP4 completo (mdat antes do moov) — vira a saída
+      const kept = this.keepPart(job, opts.maxBytes)
+      if (!kept) throw e
+      log.warn(`exportação do editor ${jobId}: remux falhou; mantido o arquivo sem faststart (${kept.path})`, e)
+      return kept
     } finally {
       safeRm(job.part)
       this.jobs.delete(jobId)
       job.remux = null
       release()
+    }
+  }
+
+  /** Renomeia o .part para um nome livre (nunca sobrescreve); null se não deu. */
+  private keepPart(job: Job, maxBytes: number | undefined): EditorExportFinalized | null {
+    try {
+      const name = numberedName(job.requested, (n) => existsSync(join(job.dir, n)) || (n !== job.name && existsSync(join(job.dir, `${n}.part`))))
+      const out = join(job.dir, name)
+      renameSync(job.part, out)
+      const size = statSync(out).size
+      if (maxBytes && size > maxBytes) {
+        safeRm(out)
+        return { path: out, size, oversize: true }
+      }
+      return { path: out, size, warning: 'O arquivo foi salvo sem a otimização para reprodução on-line (faststart): o passo final falhou, mas o vídeo está completo.' }
+    } catch (e) {
+      log.warn(`exportação do editor ${job.id}: não foi possível manter o arquivo sem faststart`, e)
+      return null
     }
   }
 

@@ -251,7 +251,7 @@ export interface IpcApi {
     open(outputDir: string, fileName: string, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
     write(jobId: string, data: Uint8Array, position: number): Promise<void>
     close(jobId: string): Promise<void>
-    finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean }>
+    finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string }>
     cancel(jobId: string): Promise<void>
     /** Progresso do remux (0–1) do job em finalização. */
     onFinalizeProgress(cb: (p: { jobId: string; fraction: number }) => void): Unsubscribe
