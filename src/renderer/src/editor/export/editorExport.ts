@@ -66,6 +66,8 @@ export interface EditorExportResult {
   warnings: string[]
   /** .srt gravado ao lado do vídeo (captions.srtBeside). */
   srtPath?: string
+  /** .srt pedido e não gravado (já existia um com o nome, nada no trecho, falha): o motivo, para um toast. */
+  srtWarning?: string
 }
 
 export { EditorExportCancelled }
@@ -124,9 +126,10 @@ export async function runEditorExport(input: EditorExportRequest, opts: { onProg
       }
       if (out.warning) warnings.add(out.warning)
       if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}. Ele pode não ser aceito pelo WhatsApp.`)
-      const srtPath = input.captions?.srtBeside ? await writeSrtBeside(input, out.path, warnings) : undefined
+      const srt = input.captions?.srtBeside ? await writeSrtBeside(input, out.path) : null
+      if (srt?.warning) warnings.add(srt.warning)
       opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 100, speed: null, etaS: null })
-      return { path: out.path, size: out.size, videoCodec: enc.videoCodec, audioCodec: enc.audioCodec, hardware: hw, fellBackToSoftware: fellBack, passes: pass, warnings: [...warnings], ...(srtPath ? { srtPath } : {}) }
+      return { path: out.path, size: out.size, videoCodec: enc.videoCodec, audioCodec: enc.audioCodec, hardware: hw, fellBackToSoftware: fellBack, passes: pass, warnings: [...warnings], ...(srt?.path ? { srtPath: srt.path } : {}), ...(srt?.warning ? { srtWarning: srt.warning } : {}) }
     }
   } finally {
     running = false
@@ -134,17 +137,14 @@ export async function runEditorExport(input: EditorExportRequest, opts: { onProg
 }
 
 /** SRT do trecho exportado ao lado do vídeo final; falha ou nada para gravar vira aviso (o vídeo já está pronto). */
-async function writeSrtBeside(req: EditorExportRequest, videoPath: string, warnings: Set<string>): Promise<string | undefined> {
+async function writeSrtBeside(req: EditorExportRequest, videoPath: string): Promise<{ path?: string; warning?: string }> {
   const cues = cuesForRange(captionCues(req.project), req.fromUs, req.toUs)
-  if (!cues.length) {
-    warnings.add('Nenhuma legenda no trecho exportado: o arquivo .srt não foi gravado.')
-    return undefined
-  }
+  if (!cues.length) return { warning: 'Nenhuma legenda no trecho exportado: o arquivo .srt não foi gravado.' }
   try {
-    return await window.api.captions.writeSrtBeside(videoPath, serializeSrt(cues))
+    const r = await window.api.captions.writeSrtBeside(videoPath, serializeSrt(cues))
+    return r.path ? { path: r.path } : { warning: r.warning ?? 'O arquivo .srt não foi gravado.' }
   } catch (e) {
-    warnings.add(`Não foi possível gravar o arquivo .srt ao lado do vídeo (${ipcErrorMessage(e)}).`)
-    return undefined
+    return { warning: `Não foi possível gravar o arquivo .srt ao lado do vídeo (${ipcErrorMessage(e)}).` }
   }
 }
 
@@ -164,7 +164,7 @@ async function encode(req: EditorExportRequest, hw: HwPref, stage: 'render' | 'r
   let fellBack = false
   for (;;) {
     if (signal.aborted) throw new EditorExportCancelled()
-    const { jobId } = await api.editorExport.open(req.outputDir, req.fileName, { estimateBytes: req.estimateBytes })
+    const { jobId } = await api.editorExport.open(req.outputDir, req.fileName, { estimateBytes: req.estimateBytes, reserveSrt: req.captions?.srtBeside === true })
     try {
       const done = await attempt(req, jobId, hw, stage, signal, onProgress)
       return { jobId, ...done, hardware: hw, fellBack }

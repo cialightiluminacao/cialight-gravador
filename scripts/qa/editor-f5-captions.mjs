@@ -234,13 +234,19 @@ async function main() {
       await T.typeEnter('Terceira')
       document.activeElement?.blur?.(); await T.settle()
       return { focusNew, focus3, caps: T.caps(), past: T.past() }`)
-    // a 4ª nasceu com o último Enter (logo depois da 3ª: playhead dentro dela): remove pelo desfazer (um passo)
-    const r3 = await ev(`const before = T.caps(); document.activeElement?.blur?.(); await T.key('z', { ctrlKey: true }); await T.wait(150); return { before, caps: T.caps(), past: T.past() }`)
+    // a 4ª nasceu com o último Enter (logo depois da 3ª: playhead dentro dela): sai pelo botão excluir (um passo)
+    const r3 = await ev(`const before = T.caps(); document.activeElement?.blur?.(); await T.click(T.el('[data-caption-id="' + before[3].id + '"] [data-caption-delete]')); await T.wait(150); return { before, caps: T.caps(), past: T.past() }`)
+    // Enter na última = um gesto: desfazer tira a legenda nova E o texto confirmado juntos (refeito em seguida)
+    const r4 = await ev(`await T.key('z', { ctrlKey: true }); await T.wait(150); const undone = T.caps().map((c) => c.text)
+      await T.key('z', { ctrlKey: true }); await T.wait(150); const undone2 = T.caps().map((c) => c.text)
+      await T.key('z', { ctrlKey: true, shiftKey: true }); await T.key('z', { ctrlKey: true, shiftKey: true }); await T.wait(150)
+      return { undone, undone2, caps: T.caps().map((c) => c.text), past: T.past() }`)
     check('foco passa para a legenda criada a cada Enter', r2.focusNew && r2.focus3, r2)
     check('playhead adiante (6 s): a 3ª nasce no playhead; a 4ª logo depois da 3ª (8 s)', r2.caps[2]?.s === 6 * S && r2.caps[3]?.s === 8 * S, r2.caps)
     check('textos gravados: Olá, mundo / Segunda legenda / Terceira', JSON.stringify(r2.caps.slice(0, 3).map((c) => c.text)) === JSON.stringify(['Olá, mundo', 'Segunda legenda', 'Terceira']), r2.caps)
-    check('um passo por gesto: 3 criações + 3 textos + criação da 4ª = 7 passos', r2.past - r.p0 === 7, { p0: r.p0, past: r2.past })
-    check('desfazer (Ctrl+Z) remove a 4ª legenda ("Nova legenda") num passo', r3.before.length === 4 && r3.before[3].text === 'Nova legenda' && r3.caps.length === 3 && r3.past === r2.past - 1, r3)
+    check('um passo por gesto: botão + 3 × (Enter = texto e próxima legenda) = 4 passos', r2.past - r.p0 === 4, { p0: r.p0, past: r2.past })
+    check('excluir a 4ª legenda ("Nova legenda") num passo', r3.before.length === 4 && r3.before[3].text === 'Nova legenda' && r3.caps.length === 3 && r3.past === r2.past + 1, r3)
+    check('desfazer o Enter: volta a legenda criada e o texto juntos ("Terceira" → "Nova legenda", 3 → 2 legendas)', JSON.stringify(r4.undone) === JSON.stringify(['Olá, mundo', 'Segunda legenda', 'Terceira', 'Nova legenda']) && JSON.stringify(r4.undone2) === JSON.stringify(['Olá, mundo', 'Segunda legenda', 'Nova legenda']) && JSON.stringify(r4.caps) === JSON.stringify(['Olá, mundo', 'Segunda legenda', 'Terceira']), r4)
     ids = r3.caps.map((c) => c.id)
     await shot('f5-captions-02-lista.png')
   }
@@ -271,6 +277,9 @@ async function main() {
     const r = await ev(`await T.seek(0); await T.click(T.el('[data-caption-id="${ids[2]}"] span')); await T.wait(400)
       return { ph: T.st().playheadUs, sel: T.st().selection }`)
     check('playhead no início da 3ª legenda (6 s) e ela selecionada', r.ph === 6 * S && JSON.stringify(r.sel) === JSON.stringify([ids[2]]), r)
+    // teclado: focar o campo de início também leva o playhead (sem mouse)
+    const k = await ev(`await T.seek(0); T.el('[data-caption-id="${ids[1]}"] [data-caption-time="start"]').focus(); await T.settle(); await T.wait(400); const r = { ph: T.st().playheadUs, sel: T.st().selection }; document.activeElement?.blur?.(); await T.settle(); return r`)
+    check('focar o início da 2ª pelo teclado leva o playhead a 3,2 s e a seleciona', k.ph === 3.2 * S && JSON.stringify(k.sel) === JSON.stringify([ids[1]]), k)
   }
 
   // ------------------------------------------------------------------ 5
@@ -334,6 +343,15 @@ async function main() {
   // ------------------------------------------------------------------ 8
   console.log('8. exportação de vídeo: Legendas [x] Queimar [x] .srt ao lado (intervalo I–O)')
   {
+    // faixa Legendas oculta: "Queimar" desligado e explicado
+    const hid = await ev(`window.__qaEditor.exportDir = ${JSON.stringify(EXPORT_DIR)}; const tid = T.capTrack().id; T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => (t.id === tid ? { ...t, hidden: true } : t)) })); await T.settle()
+      await T.click([...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar'))); await T.wait(600)
+      const d = T.dialog(); const b = d?.querySelector('[data-caption-burn]'); return { disabled: b?.disabled, checked: b?.checked, hint: d?.querySelector('[data-caption-hidden-hint]')?.textContent ?? null }`)
+    await shot('f5-captions-05b-exportar-faixa-oculta.png')
+    hid.hiddenAfter = await ev(`await T.click(T.button('Cancelar', T.dialog())); await T.wait(300); await T.key('z', { ctrlKey: true }); await T.wait(150); return T.capTrack().hidden`)
+    check('faixa Legendas oculta: "Queimar no vídeo" desligado e desabilitado, com a explicação; desfazer volta a mostrar', hid.disabled === true && hid.checked === false && !!hid.hint && hid.hint.includes('oculta') && hid.hiddenAfter === false, hid)
+    // um .srt do usuário com o nome padrão: a exportação vira " (2)" e o .srt dele fica intacto
+    writeFileSync(join(EXPORT_DIR, 'Projeto de teste do editor.srt'), 'legendas do usuário')
     const r = await ev(`await T.clearToasts(); window.__qaEditor.exportDir = ${JSON.stringify(EXPORT_DIR)}; T.st().setInOut(${0.5 * S}, ${4.5 * S}); T.st().select([])
       await T.click([...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar'))); await T.wait(600)
       const d = T.dialog(); const g = d?.querySelector('[data-export-captions]')
@@ -353,6 +371,7 @@ async function main() {
     await shot('f5-captions-06-exportado.png')
     const files = readdirSync(EXPORT_DIR)
     const mp4 = files.find((f) => f.endsWith('.mp4'))
+    check('.srt do usuário com o mesmo nome: vídeo numerado " (2)" e o .srt dele intacto', mp4 === 'Projeto de teste do editor (2).mp4' && readFileSync(join(EXPORT_DIR, 'Projeto de teste do editor.srt'), 'utf8') === 'legendas do usuário', files)
     const srtFile = mp4 ? join(EXPORT_DIR, mp4.replace(/\.mp4$/i, '.srt')) : null
     check('.srt ao lado do .mp4, mesmo nome', !!srtFile && existsSync(srtFile), files)
     check('tela de concluído e toast mostram o .srt', !!done.srt && done.srt.includes('.srt') && done.toasts.some((t) => t.includes('Legendas salvas ao lado do vídeo')), done)

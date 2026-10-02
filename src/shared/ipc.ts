@@ -295,7 +295,8 @@ export interface IpcApi {
    * apagada e volta `oversize`) e `cancel` apaga o parcial (interrompendo o remux, se houver). Uma por vez.
    */
   editorExport: {
-    open(outputDir: string, fileName: string, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
+    /** `reserveSrt`: o .srt vai ao lado — um `<nome>.srt` existente também ocupa o nome (numeração conjunta). */
+    open(outputDir: string, fileName: string, opts?: { estimateBytes?: number; reserveSrt?: boolean }): Promise<{ jobId: string; path: string }>
     write(jobId: string, data: Uint8Array, position: number): Promise<void>
     close(jobId: string): Promise<void>
     finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string }>
@@ -307,12 +308,13 @@ export interface IpcApi {
    * Legendas (SRT). `openSrt`: diálogo de abrir (*.srt) e o texto do arquivo (BOM UTF-8/UTF-16; sem BOM, UTF-8 se
    * válido, senão Windows-1252); null se cancelado. `saveSrt`: diálogo de salvar, grava UTF-8 com BOM; caminho ou null.
    * `writeSrtBeside`: grava `<mesmo nome>.srt` ao lado do vídeo — só aceita o arquivo final de uma exportação do
-   * editor concluída nesta sessão (o caminho devolvido pela exportação, que pode ser numerado); devolve o caminho.
+   * editor concluída nesta sessão (o caminho devolvido pela exportação, que pode ser numerado), uma vez; nunca
+   * sobrescreve: com `<nome>.srt` já existente devolve `{ path: null, warning }`.
    */
   captions: {
     openSrt(): Promise<{ text: string; name: string } | null>
     saveSrt(text: string, defaultName: string): Promise<string | null>
-    writeSrtBeside(videoPath: string, text: string): Promise<string>
+    writeSrtBeside(videoPath: string, text: string): Promise<{ path: string | null; warning?: string }>
   }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>

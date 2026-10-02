@@ -30,7 +30,7 @@ import { runFfmpeg } from './export/ffmpegRunner'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
 import { EditorExportJobs } from './export/editorExportJob'
-import { decodeSrtBytes, encodeSrtFile, srtBesidePath } from './captions/srtFiles'
+import { decodeSrtBytes, encodeSrtFile, writeSrtBesideFile } from './captions/srtFiles'
 import { sanitizeFileName } from '@shared/filenames'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
@@ -418,7 +418,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   const editorExports = new EditorExportJobs()
   setExportBusyCheck(() => editorExports.busy)
   const exportOwners = new Set<number>()
-  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string, opts?: { estimateBytes?: number }) => {
+  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string, opts?: { estimateBytes?: number; reserveSrt?: boolean }) => {
     const wc = e.sender
     if (!exportOwners.has(wc.id)) {
       // janela fechada, renderer caído ou recarregado: o parcial não fica órfão
@@ -431,7 +431,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       wc.on('render-process-gone', drop)
       wc.on('did-navigate', drop)
     }
-    return editorExports.open(outputDir, fileName, wc.id, Math.max(0, Number(opts?.estimateBytes) || 0))
+    return editorExports.open(outputDir, fileName, wc.id, Math.max(0, Number(opts?.estimateBytes) || 0), opts?.reserveSrt === true)
   })
   ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => editorExports.write(jobId, data, position))
   ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))
@@ -483,9 +483,10 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     if (typeof text !== 'string') throw new Error('conteúdo inválido')
     // só ao lado de um vídeo que esta sessão acabou de exportar (nunca um caminho arbitrário vindo do renderer)
     if (!editorExports.isCompletedOutput(videoPath)) throw new Error('O arquivo .srt só pode ser gravado ao lado de um vídeo exportado agora.')
-    const file = srtBesidePath(videoPath)
-    await fsp.writeFile(file, encodeSrtFile(text))
-    return file
+    // nunca sobrescreve: `<nome>.srt` existente → aviso (a exportação com reserveSrt já evita esse nome); um uso só
+    const r = await writeSrtBesideFile(videoPath, text)
+    if (r.path) editorExports.consumeCompletedOutput(videoPath)
+    return r
   })
 
   // saindo no meio de uma exportação/remux: interrompe, apaga os parciais e só então sai

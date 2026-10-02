@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, promises as fsp, renameSync, rmSync, statSync } 
 import { join, resolve } from 'path'
 import { numberedName, sanitizeFileName } from '@shared/filenames'
 import { runFfmpeg } from './ffmpegRunner'
+import { srtBesidePath } from '../captions/srtFiles'
 import { log } from '../log'
 
 // Arquivo de saída da exportação do editor (main). O render worker gera o MP4 (mdat antes do moov) e o
@@ -29,6 +30,8 @@ interface Job {
   remux: { abort: AbortController; done: Promise<void> } | null
   /** Saída criada por este job (só ela pode ser apagada num cancelamento/falha). */
   createdOut: string | null
+  /** ".srt ao lado": um `<nome>.srt` já existente também ocupa o nome (vídeo e legendas com o mesmo nome, nada sobrescrito). */
+  reserveSrt: boolean
 }
 
 export interface EditorExportOpened {
@@ -51,7 +54,12 @@ export interface EditorExportDeps {
   freeBytes?: (dir: string) => Promise<number>
 }
 
-const isTaken = (dir: string) => (name: string): boolean => existsSync(join(dir, name)) || existsSync(join(dir, `${name}.part`))
+/**
+ * Nome ocupado na pasta: o arquivo, o `.part` de outra exportação (exceto o do próprio job, `self`) e, com `reserveSrt`,
+ * o `.srt` de mesmo nome.
+ */
+const isTaken = (dir: string, reserveSrt: boolean, self?: string) => (name: string): boolean =>
+  existsSync(join(dir, name)) || (name !== self && existsSync(join(dir, `${name}.part`))) || (reserveSrt && existsSync(srtBesidePath(join(dir, name))))
 
 /** rmSync que nunca lança (arquivo preso pelo antivírus/Explorer não pode derrubar o fluxo). */
 function safeRm(path: string): void {
@@ -101,8 +109,9 @@ export class EditorExportJobs {
   /**
    * owner: webContents.id de quem abriu (os jobs dele são cancelados se a janela some).
    * estimateBytes: tamanho estimado; exige estimate × FREE_SPACE_FACTOR livres na pasta.
+   * reserveSrt: o .srt vai ao lado — `<nome>.srt` existente também conta como nome ocupado.
    */
-  async open(outputDir: string, fileName: string, owner = 0, estimateBytes = 0): Promise<EditorExportOpened> {
+  async open(outputDir: string, fileName: string, owner = 0, estimateBytes = 0, reserveSrt = false): Promise<EditorExportOpened> {
     if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
     if (!outputDir) throw new Error('Pasta de destino não definida')
     mkdirSync(outputDir, { recursive: true })
@@ -113,10 +122,10 @@ export class EditorExportJobs {
     }
     if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
     const requested = editorExportFileName(fileName)
-    const name = numberedName(requested, isTaken(outputDir))
+    const name = numberedName(requested, isTaken(outputDir, reserveSrt))
     const part = join(outputDir, `${name}.part`)
     const id = `edx-${Date.now()}-${++this.seq}`
-    const job: Job = { id, owner, dir: outputDir, requested, name, part, fh: null, writes: new Set(), remux: null, createdOut: null }
+    const job: Job = { id, owner, dir: outputDir, requested, name, part, fh: null, writes: new Set(), remux: null, createdOut: null, reserveSrt }
     this.jobs.set(id, job) // reserva antes do await: outra abertura simultânea já vê o job
     try {
       job.fh = await fsp.open(part, 'w')
@@ -131,6 +140,11 @@ export class EditorExportJobs {
   /** `path` é o arquivo final de uma exportação concluída nesta sessão (não um caminho qualquer vindo do renderer)? */
   isCompletedOutput(path: string): boolean {
     return typeof path === 'string' && path !== '' && this.completed.has(outputKey(path))
+  }
+
+  /** O .srt ao lado já foi gravado: a saída deixa de aceitar outro (um uso por exportação). */
+  consumeCompletedOutput(path: string): void {
+    this.completed.delete(outputKey(path))
   }
 
   async write(jobId: string, data: Uint8Array, position: number): Promise<void> {
@@ -163,7 +177,7 @@ export class EditorExportJobs {
     if (job.remux) throw new Error('finalização já em andamento')
     await this.closeHandle(job)
     // nome ocupado enquanto exportava (outro programa): próximo número livre, sem contar o próprio .part
-    const name = numberedName(job.requested, (n) => existsSync(join(job.dir, n)) || (n !== job.name && existsSync(join(job.dir, `${n}.part`))))
+    const name = numberedName(job.requested, isTaken(job.dir, job.reserveSrt, job.name))
     const out = join(job.dir, name)
     const abort = new AbortController()
     let release: () => void = () => {}
@@ -212,7 +226,7 @@ export class EditorExportJobs {
   /** Renomeia o .part para um nome livre (nunca sobrescreve); null se não deu. */
   private keepPart(job: Job, maxBytes: number | undefined): EditorExportFinalized | null {
     try {
-      const name = numberedName(job.requested, (n) => existsSync(join(job.dir, n)) || (n !== job.name && existsSync(join(job.dir, `${n}.part`))))
+      const name = numberedName(job.requested, isTaken(job.dir, job.reserveSrt, job.name))
       const out = join(job.dir, name)
       renameSync(job.part, out)
       const size = statSync(out).size

@@ -83,6 +83,12 @@ describe('parseSrt', () => {
     expect(r.cues.map((c) => c.text)).toEqual(['A', 'B'])
   })
 
+  it('texto solto antes da linha de tempo: descartado com aviso (o índice sozinho não avisa)', () => {
+    const r = parseSrt('lixo\n00:00:01,000 --> 00:00:02,000\nA\n\n2\n00:00:03,000 --> 00:00:04,000\nB\n')
+    expect(r.cues.map((c) => c.text)).toEqual(['A', 'B'])
+    expect(r.warnings).toEqual(['Bloco 1: texto antes do tempo ignorado (“lixo”)'])
+  })
+
   it('cue sem texto é descartada com aviso', () => {
     const r = parseSrt('1\n00:00:01,000 --> 00:00:02,000\n<i></i>\n\n2\n00:00:03,000 --> 00:00:04,000\nB\n')
     expect(r.cues.map((c) => c.text)).toEqual(['B'])

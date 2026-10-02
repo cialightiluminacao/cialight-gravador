@@ -108,6 +108,8 @@ export async function runExportHarness(params: Params): Promise<void> {
     report.captionsBurn = await exportOnce({ ...base(capProject, 'legendas.mp4'), captions: { burn: true, srtBeside: false } })
     report.captionsSrt = await exportOnce({ ...base(capProject, 'legendas-sem.mp4'), captions: { burn: false, srtBeside: true } })
     report.captionsSrtAgain = await exportOnce({ ...base(capProject, 'legendas-sem.mp4'), captions: { burn: false, srtBeside: true } })
+    // um .srt do usuário com o nome pedido já está na pasta: o vídeo sai numerado e o .srt acompanha, sem sobrescrever
+    report.captionsPreexisting = await exportOnce({ ...base(capProject, 'legendas-pre.mp4'), captions: { burn: false, srtBeside: true } })
     // o main só grava .srt ao lado de uma exportação concluída: um caminho qualquer é recusado
     try {
       await window.api.captions.writeSrtBeside(`${params.outputDir}/arbitrario.mp4`, 'x')

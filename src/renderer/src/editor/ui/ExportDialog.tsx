@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Captions, CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAlert, Upload, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
-import { captionCues, contentEndUs, findItem } from '@shared/editor/ops'
+import { captionCues, contentEndUs, findItem, isCaptionsTrack } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
 import { planAudio } from '@shared/editor/audioPlan'
 import { audioProcessIssues } from './audioProcessing'
@@ -86,6 +86,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const privacy = durationUs > 0 ? privacyWarnings(project, range.fromUs, range.toUs) : []
   // legendas habilitadas (o projeto tem legendas: mostra "Queimar no vídeo" / "Salvar arquivo .srt ao lado")
   const hasCaptions = captionCues(project).length > 0
+  // faixa Legendas oculta: nada seria queimado — a opção fica desligada e explicada (o .srt continua com as legendas)
+  const captionsHidden = !!project.tracks.find(isCaptionsTrack)?.hidden
   // "Revisar": seleciona o efeito, leva o playhead ao instante do aviso (o mais fraco, o início da mídia por
   // cima…, sempre dentro do intervalo) e fecha o diálogo
   const review = (w: PrivacyWarning): void => {
@@ -132,12 +134,13 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
           fileName: name,
           estimateBytes: estimate,
           ...(preset === 'whatsapp' ? { targetBytes: WHATSAPP_TARGET_MB * 1024 * 1024 } : {}),
-          ...(captionCues(snapshot).length ? { captions } : {})
+          ...(captionCues(snapshot).length ? { captions: { ...captions, burn: captions.burn && !snapshot.tracks.find(isCaptionsTrack)?.hidden } } : {})
         },
         { signal: ac.signal, onProgress: (progress) => setPhase((p) => (p.kind === 'running' ? { ...p, progress } : p)) }
       )
       setPhase({ kind: 'done', result })
       if (result.srtPath) toast.success('Legendas salvas ao lado do vídeo', { description: result.srtPath })
+      else if (result.srtWarning) toast.warning('O arquivo .srt não foi gravado', { description: result.srtWarning })
     } catch (e) {
       if (e instanceof EditorExportCancelled) setPhase({ kind: 'form' })
       else setPhase({ kind: 'error', message: ipcErrorMessage(e) })
@@ -263,14 +266,19 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                 <span className="flex items-center gap-1.5 text-[12px] font-medium text-fg-2">
                   <Captions className="h-3.5 w-3.5" /> Legendas
                 </span>
-                <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-fg">
-                  <input type="checkbox" className="h-3.5 w-3.5 accent-accent" checked={captions.burn} onChange={(e) => setCaptions({ burn: e.target.checked })} data-caption-burn="" />
+                <label className={cn('flex items-center gap-1.5 text-[12px] text-fg', captionsHidden ? 'cursor-not-allowed opacity-50' : 'cursor-pointer')} title={captionsHidden ? 'A faixa Legendas está oculta: mostre-a para queimar as legendas no vídeo' : undefined}>
+                  <input type="checkbox" className="h-3.5 w-3.5 accent-accent" checked={captions.burn && !captionsHidden} disabled={captionsHidden} onChange={(e) => setCaptions({ burn: e.target.checked })} data-caption-burn="" aria-describedby={captionsHidden ? 'caption-burn-hint' : undefined} />
                   Queimar no vídeo
                 </label>
                 <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-fg">
                   <input type="checkbox" className="h-3.5 w-3.5 accent-accent" checked={captions.srtBeside} onChange={(e) => setCaptions({ srtBeside: e.target.checked })} data-caption-srt="" />
                   Salvar arquivo .srt ao lado
                 </label>
+                {captionsHidden ? (
+                  <span id="caption-burn-hint" className="basis-full text-[11px] text-muted" data-caption-hidden-hint="">
+                    A faixa Legendas está oculta, então nada é queimado no vídeo. Mostre a faixa (ícone do olho) para queimar; o arquivo .srt continua com as legendas.
+                  </span>
+                ) : null}
               </div>
             ) : null}
 

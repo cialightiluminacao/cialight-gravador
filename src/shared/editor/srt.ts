@@ -62,6 +62,12 @@ export function parseSrt(text: string): { cues: Cue[]; warnings: string[] } {
     }
     timings.forEach((ti, k) => {
       n++
+      // antes da 1ª linha de tempo só cabe o índice: outra coisa (texto solto) é descartada com aviso
+      const pre = k === 0 ? b.slice(0, ti) : []
+      if (pre.length > 1 || (pre.length === 1 && !INDEX.test(pre[0]))) {
+        const junk = pre.filter((l) => !INDEX.test(l)).join(' ').trim()
+        warnings.push(`Bloco ${n}: texto antes do tempo ignorado (“${junk.length > 40 ? `${junk.slice(0, 40)}…` : junk}”)`)
+      }
       const next = k + 1 < timings.length ? timings[k + 1] : b.length
       const stop = k + 1 < timings.length && next - 1 > ti && INDEX.test(b[next - 1]) ? next - 1 : next
       const m = TIMING.exec(b[ti])!

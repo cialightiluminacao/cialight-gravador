@@ -61,6 +61,65 @@ describe('importCaptions', () => {
     expect(r.warnings.join('|')).toMatch(/descartada/)
   })
 
+  it('append: duas cues dentro de UMA legenda existente são descartadas com aviso (nunca falha a importação)', () => {
+    const p = ops.addCaption(withClip(), 0, 'Longa', { durationUs: 5 * S }).project
+    const r = ops.importCaptions(p, [cue(1, 2, 'a'), cue(3, 4, 'b')], { mode: 'append' })
+    expect(caps(r.project).map((i) => i.text)).toEqual(['Longa'])
+    expect(r.count).toBe(0)
+    expect(r.warnings).toHaveLength(2)
+    expect(r.warnings.every((w) => /descartada/.test(w))).toBe(true)
+    // e as seguintes, depois dela, ainda entram
+    const r2 = ops.importCaptions(p, [cue(1, 2, 'a'), cue(3, 4, 'b'), cue(4.5, 7, 'c')], { mode: 'append' })
+    expect(caps(r2.project).map((i) => [i.startUs / S, (i.startUs + i.durationUs) / S, i.text])).toEqual([[0, 5, 'Longa'], [5, 7, 'c']])
+  })
+
+  it('append: cue que atravessa duas existentes fica com o vão entre elas', () => {
+    let p = ops.addCaption(withClip(), 0, 'A', { durationUs: 2 * S }).project // [0,2)
+    p = ops.addCaption(p, 3 * S, 'B', { durationUs: 2 * S }).project // [3,5)
+    const r = ops.importCaptions(p, [cue(1, 6, 'x')], { mode: 'append' })
+    expect(caps(r.project).map((i) => [i.startUs / S, (i.startUs + i.durationUs) / S, i.text])).toEqual([[0, 2, 'A'], [2, 3, 'x'], [3, 5, 'B']])
+    expect(r.warnings).toHaveLength(1)
+  })
+
+  it('aviso certo: fim ≤ início × antes do início do vídeo', () => {
+    const r = ops.importCaptions(withClip(), [cue(3, 2, 'invertida'), cue(1, 2, 'antes')], { mode: 'replace', offsetUs: -2 * S })
+    expect(r.count).toBe(0)
+    expect(r.warnings.find((w) => w.startsWith('Legenda 1'))).toMatch(/fim não é depois do início/)
+    expect(r.warnings.find((w) => w.startsWith('Legenda 2'))).toMatch(/antes do início do vídeo/)
+  })
+
+  it('propriedade: legendas existentes e cues aleatórias → nunca lança, sem sobreposição, existentes intactas', () => {
+    let seed = 12345
+    const rnd = (): number => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31)
+    for (let round = 0; round < 300; round++) {
+      let p = withClip()
+      // existentes: encostadas ou com vãos, algumas desativadas
+      let t = Math.round(rnd() * 2 * S)
+      const nExisting = Math.floor(rnd() * 6)
+      for (let k = 0; k < nExisting; k++) {
+        const d = MIN_ITEM_US + Math.round(rnd() * 3 * S)
+        const r = ops.addCaption(p, t, `e${k}`, { durationUs: d })
+        p = r.project
+        if (rnd() < 0.2) p = ops.updateItem<TextItem>(p, r.itemId, (x) => { x.enabled = false })
+        t += d + (rnd() < 0.4 ? 0 : Math.round(rnd() * 2 * S))
+      }
+      const before = p.tracks.find(ops.isCaptionsTrack)?.items.map((i) => [i.id, i.startUs, i.durationUs]) ?? []
+      const n = 1 + Math.floor(rnd() * 12)
+      const cs: Cue[] = Array.from({ length: n }, () => {
+        const s0 = Math.round((rnd() * 16 - 1) * S)
+        return { startUs: s0, endUs: s0 + Math.round((rnd() * 3 - 0.2) * S), text: 'x' }
+      })
+      const offsetUs = rnd() < 0.3 ? Math.round((rnd() - 0.5) * 2 * S) : undefined
+      let r: ReturnType<typeof ops.importCaptions>
+      expect(() => { r = ops.importCaptions(p, cs, { mode: 'append', offsetUs }) }, `rodada ${round}`).not.toThrow()
+      const items = [...caps(r!.project)].sort((a, b) => a.startUs - b.startUs)
+      for (let k = 1; k < items.length; k++) expect(items[k].startUs, `rodada ${round}`).toBeGreaterThanOrEqual(items[k - 1].startUs + items[k - 1].durationUs)
+      for (const it of items) expect(it.durationUs).toBeGreaterThanOrEqual(MIN_ITEM_US)
+      for (const [id, s, d] of before) expect(items.find((i) => i.id === id)).toMatchObject({ startUs: s, durationUs: d })
+      expect(r!.count + r!.warnings.filter((w) => /descartada/.test(w)).length).toBe(n)
+    }
+  })
+
   it('cue curta demais (< MIN_ITEM_US) é descartada com aviso', () => {
     const r = ops.importCaptions(withClip(), [{ startUs: 0, endUs: MIN_ITEM_US - 1, text: 'curta' }, cue(1, 2, 'ok')], { mode: 'replace' })
     expect(r.count).toBe(1)

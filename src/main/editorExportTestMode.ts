@@ -107,6 +107,7 @@ interface HarnessReport {
   captionsSrt?: ExportOut & { srtPath?: string }
   captionsSrtAgain?: ExportOut & { srtPath?: string }
   captionsArbitrary?: { rejected: boolean; error?: string }
+  captionsPreexisting?: ExportOut & { srtPath?: string; srtWarning?: string }
 }
 
 interface LevelSpan { n: number; min: number; max: number }
@@ -377,6 +378,9 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   capProject = setCaptionStyle(capProject, { background: CAP_BOX })
   rmSync(projects.dirOf(CAPTIONS_ID), { recursive: true, force: true })
   projects.create(capProject)
+  // um .srt do usuário já na pasta, sem o vídeo: a exportação com ".srt ao lado" não pode sobrescrevê-lo
+  const PRE_SRT = join(exportsDir, 'legendas-pre.srt')
+  writeFileSync(PRE_SRT, 'legendas do usuário — não mexer')
 
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
@@ -702,6 +706,10 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
       check(again.srtPath === want && want.endsWith('legendas-sem (2).srt') && existsSync(want), `o .srt acompanha o nome numerado (${again.srtPath})`, failures)
       if (existsSync(want)) check(readSrt(want).text === expected, '.srt do nome numerado com o conteúdo esperado', failures)
     }
+    const pre = r.captionsPreexisting
+    check(!!pre?.path && pre.path.endsWith('legendas-pre (2).mp4') && existsSync(pre.path), `.srt do usuário com o nome pedido → vídeo numerado "legendas-pre (2).mp4" (${pre?.path ?? pre?.error})`, failures)
+    check(!!pre?.srtPath && pre.srtPath === srtOf(pre.path ?? '') && existsSync(pre.srtPath) && readSrt(pre.srtPath).text === expected && !pre.srtWarning, `o .srt acompanha: ${pre?.srtPath} (aviso: ${pre?.srtWarning})`, failures)
+    check(readFileSync(PRE_SRT, 'utf8') === 'legendas do usuário — não mexer', '.srt do usuário intacto (nada sobrescrito)', failures)
     check(!!r.captionsArbitrary?.rejected && !existsSync(join(exportsDir, 'arbitrario.srt')), `writeSrtBeside recusa um caminho que não é de uma exportação concluída (${JSON.stringify(r.captionsArbitrary)})`, failures)
   }
 

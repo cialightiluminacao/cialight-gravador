@@ -66,6 +66,32 @@ describe('EditorExportJobs', () => {
     expect(jobs.isCompletedOutput(c.path)).toBe(false)
   })
 
+  it('reserveSrt (".srt ao lado"): um <nome>.srt existente também ocupa o nome; sem reserveSrt, não', async () => {
+    writeFileSync(join(dir, 'Aula.srt'), 'do usuário')
+    writeFileSync(join(dir, 'Aula (2).srt'), 'do usuário')
+    const jobs = new EditorExportJobs(plenty)
+    const a = await jobs.open(dir, 'Aula.mp4', 0, 0, true)
+    expect(a.path).toBe(join(dir, 'Aula (3).mp4'))
+    writeFileSync(join(dir, 'Aula (3).srt'), 'apareceu durante a exportação')
+    await jobs.write(a.jobId, new Uint8Array([1]), 0)
+    const r = await jobs.finalize(a.jobId)
+    expect(r.path).toBe(join(dir, 'Aula (4).mp4')) // o finalize também respeita o .srt
+    const b = await jobs.open(dir, 'Aula.mp4')
+    expect(b.path).toBe(join(dir, 'Aula.mp4'))
+    await jobs.cancel(b.jobId)
+    expect(readFileSync(join(dir, 'Aula.srt'), 'utf8')).toBe('do usuário')
+  })
+
+  it('consumeCompletedOutput: o .srt ao lado é aceito uma vez por exportação', async () => {
+    const jobs = new EditorExportJobs(plenty)
+    const a = await jobs.open(dir, 'u.mp4')
+    await jobs.write(a.jobId, new Uint8Array([1]), 0)
+    const r = await jobs.finalize(a.jobId)
+    expect(jobs.isCompletedOutput(r.path)).toBe(true)
+    jobs.consumeCompletedOutput(r.path)
+    expect(jobs.isCompletedOutput(r.path)).toBe(false)
+  })
+
   it('nunca sobrescreve: nome ocupado ganha " (2)", " (3)"', async () => {
     writeFileSync(join(dir, 'x.mp4'), 'antigo')
     writeFileSync(join(dir, 'x (2).mp4'), 'antigo')

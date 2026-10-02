@@ -219,7 +219,7 @@ export function CaptionsPanel({ playback }: { playback: PlaybackController | nul
 }
 
 /** Campo de tempo (mm:ss,mmm): rascunho local, confirmado no Enter/ao sair; Esc descarta o rascunho. */
-function TimeField({ label, valueUs, disabled, onCommit, field }: { label: string; valueUs: number; disabled: boolean; onCommit: (typed: string) => void; field: 'start' | 'end' }): React.JSX.Element {
+function TimeField({ label, valueUs, disabled, onCommit, field, onFocus }: { label: string; valueUs: number; disabled: boolean; onCommit: (typed: string) => void; field: 'start' | 'end'; onFocus?: () => void }): React.JSX.Element {
   const shown = formatCueTime(valueUs)
   const [draft, setDraft] = useState<string | null>(null)
   const discard = useRef(false)
@@ -233,6 +233,7 @@ function TimeField({ label, valueUs, disabled, onCommit, field }: { label: strin
       data-caption-time={field}
       className="h-6 w-[74px] rounded border border-border bg-bg-2 px-1 font-mono text-[10.5px] tabular-nums text-fg outline-none focus:border-accent/60 disabled:opacity-40"
       onChange={(e) => setDraft(e.target.value)}
+      onFocus={onFocus}
       onBlur={() => {
         // o campo volta a mostrar o modelo: um tempo recusado não fica nele (o aceito chega pelo valueUs)
         const typed = draft
@@ -271,10 +272,15 @@ const CaptionRow = memo(function CaptionRow({ item, index, isLast, selected, loc
     if (plan.kind === 'invalid') toast.error(plan.message)
     else if (plan.kind === 'change') st().apply((p) => setCaptionTimes(p, item.id, plan.startUs, plan.endUs))
   }
-  const commitText = (typed: string): void => {
+  const commitText = (typed: string, transient = false): void => {
     const plan = planTextEdit(item.text, typed)
     if (plan.kind === 'empty') toast('O texto da legenda não pode ficar vazio: o anterior foi mantido.')
-    else if (plan.kind === 'change') st().apply((p) => updateItem<TextItem>(p, item.id, (d) => { d.text = plan.text }))
+    else if (plan.kind === 'change') st().apply((p) => updateItem<TextItem>(p, item.id, (d) => { d.text = plan.text }), transient ? { transient: true } : undefined)
+  }
+  // teclado: focar o início da legenda leva o playhead até ela (como o clique na linha)
+  const focusSeek = (): void => {
+    onSeek(item.startUs)
+    if (!selected) st().select([item.id])
   }
   const off = item.enabled === false
 
@@ -290,7 +296,7 @@ const CaptionRow = memo(function CaptionRow({ item, index, isLast, selected, loc
     >
       <div className="flex items-center gap-1">
         <span className="w-5 shrink-0 text-right font-mono text-[10px] tabular-nums text-muted">{index + 1}</span>
-        <TimeField label={`Início da legenda ${index + 1}`} field="start" valueUs={item.startUs} disabled={locked} onCommit={(t) => commitTime('start', t)} />
+        <TimeField label={`Início da legenda ${index + 1}`} field="start" valueUs={item.startUs} disabled={locked} onCommit={(t) => commitTime('start', t)} onFocus={focusSeek} />
         <span className="text-[10px] text-muted-2">→</span>
         <TimeField label={`Fim da legenda ${index + 1}`} field="end" valueUs={item.startUs + item.durationUs} disabled={locked} onCommit={(t) => commitTime('end', t)} />
         {off ? <span className="text-[9.5px] text-muted">desativada</span> : null}
@@ -323,11 +329,14 @@ const CaptionRow = memo(function CaptionRow({ item, index, isLast, selected, loc
           const typed = e.target.value
           // texto recusado (vazio) não fica no campo
           if (typed.trim() === '') e.target.value = item.text
-          commitText(typed)
           if (enterRef.current) {
+            // Enter na última = um gesto: o texto gravado e a próxima legenda num único passo de desfazer
             enterRef.current = false
+            st().begin()
+            commitText(typed, true)
             onEnterLast()
-          }
+            st().commitTx()
+          } else commitText(typed)
         }}
         onKeyDown={(e) => {
           e.stopPropagation()
