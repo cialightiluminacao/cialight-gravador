@@ -1,10 +1,16 @@
 import { create } from 'zustand'
 import { toast } from 'sonner'
-import { EditError, updateAsset } from '@shared/editor/ops'
+import { EditError, scopeDowngrades, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
 import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
 import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from './zoom'
 import { ipcErrorMessage } from '@/lib/ipcError'
+
+/** Aviso quando uma edição tirou um efeito de "só a faixa abaixo" (não acharia mais a camada): vale para tudo abaixo. */
+export const SCOPE_DOWNGRADE_MSG = 'Efeito passou a valer para tudo abaixo'
+function noteScopeDowngrades(before: Project | null, after: Project): void {
+  if (before && scopeDowngrades(before, after) > 0) toast.info(SCOPE_DOWNGRADE_MSG)
+}
 
 // Store do editor (zustand): projeto com histórico, transações (arrasto = 1 passo de undo),
 // seleção, viewport da timeline e autosave. Operações puras vivem em @shared/editor/ops.
@@ -108,6 +114,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       return true
     }
     // commit real (se houver transação aberta, ela é encerrada com este estado)
+    noteScopeDowngrades(txBase ?? history.present, next)
     const h = commit(txBase ? { ...history, present: txBase } : history, touch(next), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
     return true
@@ -148,6 +155,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       set({ txBase: null })
       return
     }
+    noteScopeDowngrades(txBase, history.present)
     const h = commit({ ...history, present: txBase }, touch(history.present), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
   },

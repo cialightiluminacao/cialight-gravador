@@ -25,6 +25,8 @@ const end = itemEndUs
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
 /** Nome das faixas de efeitos criadas por addEffect ("Efeitos", "Efeitos 2", …). */
 const FX_TRACK = /^Efeitos( \d+)?$/
+/** Faixa de efeitos (só recebe efeitos; mídia nunca entra nela)? */
+export const isFxTrack = (t: Track): boolean => t.kind === 'video' && FX_TRACK.test(t.name)
 
 // ---------------------------------------------------------------- consultas
 
@@ -321,17 +323,70 @@ function nextFxName(p: Project): string {
   return name
 }
 
+/** Índice da faixa de vídeo visível com o clipe do grupo do efeito (o que cruza o intervalo dele, se houver); −1 = nenhum. */
+function targetTrackIndex(d: Project, it: Item): number {
+  if (!it.linkId) return -1
+  let best = -1
+  d.tracks.forEach((t, i) => {
+    if (t.kind !== 'video' || t.hidden) return
+    for (const m of t.items) {
+      if (m.linkId !== it.linkId || m.type !== 'media' || !m.visual) continue
+      if (best < 0 || (m.startUs < end(it) && end(m) > it.startUs)) best = i
+    }
+  })
+  return best
+}
+
 /**
  * Põe o efeito `it` (já fora de qualquer faixa) numa faixa: `prefer` se estiver livre e desbloqueada; senão uma
  * faixa "Efeitos" existente acima de toda a mídia, visível, desbloqueada e livre no intervalo; senão uma "Efeitos N"
  * nova logo acima do bloco de efeitos (topo das faixas de vídeo) — nunca abaixo de mídia.
+ * Escopo `track` (só a faixa logo abaixo): precisa ficar logo acima da faixa do seu clipe — numa faixa "Efeitos"
+ * livre ali, ou numa nova ali se o clipe estiver na faixa de mídia mais alta. Sem isso ele não acharia a camada e
+ * não esconderia nada; então passa a valer para tudo abaixo (cobre a mais, nunca a menos). Devolve true nesse caso.
  */
-function placeEffect(d: Project, it: Item, prefer?: Track): void {
+function placeEffect(d: Project, it: Item, prefer?: Track): boolean {
   const s = it.startUs, e = end(it)
-  if (prefer && !prefer.locked && isFree(prefer, s, e)) { prefer.items.push(it); return }
+  if (prefer && !prefer.locked && isFree(prefer, s, e)) { prefer.items.push(it); return false }
+  let downgraded = false
+  if (it.type === 'effect' && it.scope === 'track') {
+    const ti = targetTrackIndex(d, it)
+    if (ti >= 0) {
+      const above = d.tracks[ti + 1]
+      if (above && above.kind === 'video' && FX_TRACK.test(above.name) && !above.locked && !above.hidden && isFree(above, s, e)) { above.items.push(it); return false }
+      const topMedia = d.tracks.every((t, i) => i <= ti || t.kind !== 'video' || FX_TRACK.test(t.name))
+      if (topMedia) { mustTrack(d, createTrack(d, 'video', ti + 1, nextFxName(d))).items.push(it); return false }
+    }
+    it.scope = 'below'
+    downgraded = true
+  }
   const lastMedia = d.tracks.reduce((m, t, i) => (t.kind === 'video' && !FX_TRACK.test(t.name) ? i : m), -1)
   const t = d.tracks.find((x, i) => x.kind === 'video' && i > lastMedia && FX_TRACK.test(x.name) && !x.locked && !x.hidden && isFree(x, s, e))
   ;(t ?? mustTrack(d, createTrack(d, 'video', aboveLastVideo(d), nextFxName(d)))).items.push(it)
+  return downgraded
+}
+
+/**
+ * Sobrescrever [s, e) numa faixa: nunca recorta seguidores numa faixa "Efeitos" (são tirados da faixa e devolvidos
+ * para recolocar com placeEffect depois); clipe de mídia apagado por inteiro tira o vínculo dos efeitos órfãos.
+ */
+function overwriteIn(d: Project, t: Track, s: Us, e: Us): Item[] {
+  let lifted: Item[] = []
+  if (FX_TRACK.test(t.name)) {
+    lifted = t.items.filter((i) => isFollower(d, i) && i.startUs < e && end(i) > s)
+    if (lifted.length) t.items = t.items.filter((i) => !lifted.includes(i))
+  }
+  const media = t.items.filter((i) => i.type !== 'effect' && i.linkId).map((i) => [i.id, i.linkId!] as const)
+  const cut = new Set<string>()
+  overwriteRange(t, s, e, cut)
+  relinkAcross(d, s, e, cut)
+  dropOrphanLinks(d, media.filter(([id]) => !t.items.some((i) => i.id === id)).map(([, l]) => l))
+  return lifted
+}
+
+/** Mídia (não-efeito) não entra em faixa "Efeitos": ficaria por cima dos efeitos das faixas de baixo. */
+function assertNotFxTrackFor(it: Item, t: Track): void {
+  if (it.type !== 'effect' && t.kind === 'video' && FX_TRACK.test(t.name)) throw new EditError('invalid', `A faixa "${t.name}" é só para efeitos`)
 }
 
 /**
@@ -345,6 +400,12 @@ function relocateFollowers(d: Project, ids: Iterable<string>): void {
     f.track.items.splice(f.itemIndex, 1)
     placeEffect(d, f.item)
   }
+}
+
+/** Quantos efeitos passaram de "só a faixa abaixo" para "tudo abaixo" entre `before` e `after` (mesmo id). */
+export function scopeDowngrades(before: Project, after: Project): number {
+  const was = new Set(before.tracks.flatMap((t) => t.items.filter((i) => i.type === 'effect' && i.scope === 'track').map((i) => i.id)))
+  return after.tracks.reduce((n, t) => n + t.items.filter((i) => i.type === 'effect' && i.scope === 'below' && was.has(i.id)).length, 0)
 }
 
 /** Grupos de `links` que ficaram sem mídia: os efeitos que sobraram perdem o vínculo (não seguem mais nada). */
@@ -491,6 +552,7 @@ export function insertItems(p: Project, trackId: string, items: Item[], mode: In
   assertUnlocked(track)
   for (const it of items) {
     if (!fitsTrack(it, track.kind)) throw new EditError('invalid', `Item ${it.id} não cabe numa faixa de ${track.kind === 'video' ? 'vídeo' : 'áudio'}`)
+    assertNotFxTrackFor(it, track)
     if (it.durationUs < MIN_ITEM_US) throw new EditError('invalid', `Item ${it.id} menor que a duração mínima`)
     if (it.startUs < 0) throw new EditError('bounds', `Item ${it.id} começa antes de 0`)
   }
@@ -500,6 +562,7 @@ export function insertItems(p: Project, trackId: string, items: Item[], mode: In
   return produce(p, (d) => {
     const t = mustTrack(d, trackId)
     let placed = sorted
+    let lifted: Item[] = []
     if (mode === 'insert') {
       const first = sorted[0].startUs
       const sum = sorted.reduce((acc, i) => acc + i.durationUs, 0)
@@ -507,13 +570,10 @@ export function insertItems(p: Project, trackId: string, items: Item[], mode: In
       const point = makeRoom(d, first, Math.max(sum, span), trackId)
       placed = sorted.map((i) => ({ ...i, startUs: i.startUs + point - first }))
     } else {
-      for (const i of sorted) {
-        const cut = new Set<string>()
-        overwriteRange(t, i.startUs, end(i), cut)
-        relinkAcross(d, i.startUs, end(i), cut)
-      }
+      for (const i of sorted) lifted.push(...overwriteIn(d, t, i.startUs, end(i)))
     }
     t.items.push(...placed)
+    for (const it of lifted) placeEffect(d, it)
     finalize(d)
   })
 }
@@ -700,6 +760,7 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
     const to = dest && primary.has(id) ? dest : f.track
     assertUnlocked(to)
     if (!fitsTrack(f.item, to.kind)) throw new EditError('invalid', `Item ${id} não cabe na faixa ${to.name}`)
+    if (to.id !== f.track.id) assertNotFxTrackFor(f.item, to)
     return { id, fromTrackId: f.track.id, toTrackId: to.id, item: f.item }
   })
   const minStart = Math.min(...plan.map((x) => x.item.startUs))
@@ -709,6 +770,7 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
   return produce(p, (d) => {
     for (const t of d.tracks) if (t.items.some((i) => idSet.has(i.id))) t.items = t.items.filter((i) => !idSet.has(i.id))
     let moved = plan.map((x) => ({ ...x, item: { ...x.item, startUs: x.item.startUs + delta } as Item }))
+    const lifted: Item[] = []
     if (opts?.mode === 'insert') {
       const blockStart = Math.min(...moved.map((x) => x.item.startUs))
       const span = Math.max(...moved.map((x) => end(x.item))) - blockStart
@@ -721,12 +783,11 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
         const t = mustTrack(d, x.toTrackId)
         if (isFree(t, x.item.startUs, end(x.item))) continue
         if (opts?.mode !== 'overwrite') throw new EditError('overlap', `Sobreposição na faixa "${t.name}"`)
-        const cut = new Set<string>()
-        overwriteRange(t, x.item.startUs, end(x.item), cut)
-        relinkAcross(d, x.item.startUs, end(x.item), cut)
+        lifted.push(...overwriteIn(d, t, x.item.startUs, end(x.item)))
       }
     }
     for (const x of moved) mustTrack(d, x.toTrackId).items.push(x.item)
+    for (const it of lifted) placeEffect(d, it)
     relocateFollowers(d, moved.map((x) => x.id))
     finalize(d)
   })
@@ -781,7 +842,9 @@ export function deleteRange(p: Project, fromUs: Us, toUs: Us, opts?: { trackIds?
     : p.tracks.filter((t) => !t.locked).map((t) => t.id)
   return produce(p, (d) => {
     const cut = new Set<string>()
+    const before = mediaLinks(d, trackIds.flatMap((id) => mustTrack(d, id).items.map((i) => i.id)))
     for (const id of trackIds) overwriteRange(mustTrack(d, id), from, to, cut)
+    dropOrphanLinks(d, before)
     relinkAcross(d, from, to, cut)
     for (const id of trackIds) for (const it of mustTrack(d, id).items) if (it.startUs >= to) it.startUs -= to - from
     // marcadores acompanham só quando o corte vale para todas as faixas desbloqueadas
@@ -827,7 +890,8 @@ export function unlinkMedia(p: Project, itemId: string): Project {
   const isClip = (id: string): boolean => { const g = mustFind(p, id); return g.track.kind === 'video' && g.item.type === 'media' && !!g.item.visual }
   const anchor = isClip(itemId) ? itemId : (media.find(isClip) ?? itemId)
   const rest = media.filter((id) => id !== anchor)
-  return rest.length ? unlinkItems(p, rest) : p
+  // só efeitos no grupo além do clipe: "Desvincular efeitos" solta todos (nunca um clique sem efeito)
+  return rest.length ? unlinkItems(p, rest) : unlinkItems(p, group)
 }
 
 /**
@@ -961,19 +1025,19 @@ export function updateItem<T extends Item>(p: Project, itemId: string, recipe: (
  * recriados entre as cópias. Se não couber na faixa de origem, cria uma faixa do mesmo tipo logo acima; efeito
  * copiado que não cabe vai para outra faixa de efeitos (placeEffect), nunca para uma "Vídeo N".
  */
-export function duplicateItems(p: Project, itemIds: string[], atUs?: Us): { project: Project; itemIds: string[] } {
+export function duplicateItems(p: Project, itemIds: string[], atUs?: Us): { project: Project; itemIds: string[]; downgraded: number } {
   const ids = expand(p, itemIds, true)
-  if (ids.length === 0) return { project: p, itemIds: [] }
+  if (ids.length === 0) return { project: p, itemIds: [], downgraded: 0 }
   const found = ids.map((id) => mustFind(p, id))
   const blockStart = Math.min(...found.map((f) => f.item.startUs))
   const at = Math.max(0, Math.round(atUs ?? Math.max(...found.map((f) => end(f.item)))))
   const linkMap = new Map<string, string>()
+  let downgraded = 0
   const copies = found.map((f) => ({
     trackId: f.track.id,
     item: withLink({ ...f.item, id: newId('i_'), startUs: f.item.startUs + at - blockStart }, mapLink(linkMap, f.item.linkId))
   }))
   const project = produce(p, (d) => {
-    for (const c of copies) if (c.item.type === 'effect') placeEffect(d, c.item, mustTrack(d, c.trackId))
     for (const trackId of [...new Set(copies.filter((c) => c.item.type !== 'effect').map((c) => c.trackId))]) {
       const group = copies.filter((c) => c.trackId === trackId && c.item.type !== 'effect').map((c) => c.item)
       const src = mustTrack(d, trackId)
@@ -981,9 +1045,11 @@ export function duplicateItems(p: Project, itemIds: string[], atUs?: Us): { proj
       const target = fits ? src : mustTrack(d, createTrack(d, src.kind, d.tracks.indexOf(src) + 1))
       target.items.push(...group)
     }
+    // efeitos depois da mídia: o de escopo `track` procura a faixa do clipe copiado
+    for (const c of copies) if (c.item.type === 'effect' && placeEffect(d, c.item, mustTrack(d, c.trackId))) downgraded++
     finalize(d)
   })
-  return { project, itemIds: copies.map((c) => c.item.id) }
+  return { project, itemIds: copies.map((c) => c.item.id), downgraded }
 }
 
 /**

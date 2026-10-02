@@ -89,8 +89,20 @@ function visualState(v: VisualProps, itemDur: Us, local: Us): { rect: Rect; opac
 
 const ev = (a: Anim<number>, local: Us): number => evalAnim(a, local)
 
+/**
+ * O efeito layers[i] age no quadro? Escopo `below`: sempre. Escopo `track`: só se a camada logo antes dele for a
+ * mídia/anotações da faixa `belowTrackId` (a mesma condição do compositor; sem ela o efeito não esconde nada).
+ */
+export function effectBound(layers: Layer[], i: number): boolean {
+  const fx = layers[i]
+  if (fx?.kind !== 'effect') return false
+  if (fx.scope === 'below') return true
+  const prev = layers[i - 1]
+  return !!prev && (prev.kind === 'media' || prev.kind === 'annotations') && prev.trackId === fx.belowTrackId
+}
+
 /** Faixa de vídeo não oculta imediatamente abaixo de trackId (faixas de áudio e ocultas são puladas). */
-function visualTrackBelow(p: Project, trackId: string): string | null {
+export function visualTrackBelow(p: Project, trackId: string): string | null {
   const i = p.tracks.findIndex((t) => t.id === trackId)
   for (let j = i - 1; j >= 0; j--) {
     const t = p.tracks[j]

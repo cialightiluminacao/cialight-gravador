@@ -3,7 +3,7 @@
 // F1: mídia (vídeo/imagem) e anotações. F2: efeitos de privacidade (effects.ts) — com efeito no quadro, as
 // camadas vão para um FBO de acumulação que o efeito lê. Texto/forma/transições chegam depois (ignorados).
 import * as twgl from 'twgl.js'
-import type { AnnotationsLayer, EffectLayer, Layer, MediaLayer } from '@shared/editor/resolve'
+import { effectBound, type AnnotationsLayer, type EffectLayer, type Layer, type MediaLayer } from '@shared/editor/resolve'
 import { parseColor } from './color'
 import { EffectPass } from './effects'
 import { createGl, createTexture, sourceSize, uploadTexture } from './gl'
@@ -100,7 +100,7 @@ export class Compositor {
       // efeito de escopo `track` logo acima, da faixa imediatamente acima desta: a camada é desenhada isolada no
       // FBO auxiliar, recebe o efeito e só então é composta sobre o acumulado
       const next = layers[i + 1]
-      if (fx && next?.kind === 'effect' && next.scope === 'track' && (layer.kind === 'media' || layer.kind === 'annotations') && next.belowTrackId === layer.trackId) {
+      if (fx && next?.kind === 'effect' && next.scope === 'track' && effectBound(layers, i + 1)) {
         const aux = this.effects.aux(W, H)
         this.bindTarget(aux)
         gl.clearColor(0, 0, 0, 0)

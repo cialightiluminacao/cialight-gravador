@@ -183,6 +183,15 @@ describe('planFade', () => {
 })
 
 describe('dropTarget', () => {
+  it('nunca solta mídia numa faixa "Efeitos" (cai na escolha automática); mover para ela é recusado', () => {
+    const { p, v0 } = fixture()
+    const e = ops.addEffect(p, 'blur', 0)
+    const fxTrack = ops.findItem(e.project, e.itemId)!.track.id
+    expect(dropTarget(e.project, 'a', { kind: 'track', trackId: fxTrack })).toBeUndefined()
+    const r = planMove(e.project, { draggedId: v0, ids: [v0], deltaUs: 20 * S, zone: { kind: 'track', trackId: fxTrack }, includeLinked: false, snap: noSnap, preview: false })
+    expect(r.project).toBeNull()
+    expect(r.error?.code).toBe('invalid')
+  })
   const audioAsset = (): Asset => ({ id: 'm', name: 'm', kind: 'audio', source: { type: 'file', path: 'C:/m.m4a', size: 1, mtimeMs: 1 }, durationUs: S, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
   it('só passa a faixa quando o tipo bate com o que a mídia gera', () => {
     const p = ops.addAsset(fixture().p, audioAsset())

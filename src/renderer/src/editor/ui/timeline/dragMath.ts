@@ -1,4 +1,4 @@
-import { addTrack, defaultEffectDurationUs, EditError, effectTrackAllowed, findItem, linkedIds, moveItems, moveKeyframes, trimItem, updateItem } from '@shared/editor/ops'
+import { addTrack, defaultEffectDurationUs, EditError, effectTrackAllowed, isFxTrack, findItem, linkedIds, moveItems, moveKeyframes, trimItem, updateItem } from '@shared/editor/ops'
 import type { MediaItem, Project, TrackKind, Us } from '@shared/editor/project'
 import { snapDelta, snapPoints, type SnapPoint } from '@shared/editor/snap'
 import { itemEndUs, snapToFrame } from '@shared/editor/time'
@@ -189,7 +189,8 @@ export function dropTarget(p: Project, assetId: string, zone: DropZone): { track
   const kinds = assetProduces(asset)
   if (zone.kind === 'newTrack') return kinds.includes(zone.trackKind) ? { newTrack: zone.trackKind } : undefined
   const t = p.tracks.find((x) => x.id === zone.trackId)
-  return t && kinds.includes(t.kind) ? { trackId: t.id } : undefined
+  // faixa "Efeitos" não recebe mídia (ops também recusa): cai na escolha automática
+  return t && kinds.includes(t.kind) && !isFxTrack(t) ? { trackId: t.id } : undefined
 }
 
 /**

@@ -2,8 +2,9 @@
 import { evalAnim } from './anim'
 import type { Anim, EffectItem, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
+import { visualTrackBelow } from './resolve'
 
-export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered'
+export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget'
 /** `tUs`: instante (absoluto, dentro do intervalo) que "Revisar" mostra — o mais fraco, o início da sobreposição… */
 export interface PrivacyWarning { itemId: string; kind: PrivacyWarningKind; message: string; tUs: Us }
 
@@ -22,8 +23,27 @@ const MSG = {
   weakBlurInvert: `Blur fraco fora da região pode ser revertido; use intensidade ≥ ${WEAK_BLUR}`,
   weakPixelate: `Pixelado fraco pode ser revertido; use intensidade ≥ ${WEAK_PIXELATE} ou Tarja`,
   disabled: 'Efeito de privacidade desativado neste trecho: o conteúdo aparece sem proteção',
-  covered: 'Há mídia acima deste efeito; ela não será borrada'
+  covered: 'Há mídia acima deste efeito; ela não será borrada',
+  noTarget: "Efeito 'só a faixa abaixo' sem mídia embaixo neste trecho"
 } as const
+
+/**
+ * Escopo `track`: primeiro instante de [a, b) em que a faixa logo abaixo (visualTrackBelow) não tem mídia/anotações
+ * visíveis e ativas — ali o efeito não acha camada e não esconde nada. null = coberto o trecho todo.
+ */
+function noTargetAt(p: Project, trackId: string, a: Us, b: Us): Us | null {
+  const below = visualTrackBelow(p, trackId)
+  const t = below ? p.tracks.find((x) => x.id === below) : undefined
+  if (!t) return a
+  const items = t.items.filter((i) => (i.type === 'media' || i.type === 'annotations') && i.enabled !== false && i.startUs < b && itemEndUs(i) > a).sort((x, y) => x.startUs - y.startUs)
+  let cursor = a
+  for (const i of items) {
+    if (i.startUs > cursor) return cursor
+    cursor = Math.max(cursor, itemEndUs(i))
+    if (cursor >= b) return null
+  }
+  return cursor < b ? cursor : null
+}
 
 interface Box { x0: number; y0: number; x1: number; y1: number }
 
@@ -107,6 +127,10 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
         }
       }
       if (cover !== null) out.push({ itemId: it.id, kind: 'covered', message: MSG.covered, tUs: cover })
+      if (it.scope === 'track') {
+        const gap = noTargetAt(p, track.id, from, Math.min(e, hi))
+        if (gap !== null) out.push({ itemId: it.id, kind: 'noTarget', message: MSG.noTarget, tUs: gap })
+      }
     }
   })
   return out

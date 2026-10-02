@@ -7,7 +7,7 @@ import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
 import { frameDurUs, frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
 import type { PlaybackController } from '../engine/PlaybackController'
 import type { ShortcutAction } from '../shortcuts'
-import { flushAutosave, useEditorStore } from '../state/editorStore'
+import { flushAutosave, SCOPE_DOWNGRADE_MSG, useEditorStore } from '../state/editorStore'
 import { useKeyframeSelection } from '../state/keyframeSelection'
 import { useViewerTool } from '../state/viewerTool'
 
@@ -217,13 +217,17 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'paste': {
       if (!clipboard.length) return true
       let ids: string[] = []
-      if (s.apply((q) => { const r = duplicateItems(q, clipboard, s.playheadUs); ids = r.itemIds; return r.project })) s.select(ids)
+      let down = 0
+      if (s.apply((q) => { const r = duplicateItems(q, clipboard, s.playheadUs); ids = r.itemIds; down = r.downgraded; return r.project })) s.select(ids)
+      if (down) toast.info(SCOPE_DOWNGRADE_MSG)
       return true
     }
     case 'duplicate': {
       if (!s.selection.length) return true
       let ids: string[] = []
-      if (s.apply((q) => { const r = duplicateItems(q, s.selection); ids = r.itemIds; return r.project })) s.select(ids)
+      let down = 0
+      if (s.apply((q) => { const r = duplicateItems(q, s.selection); ids = r.itemIds; down = r.downgraded; return r.project })) s.select(ids)
+      if (down) toast.info(SCOPE_DOWNGRADE_MSG)
       return true
     }
     case 'undo': s.undo(); return true
