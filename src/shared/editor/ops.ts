@@ -990,21 +990,40 @@ export function removeKeyframesAt(p: Project, itemId: string, localUs: Us): Proj
   })
 }
 
-/** Troca o tipo dos efeitos (os outros itens são ignorados). Tarja: borda suave 0 (cor exata, irreversível). */
+/**
+ * Troca o tipo dos efeitos (os outros itens e os que já são do tipo são ignorados). Tarja: borda suave 0
+ * (cor exata, irreversível) e sem keys de intensidade (não valem para cor sólida). Saindo da Tarja, a
+ * borda suave volta ao padrão do tipo.
+ */
 export function convertEffects(p: Project, itemIds: string[], effect: EffectItem['effect']): Project {
   const ids = itemIds.filter((id) => {
     const f = findItem(p, id)
-    return f?.item.type === 'effect' && (f.item.effect !== effect || (effect === 'solid' && f.item.feather !== 0))
+    return f?.item.type === 'effect' && f.item.effect !== effect
   })
   if (ids.length === 0) return p
   for (const id of ids) assertUnlocked(mustFind(p, id).track)
+  const presetFeather = createEffectItem(effect, 0, MIN_ITEM_US).feather
   return produce(p, (d) => {
     for (const id of ids) {
       const it = findItem(d, id)!.item as EffectItem
+      if (effect === 'solid') {
+        it.feather = 0
+        it.strength = { value: it.strength.value }
+      } else if (it.effect === 'solid') it.feather = presetFeather
       it.effect = effect
-      if (effect === 'solid') it.feather = 0
     }
   })
+}
+
+/**
+ * Ativar/desativar (Shift+E, menu): com vínculo, o grupo todo (vídeo + áudio vinculado). Se algum do grupo
+ * está ativo, desativa todos; senão reativa todos.
+ */
+export function toggleEnabled(p: Project, itemIds: string[], includeLinked: boolean): Project {
+  const ids = expand(p, itemIds, includeLinked)
+  if (ids.length === 0) return p
+  const anyOn = ids.some((id) => mustFind(p, id).item.enabled !== false)
+  return setItemEnabled(p, ids, !anyOn)
 }
 
 const FX_TRACK = /^Efeitos( \d+)?$/

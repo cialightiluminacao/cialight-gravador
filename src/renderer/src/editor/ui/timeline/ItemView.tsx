@@ -14,9 +14,9 @@ import { usToPx } from '../../state/zoom'
 // Um item na faixa: posicionado por usToPx e recortado à área visível (+ margem), para que itens
 // enormes em zoom alto não virem caixas de milhões de px. Vídeo mostra o filmstrip (fatias do sprite
 // por background-position, ancoradas no início do item), imagem repete a própria imagem, áudio
-// desenha a forma de onda. Losangos = keyframes (KeyframeMarks); item desativado fica apagado e
-// hachurado. Bordas (data-edge) fazem trim; os eventos são tratados por delegação
-// no useTimelineDrag (nenhum handler por item → memo efetivo).
+// desenha a forma de onda. Losangos = keyframes (KeyframeMarks); item desativado fica apagado, com
+// borda tracejada e ícone de olho cortado (a hachura é da faixa bloqueada). Bordas (data-edge) fazem
+// trim; os eventos são tratados por delegação no useTimelineDrag (nenhum handler por item → memo efetivo).
 
 export const ITEM_MARGIN_PX = 240
 const INSET = 3
@@ -111,6 +111,7 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
         TONE[isAudio ? 'audio' : item.type],
         locked ? 'cursor-not-allowed' : 'cursor-grab',
         (dimmed || disabled) && 'opacity-45',
+        disabled && 'border-dashed',
         selected && 'z-[1] border-accent shadow-[0_0_0_1.5px_var(--accent)]'
       )}
       style={{ left: visL, width: visR - visL, top: INSET, height: h }}
@@ -128,9 +129,14 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
       ) : null}
       {broken ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(255,92,92,0.22)_0_6px,transparent_6px_12px)]" /> : null}
       {locked ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(0,0,0,0.28)_0_4px,transparent_4px_9px)]" /> : null}
-      {disabled ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(45deg,rgba(0,0,0,0.4)_0_3px,transparent_3px_7px)]" /> : null}
       {fades ? <FadeHandles fadeInUs={fades.in} fadeOutUs={fades.out} pxPerSec={pxPerSec} w={w} clipFrom={clipFrom} visW={visR - visL} h={h} editable={fadeEditable} selected={selected} /> : null}
       <KeyframeMarks item={item} pxPerSec={pxPerSec} clipFrom={clipFrom} visW={visR - visL} h={h} locked={locked} />
+      {/* desativado: o ícone aparece mesmo em item estreito (no rótulo quando cabe, senão no início) */}
+      {disabled && narrow ? (
+        <span className="pointer-events-none absolute left-0 top-0 z-[2] flex h-[14px] items-center rounded-br-[4px] bg-black/60 px-[2px] text-white/90">
+          <EyeOff className="h-2.5 w-2.5" aria-label="Desativado" />
+        </span>
+      ) : null}
       {!narrow ? (
         <span className={cn('pointer-events-none absolute top-0 z-[2] flex max-w-full items-center gap-1 rounded-br-[5px] bg-black/55 px-1.5 py-[1px] text-[10px] font-semibold leading-[14px] text-white/90', fadeEditable && clipFrom === 0 ? 'left-[11px]' : 'left-0')}>
           {broken ? <AlertTriangle className="h-3 w-3 shrink-0 text-danger" /> : null}

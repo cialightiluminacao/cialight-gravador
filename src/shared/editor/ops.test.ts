@@ -479,3 +479,38 @@ describe('keyframes (Task 4): grupo, tempos, mover, remover; conversão de efeit
     expect(ops.convertEffects(p, [v], 'solid')).toBe(p) // só efeitos
   })
 })
+describe('Task 4 (revisão): ativar/desativar com vínculo, conversão, keyframePaths', () => {
+  const fx0 = (p: Project) => p.tracks[1].items[0] as EffectItem
+  it('toggleEnabled: expande os vinculados (cálculo e aplicação); sem vínculo só os dados', () => {
+    const { p, v, a } = base()
+    const off = ops.toggleEnabled(p, [v], true)
+    expect(ops.findItem(off, v)!.item.enabled).toBe(false)
+    expect(ops.findItem(off, a)!.item.enabled).toBe(false)
+    // só o áudio ainda ativo: algum ativo no grupo → desativa todos (não reativa o vídeo)
+    const mixed = ops.setItemEnabled(p, [v], false)
+    const all = ops.toggleEnabled(mixed, [v], true)
+    expect([v, a].map((id) => ops.findItem(all, id)!.item.enabled)).toEqual([false, false])
+    expect(ops.toggleEnabled(off, [a], true)).toEqual(p)
+    const alt = ops.toggleEnabled(p, [v], false)
+    expect(ops.findItem(alt, v)!.item.enabled).toBe(false)
+    expect('enabled' in ops.findItem(alt, a)!.item).toBe(false)
+  })
+  it('keyframePaths: anotações → nenhum; mídia sem visual em faixa de vídeo → volume', () => {
+    const { p, v } = base()
+    const ann: Item = { id: 'n', type: 'annotations', sessionId: 's', inUs: 0, startUs: 0, durationUs: S }
+    expect(ops.keyframePaths(ann, 'video')).toEqual([])
+    const media = ops.findItem(p, v)!.item as MediaItem
+    expect(ops.keyframePaths({ ...media, visual: undefined }, 'video')).toEqual(['audio.volume'])
+  })
+  it('convertEffects: Tarja tira os keys de intensidade; voltar de Tarja usa a borda padrão do tipo; mesmo tipo = nada', () => {
+    const r = ops.addEffect(base().p, 'blur', 0, { durationUs: 4 * S })
+    const k = ops.toggleKeyframe(ops.toggleKeyframe(r.project, r.itemId, 'strength', 0), r.itemId, 'strength', 2 * S)
+    const s = ops.convertEffects(k, [r.itemId], 'solid')
+    expect(fx0(s).strength).toEqual({ value: 60 })
+    expect(ops.convertEffects(s, [r.itemId], 'solid')).toBe(s)
+    expect(fx0(ops.convertEffects(s, [r.itemId], 'blur')).feather).toBe(0.15)
+    expect(fx0(ops.convertEffects(s, [r.itemId], 'pixelate')).feather).toBe(0)
+    const withFeather = ops.updateItem<EffectItem>(r.project, r.itemId, (d) => { d.feather = 0.5 })
+    expect(fx0(ops.convertEffects(withFeather, [r.itemId], 'pixelate')).feather).toBe(0.5) // fora da Tarja mantém
+  })
+})

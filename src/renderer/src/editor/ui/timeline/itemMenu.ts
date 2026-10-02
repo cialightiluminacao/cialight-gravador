@@ -61,7 +61,8 @@ export function itemMenuEntries(p: Project, itemId: string, playback: PlaybackCo
   const media = sel.filter((id) => findItem(p, id)?.item.type === 'media')
   const main = findItem(p, itemId)?.item
   const current = main?.type === 'media' ? main.speed : null
-  const anyOn = sel.some((id) => findItem(p, id)?.item.enabled !== false)
+  // mesmo grupo que Shift+E desativa: a seleção e os vinculados
+  const anyOn = [...new Set(sel.flatMap((id) => (findItem(p, id) ? linkedIds(p, id) : [])))].some((id) => findItem(p, id)?.item.enabled !== false)
   return [
     { label: 'Dividir no playhead', icon: Scissors, shortcut: SHORTCUT_LABELS.split, disabled: !splittable, onSelect: splitAtPlayhead },
     { label: 'Duplicar', icon: Copy, shortcut: SHORTCUT_LABELS.duplicate, onSelect: () => runShortcut('duplicate', playback) },

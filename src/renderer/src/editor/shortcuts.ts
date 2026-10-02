@@ -36,7 +36,8 @@ export type ShortcutAction =
   | 'toggleKeyframe' // Alt+K (K sozinho é pausa)
   | 'prevKeyframe' // [
   | 'nextKeyframe' // ]
-  | 'toggleEnabled' // Shift+E
+  | 'toggleEnabled' // Shift+E (com os vinculados)
+  | 'toggleEnabledUnlinked' // Alt+Shift+E (Alt ignora o vínculo, como mover/aparar)
 
 export interface KeyLike {
   key: string
@@ -105,7 +106,11 @@ export function shortcutFor(e: KeyLike): ShortcutAction | null {
     if (k === 'x' && e.shiftKey) return 'deleteRange'
     return null
   }
-  if (e.altKey) return !e.shiftKey && (k === 'k' || e.code === 'KeyK') ? 'toggleKeyframe' : null
+  if (e.altKey) {
+    if (!e.shiftKey && (k === 'k' || e.code === 'KeyK')) return 'toggleKeyframe'
+    if (e.shiftKey && (k === 'e' || e.code === 'KeyE')) return 'toggleEnabledUnlinked'
+    return null
+  }
   switch (k) {
     case ' ':
       return 'playPause'

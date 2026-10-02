@@ -48,6 +48,7 @@ describe('shortcutFor', () => {
     expect(shortcutFor(key(']'))).toBe('nextKeyframe')
     expect(shortcutFor(key('E', { shiftKey: true }))).toBe('toggleEnabled')
     expect(shortcutFor(key('e'))).toBeNull()
+    expect(shortcutFor(key('E', { shiftKey: true, altKey: true }))).toBe('toggleEnabledUnlinked') // Alt ignora o vínculo
   })
 
   it('teclas sem atalho e combinações com Alt não fazem nada', () => {

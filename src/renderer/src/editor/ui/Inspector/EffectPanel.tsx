@@ -44,7 +44,9 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
   const values = { x: animAt(r.x, local), y: animAt(r.y, local), w: animAt(r.w, local), h: animAt(r.h, local), rotation: animAt(r.rotation, local) }
   const warnings = useMemo(() => privacyWarnings(project, item.startUs, itemEndUs(item)).filter((w) => w.itemId === id), [project, item, id])
   const enabled = item.enabled !== false
-  const kf = (path: AnimPath, label: string): React.JSX.Element => <KeyframeButton item={item} path={path} label={label} />
+  const kf = (path: AnimPath, label: string): React.JSX.Element => <KeyframeButton item={item} path={path} label={label} disabled={locked} />
+  // faixa bloqueada: nenhum controle edita
+  const lock = <T extends { value: string }>(opts: T[]): (T & { disabled?: boolean })[] => (locked ? opts.map((o) => ({ ...o, disabled: true })) : opts)
 
   return (
     <>
@@ -60,14 +62,14 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
       ) : null}
 
       <PanelSection title="Efeito" aside={<Toggle size="sm" checked={enabled} disabled={locked} onCheckedChange={(on) => apply((p) => setItemEnabled(p, [id], on))} aria-label="Ativar efeito" />}>
-        <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={item.effect} options={TYPE_OPTIONS} onValueChange={(v) => apply((p) => convertEffects(p, [id], v))} />
+        <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={item.effect} options={lock(TYPE_OPTIONS)} onValueChange={(v) => apply((p) => convertEffects(p, [id], v))} />
         <FieldRow label="Forma">
-          <Segmented size="sm" className="w-full [&>*]:flex-1" value={r.shape} options={SHAPE_OPTIONS} onValueChange={(shape) => editItem<EffectItem>(id, (d) => { d.region.shape = shape })} />
+          <Segmented size="sm" className="w-full [&>*]:flex-1" value={r.shape} options={lock(SHAPE_OPTIONS)} onValueChange={(shape) => editItem<EffectItem>(id, (d) => { d.region.shape = shape })} />
         </FieldRow>
         {item.effect === 'solid' ? (
           <FieldRow label="Cor">
             <span className="font-mono text-[10.5px] uppercase text-muted">{item.color}</span>
-            <ColorInput label="Cor da tarja" value={item.color} onChange={(hex) => editItemTransient<EffectItem>(id, (d) => { d.color = hex })} />
+            <ColorInput label="Cor da tarja" disabled={locked} value={item.color} onChange={(hex) => editItemTransient<EffectItem>(id, (d) => { d.color = hex })} />
           </FieldRow>
         ) : (
           <NumberField label="Intensidade" value={animAt(item.strength, local)} min={0} max={100} precision={0} step={0.5} disabled={locked} onChange={(n) => setAnim('strength', n)} title={item.effect === 'blur' ? 'Raio do desfoque' : 'Tamanho dos blocos'} trailing={kf('strength', 'Intensidade')} />
@@ -79,7 +81,7 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
         </div>
         <div className="space-y-1 pt-0.5 text-[11px]">
           <span className="text-muted">Escopo</span>
-          <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={item.scope} options={SCOPE_OPTIONS} onValueChange={(scope) => editItem<EffectItem>(id, (d) => { d.scope = scope })} />
+          <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={item.scope} options={lock(SCOPE_OPTIONS)} onValueChange={(scope) => editItem<EffectItem>(id, (d) => { d.scope = scope })} />
         </div>
       </PanelSection>
 

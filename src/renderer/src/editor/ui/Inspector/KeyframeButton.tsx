@@ -19,7 +19,8 @@ export const InspectorPlayback = createContext<PlaybackController | null>(null)
 
 const btn = 'flex h-6 w-5 items-center justify-center rounded text-muted hover:bg-white/5 hover:text-fg disabled:pointer-events-none disabled:opacity-25'
 
-export function KeyframeButton({ item, path, label }: { item: Item; path: AnimPath; label: string }): React.JSX.Element | null {
+/** disabled: faixa bloqueada (nada de criar/remover keys; navegar continua valendo). */
+export function KeyframeButton({ item, path, label, disabled }: { item: Item; path: AnimPath; label: string; disabled?: boolean }): React.JSX.Element | null {
   const playback = useContext(InspectorPlayback)
   const playheadUs = usePausedPlayhead()
   const fps = useEditorStore((s) => s.project?.canvas.fps ?? 30)
@@ -27,7 +28,8 @@ export function KeyframeButton({ item, path, label }: { item: Item; path: AnimPa
   if (!anim) return null
   const keys = (anim.keys ?? []).map((k) => item.startUs + k.tUs)
   const tol = frameDurUs(fps) / 2
-  const inside = playheadUs >= item.startUs && playheadUs <= itemEndUs(item)
+  // fim exclusivo (como o visualizador e o Alt+K): no fim do item já vale o próximo
+  const inside = playheadUs >= item.startUs && playheadUs < itemEndUs(item)
   const here = keys.some((t) => Math.abs(t - playheadUs) <= tol)
   const prev = keys.filter((t) => t < playheadUs - tol).at(-1) ?? null
   const next = keys.find((t) => t > playheadUs + tol) ?? null
@@ -49,7 +51,7 @@ export function KeyframeButton({ item, path, label }: { item: Item; path: AnimPa
         </button>
       </Tip>
       <Tip content={here ? `Remover keyframe de ${label}` : `Adicionar keyframe de ${label}`}>
-        <button type="button" data-kf="toggle" aria-label={here ? `Remover keyframe de ${label}` : `Adicionar keyframe de ${label}`} aria-pressed={here} className={btn} disabled={!inside} onClick={toggle}>
+        <button type="button" data-kf="toggle" aria-label={here ? `Remover keyframe de ${label}` : `Adicionar keyframe de ${label}`} aria-pressed={here} className={btn} disabled={!inside || disabled} onClick={toggle}>
           <span className={cn('block h-2 w-2 rotate-45 border', here ? 'border-black/50 bg-warn' : animated ? 'border-warn' : 'border-muted')} />
         </button>
       </Tip>

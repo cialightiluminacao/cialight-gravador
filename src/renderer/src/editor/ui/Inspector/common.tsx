@@ -52,7 +52,7 @@ export const usToSec2 = (us: Us): number => Math.round(us / 10_000) / 100
 export const sec2ToUs = (s: number): Us => Math.round(s * 1e6)
 
 /** Seletor de cor: o arrasto no seletor nativo é uma transação só (abre na 1ª mudança, fecha ao sair). */
-export function ColorInput({ value, label, onChange }: { value: string; label: string; onChange: (hex: string) => void }): React.JSX.Element {
+export function ColorInput({ value, label, onChange, disabled }: { value: string; label: string; onChange: (hex: string) => void; disabled?: boolean }): React.JSX.Element {
   const st = useEditorStore.getState
   const opened = useRef(false) // transação aberta por este seletor
   return (
@@ -60,8 +60,9 @@ export function ColorInput({ value, label, onChange }: { value: string; label: s
       type="color"
       aria-label={label}
       title={label}
-      className="h-6 w-10 cursor-pointer rounded border border-border-strong bg-transparent"
+      className="h-6 w-10 cursor-pointer rounded border border-border-strong bg-transparent disabled:cursor-not-allowed disabled:opacity-40"
       value={value}
+      disabled={disabled}
       onBlur={() => {
         if (opened.current) st().commitTx()
         opened.current = false

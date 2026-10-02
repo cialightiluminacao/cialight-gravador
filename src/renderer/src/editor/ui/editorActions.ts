@@ -1,9 +1,9 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addMarker, addMediaFromAsset, addTrack, deleteItems, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, setItemEnabled, splitAt, toggleKeyframes, trimItem } from '@shared/editor/ops'
+import { addMarker, addMediaFromAsset, addTrack, deleteItems, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
 import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
-import { frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
+import { frameDurUs, frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
 import type { PlaybackController } from '../engine/PlaybackController'
 import type { ShortcutAction } from '../shortcuts'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
@@ -123,7 +123,7 @@ export function toggleKeyframeAtPlayhead(): void {
   if (!project) return
   const targets = selection.flatMap((id) => {
     const f = findItem(project, id)
-    if (!f || playheadUs < f.item.startUs || playheadUs > itemEndUs(f.item)) return []
+    if (!f || playheadUs < f.item.startUs || playheadUs >= itemEndUs(f.item)) return [] // fim exclusivo, como no visualizador
     const paths = keyframePaths(f.item, f.track.kind)
     return paths.length ? [{ id, paths }] : []
   })
@@ -134,13 +134,17 @@ export function toggleKeyframeAtPlayhead(): void {
   st().apply((p) => targets.reduce((q, t) => toggleKeyframes(q, t.id, t.paths, playheadUs), p))
 }
 
-/** [ / ]: vai ao keyframe anterior/próximo (qualquer propriedade) dos itens selecionados. */
+/**
+ * [ / ]: vai ao keyframe anterior/próximo (qualquer propriedade) dos itens selecionados, além de ±meio
+ * quadro do playhead (a mesma tolerância dos botões ◀ ▶ e do ◇).
+ */
 export function jumpToKeyframe(playback: PlaybackController | null, dir: 1 | -1): void {
   const { project, selection, playheadUs } = st()
   if (!project) return
+  const from = playheadUs + (dir * frameDurUs(project.canvas.fps)) / 2
   let best: Us | null = null
   for (const id of selection) {
-    const t = nextKeyframeUs(project, id, 'any', playheadUs, dir)
+    const t = nextKeyframeUs(project, id, 'any', from, dir)
     if (t !== null && (best === null || (dir === 1 ? t < best : t > best))) best = t
   }
   if (best === null) return
@@ -148,12 +152,10 @@ export function jumpToKeyframe(playback: PlaybackController | null, dir: 1 | -1)
   seekTo(playback, best)
 }
 
-/** Shift+E / menu: desativa os selecionados (se algum está ativo) ou reativa todos. */
-export function toggleEnabledSelection(ids = st().selection): void {
-  const p = st().project
-  if (!p || !ids.length) return
-  const anyOn = ids.some((id) => findItem(p, id)?.item.enabled !== false)
-  st().apply((q) => setItemEnabled(q, ids, !anyOn))
+/** Shift+E / menu: desativa os selecionados e vinculados (se algum está ativo) ou reativa todos; Alt ignora o vínculo. */
+export function toggleEnabledSelection(ids = st().selection, includeLinked = true): void {
+  if (!st().project || !ids.length) return
+  st().apply((q) => toggleEnabled(q, ids, includeLinked))
 }
 
 export async function saveNow(): Promise<void> {
@@ -242,6 +244,7 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'prevKeyframe': jumpToKeyframe(playback, -1); return true
     case 'nextKeyframe': jumpToKeyframe(playback, 1); return true
     case 'toggleEnabled': toggleEnabledSelection(); return true
+    case 'toggleEnabledUnlinked': toggleEnabledSelection(st().selection, false); return true
     case 'deselect':
       if (s.txBase) s.cancelTx()
       else if (useKeyframeSelection.getState().sel) useKeyframeSelection.getState().set(null) // Esc primeiro solta o losango
