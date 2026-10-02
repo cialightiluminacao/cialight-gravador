@@ -23,7 +23,7 @@ import { abPlan, shuttleSegments, voiceAssetIds, type AudioSegment } from '@shar
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 import { AssetPcm } from './assetPcm'
-import { mixBlock, SR, StretchBank, type PcmSource } from './mixer'
+import { mixBlock, SR, StretchBank, stretchKeysIn, type PcmSource } from './mixer'
 import { LatestOnly } from './latestOnly'
 import type { AudioIn, AudioOut } from './protocol'
 import { createStretcher } from './stretch'
@@ -32,6 +32,7 @@ import { SpeechLoader } from './speechLoader'
 type RenderMsg = Extract<AudioIn, { t: 'render' }> & { reply: (m: AudioOut, transfer?: Transferable[]) => void }
 
 const LOOKAHEAD_US = 1_000_000
+const LOOKAHEAD_FRAMES = Math.round((LOOKAHEAD_US * SR) / 1e6)
 
 const post = (m: AudioOut, transfer: Transferable[] = []): void => (self as unknown as Worker).postMessage(m, transfer)
 
@@ -198,17 +199,18 @@ async function pump(): Promise<void> {
         const segs = segmentsAt(rate)
         // no shuttle o bloco é mixado no tempo do shuttle (timeline ÷ rate)
         const fromUs = rate === 1 ? m.fromUs : Math.round(m.fromUs / rate)
-        // stretchers do bloco presos até o próximo: o aquecimento à frente não os despeja antes do mixBlock
+        // stretchers do bloco E do aquecimento à frente presos até o próximo bloco: o LRU só despeja o que ficou para
+        // trás, então nenhum trecho perde o estado entre o aquecimento e a leitura (saída independe da ordem async)
         const blockEnd = fromUs + Math.round((m.frames * 1e6) / SR)
-        stretch.pin(new Set(segs.filter((s) => s.mode === 'stretch' && s.startUs < blockEnd && s.startUs + s.durationUs > fromUs).map((s) => s.itemId)))
+        stretch.pin(stretchKeysIn(segs, fromUs, blockEnd + Math.round((LOOKAHEAD_FRAMES * 1e6) / SR)))
         await prepare(segs, fromUs, m.frames, stale)
         if (stale()) continue // cancelado durante a decodificação: o cliente já descartou
         const peaks = meters ? new Map<string, number>() : undefined
         const pcm = mixBlock(segs, fromUs, m.frames, sources as Map<string, PcmSource>, peaks)
         m.reply({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm, tracks: peaks ? Object.fromEntries(peaks) : {} }, [pcm.buffer])
-        void prepare(segs, blockEnd, Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
+        void prepare(segs, blockEnd, LOOKAHEAD_FRAMES, stale)
         // A/B: o outro lado também fica decodificado (bloco + aquecimento), para segurar/soltar não começar do zero
-        if (rate === 1 && alternate.length) void warm(alternate, fromUs, m.frames + Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
+        if (rate === 1 && alternate.length) void warm(alternate, fromUs, m.frames + LOOKAHEAD_FRAMES, stale)
       } catch (err) {
         m.reply({ t: 'error', message: errMsg(err), seq: m.seq })
       }

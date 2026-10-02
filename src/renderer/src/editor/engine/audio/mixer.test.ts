@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AudioSegment } from '@shared/editor/audioPlan'
-import { ChunkedPcm, limit, mixBlock, resampleLinear, SR, StretchBank, type PcmSource } from './mixer'
+import { ChunkedPcm, limit, mixBlock, resampleLinear, SR, StretchBank, stretchKeysIn, type PcmSource } from './mixer'
 import type { Stretcher } from './stretch'
 
 // Fonte sintética: senoide de `hz` com amplitude `amp` no tempo da fonte (os dois canais iguais).
@@ -342,6 +342,53 @@ describe('mixBlock + StretchBank (fake determinístico)', () => {
     expect([bank.has('b'), bank.has('c'), bank.has('i1'), bank.has('d')]).toEqual([false, false, true, true])
   })
 
+  it('revisão final (M3): mais de 16 trechos esticados no bloco + aquecimento — saída idêntica à de um banco sem limite, qualquer que seja a ordem do aquecimento', async () => {
+    // 120 trechos de 30 ms a 2× (vários cruzam a borda dos blocos de 50 ms): ~35 no bloco + 1 s à frente
+    const N = 120
+    const segs = Array.from({ length: N }, (_, k) => stretchSeg({ itemId: `s${k}`, startUs: k * 30_000, durationUs: 30_000, srcInUs: 1_000_000 + k * 100_000 }))
+    const FR = 2400 // 50 ms
+    const LA = 1_000_000
+    /** O laço do worker: pin → ensure do bloco → mixBlock → aquecimento à frente (aguardado agora ou só no fim). */
+    async function run(maxLive: number, pinWindow: boolean, lateWarm: boolean): Promise<{ out: number[]; resets: number; evictedInWindow: number }> {
+      const { calls, bank, srcs } = setup(maxLive)
+      const out: number[] = []
+      const pendingWarm: (() => Promise<void>)[] = []
+      let evictedInWindow = 0
+      const touching = (a: number, b: number): AudioSegment[] => segs.filter((x) => x.startUs < b && x.startUs + x.durationUs > a)
+      for (let from = 0; from < N * 30_000; from += 50_000) {
+        const end = from + 50_000
+        bank.pin(pinWindow ? stretchKeysIn(segs, from, end + LA) : new Set(touching(from, end).map((x) => x.itemId)))
+        // aquecimentos atrasados (WASM instanciando) terminam só agora, depois do pin do bloco seguinte
+        for (const w of pendingWarm.splice(0)) await w()
+        for (const x of touching(from, end)) await bank.ensure(x.itemId, 2)
+        out.push(...mixBlock(segs, from, FR, srcs))
+        const warm = async (): Promise<void> => {
+          for (const x of touching(end, end + LA)) await bank.ensure(x.itemId, 2)
+        }
+        if (lateWarm) pendingWarm.push(warm)
+        else await warm()
+        // ensure já feito pelo aquecimento e perdido antes da leitura: trechos dentro da janela sem estado
+        evictedInWindow += lateWarm ? 0 : touching(end, end + LA).filter((x) => !bank.has(x.itemId)).length
+      }
+      return { out, resets: calls.filter((c) => c.op === 'reset').length, evictedInWindow }
+    }
+    const ref = await run(1000, true, false)
+    expect(ref.resets).toBe(N) // um pré-roll por trecho
+    for (const late of [false, true]) {
+      const r = await run(16, true, late)
+      expect(r.resets).toBe(N)
+      expect(r.evictedInWindow).toBe(0)
+      expect(r.out).toEqual(ref.out)
+    }
+    // contraprova: com só o bloco preso, o aquecimento à frente despeja trechos da janela que ele mesmo preparou
+    // (a garantia de saída igual dependia da ordem async; com a janela presa ela vale por construção)
+    expect((await run(16, false, false)).evictedInWindow).toBeGreaterThan(0)
+  })
+  it('stretchKeysIn: só trechos esticados que tocam [from, to)', () => {
+    const segs = [stretchSeg({ itemId: 'a', startUs: 0, durationUs: 100 }), stretchSeg({ itemId: 'b', startUs: 100, durationUs: 100 }), seg({ itemId: 'c', startUs: 0, durationUs: 1000 }), stretchSeg({ itemId: 'd', startUs: 300, durationUs: 100, mode: 'mute' })]
+    expect([...stretchKeysIn(segs, 50, 150)]).toEqual(['a', 'b'])
+    expect([...stretchKeysIn(segs, 100, 400)]).toEqual(['b'])
+  })
   it('falha ao criar o stretcher: ensure rejeita sempre, sem tentar de novo', async () => {
     let tries = 0
     const bank = new StretchBank(async () => {

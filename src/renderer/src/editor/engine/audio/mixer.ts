@@ -222,6 +222,17 @@ export type FrameReader = (fromFrame: number, frames: number) => Float32Array
 
 interface StretchState { st: Stretcher; speed: number; base: number; out: number; fedTo: number }
 
+/**
+ * Itens dos segmentos 'stretch' que tocam [fromUs, toUs). O worker prende (pin) o bloco + o aquecimento à frente:
+ * o LRU só despeja o que já ficou para trás, então quantos trechos cabem na janela não muda a saída (exportação
+ * idêntica byte a byte; o banco passa de maxLive enquanto a janela pedir).
+ */
+export function stretchKeysIn(segs: readonly AudioSegment[], fromUs: Us, toUs: Us): Set<string> {
+  const out = new Set<string>()
+  for (const s of segs) if (s.mode === 'stretch' && s.startUs < toUs && s.startUs + s.durationUs > fromUs) out.add(s.itemId)
+  return out
+}
+
 // tolerância de continuidade (frames): as posições de fonte chegam em µs arredondados
 const STRETCH_TOL_FRAMES = 2
 
