@@ -252,10 +252,11 @@ async function main() {
   let movedId = null
   if (hasCam) {
     const mv = await ev(`const cam = T.items().find((i) => i.trackName === 'Webcam' && i.startUs === 0); await T.seek(Math.round(cam.durationUs / 2)); T.st().select([cam.id]); await T.settle(); await new Promise((r) => setTimeout(r, 300))
-      const h = document.querySelector('section[aria-label="Visualizador"] .cursor-move'); if (!h) throw new Error('alça de mover não apareceu')
+      const h = document.querySelector('[data-media-handles="' + cam.id + '"]'); if (!h) throw new Error('alças da webcam não apareceram')
       const before = { x: cam.visual.transform.x, y: cam.visual.transform.y }; const a = T.pt(h); const stage = T.el('[aria-label="Visualização do projeto"]').getBoundingClientRect()
       const p0 = T.st().history.past.length
-      await T.drag(h, a, { x: a.x - stage.width * 0.3, y: a.y - stage.height * 0.25 })
+      // o corpo das alças não recebe cliques: o arraste começa no elemento real sob o ponto (o fundo do visualizador)
+      await T.drag(document.elementFromPoint(a.x, a.y), a, { x: a.x - stage.width * 0.3, y: a.y - stage.height * 0.25 })
       const it = T.items().find((i) => i.id === cam.id); return { id: cam.id, before, after: { x: it.visual.transform.x, y: it.visual.transform.y }, dp: T.st().history.past.length - p0 }`)
     movedId = mv.id
     const val = (v) => (typeof v === 'object' && v !== null && 'value' in v ? v.value : v)
@@ -283,8 +284,8 @@ async function main() {
   check('mp3 numa faixa de áudio em 0 s', drop.mp3.length === 1 && drop.mp3[0][1] === 'audio' && drop.mp3[0][2] === 0, drop)
   if (!hasCam) {
     const mv = await ev(`const it0 = T.byAsset('${pngId}')[0]; await T.seek(1500000); T.st().select([it0.id]); await T.settle(); await new Promise((r) => setTimeout(r, 300))
-      const h = document.querySelector('section[aria-label="Visualizador"] .cursor-move'); const a = T.pt(h)
-      await T.drag(h, a, { x: a.x + 120, y: a.y + 60 }); const it = T.byAsset('${pngId}')[0]; return { before: it0.visual.transform, after: it.visual.transform }`)
+      const h = document.querySelector('[data-media-handles="' + it0.id + '"]'); const a = T.pt(h)
+      await T.drag(document.elementFromPoint(a.x, a.y), a, { x: a.x + 120, y: a.y + 60 }); const it = T.byAsset('${pngId}')[0]; return { before: it0.visual.transform, after: it.visual.transform }`)
     check('imagem movida no visualizador', JSON.stringify(mv.before) !== JSON.stringify(mv.after), mv)
   }
   await ev(`T.st().select([]); await T.seek(1500000); return 1`)
