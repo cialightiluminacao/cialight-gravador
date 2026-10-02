@@ -245,6 +245,11 @@ const STRETCH_TOL_FRAMES = 2
  * entrada já foi entregue até base + lead + j·speed, lead = outputLatency·speed + inputLatency. A posição
  * é sempre recalculada de base/out (inteiros), sem acumular frações.
  * No máximo `maxLive` segmentos com estado (LRU, exceto os presos por pin); os liberados são reaproveitados.
+ *
+ * Estado compartilhado de propósito: a chave é só o itemId, não a fonte. O lado alternativo do A/B, a troca
+ * original ↔ processado e os segmentos do shuttle do mesmo item usam o MESMO stretcher; como a posição de fonte
+ * continua, trocar de fonte no meio não reseta — vira uma emenda sem pré-roll (sem clique). Não "corrigir" para
+ * chave por fonte: isso faria reset + pré-roll a cada troca (clique audível no A/B).
  */
 export class StretchBank {
   private readonly states = new Map<string, StretchState>() // ordem = LRU (mais recente no fim)
