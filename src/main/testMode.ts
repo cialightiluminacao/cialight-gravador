@@ -71,11 +71,16 @@ async function testFfmpeg(store: SessionStore): Promise<number> {
     return await testFfmpegRun(store)
   } finally {
     const now = existsSync(file) ? readFileSync(file) : null
+    // não existia antes: o arquivo criado pelo probe sai (o app instalado volta ao padrão)
+    if (!before && now) {
+      rmSync(file, { force: true })
+      console.log('settings.json criado pelo probe de encoders removido (não existia antes do teste)')
+    }
     if (before && (!now || !now.equals(before))) {
       writeFileSync(file, before)
       console.log('settings.json restaurado (o probe de encoders tinha atualizado o cache)')
     }
-    console.log(`settings.json do usuário ${before && readFileSync(file).equals(before) ? 'igual ao de antes' : before ? 'DIFERENTE' : 'inexistente antes do teste'}`)
+    console.log(`settings.json do usuário ${before ? (readFileSync(file).equals(before) ? 'igual ao de antes' : 'DIFERENTE') : existsSync(file) ? 'DIFERENTE (não existia)' : 'inexistente, como antes'}`)
   }
 }
 

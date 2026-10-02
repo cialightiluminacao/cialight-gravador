@@ -1,5 +1,5 @@
 import { Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
-import { convertEffects, detachAudio, enableGroupIds, findItem, linkedIds, linkItems, setSpeed, unlinkItems } from '@shared/editor/ops'
+import { convertEffects, detachAudio, enableGroupIds, findItem, linkItems, setSpeed, unlinkMedia } from '@shared/editor/ops'
 import type { EffectItem, Marker, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
 import type { PlaybackController } from '../../engine/PlaybackController'
@@ -44,7 +44,7 @@ function linkEntry(p: Project, itemId: string, selection: string[]): MenuEntry {
   if (selection.length >= 2 && (links.size > 1 || links.has(undefined))) {
     return { label: 'Vincular', icon: Link2, onSelect: () => st().apply((q) => linkItems(q, selection)) }
   }
-  if (f?.item.linkId) return { label: 'Desvincular', icon: Unlink, onSelect: () => st().apply((q) => unlinkItems(q, linkedIds(q, itemId))) }
+  if (f?.item.linkId) return { label: 'Desvincular', icon: Unlink, onSelect: () => st().apply((q) => unlinkMedia(q, itemId)) }
   const it = f?.item
   const asset = it?.type === 'media' ? p.assets.find((a) => a.id === it.assetId) : undefined
   const canDetach = f?.track.kind === 'video' && it?.type === 'media' && it.audio.enabled && !!asset?.audio

@@ -4,6 +4,7 @@ import type { Asset, EffectItem, Item, MediaItem, Project } from './project'
 import * as ops from './ops'
 import { validateProject } from './schema'
 import { itemEndUs as end } from './time'
+import { resolveFrame } from './resolve'
 
 // Efeitos vinculados ao clipe sobre o qual foram criados (revisão final F2, I3) e regras de faixa (I2, M6).
 const S = 1_000_000
@@ -201,5 +202,114 @@ describe('faixas: mídia nunca por cima dos efeitos; fim do conteúdo', () => {
     expect(ops.contentEndUs(e.project)).toBe(10 * S)
     const r2 = ops.addMediaFromAsset(b.p, 'a1', 10 * S)
     expect(ops.contentEndUs(ops.setItemEnabled(r2.project, r2.itemIds, false))).toBe(10 * S)
+  })
+})
+
+describe('re-revisão: seguidores nunca recortam nem são recortados; desvincular; órfãos; duplicar', () => {
+  const names = (p: Project): string[] => p.tracks.filter((t) => t.kind === 'video').map((t) => t.name)
+  const trackOf = (p: Project, id: string): string => ops.findItem(p, id)!.track.name
+  /** Tela [0,10 s) na Vídeo 1, webcam (PiP) [0,4 s) na Vídeo 2; blur da webcam em 0 e do texto da tela em 6 s, os dois na "Efeitos". */
+  function pip(): { p: Project; screen: string; cam: string; camFx: string; textFx: string } {
+    const p0 = ops.addAsset(ops.addAsset(createEmptyProject('t'), vid('tela')), vid('cam', 4 * S))
+    const sr = ops.addMediaFromAsset(p0, 'tela', 0)
+    const cr = ops.addMediaFromAsset(sr.project, 'cam', 0)
+    const a = ops.addEffect(cr.project, 'blurFace', 0)
+    const b = ops.addEffect(a.project, 'blurText', 6 * S, { region: { x: 0.3, y: 0.3 } })
+    return { p: b.project, screen: sr.itemIds[0], cam: cr.itemIds[0], camFx: a.itemId, textFx: b.itemId }
+  }
+  it('arrastar a webcam (sobrescrever) até o blur dela cruzar o do texto: os dois mantêm a duração; o texto segue borrado', () => {
+    const { p, screen, cam, camFx, textFx } = pip()
+    expect([trackOf(p, camFx), trackOf(p, textFx)]).toEqual(['Efeitos', 'Efeitos'])
+    expect([it_(p, camFx).linkId, it_(p, textFx).linkId]).toEqual([it_(p, cam).linkId, it_(p, screen).linkId])
+    const q = ops.moveItems(p, [cam], 5 * S, { mode: 'overwrite' }) // webcam [5,9): o blur dela cruza [6,10)
+    expect([fx(q, camFx).startUs, fx(q, camFx).durationUs]).toEqual([5 * S, 4 * S])
+    expect([fx(q, textFx).startUs, fx(q, textFx).durationUs]).toEqual([6 * S, 4 * S])
+    expect(trackOf(q, textFx)).toBe('Efeitos')
+    expect(trackOf(q, camFx)).toBe('Efeitos 2')
+    expect(names(q)).toEqual(['Vídeo 1', 'Vídeo 2', 'Efeitos', 'Efeitos 2']) // acima do bloco, nunca abaixo de mídia
+    expect(resolveFrame(q, 7 * S).find((l) => l.kind === 'effect' && l.itemId === textFx)).toMatchObject({ kind: 'effect', region: { x: 0.3, y: 0.3 } })
+    expect(validateProject(q)).toEqual([])
+  })
+  /** Clipe [0,5 s) com "Esconder texto" alinhado ao fim e um efeito livre [6,8) na mesma faixa "Efeitos". */
+  function blocked(): { p: Project; v: string; f: string; free: string } {
+    const b = base()
+    const r = ops.addEffect(ops.trimItem(b.p, b.v, 'end', 5 * S), 'blurText', 0)
+    const x = ops.addEffect(r.project, 'solid', 6 * S, { durationUs: 2 * S })
+    expect(trackOf(x.project, x.itemId)).toBe('Efeitos')
+    expect(fx(x.project, x.itemId).linkId).toBeUndefined()
+    return { p: x.project, v: b.v, f: r.itemId, free: x.itemId }
+  }
+  it('seguidor movido para cima de um efeito livre: o livre não é recortado', () => {
+    const { p, v, f, free } = blocked()
+    const q = ops.moveItems(p, [v], 5 * S, { mode: 'overwrite' })
+    expect([fx(q, free).startUs, fx(q, free).durationUs, trackOf(q, free)]).toEqual([6 * S, 2 * S, 'Efeitos'])
+    expect([fx(q, f).startUs, fx(q, f).durationUs, trackOf(q, f)]).toEqual([5 * S, 5 * S, 'Efeitos 2'])
+  })
+  it('aparar estendendo o clipe: o seguidor que bateria muda de faixa (antes o aparar parava no vizinho)', () => {
+    const { p, v, f, free } = blocked()
+    const q = ops.trimItem(p, v, 'end', 9 * S)
+    expect(end(it_(q, v))).toBe(9 * S)
+    expect([fx(q, f).startUs, end(fx(q, f)), trackOf(q, f)]).toEqual([0, 9 * S, 'Efeitos 2'])
+    expect([fx(q, free).startUs, fx(q, free).durationUs]).toEqual([6 * S, 2 * S])
+  })
+  it('velocidade 0,5 com o seguidor batendo num efeito livre: muda de faixa (antes lançava overlap)', () => {
+    const { p, v, f, free } = blocked()
+    const q = ops.setSpeed(p, v, 0.5)
+    expect([fx(q, f).startUs, end(fx(q, f)), trackOf(q, f)]).toEqual([0, 10 * S, 'Efeitos 2'])
+    expect([fx(q, free).startUs, fx(q, free).durationUs]).toEqual([6 * S, 2 * S])
+    expect(validateProject(q)).toEqual([])
+  })
+  it('ripple com a faixa do seguidor bloqueada por um efeito livre: o seguidor muda de faixa (antes lançava overlap)', () => {
+    const b = base()
+    const p = ops.trimItem(b.p, b.v, 'end', 5 * S)
+    const r2 = ops.addMediaFromAsset(p, 'a1', 5 * S)
+    const e = ops.addEffect(r2.project, 'blur', 5 * S) // [5,15) vinculado ao 2º clipe
+    const x = ops.addEffect(e.project, 'solid', 2 * S, { durationUs: 2 * S }) // [2,4), vinculado ao 1º…
+    const loose = ops.unlinkMedia(x.project, x.itemId) // …e solto: efeito livre na mesma faixa
+    expect(trackOf(loose, x.itemId)).toBe('Efeitos')
+    const q = ops.trimItem(loose, b.v, 'end', 3 * S, { ripple: true })
+    expect(it_(q, r2.itemIds[0]).startUs).toBe(3 * S)
+    expect([fx(q, e.itemId).startUs, fx(q, e.itemId).durationUs, trackOf(q, e.itemId)]).toEqual([3 * S, 10 * S, 'Efeitos 2'])
+    expect([fx(q, x.itemId).startUs, fx(q, x.itemId).durationUs]).toEqual([2 * S, 2 * S])
+  })
+  it('desvincular a partir da mídia separa só a mídia; os efeitos ficam com o vídeo; a partir do efeito, só ele', () => {
+    const { p, v, a, f } = linked()
+    const q = ops.unlinkMedia(p, v)
+    expect(it_(q, a).linkId).toBeUndefined()
+    expect(fx(q, f).linkId).toBeDefined()
+    expect(fx(q, f).linkId).toBe(it_(q, v).linkId)
+    const fromAudio = ops.unlinkMedia(p, a)
+    expect(it_(fromAudio, a).linkId).toBeUndefined()
+    expect(fx(fromAudio, f).linkId).toBe(it_(fromAudio, v).linkId)
+    const det = ops.detachAudio(p, v) // já vinculado ao áudio: só desvincula a mídia
+    expect(it_(det, a).linkId).toBeUndefined()
+    expect(fx(det, f).linkId).toBe(it_(det, v).linkId)
+    const onFx = ops.unlinkMedia(p, f)
+    expect(fx(onFx, f).linkId).toBeUndefined()
+    expect(it_(onFx, v).linkId).toBe(it_(onFx, a).linkId)
+  })
+  it('apagar o clipe com Alt (sem vinculados): os efeitos dele perdem o vínculo quando não sobra mídia no grupo', () => {
+    const b = base()
+    const solo = ops.updateItem<MediaItem>(ops.deleteItems(ops.unlinkItems(b.p, [b.v, b.a]), [b.a]), b.v, (d) => { d.audio.enabled = false })
+    const e1 = ops.addEffect(solo, 'blur', 0, { durationUs: 3 * S })
+    const e2 = ops.addEffect(e1.project, 'solid', 4 * S, { durationUs: 3 * S })
+    expect(fx(e2.project, e1.itemId).linkId).toBe(fx(e2.project, e2.itemId).linkId)
+    const q = ops.deleteItems(e2.project, [b.v], { includeLinked: false })
+    expect([fx(q, e1.itemId).linkId, fx(q, e2.itemId).linkId]).toEqual([undefined, undefined])
+    // com o áudio ainda no grupo, o vínculo fica
+    const l = linked()
+    const r = ops.deleteItems(l.p, [l.v], { includeLinked: false })
+    expect(fx(r, l.f).linkId).toBe(it_(r, l.a).linkId)
+  })
+  it('duplicar: efeito copiado que não cabe vai para outra faixa de efeitos (acima), nunca "Vídeo N"', () => {
+    const { p, v, f } = linked()
+    const extra = ops.addEffect(p, 'solid', 13 * S, { durationUs: 2 * S }) // depois do clipe: sem vínculo, na "Efeitos"
+    expect(trackOf(extra.project, extra.itemId)).toBe('Efeitos')
+    const r = ops.duplicateItems(extra.project, [v]) // a cópia do efeito iria para [12,20): bate em [13,15)
+    const copy = r.itemIds.map((id) => it_(r.project, id)).find((i) => i.type === 'effect')!
+    expect(trackOf(r.project, copy.id)).toBe('Efeitos 2')
+    expect(names(r.project)).toEqual(['Vídeo 1', 'Efeitos', 'Efeitos 2'])
+    expect(fx(r.project, f).startUs).toBe(2 * S)
+    expect(validateProject(r.project)).toEqual([])
   })
 })
