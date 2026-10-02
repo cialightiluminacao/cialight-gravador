@@ -307,17 +307,32 @@ function overlayVisual(p0: Project, q1: Project, m: MediaItem): VisualProps {
 type Under = MediaItem | AnnotationsItem
 type Placed = { it: Under; ti: number; drawn: boolean }
 
+// índice id → item e faixa, por lista de faixas (projeto imutável): as buscas por id dentro dos laços por efeito
+// varriam o projeto inteiro (O(itens²) em projetos de 1 h com centenas de cortes)
+const locByTracks = new WeakMap<Project['tracks'], Map<string, { it: Item; ti: number }>>()
+function locOf(p: Project, id: string): { it: Item; ti: number } | undefined {
+  let idx = locByTracks.get(p.tracks)
+  if (!idx) {
+    idx = new Map()
+    for (let ti = 0; ti < p.tracks.length; ti++) for (const it of p.tracks[ti].items) if (!idx.has(it.id)) idx.set(it.id, { it, ti })
+    locByTracks.set(p.tracks, idx)
+  }
+  return idx.get(id)
+}
+
 /** Itens sobre os quais o efeito age (faixas abaixo; escopo `track`: a faixa-alvo) no tempo dele, do topo para o fundo. */
 function actedClips(p: Project, fx: EffectItem): Placed[] {
-  const fti = p.tracks.findIndex((t) => t.items.some((i) => i.id === fx.id))
+  const fti = locOf(p, fx.id)?.ti ?? -1
   const target = fx.scope === 'track' ? (fx.targetTrackId ?? visualTrackBelow(p, p.tracks[fti].id)) : null
   const out: Placed[] = []
+  const assets = new Set(p.assets.map((a) => a.id))
   p.tracks.forEach((t, ti) => {
     if (t.kind !== 'video') return
     if (target ? t.id !== target : ti >= fti) return
     for (const it of t.items) {
-      const ok = it.type === 'annotations' || (it.type === 'media' && !!it.visual && p.assets.some((a) => a.id === it.assetId))
-      if (!ok || it.startUs >= itemEndUs(fx) || itemEndUs(it) <= fx.startUs) continue
+      if (it.startUs >= itemEndUs(fx) || itemEndUs(it) <= fx.startUs) continue
+      const ok = it.type === 'annotations' || (it.type === 'media' && !!it.visual && assets.has(it.assetId))
+      if (!ok) continue
       out.push({ it: it as Under, ti, drawn: !t.hidden && it.enabled !== false })
     }
   })
@@ -387,12 +402,12 @@ function effectTimes(p0: Project, p1: Project, fx: EffectItem, acted: Placed[]):
   const r = fx.region
   addKeys(fx.startUs, [r.x, r.y, r.w, r.h, r.rotation])
   // ancorado: a região segue o clipe dele (keys e animações dele contam)
-  const anchor = fx.attach ? p0.tracks.flatMap((t) => t.items).find((i) => i.id === fx.attach!.mediaItemId) : undefined
+  const anchor = fx.attach ? locOf(p0, fx.attach.mediaItemId)?.it : undefined
   const items: Under[] = [...acted.map((x) => x.it), ...(anchor?.type === 'media' ? [anchor] : [])]
   for (const it of items) {
     if (it.type === 'media') {
       for (const q of [p0, p1]) {
-        const v = (q.tracks.flatMap((t) => t.items).find((i) => i.id === it.id) as MediaItem | undefined)?.visual
+        const v = (locOf(q, it.id)?.it as MediaItem | undefined)?.visual
         if (!v) continue
         addKeys(it.startUs, [v.transform.x, v.transform.y, v.transform.scale, v.transform.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b])
         if (v.animIn) must.add(it.startUs + v.animIn.durationUs)
@@ -411,7 +426,7 @@ function effectTimes(p0: Project, p1: Project, fx: EffectItem, acted: Placed[]):
   return { times: [...set].sort((x, y) => x - y), must: kept }
 }
 
-const fxIn = (p: Project, id: string): EffectItem => p.tracks.flatMap((t) => t.items).find((i) => i.id === id) as EffectItem
+const fxIn = (p: Project, id: string): EffectItem => locOf(p, id)!.it as EffectItem
 const sameIds = (a: { it: Under }[], b: { it: Under }[]): boolean => a.every((x) => b.some((y) => y.it.id === x.it.id))
 
 /** Ids dos itens que a região do efeito (como o resolve a desenha em `p`) toca — buraco: os visíveis nele — ao longo dele. */
@@ -539,6 +554,9 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
     if (fx.attach) {
       const own = attachedMedia(p, fx)
       if (!own) continue // âncora perdida: a caixa de reserva fica (aviso attachLost da privacidade)
+      // só o próprio clipe sob ele no tempo (o caso do corte de silêncios): não há outro item para tocar — exato, sem
+      // amostrar (touchedIds só devolve itens de `acted`)
+      if (acted.every((x) => x.it.id === own.id)) continue
       const { ids } = touchedIds(p, fx, acted)
       if ([...ids].some((id) => id !== own.id)) unanchor.push(fx.id)
       continue

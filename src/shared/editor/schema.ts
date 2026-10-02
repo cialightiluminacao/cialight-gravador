@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
 import { ANIM_PRESETS, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, AnimPreset, EffectItem, EffectRegion, Item, PresetAnim, Project, VisualProps } from './project'
+import type { Anim, AnimPreset, Asset, EffectItem, EffectRegion, Item, MediaItem, PresetAnim, Project, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
 import { conservativeRegion } from './contentPose'
@@ -253,18 +253,41 @@ function fromDiskAnchors(p: Project): Project {
  * maior que o do build novo. A região do conteúdo vai em `attach.region`; parseProject desfaz a troca e a ida e volta
  * pelo parse novo não perde nada.
  */
-function diskAnchored(p: Project, fx: EffectItem): unknown {
+function diskAnchored(p: Project, fx: EffectItem, cache: UnionCache): unknown {
   const at = fx.attach!
   const m = attachedMedia(p, fx)
-  // a caixa cobre a região com a geometria do build novo E com a que a v1.3 desenha (presets dela, sem curva)
-  const u = m ? boxUnion(anchoredUnion(p, fx, m), m.visual ? anchoredUnion(p, fx, { ...m, visual: v13Geometry(m.visual) }) : null) : null
-  const box = boxUnion(u, at.fallback ?? null)
+  const box = boxUnion(m ? diskUnion(p, fx, m, cache) : null, at.fallback ?? null)
   const r = conservativeRegion(fx, box)
   return {
     ...fx,
     region: { shape: fx.region.shape, x: { value: r.x }, y: { value: r.y }, w: { value: r.w }, h: { value: r.h }, rotation: { value: r.rotation } },
     attach: { ...at, region: fx.region }
   }
+}
+
+// Caixa do disco por efeito (o autosave grava a cada 1 s): recalculada só quando o efeito, o clipe da âncora, o asset
+// dele ou o quadro mudam (anchoredUnion só lê esses quatro). Mesmos objetos (projeto imutável no renderer): acerto
+// direto. O processo principal recebe o projeto pelo IPC e o parseia de novo a cada gravação (objetos novos, mesmo
+// conteúdo): aí vale a chave de conteúdo (JSON do que anchoredUnion lê), bem mais barata que as duas uniões.
+type UnionEntry = { fx: EffectItem; m: MediaItem; asset: Asset | undefined; canvas: Project['canvas']; key: string | null; u: Box | null }
+type UnionCache = { prev: Map<string, UnionEntry>; next: Map<string, UnionEntry> }
+/** Por projeto: as entradas da última gravação (efeitos apagados saem na seguinte). */
+const unionCaches = new Map<string, Map<string, UnionEntry>>()
+const unionKey = (p: Project, fx: EffectItem, m: MediaItem, asset: Asset | undefined): string =>
+  JSON.stringify([fx.startUs, fx.durationUs, fx.region, m.startUs, m.durationUs, m.assetId, m.visual, asset?.video ?? null, p.canvas.width, p.canvas.height])
+/** União da região ancorada com a geometria do build novo E com a que a v1.3 desenha (presets dela, sem curva). */
+function diskUnion(p: Project, fx: EffectItem, m: MediaItem, cache: UnionCache): Box | null {
+  const asset = p.assets.find((a) => a.id === m.assetId)
+  const c = cache.prev.get(fx.id)
+  let e: UnionEntry
+  if (c && c.fx === fx && c.m === m && c.asset === asset && c.canvas === p.canvas) e = c
+  else {
+    const key = unionKey(p, fx, m, asset)
+    const u = c && c.key === key ? c.u : boxUnion(anchoredUnion(p, fx, m), m.visual ? anchoredUnion(p, fx, { ...m, visual: v13Geometry(m.visual) }) : null)
+    e = { fx, m, asset, canvas: p.canvas, key, u }
+  }
+  cache.next.set(fx.id, e)
+  return e.u
 }
 
 type Box = { x: number; y: number; w: number; h: number }
@@ -314,6 +337,7 @@ function diskVisual(v: VisualProps): unknown {
  * keys nessas propriedades. parseProject aceita as duas formas. Efeito ancorado: diskAnchored. Não muda o projeto recebido.
  */
 export function toDiskProject(p: Project): unknown {
+  const cache: UnionCache = { prev: unionCaches.get(p.id) ?? new Map(), next: new Map() }
   const item = (it: Item): unknown => {
     switch (it.type) {
       case 'media':
@@ -323,12 +347,15 @@ export function toDiskProject(p: Project): unknown {
       case 'shape':
         return { ...it, visual: diskVisual(it.visual) }
       case 'effect':
-        return it.attach ? diskAnchored(p, it) : it
+        return it.attach ? diskAnchored(p, it, cache) : it
       default:
         return it
     }
   }
-  return { ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map(item) })) }
+  const out = { ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map(item) })) }
+  if (cache.next.size) unionCaches.set(p.id, cache.next)
+  else unionCaches.delete(p.id)
+  return out
 }
 
 /** Nome da propriedade nas mensagens (os de antes da F4 mantidos: volume, x, strength…). */

@@ -60,6 +60,30 @@ function noTargetAt(p: Project, fx: EffectItem, trackId: string, a: Us, b: Us): 
 
 interface Box { x0: number; y0: number; x1: number; y1: number }
 
+// itens da faixa por início, com o maior fim acumulado (cresce sempre: dá para buscar mesmo com sobreposição), por
+// lista de itens (imutável): os laços efeito × clipe viram busca binária — O(efeitos × faixas × log n) em 1 h
+const byStart = new WeakMap<Item[], { items: Item[]; maxEnd: Us[] }>()
+/** Itens da lista que cruzam [a, b), em ordem de início. */
+function itemsIn(list: Item[], a: Us, b: Us): Item[] {
+  let s = byStart.get(list)
+  if (!s) {
+    const items = [...list].sort((x, y) => x.startUs - y.startUs)
+    const maxEnd: Us[] = []
+    for (let i = 0; i < items.length; i++) maxEnd.push(Math.max(i ? maxEnd[i - 1] : -Infinity, itemEndUs(items[i])))
+    s = { items, maxEnd }
+    byStart.set(list, s)
+  }
+  let lo = 0, hi = s.items.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (s.maxEnd[mid] > a) hi = mid
+    else lo = mid + 1
+  }
+  const out: Item[] = []
+  for (let i = lo; i < s.items.length && s.items[i].startUs < b; i++) if (itemEndUs(s.items[i]) > a) out.push(s.items[i])
+  return out
+}
+
 const animated = (...as: Anim<number>[]): boolean => as.some((a) => (a.keys?.length ?? 0) > 0)
 
 /** Caixa (px do quadro) que contém a região + borda suave; null = quadro inteiro ou animada (sem teste de espaço). */
@@ -185,7 +209,7 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
       let cover: Us | null = null
       for (const upper of p.tracks.slice(ti + 1)) {
         if (upper.kind !== 'video' || upper.hidden || upper.id === target) continue
-        for (const m of upper.items) {
+        for (const m of itemsIn(upper.items, from, Math.min(e, hi))) {
           if (m.type !== 'media' || m.enabled === false) continue
           const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
           if (a >= b || disjoint(region, mediaBox(p, m, W, H))) continue
@@ -201,7 +225,7 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
       let rev: Us | null = null
       for (const t of p.tracks) {
         if (t.kind !== 'video' || t.hidden) continue
-        for (const m of t.items) {
+        for (const m of itemsIn(t.items, from, Math.min(e, hi))) {
           if (m.type !== 'media' || !m.reverse || m.freeze || m.enabled === false || (it.linkId && m.linkId === it.linkId)) continue
           const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
           if (a < b) rev = rev === null ? a : Math.min(rev, a)
@@ -224,13 +248,13 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
       const moved: Partial<Record<'transformedUnderEffect' | 'unlinkedOverMoving', { tUs: Us; mediaItemId: string }>> = {}
       p.tracks.forEach((t, mi) => {
         if (t.kind !== 'video' || t.hidden) return
-        for (const m of t.items) {
+        for (const m of itemsIn(t.items, from, Math.min(e, hi))) {
           if (m.type !== 'media' || !m.visual || m.enabled === false || m.id === own?.id) continue
           const inGroup = !!it.linkId && m.linkId === it.linkId
           if (!inGroup && !(target ? t.id === target : mi < ti)) continue
-          if (!clipMoves(m)) continue
+          // o teste barato (tempo) antes de clipMoves: o laço é efeitos × clipes
           const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
-          if (a >= b || !regionTouchesOver(p, it, m, a, b)) continue
+          if (a >= b || !clipMoves(m) || !regionTouchesOver(p, it, m, a, b)) continue
           const at = unfollowedAt(p, it, m, a, b)
           const kind = inGroup ? 'transformedUnderEffect' : 'unlinkedOverMoving'
           if (at !== null && (!moved[kind] || at < moved[kind]!.tUs)) moved[kind] = { tUs: at, mediaItemId: m.id }

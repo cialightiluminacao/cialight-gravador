@@ -171,12 +171,24 @@ export function clipFrameAt(p: Project, m: MediaItem, at: Us, allowEmpty = false
 export function attachedMedia(p: Project, fx: EffectItem): MediaItem | null {
   const id = fx.attach?.mediaItemId
   if (!id) return null
+  return videoItemIndex(p).get(id) ?? null
+}
+
+// índice id → mídia ativa das faixas de vídeo (null = o id existe, mas não serve de âncora), por lista de faixas: o
+// projeto é imutável (toda edição troca `tracks`), então o índice vale enquanto a lista for a mesma — inclusive em
+// cópias rasas do projeto ({ ...p, canvas }) que o reenquadrar faz. Sem ele, cada amostra do efeito ancorado varria
+// todas as faixas (O(itens) por amostra: reenquadrar e privacidade em projetos de 1 h).
+const indexByTracks = new WeakMap<Project['tracks'], Map<string, MediaItem | null>>()
+function videoItemIndex(p: Project): Map<string, MediaItem | null> {
+  let idx = indexByTracks.get(p.tracks)
+  if (idx) return idx
+  idx = new Map()
   for (const t of p.tracks) {
     if (t.kind !== 'video') continue
-    const m = t.items.find((i) => i.id === id)
-    if (m) return m.type === 'media' && m.visual && m.enabled !== false ? m : null
+    for (const m of t.items) if (!idx.has(m.id)) idx.set(m.id, m.type === 'media' && m.visual && m.enabled !== false ? m : null)
   }
-  return null
+  indexByTracks.set(p.tracks, idx)
+  return idx
 }
 
 /**
