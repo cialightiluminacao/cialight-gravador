@@ -88,32 +88,42 @@ export class ProjectStore {
    * origem delas) e grava `p`; versions/ começa vazia. Cada arquivo vira um hard link quando dá (mesmo disco: não ocupa
    * espaço de novo) ou uma cópia. Os dois projetos ficam independentes: estes arquivos nunca são reescritos no lugar
    * (sempre .part/.tmp + renomear, que troca a entrada da pasta) e apagar uma pasta não tira o arquivo da outra.
-   * Pula temporários (.tmp, .part-*) e gravações pendentes (com marcador: a recuperação é do projeto de origem). Lança
-   * se a origem não existe ou se `p.id` já existe (inclusive a própria origem).
+   * Pula temporários (.tmp, .part-*) e gravações pendentes (com marcador: a recuperação é do projeto de origem) —
+   * devolvidas em `skippedPending` para a interface avisar. Lança se a origem não existe ou se a pasta de `p.id` já
+   * existe (inclusive a própria origem); falha no meio apaga a pasta nova (nada pela metade).
    */
-  duplicate(sourceId: string, p: Project): void {
+  duplicate(sourceId: string, p: Project): { skippedPending: string[] } {
     const src = this.dirOf(sourceId)
     if (!existsSync(join(src, 'project.json'))) throw new Error(`Projeto ${sourceId} não existe`)
     const dir = this.dirOf(p.id)
-    if (p.id.toLowerCase() === sourceId.toLowerCase() || existsSync(join(dir, 'project.json'))) throw new Error(`Projeto ${p.id} já existe`)
-    for (const s of SUBDIRS) mkdirSync(join(dir, s), { recursive: true })
-    for (const sub of ['proxies', 'cache', 'generated']) {
-      const from = join(src, sub)
-      if (!existsSync(from)) continue
-      const names = readdirSync(from)
-      const pending = new Set(names.filter((n) => n.endsWith(PENDING_SUFFIX)).map((n) => n.slice(0, -PENDING_SUFFIX.length)))
-      for (const n of names) {
-        if (n.endsWith(PENDING_SUFFIX) || pending.has(n) || n.endsWith('.tmp') || n.includes('.part-')) continue
-        const a = join(from, n), b = join(dir, sub, n)
-        if (!statSync(a).isFile()) continue
-        try {
-          linkSync(a, b)
-        } catch {
-          copyFileSync(a, b)
+    if (p.id.toLowerCase() === sourceId.toLowerCase() || existsSync(dir)) throw new Error(`Projeto ${p.id} já existe`)
+    const skippedPending: string[] = []
+    try {
+      for (const s of SUBDIRS) mkdirSync(join(dir, s), { recursive: true })
+      for (const sub of ['proxies', 'cache', 'generated']) {
+        const from = join(src, sub)
+        if (!existsSync(from)) continue
+        const names = readdirSync(from)
+        const pending = new Set(names.filter((n) => n.endsWith(PENDING_SUFFIX)).map((n) => n.slice(0, -PENDING_SUFFIX.length)))
+        for (const n of names) {
+          if (pending.has(n)) skippedPending.push(`${sub}/${n}`)
+          if (n.endsWith(PENDING_SUFFIX) || pending.has(n) || n.endsWith('.tmp') || n.includes('.part-')) continue
+          const a = join(from, n), b = join(dir, sub, n)
+          if (!statSync(a).isFile()) continue
+          try {
+            linkSync(a, b)
+          } catch {
+            copyFileSync(a, b)
+          }
         }
       }
+      this.save(p)
+    } catch (e) {
+      this.cache.delete(p.id.toLowerCase())
+      rmSync(dir, { recursive: true, force: true })
+      throw e
     }
-    this.save(p)
+    return { skippedPending }
   }
 
   save(p: Project): void {

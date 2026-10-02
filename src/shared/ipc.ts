@@ -220,9 +220,10 @@ export interface IpcApi {
     remove(id: string): Promise<void>
     /**
      * Cópia do projeto `sourceId` gravada como `p` (id novo, pasta própria, ex.: "Reenquadrar"): os derivados (proxies,
-     * cache, narrações) vão junto por hard link ou cópia. Lança se `p.id` já existe ou a origem não existe.
+     * cache, narrações) vão junto por hard link ou cópia; `skippedPending`: narrações pendentes (não recuperadas) que
+     * ficaram só na origem. Lança se a pasta de `p.id` já existe ou a origem não existe (falha no meio não deixa nada).
      */
-    duplicate(sourceId: string, p: Project): Promise<void>
+    duplicate(sourceId: string, p: Project): Promise<{ skippedPending: string[] }>
     /** Lê a sessão no main, converte com projectFromSession, cria o projeto e o retorna. */
     fromSession(sessionId: string): Promise<Project>
     /** Diálogo de abrir arquivos de mídia (multi-seleção); [] se cancelado. */

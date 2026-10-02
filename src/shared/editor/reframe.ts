@@ -2,26 +2,30 @@
 // importa no quadro. Puro.
 // - Clipe principal (cobre o quadro, ou centrado em escala ≥ 1 — a gravação da tela): 'cover' = preenche o quadro novo
 //   (fit cover) com keys de x/y que levam o ponto de foco ao centro, presos para não mostrar borda preta; 'contain' =
-//   cabe inteiro (fit contain, barras), posição intacta. Pontos de foco (instante, ponto do quadro ATUAL) marcados pelo
-//   usuário por clipe; sem pontos, o ponto da fonte que estava no centro do quadro (o centro do clipe parado, o
+//   cabe inteiro (fit contain, barras), posição intacta. Pontos de foco marcados pelo usuário por clipe, guardados no
+//   espaço do CONTEÚDO do clipe (instante relativo ao início dele, fração da fonte exibida: mover ou transformar o
+//   clipe não os desloca); sem pontos, o ponto da fonte que estava no centro do quadro (o centro do clipe parado, o
 //   movimento do Ken Burns/zoom).
 // - Sobreposições (PiP, logos): mesmo tamanho em px relativo ao lado menor do quadro, posição proporcional, presas
 //   dentro do quadro se estavam dentro.
 // - Textos/formas: posição proporcional (normalizada), tamanho do texto pelo lado menor.
-// - Privacidade: todo efeito continua cobrindo o MESMO conteúdo. Ancorados acompanham o clipe sozinhos (região no
-//   espaço do conteúdo). Soltos que só agem sobre um clipe no tempo todo são ancorados a ele (passam também a seguir
-//   edições futuras); os que agem sobre vários clipes (atravessam um corte, ficam sobre PiP e tela) são assados no
-//   quadro novo: em cada amostra (≥ 60/s) a região antiga vai ao conteúdo de cada clipe e volta ao quadro novo pela
-//   geometria nova — normal: a caixa que envolve todas (cresce, nunca encolhe); invertido (o buraco nítido): só com um
-//   clipe visível no buraco, e nunca deixando aparecer clipe que antes não aparecia nele (senão o buraco nulo: esconde
-//   tudo). Região que sai do quadro novo é mantida (cobre o conteúdo onde quer que ele vá) e avisada.
+// - Privacidade: todo efeito continua cobrindo o MESMO conteúdo. "Clipes" sob o efeito, para essa decisão: a mídia de
+//   vídeo das faixas que ele esconde — também desativada ou em faixa oculta (pode voltar a aparecer) — e as anotações
+//   da gravação (camada parada no quadro inteiro: o conteúdo delas fica no mesmo ponto normalizado). Ancorado ou solto
+//   que, em todo o tempo, só encosta num clipe de mídia: ancorado a ele (acompanha o clipe sozinho, inclusive edições
+//   futuras). Encostando em vários (atravessa um corte, fica sobre PiP e tela, sobre traços das anotações): assado no
+//   quadro novo — em cada amostra (≥ 60/s) a região antiga vai ao conteúdo de cada clipe e volta ao quadro novo pela
+//   geometria nova; normal: a caixa que envolve todas (cresce, nunca encolhe); invertido (o buraco nítido): só com um
+//   clipe visível no buraco, e nunca deixando aparecer clipe que antes não aparecia nele — com vários, o buraco nulo
+//   (esconde tudo). Um ancorado que vira assado perde a âncora (aviso). Região que sai do quadro novo é mantida (cobre o
+//   conteúdo onde quer que ele vá) e avisada.
 import { easeValue, evalAnim } from './anim'
 import { refreshAttachments } from './attachment'
 import { contentToScreen, NO_HOLE, regionAabb, regionTouchesClip, screenToContent, type ClipFrame, type RegionValues } from './contentPose'
 import { FIT_TOL, simplifyRegionSamples, toContentRegion, type RegionSample } from './followTransform'
 import { newId } from './ids'
 import { layerBase } from './layerGeometry'
-import type { Anim, EffectItem, Item, Keyframe, MediaItem, Project, TextItem, Us, VisualProps } from './project'
+import type { Anim, AnnotationsItem, EffectItem, Item, Keyframe, MediaItem, Project, TextItem, Us, VisualProps } from './project'
 import { attachedMedia, clipFrameAt, effectRegionAt, visualStateAt, visualTrackBelow } from './resolve'
 import { frameToUs, itemEndUs } from './time'
 import { coverRange, coversFrame, sourceOf } from './zoom'
@@ -33,14 +37,17 @@ export const REFRAME_ASPECTS: readonly { id: ReframeAspect; label: string; suffi
   { id: '4:5', label: 'Retrato 4:5', suffix: '4:5', ratio: [4, 5] }
 ]
 
-/** Ponto de foco: instante ABSOLUTO da timeline e ponto (normalizado) do quadro atual (antes de reenquadrar). */
-export interface FocusPoint { tUs: Us; x: number; y: number }
+/**
+ * Ponto de foco no espaço do conteúdo do clipe: instante relativo ao início do clipe e ponto como fração da fonte
+ * exibida (já girada, sem corte) — o mesmo espaço da região ancorada. focusFromScreen/focusToScreen convertem.
+ */
+export interface FocusPoint { localUs: Us; x: number; y: number }
 export interface ReframeOptions {
   mode: 'cover' | 'contain'
   /** Pontos de foco por id do clipe principal (outros ids e pontos fora do clipe são ignorados). */
   focus?: Record<string, FocusPoint[]>
 }
-export type ReframeWarningKind = 'outsideFrame' | 'holeReduced' | 'annotations'
+export type ReframeWarningKind = 'outsideFrame' | 'holeReduced' | 'unanchored' | 'annotations'
 export interface ReframeWarning { itemId: string; kind: ReframeWarningKind; message: string; tUs: Us }
 export interface ReframeResult {
   project: Project
@@ -53,7 +60,8 @@ export interface ReframeResult {
 
 const MSG: Record<ReframeWarningKind, string> = {
   outsideFrame: 'A região deste efeito fica (em parte) fora do novo quadro: foi mantida sobre o mesmo conteúdo — confira o enquadramento',
-  holeReduced: 'O efeito invertido não pôde manter a área nítida com segurança no novo quadro: ela foi reduzida (o resto continua escondido) — confira',
+  holeReduced: 'Efeito invertido: o buraco foi fechado para não expor conteúdo no novo quadro (o quadro inteiro fica escondido nesses trechos) — confira',
+  unanchored: 'O efeito estava ancorado a um clipe, mas também cobria outro: a região foi ajustada ao novo quadro e deixou de seguir o clipe — confira',
   annotations: 'As anotações da gravação ocupam o quadro inteiro e não acompanham o reenquadramento — confira se ainda batem com a tela'
 }
 
@@ -102,6 +110,21 @@ export function isMainClip(p: Project, m: MediaItem): boolean {
   if (!isRight(evalAnim(t.rotation, 0))) return false
   if (coversFrame(v, sourceOf(p, m), { w: p.canvas.width, h: p.canvas.height }, 0)) return true
   return Math.abs(evalAnim(t.x, 0) - 0.5) < 0.01 && Math.abs(evalAnim(t.y, 0) - 0.5) < 0.01 && evalAnim(t.scale, 0) >= 0.99
+}
+
+/** Clique no quadro (ponto normalizado) no instante absoluto → ponto de foco no conteúdo do clipe; null = clipe invisível. */
+export function focusFromScreen(p: Project, m: MediaItem, tUs: Us, x: number, y: number): FocusPoint | null {
+  const cf = clipFrameAt(p, m, tUs)
+  if (!cf) return null
+  const q = contentAt(cf, x, y)
+  return { localUs: Math.round(tUs) - m.startUs, x: q.x, y: q.y }
+}
+
+/** Ponto de foco → instante absoluto e ponto normalizado do quadro de `p` (marcador no visualizador); null = invisível. */
+export function focusToScreen(p: Project, m: MediaItem, f: FocusPoint): { tUs: Us; x: number; y: number } | null {
+  const tUs = m.startUs + f.localUs
+  const cf = clipFrameAt(p, m, tUs)
+  return cf ? { tUs, ...screenAt(cf, f) } : null
 }
 
 /** Clipe principal de cima ativo no instante (o que recebe os pontos de foco no visualizador); null = nenhum. */
@@ -159,12 +182,12 @@ function focusTransform(p0: Project, q1: Project, m0: MediaItem, points: FocusPo
   const D = m0.durationUs, W1 = q1.canvas.width, H1 = q1.canvas.height
   const rest0 = restItem(m0)
   const m1 = restItem({ ...m0, visual: { ...v0, fit: 'cover', transform: { ...t0, x: { value: 0.5 }, y: { value: 0.5 } } } })
-  // pontos do usuário: no clipe, um por instante (o último marcado vale), no espaço do conteúdo (geometria como exibida)
+  // pontos do usuário (já no espaço do conteúdo): dentro do clipe, um por instante (o último vale)
   const byT = new Map<Us, { l: Us; q: { x: number; y: number } }>()
   for (const pt of points) {
-    if (pt.tUs < m0.startUs || pt.tUs >= itemEndUs(m0)) continue
-    const cf = clipFrameAt(p0, m0, Math.round(pt.tUs))
-    if (cf) byT.set(Math.round(pt.tUs) - m0.startUs, { l: Math.round(pt.tUs) - m0.startUs, q: contentAt(cf, pt.x, pt.y) })
+    const l = Math.round(pt.localUs)
+    if (l < 0 || l >= D) continue
+    byT.set(l, { l, q: { x: pt.x, y: pt.y } })
   }
   const pts = [...byT.values()].sort((a, b) => a.l - b.l)
   const focusAt = (l: Us): { x: number; y: number } => {
@@ -237,26 +260,45 @@ function overlayVisual(p0: Project, q1: Project, m: MediaItem): VisualProps {
 
 // ---------------------------------------------------------------- efeitos
 
-type Placed = { m: MediaItem; ti: number }
+/**
+ * Item sob o efeito: mídia de vídeo (também desativada ou em faixa oculta: pode voltar a aparecer) ou anotações.
+ * `drawn` = desenhado hoje (ativo, faixa visível) — só esse esconde o que está embaixo.
+ */
+type Under = MediaItem | AnnotationsItem
+type Placed = { it: Under; ti: number; drawn: boolean }
 
-/** Clipes de vídeo sobre os quais o efeito age (faixas abaixo; escopo `track`: a faixa-alvo), do topo para o fundo. */
+/** Itens sobre os quais o efeito age (faixas abaixo; escopo `track`: a faixa-alvo) no tempo dele, do topo para o fundo. */
 function actedClips(p: Project, fx: EffectItem): Placed[] {
   const fti = p.tracks.findIndex((t) => t.items.some((i) => i.id === fx.id))
   const target = fx.scope === 'track' ? (fx.targetTrackId ?? visualTrackBelow(p, p.tracks[fti].id)) : null
   const out: Placed[] = []
   p.tracks.forEach((t, ti) => {
-    if (t.kind !== 'video' || t.hidden) return
+    if (t.kind !== 'video') return
     if (target ? t.id !== target : ti >= fti) return
-    for (const m of t.items) {
-      if (m.type !== 'media' || !m.visual || m.enabled === false || !p.assets.some((a) => a.id === m.assetId)) continue
-      if (m.startUs < itemEndUs(fx) && itemEndUs(m) > fx.startUs) out.push({ m, ti })
+    for (const it of t.items) {
+      const ok = it.type === 'annotations' || (it.type === 'media' && !!it.visual && p.assets.some((a) => a.id === it.assetId))
+      if (!ok || it.startUs >= itemEndUs(fx) || itemEndUs(it) <= fx.startUs) continue
+      out.push({ it: it as Under, ti, drawn: !t.hidden && it.enabled !== false })
     }
   })
   return out.sort((a, b) => b.ti - a.ti)
 }
 
-/** A camada (opaca, retangular, sem desfoque) esconde tudo o que está embaixo dentro da caixa `b` (px)? */
-function occludes(m: MediaItem, cf: ClipFrame, at: Us, b: { x0: number; y0: number; x1: number; y1: number }): boolean {
+/**
+ * Geometria do item no instante. Anotações: a camada do quadro inteiro, parada ('fill' com a fonte do tamanho do
+ * quadro) — fração do "conteúdo" = ponto normalizado do quadro, o mesmo nos dois quadros.
+ */
+function frameOf(p: Project, it: Under, at: Us): ClipFrame | null {
+  if (it.type === 'media') return clipFrameAt(p, it, at)
+  const W = p.canvas.width, H = p.canvas.height
+  const g = layerBase({ l: 0, t: 0, r: 0, b: 0 }, 'fill', { w: W, h: H, rotation: 0 }, { w: W, h: H })
+  return { cx: 0.5, cy: 0.5, rotation: 0, sx: g.bw, sy: g.bh, mirror: false, g, W, H }
+}
+
+/** A camada (desenhada, opaca, retangular, sem desfoque) esconde tudo o que está embaixo dentro da caixa `b` (px)? */
+function occludes(pl: Placed, cf: ClipFrame, at: Us, b: { x0: number; y0: number; x1: number; y1: number }): boolean {
+  const m = pl.it
+  if (!pl.drawn || m.type !== 'media') return false
   const v = m.visual!
   const s = visualStateAt(v, m.durationUs, at - m.startUs)
   if (s.opacity < 0.999 || s.blur > 0 || (v.shape && v.shape !== 'rect')) return false
@@ -269,21 +311,22 @@ function occludes(m: MediaItem, cf: ClipFrame, at: Us, b: { x0: number; y0: numb
 }
 
 /**
- * Clipes cujo conteúdo a região (do quadro, normalizada) toca no instante, do topo para o fundo. `visible`: para no
- * primeiro que cobre a região inteira e é opaco (os de baixo não aparecem nela) — o que um buraco mostra.
+ * Itens cujo conteúdo a região (do quadro, normalizada) toca no instante, do topo para o fundo. `visible`: para no
+ * primeiro desenhado que cobre a região inteira e é opaco (os de baixo não aparecem nela) — o que um buraco mostra.
  */
-function clipsAt(p: Project, fx: EffectItem, acted: Placed[], r: RegionValues, at: Us, visible: boolean): { m: MediaItem; cf: ClipFrame }[] {
+function clipsAt(p: Project, fx: EffectItem, acted: Placed[], r: RegionValues, at: Us, visible: boolean): { it: Under; cf: ClipFrame }[] {
   const loose = { ...fx, invert: false }
-  const out: { m: MediaItem; cf: ClipFrame }[] = []
+  const out: { it: Under; cf: ClipFrame }[] = []
   const W = p.canvas.width, H = p.canvas.height
-  for (const { m } of acted) {
-    if (at < m.startUs || at >= itemEndUs(m)) continue
-    const cf = clipFrameAt(p, m, at)
+  for (const pl of acted) {
+    const it = pl.it
+    if (at < it.startUs || at >= itemEndUs(it)) continue
+    const cf = frameOf(p, it, at)
     if (!cf || !regionTouchesClip(loose, r, cf)) continue
-    out.push({ m, cf })
+    out.push({ it, cf })
     if (visible) {
       const a = regionAabb(r, W, H), pad = Math.max(0, fx.feather) * Math.min(Math.abs(r.w) * W, Math.abs(r.h) * H) / 2
-      if (occludes(m, cf, at, { x0: a.x0 * W - pad, y0: a.y0 * H - pad, x1: a.x1 * W + pad, y1: a.y1 * H + pad })) break
+      if (occludes(pl, cf, at, { x0: a.x0 * W - pad, y0: a.y0 * H - pad, x1: a.x1 * W + pad, y1: a.y1 * H + pad })) break
     }
   }
   return out
@@ -292,7 +335,7 @@ function clipsAt(p: Project, fx: EffectItem, acted: Placed[], r: RegionValues, a
 /** O clipe leva a fonte ao quadro com a mesma escala nos dois eixos (sem distorção)? */
 const conformal = (cf: ClipFrame): boolean => Math.abs(cf.sx / cf.g.cw - cf.sy / cf.g.ch) <= 1e-9 * Math.max(cf.sx / cf.g.cw, cf.sy / cf.g.ch)
 
-/** Instantes (absolutos) para amostrar o efeito: grade ≥ 60/s com os quadros do projeto, keys e bordas dos clipes. */
+/** Instantes (absolutos) para amostrar o efeito: grade ≥ 60/s com os quadros do projeto, keys e bordas dos itens. */
 function effectTimes(p0: Project, p1: Project, fx: EffectItem, acted: Placed[]): { times: Us[]; must: Set<Us> } {
   const a = fx.startUs, b = itemEndUs(fx)
   const fps = p0.canvas.fps > 0 ? p0.canvas.fps : 30
@@ -303,15 +346,20 @@ function effectTimes(p0: Project, p1: Project, fx: EffectItem, acted: Placed[]):
   }
   const r = fx.region
   addKeys(fx.startUs, [r.x, r.y, r.w, r.h, r.rotation])
-  for (const { m } of acted) {
-    for (const q of [p0, p1]) {
-      const v = (q.tracks.flatMap((t) => t.items).find((i) => i.id === m.id) as MediaItem | undefined)?.visual
-      if (!v) continue
-      addKeys(m.startUs, [v.transform.x, v.transform.y, v.transform.scale, v.transform.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b])
-      if (v.animIn) must.add(m.startUs + v.animIn.durationUs)
-      if (v.animOut) must.add(itemEndUs(m) - v.animOut.durationUs)
+  // ancorado: a região segue o clipe dele (keys e animações dele contam)
+  const anchor = fx.attach ? p0.tracks.flatMap((t) => t.items).find((i) => i.id === fx.attach!.mediaItemId) : undefined
+  const items: Under[] = [...acted.map((x) => x.it), ...(anchor?.type === 'media' ? [anchor] : [])]
+  for (const it of items) {
+    if (it.type === 'media') {
+      for (const q of [p0, p1]) {
+        const v = (q.tracks.flatMap((t) => t.items).find((i) => i.id === it.id) as MediaItem | undefined)?.visual
+        if (!v) continue
+        addKeys(it.startUs, [v.transform.x, v.transform.y, v.transform.scale, v.transform.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b])
+        if (v.animIn) must.add(it.startUs + v.animIn.durationUs)
+        if (v.animOut) must.add(itemEndUs(it) - v.animOut.durationUs)
+      }
     }
-    for (const x of [m.startUs - 1, m.startUs, itemEndUs(m) - 1, itemEndUs(m)]) must.add(x)
+    for (const x of [it.startUs - 1, it.startUs, itemEndUs(it) - 1, itemEndUs(it)]) must.add(x)
   }
   const kept = new Set([...must].filter((x) => x >= a && x < b))
   const set = new Set<Us>(kept)
@@ -323,22 +371,21 @@ function effectTimes(p0: Project, p1: Project, fx: EffectItem, acted: Placed[]):
   return { times: [...set].sort((x, y) => x - y), must: kept }
 }
 
-/** Retângulo alinhado aos eixos (px, meia-extensões) contido na região (normal ou girada; elipse pelo círculo/retângulo inscrito). */
-function inscribedBox(r: RegionValues, shape: 'rect' | 'ellipse', W: number, H: number): { x0: number; y0: number; x1: number; y1: number } {
-  let hw = (Math.abs(r.w) * W) / 2, hh = (Math.abs(r.h) * H) / 2
-  if (shape === 'ellipse') { hw /= Math.SQRT2; hh /= Math.SQRT2 }
-  if (!isRight(r.rotation)) hw = hh = Math.min(hw, hh) / Math.SQRT2
-  else if (Math.round(r.rotation / 90) % 2 !== 0) [hw, hh] = [hh, hw]
-  return { x0: r.x * W - hw, y0: r.y * H - hh, x1: r.x * W + hw, y1: r.y * H + hh }
-}
-
 const fxIn = (p: Project, id: string): EffectItem => p.tracks.flatMap((t) => t.items).find((i) => i.id === id) as EffectItem
-const sameIds = (a: { m: MediaItem }[], b: { m: MediaItem }[]): boolean => a.every((x) => b.some((y) => y.m.id === x.m.id))
+const sameIds = (a: { it: Under }[], b: { it: Under }[]): boolean => a.every((x) => b.some((y) => y.it.id === x.it.id))
+
+/** Ids dos itens que a região do efeito (como o resolve a desenha em `p`) toca — buraco: os visíveis nele — ao longo dele. */
+function touchedIds(p: Project, fx: EffectItem, acted: Placed[]): { ids: Set<string>; times: Us[] } {
+  const { times } = effectTimes(p, p, fx, acted)
+  const ids = new Set<string>()
+  for (const t of times) for (const { it } of clipsAt(p, fx, acted, effectRegionAt(p, fx, t, 0), t, fx.invert)) ids.add(it.id)
+  return { ids, times }
+}
 
 /**
  * Região do efeito no quadro novo, em cada amostra, levando o conteúdo que a região antiga cobria (ver o topo do
- * arquivo). `reduced`: algum instante do invertido virou o buraco nulo/menor. Invertido ancorado: a região já vem do
- * resolve (`anchored`) e só é conferida (nunca mostrar clipe novo no buraco).
+ * arquivo). `reduced`: algum instante do invertido virou o buraco nulo. Invertido ancorado (`anchored`): a região já
+ * vem do resolve e só é conferida (nunca mostrar clipe novo no buraco).
  */
 function mappedSamples(p0: Project, p1: Project, id: string, anchored: boolean): { samples: RegionSample[]; reduced: boolean; unsafe: boolean } {
   const fx0 = fxIn(p0, id), fx1 = fxIn(p1, id)
@@ -353,12 +400,17 @@ function mappedSamples(p0: Project, p1: Project, id: string, anchored: boolean):
     if (anchored) r1 = effectRegionAt(p1, fx1, t, 0)
     else {
       const under = clipsAt(p0, fx0, acted0, r0, t, fx0.invert)
-      const maps = under.flatMap(({ m, cf }) => {
-        const m1 = acted1.find((x) => x.m.id === m.id)?.m
-        const cf1 = m1 ? clipFrameAt(p1, m1, t) : null
+      const maps = under.flatMap(({ it, cf }) => {
+        const it1 = acted1.find((x) => x.it.id === it.id)?.it
+        const cf1 = it1 ? frameOf(p1, it1, t) : null
         return cf1 ? [{ cf0: cf, cf1 }] : []
       })
-      if (maps.length === 0) r1 = r0
+      if (fx0.invert && under.length > 1) {
+        // buraco sobre vários itens: nenhum mapeamento único mantém o que cada um mostrava (o PiP deixa de esconder a
+        // tela, a tela se move por baixo dele…) — fecha o buraco
+        r1 = NO_HOLE
+        reduced = true
+      } else if (maps.length === 0) r1 = r0
       else if (!fx0.invert) {
         const rs = maps.map(({ cf0, cf1 }) => contentToScreen(cf1, screenToContent(cf0, r0, shape), shape, 0, 'cover'))
         if (rs.length === 1) r1 = rs[0]
@@ -369,20 +421,14 @@ function mappedSamples(p0: Project, p1: Project, id: string, anchored: boolean):
           const k = shape === 'ellipse' ? Math.SQRT2 : 1
           r1 = { x: (x0 + x1) / 2, y: (y0 + y1) / 2, w: (x1 - x0) * k, h: (y1 - y0) * k, rotation: 0 }
         }
-      } else if (maps.length === 1 && conformal(maps[0].cf0)) {
+      } else if (conformal(maps[0].cf0)) {
         r1 = contentToScreen(maps[0].cf1, screenToContent(maps[0].cf0, r0, shape), shape, 0, 'hole')
-      } else if (maps.every((x) => conformal(x.cf0))) {
-        // vários clipes no buraco: a interseção dos retângulos inscritos nas imagens dele por cada clipe
-        const bs = maps.map(({ cf0, cf1 }) => inscribedBox(contentToScreen(cf1, screenToContent(cf0, r0, shape), shape, 0, 'hole'), shape, W1, H1))
-        const x0 = Math.max(...bs.map((b) => b.x0)), y0 = Math.max(...bs.map((b) => b.y0)), x1 = Math.min(...bs.map((b) => b.x1)), y1 = Math.min(...bs.map((b) => b.y1))
-        r1 = x1 > x0 && y1 > y0 ? { x: (x0 + x1) / 2 / W1, y: (y0 + y1) / 2 / H1, w: (x1 - x0) / W1, h: (y1 - y0) / H1, rotation: 0 } : NO_HOLE
-        reduced = true
       } else {
         r1 = NO_HOLE
         reduced = true
       }
     }
-    // buraco: o que aparece nele no quadro novo tem de ser clipe que já aparecia nele (senão, buraco nulo)
+    // buraco: o que aparece nele no quadro novo tem de ser o que já aparecia nele (senão, buraco nulo)
     if (fx0.invert && r1.w > 0 && r1.h > 0) {
       const before = clipsAt(p0, fx0, acted0, r0, t, true)
       const now = clipsAt(p1, fx1, acted1, r1, t, true)
@@ -397,22 +443,40 @@ function mappedSamples(p0: Project, p1: Project, id: string, anchored: boolean):
   return { samples, reduced, unsafe }
 }
 
-/** Ancorar o efeito ao clipe (no projeto antigo): região no espaço do conteúdo, vínculo com o clipe. */
+/** Desvio tolerado entre a região ancorada e a solta (px do quadro, graus): só arredondamento. */
+const SAME_PX = 0.5, SAME_DEG = 0.05
+
+/**
+ * Clipe ao qual o efeito solto pode ser ancorado: o único item que ele toca (buraco: o único visível nele) no tempo
+ * todo, mídia desenhada, com o efeito dentro do tempo dele, no grupo dele ou solto — e a região ancorada
+ * (toContentRegion) desenha EXATAMENTE a região solta em todas as amostras. Região parada sobre um clipe que se move
+ * (deslizar, zoom, keys) cobre conteúdos diferentes ao longo do tempo: ancorada ela cobriria só um → assar.
+ * null = assar.
+ */
 function anchorPlan(p0: Project, fx: EffectItem, acted: Placed[]): MediaItem | null {
-  const { times } = effectTimes(p0, p0, fx, acted)
-  const seen = new Map<string, MediaItem>()
-  for (const t of times) for (const { m } of clipsAt(p0, fx, acted, effectRegionAt(p0, fx, t, 0), t, fx.invert)) seen.set(m.id, m)
-  if (seen.size !== 1) return null
-  const m = [...seen.values()][0]
+  const { ids, times } = touchedIds(p0, fx, acted)
+  if (ids.size !== 1) return null
+  const pl = acted.find((x) => ids.has(x.it.id))
+  const m = pl?.it
+  if (!pl || !pl.drawn || m?.type !== 'media') return null
   if (fx.startUs < m.startUs || itemEndUs(fx) > itemEndUs(m)) return null
   // grupo: do clipe, ou solto (o grupo dele não tem mídia)
   const groupHasMedia = !!fx.linkId && p0.tracks.some((t) => t.items.some((i) => i.type !== 'effect' && i.linkId === fx.linkId))
   if (groupHasMedia && fx.linkId !== m.linkId) return null
-  if (fx.invert) {
-    for (const t of times) {
-      const cf = t >= m.startUs && t < itemEndUs(m) ? clipFrameAt(p0, m, t) : null
-      if (cf && !conformal(cf)) return null
-    }
+  const W = p0.canvas.width, H = p0.canvas.height
+  let anchored: EffectItem
+  try {
+    anchored = { ...fx, region: toContentRegion(p0, fx, m), attach: { mediaItemId: m.id } }
+  } catch {
+    return null // clipe invisível no tempo do efeito
+  }
+  for (const t of times) {
+    const cf = clipFrameAt(p0, m, t)
+    if (!cf) continue // conteúdo invisível: a região não cobre nada dele
+    if (fx.invert && !conformal(cf)) return null
+    const a = effectRegionAt(p0, fx, t, 0), b = effectRegionAt(p0, anchored, t, 0)
+    const deg = Math.abs(((((a.rotation - b.rotation) % 360) + 540) % 360) - 180)
+    if (Math.abs(a.x - b.x) * W > SAME_PX || Math.abs(a.y - b.y) * H > SAME_PX || Math.abs(Math.abs(a.w) - Math.abs(b.w)) * W > SAME_PX || Math.abs(Math.abs(a.h) - Math.abs(b.h)) * H > SAME_PX || deg > SAME_DEG) return null
   }
   return m
 }
@@ -422,19 +486,25 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
   const canvas = { ...p.canvas, ...reframeCanvas(p.canvas, aspect) }
   const q1: Project = { ...p, canvas }
   const warnings: ReframeWarning[] = []
-  // 1. efeitos soltos: ancorar (um clipe só) ou assar depois (vários)
+  // 1. soltos: ancorar (um clipe só) ou assar depois (vários). Ancorados que tocam outro item além do clipe deles:
+  //    assar (a âncora só leva a região pelo clipe dela; o conteúdo do outro iria para outro lugar)
   const anchors = new Map<string, MediaItem>()
   const toBake: string[] = []
+  const unanchor: string[] = []
   for (const t of p.tracks) for (const fx of t.items) {
-    if (fx.type !== 'effect' || fx.attach) continue
+    if (fx.type !== 'effect') continue
     const acted = actedClips(p, fx)
+    if (fx.attach) {
+      const own = attachedMedia(p, fx)
+      if (!own) continue // âncora perdida: a caixa de reserva fica (aviso attachLost da privacidade)
+      const { ids } = touchedIds(p, fx, acted)
+      if ([...ids].some((id) => id !== own.id)) unanchor.push(fx.id)
+      continue
+    }
     if (acted.length === 0) continue
     const m = anchorPlan(p, fx, acted)
     if (m) anchors.set(fx.id, m)
-    else {
-      const { times } = effectTimes(p, p, fx, acted)
-      if (times.some((at) => clipsAt(p, fx, acted, effectRegionAt(p, fx, at, 0), at, fx.invert).length > 0)) toBake.push(fx.id)
-    }
+    else if (touchedIds(p, fx, acted).ids.size > 0) toBake.push(fx.id)
   }
   // vínculos dos ancorados: o do clipe ou um grupo novo com ele
   const links = new Map<string, string>()
@@ -473,7 +543,7 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
   }
   // 3. caixas de reserva das âncoras no quadro novo
   p1 = refreshAttachments(p1, p0)
-  // 4. assar os de vários clipes; invertidos ancorados: conferir que nenhum clipe novo aparece no buraco
+  // 4. assar os de vários itens; invertidos ancorados: conferir que nenhum item novo aparece no buraco
   const baked: string[] = []
   const replace = (id: string, fn: (fx: EffectItem) => EffectItem): void => {
     p1 = { ...p1, tracks: p1.tracks.map((t) => (t.items.some((i) => i.id === id) ? { ...t, items: t.items.map((i) => (i.id === id ? fn(i as EffectItem) : i)) } : t)) }
@@ -482,7 +552,8 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
     const fx0 = fxIn(p0, id)
     const { samples, reduced, unsafe } = mappedSamples(p0, p1, id, anchored)
     if (anchored && !unsafe) return
-    if (reduced) warnings.push({ itemId: id, kind: 'holeReduced', message: MSG.holeReduced, tUs: samples.find((s) => s.r.w === 0)?.t ?? fx0.startUs })
+    if (reduced) warnings.push({ itemId: id, kind: 'holeReduced', message: MSG.holeReduced, tUs: samples.find((s) => !(s.r.w > 0 && s.r.h > 0))?.t ?? fx0.startUs })
+    if (fx0.attach) warnings.push({ itemId: id, kind: 'unanchored', message: MSG.unanchored, tUs: fx0.startUs })
     const region = simplifyRegionSamples(samples, fx0.region.shape, fx0.startUs, canvas.width, canvas.height, fx0.invert ? 'shrink' : 'grow')
     replace(id, (fx) => {
       const { attach: _, ...rest } = fx
@@ -490,7 +561,7 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
     })
     baked.push(id)
   }
-  for (const id of toBake) bake(id, false)
+  for (const id of [...toBake, ...unanchor]) bake(id, false)
   for (const t of p1.tracks) for (const fx of t.items) if (fx.type === 'effect' && fx.invert && fx.attach && attachedMedia(p1, fx)) bake(fx.id, true)
   // 5. regiões que saem do quadro novo (estando dentro do antigo no mesmo instante)
   for (const t of p1.tracks) for (const fx1 of t.items) {

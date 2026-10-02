@@ -3,7 +3,8 @@ import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Crop, Crosshair, ShieldCheck, TriangleAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { newProjectId } from '@shared/editor/ids'
-import type { Project } from '@shared/editor/project'
+import type { MediaItem, Project } from '@shared/editor/project'
+import { findItem } from '@shared/editor/ops'
 import { mainClipAt, REFRAME_ASPECTS, reframeName, type ReframeAspect, type ReframeWarning } from '@shared/editor/reframe'
 import { formatTimecodeUs } from '@shared/editor/time'
 import { Button } from '@/components/ui/Button'
@@ -20,10 +21,13 @@ import { aspectIdOf } from './aspects'
 // "Reenquadrar" (F4): painel não modal (abaixo da barra superior, sobre o inspetor — visualizador e linha do tempo
 // continuam utilizáveis) para levar o projeto a 9:16, 1:1 ou 4:5. Modo Preencher: o clipe principal cobre o quadro
 // novo e segue os pontos de foco marcados clicando no visualizador (no instante do playhead; lista editável); sem
-// pontos, o centro do clipe. Modo Caber inteiro: barras, sem foco. O visualizador mostra o quadro novo por cima do
+// pontos, o centro do clipe. Os pontos ficam no espaço do conteúdo de cada clipe; a lista os agrupa por clipe (o do
+// playhead primeiro) e diz quantos há em outros clipes. Modo Caber inteiro: barras, sem foco. O visualizador mostra o quadro novo por cima do
 // atual (ReframeOverlay). Padrão: cria uma CÓPIA do projeto "<nome> (Vertical)" (pasta própria, abre em seguida); ou
 // aplica neste projeto num passo de desfazer. Efeitos de privacidade continuam cobrindo o mesmo conteúdo
-// (shared/editor/reframe); avisos (região fora do quadro novo, buraco reduzido, anotações) aparecem aqui e ao aplicar.
+// (shared/editor/reframe): o resumo "continuam sobre o mesmo conteúdo" só aparece sem nenhum aviso; com avisos (região
+// fora do quadro novo, buraco fechado, âncora removida, anotações) a lista deles aparece aqui e ao aplicar. Narrações
+// pendentes (não recuperadas) ficam só no original: aviso ao criar a cópia.
 
 /** Topo do painel: logo abaixo da barra superior do editor. */
 function panelTop(): number {
@@ -68,10 +72,12 @@ async function runReframe(): Promise<void> {
     // a cópia não é "o projeto da gravação": "Editar" na gravação continua abrindo o original
     const { originSessionId: _, ...rest } = r.project
     const copy: Project = { ...rest, id: newProjectId(now), name: reframeName(p.name, rf.aspect), createdAt: now.toISOString(), updatedAt: now.toISOString() }
-    await window.api.project.duplicate(p.id, copy)
+    const { skippedPending } = await window.api.project.duplicate(p.id, copy)
     rf.close()
     useAppStore.getState().openEditor(copy.id)
-    if (lines.length) toast.warning(`Cópia criada: ${copy.name}`, { description: lines.join(' · '), duration: 12_000 })
+    const n = skippedPending.length
+    const all = [...lines, ...(n ? [`${n === 1 ? '1 narração pendente (não recuperada) ficou' : `${n} narrações pendentes (não recuperadas) ficaram`} só no original — abra o original para recuperá-las`] : [])]
+    if (all.length) toast.warning(`Cópia criada: ${copy.name}`, { description: all.join(' · '), duration: 12_000 })
     else toast.success(`Cópia criada: ${copy.name}`, { description: `O original (${p.name}) ficou como estava.` })
   } catch (e) {
     toast.error(`Não foi possível criar a cópia: ${ipcErrorMessage(e)}`)
@@ -101,7 +107,13 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
   if (!project || !result) return null
   const rf = useReframe.getState()
   const target = mainClipAt(project, playheadUs)
-  const list = target ? (points[target.id] ?? []) : []
+  // pontos por clipe (o do playhead primeiro); clipes apagados somem da lista
+  const groups = Object.entries(points)
+    .map(([id, list]) => ({ m: findItem(project, id)?.item, list }))
+    .filter((g): g is { m: MediaItem; list: typeof g.list } => g.m?.type === 'media' && g.list.length > 0)
+    .sort((a, b) => (a.m.id === target?.id ? -1 : b.m.id === target?.id ? 1 : a.m.startUs - b.m.startUs))
+  const others = groups.filter((g) => g.m.id !== target?.id).reduce((n, g) => n + g.list.length, 0)
+  const hasTarget = groups.some((g) => g.m.id === target?.id)
   const current = aspectIdOf(project)
   const effects = project.tracks.reduce((n, t) => n + t.items.filter((i) => i.type === 'effect').length, 0)
   const lines = warningLines(result.warnings)
@@ -174,9 +186,9 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
                   <span className="flex items-center gap-1.5 text-[12px] font-medium text-fg-2">
                     <Crosshair className="h-3.5 w-3.5 text-accent" /> Pontos de foco
                   </span>
-                  {list.length ? (
-                    <button type="button" className="text-[11px] text-muted hover:text-fg" onClick={() => target && rf.clearPoints(target.id)}>
-                      Limpar
+                  {hasTarget && target ? (
+                    <button type="button" className="text-[11px] text-muted hover:text-fg" onClick={() => rf.clearPoints(target.id)}>
+                      Limpar deste clipe
                     </button>
                   ) : null}
                 </div>
@@ -189,31 +201,47 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
                     'Não há clipe principal no playhead: mova o playhead para um trecho com vídeo.'
                   )}
                 </p>
-                {target ? (
-                  list.length ? (
-                    <ul className="space-y-1 rounded-xl border border-border bg-bg-2 px-2 py-1.5" aria-label="Pontos de foco">
-                      {list.map((pt) => (
-                        <li key={pt.tUs} data-focus-point={pt.tUs} className="flex items-center gap-2 text-[11px]">
-                          <button type="button" className="font-mono tabular-nums text-fg hover:text-accent" title="Ir para este instante" onClick={() => seekTo(playback, pt.tUs)}>
-                            {formatTimecodeUs(pt.tUs, fps)}
-                          </button>
-                          <span className="flex-1 text-muted">
-                            {pct(pt.x)} × {pct(pt.y)}
-                          </span>
-                          <button type="button" aria-label={`Remover o ponto em ${formatTimecodeUs(pt.tUs, fps)}`} className="rounded p-0.5 text-muted hover:bg-white/5 hover:text-fg" onClick={() => rf.removePoint(target.id, pt.tUs)}>
-                            <X className="h-3 w-3" />
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="rounded-xl border border-dashed border-border px-3 py-2 text-[11px] text-muted">Sem pontos: o centro do clipe (ou o movimento de zoom que ele já tem).</p>
-                  )
+                {groups.length ? (
+                  <div className="space-y-2" aria-label="Pontos de foco por clipe">
+                    {groups.map((g) => (
+                      <div key={g.m.id} data-focus-group={g.m.id} className="rounded-xl border border-border bg-bg-2 px-2 py-1.5">
+                        <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-fg-2">
+                          <span className="truncate">{itemLabel(project, g.m)}</span>
+                          <span className="shrink-0 text-muted">· {g.list.length === 1 ? '1 ponto' : `${g.list.length} pontos`}</span>
+                          {g.m.id === target?.id ? <span className="ml-auto shrink-0 text-[10px] text-accent">no playhead</span> : null}
+                        </div>
+                        <ul className="space-y-1">
+                          {g.list.map((pt) => {
+                            const tUs = g.m.startUs + pt.localUs
+                            return (
+                              <li key={pt.localUs} data-focus-point={tUs} className="flex items-center gap-2 text-[11px]">
+                                <button type="button" className="font-mono tabular-nums text-fg hover:text-accent" title="Ir para este instante" onClick={() => seekTo(playback, tUs)}>
+                                  {formatTimecodeUs(tUs, fps)}
+                                </button>
+                                <span className="flex-1 text-muted" title="Posição na imagem do clipe">
+                                  {pct(pt.x)} × {pct(pt.y)}
+                                </span>
+                                <button type="button" aria-label={`Remover o ponto em ${formatTimecodeUs(tUs, fps)}`} className="rounded p-0.5 text-muted hover:bg-white/5 hover:text-fg" onClick={() => rf.removePoint(g.m.id, pt.localUs)}>
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {target && !hasTarget ? (
+                  <p data-focus-empty="" className="rounded-xl border border-dashed border-border px-3 py-2 text-[11px] text-muted">
+                    Sem pontos neste clipe: o centro dele (ou o movimento de zoom que ele já tem).
+                    {others ? ` ${others === 1 ? 'Há 1 ponto' : `Há ${others} pontos`} em outros clipes.` : ''}
+                  </p>
                 ) : null}
               </div>
             ) : null}
 
-            {effects > 0 ? (
+            {effects > 0 && !lines.length ? (
               <div className="flex gap-2 rounded-xl border border-border bg-bg-2 px-3 py-2 text-[11px] leading-snug text-fg-2" data-reframe-privacy="">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ok" />
                 <span>

@@ -3,7 +3,8 @@ import { reframeProject, type FocusPoint, type ReframeAspect, type ReframeResult
 import type { Project } from '@shared/editor/project'
 
 // Painel "Reenquadrar" (fora do histórico do projeto): proporção, modo, destino (cópia ou este projeto) e os pontos de
-// foco marcados no visualizador, por clipe principal. Fechar descarta os pontos.
+// foco marcados no visualizador, por clipe principal, no espaço do conteúdo do clipe (instante relativo ao início dele,
+// fração da fonte): mover ou transformar o clipe com o painel aberto não os desloca. Fechar descarta os pontos.
 
 export type ReframeDest = 'copy' | 'apply'
 
@@ -12,14 +13,14 @@ export interface ReframeState {
   aspect: ReframeAspect
   mode: 'cover' | 'contain'
   dest: ReframeDest
-  /** Pontos de foco por id do clipe principal, em ordem de tempo; um por instante. */
+  /** Pontos de foco por id do clipe principal, em ordem de tempo (localUs); um por instante. */
   points: Record<string, FocusPoint[]>
   openPanel(aspect: ReframeAspect): void
   close(): void
   set(patch: Partial<Pick<ReframeState, 'aspect' | 'mode' | 'dest'>>): void
   /** Marca (ou troca, no mesmo instante) o ponto de foco do clipe. */
   addPoint(itemId: string, pt: FocusPoint): void
-  removePoint(itemId: string, tUs: number): void
+  removePoint(itemId: string, localUs: number): void
   clearPoints(itemId: string): void
 }
 
@@ -35,8 +36,8 @@ export const useReframe = create<ReframeState>()((set) => ({
   close: () => set({ open: false, points: NONE }),
   set: (patch) => set(patch),
   addPoint: (itemId, pt) =>
-    set((s) => ({ points: { ...s.points, [itemId]: [...(s.points[itemId] ?? []).filter((p) => p.tUs !== pt.tUs), pt].sort((a, b) => a.tUs - b.tUs) } })),
-  removePoint: (itemId, tUs) => set((s) => ({ points: { ...s.points, [itemId]: (s.points[itemId] ?? []).filter((p) => p.tUs !== tUs) } })),
+    set((s) => ({ points: { ...s.points, [itemId]: [...(s.points[itemId] ?? []).filter((p) => p.localUs !== pt.localUs), pt].sort((a, b) => a.localUs - b.localUs) } })),
+  removePoint: (itemId, localUs) => set((s) => ({ points: { ...s.points, [itemId]: (s.points[itemId] ?? []).filter((p) => p.localUs !== localUs) } })),
   clearPoints: (itemId) => set((s) => ({ points: { ...s.points, [itemId]: [] } }))
 }))
 

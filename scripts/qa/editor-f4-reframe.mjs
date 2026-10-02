@@ -9,7 +9,8 @@
 // Confere: o botão "Reenquadrar" abre o painel não modal (9:16 por padrão) com o quadro novo desenhado no
 // visualizador; clique no visualizador marca pontos de foco no playhead (lista editável: ir, trocar, remover;
 // marcador no quadro); a janela da prévia segue os pontos (suave entre eles); "Caber inteiro" esconde os pontos; o
-// transporte continua com o painel aberto; o efeito de privacidade solto sobre o vídeo aparece como "será ancorado";
+// transporte continua com o painel aberto; com a região do efeito fora do quadro novo o painel lista o aviso (sem o
+// selo "continuam sobre o mesmo conteúdo"); com ela dentro, o selo diz "será ancorado"; pontos agrupados por clipe;
 // "Este projeto" aplica em um passo de desfazer; "Criar cópia" (padrão) grava "<nome> (Vertical)" numa pasta própria
 // (com os proxies) e a abre, com o original intacto. Screenshots em docs/qa/editor-f4/.
 import { spawn, execFileSync } from 'child_process'
@@ -178,7 +179,9 @@ async function main() {
     const xs = pts.map((p) => p[0] / ov.width), ys = pts.map((p) => p[1] / ov.height)
     return { open: !!d, text: d?.textContent ?? '', win: pts.length ? { cx: (Math.min(...xs) + Math.max(...xs)) / 2, w: Math.max(...xs) - Math.min(...xs), y0: Math.min(...ys), y1: Math.max(...ys) } : null,
       list: [...document.querySelectorAll('[data-focus-point]')].map((e) => +e.getAttribute('data-focus-point')), here: document.querySelectorAll('[data-focus-marker="here"]').length,
-      markers: document.querySelectorAll('[data-focus-marker]').length, points: R.getState().points }`)
+      markers: document.querySelectorAll('[data-focus-marker]').length, points: R.getState().points,
+      groups: [...document.querySelectorAll('[data-focus-group]')].map((g) => g.getAttribute('data-focus-group')),
+      shield: !!document.querySelector('[data-reframe-privacy]'), warnings: document.querySelector('[data-reframe-warnings]')?.textContent ?? '' }`)
   const seg = `const seg = (label) => [...document.querySelectorAll('[data-reframe-dialog] button')].find((b) => b.textContent.trim() === label);`
 
   console.log('privacidade: um blur desenhado sobre o vídeo')
@@ -191,7 +194,7 @@ async function main() {
     const r = await panel()
     // vídeo 16:9 em 'cover' no 9:16: a camada tem 3413 px de largura; a janela, 1080/3413 do quadro atual e a altura toda
     check('painel aberto (9:16, Preencher, Criar cópia) com o quadro novo no centro do visualizador', r.open && r.text.includes('Reenquadrar') && r.text.includes('1080×1920') && !!r.win && Math.abs(r.win.cx - 0.5) < 0.01 && Math.abs(r.win.w - 1080 / 3413.33) < 0.01 && r.win.y0 < 0.01 && r.win.y1 > 0.99, r)
-    check('resumo de privacidade: o efeito será ancorado ao clipe', r.text.includes('continuam sobre o mesmo conteúdo') && r.text.includes('1 será ancorado'), r.text)
+    check('efeito fora do quadro novo (centro): o aviso aparece e o selo "continuam sobre o mesmo conteúdo" não', !r.shield && r.warnings.includes('fora do novo quadro'), { shield: r.shield, warnings: r.warnings })
     check('sem pontos: o centro do clipe', r.text.includes('Sem pontos'), r.text)
     await shot('f4-reframe-01-painel.png')
   }
@@ -202,6 +205,7 @@ async function main() {
     const r = await panel()
     check('clique no visualizador marca o ponto no playhead (2 s, 78 % × 50 %), sem editar o projeto nem selecionar', JSON.stringify(r.list) === JSON.stringify([2e6]) && r.here === 1 && a.past === a.p0 && a.sel.length === 0 && Math.abs(r.points[v][0].x - 1500 / 1920) < 0.002, { a, r })
     check('a janela da prévia centraliza o ponto marcado', !!r.win && Math.abs(r.win.cx - 1500 / 1920) < 0.01, r.win)
+    check('com o efeito dentro do quadro novo: sem avisos, selo "será ancorado"; pontos agrupados no clipe', r.shield && r.text.includes('1 será ancorado') && !r.warnings && JSON.stringify(r.groups) === JSON.stringify([v]), { shield: r.shield, warnings: r.warnings, groups: r.groups })
     await shot('f4-reframe-02-foco.png')
     await ev(`await T.seek(6e6); const c = T.toScreen(400, 540); await T.clickAt(c.x, c.y); await T.wait(200); return 1`)
     const b = await panel()
@@ -213,7 +217,7 @@ async function main() {
     const c = await ev(`await T.seek(6e6); const c = T.toScreen(600, 400); await T.clickAt(c.x, c.y); await T.wait(150)
       const n = window.__qaEditor.reframe.getState().points['${v}']
       await T.click(T.el('[data-focus-point="6000000"] button[aria-label^="Remover"]')); await T.wait(150)
-      return { replaced: n.length === 2 && Math.abs(n[1].x - 600 / 1920) < 0.002, after: window.__qaEditor.reframe.getState().points['${v}'].map((p) => p.tUs) }`)
+      return { replaced: n.length === 2 && Math.abs(n[1].x - 600 / 1920) < 0.002, after: window.__qaEditor.reframe.getState().points['${v}'].map((p) => p.localUs) }`)
     check('clicar de novo no mesmo instante troca o ponto; o X remove', c.replaced && JSON.stringify(c.after) === JSON.stringify([2e6]), c)
     const g = await ev(`await T.seek(0); await T.click(T.el('[data-focus-point="2000000"] button')); await T.wait(300); return T.st().playheadUs`)
     check('clicar no tempo do ponto leva o playhead até ele', Math.abs(g - 2e6) < 40_000, g)

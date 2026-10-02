@@ -6,12 +6,13 @@ import { createEffectItem, createEmptyProject, createMediaItem } from './factory
 import { attachEffects } from './followTransform'
 import { findItem } from './ops'
 import { privacyWarnings } from './privacy'
-import type { Asset, EffectItem, Item, MediaItem, Project, TextItem, Track, Us } from './project'
+import type { AnnotationsItem, Asset, EffectItem, Item, MediaItem, Project, TextItem, Track, Us } from './project'
+import { layerBase } from './layerGeometry'
 import { clipFrameAt, effectRegionAt } from './resolve'
 import { parseProject, toDiskProject } from './schema'
 import { frameToUs, itemEndUs } from './time'
 import { applyKenBurns, coversFrame, sourceOf } from './zoom'
-import { mainClipAt, reframeCanvas, reframeName, reframeProject, reframeWindow, type FocusPoint } from './reframe'
+import { focusFromScreen, focusToScreen, mainClipAt, reframeCanvas, reframeName, reframeProject, reframeWindow, type FocusPoint } from './reframe'
 
 const S = 1_000_000
 const vid: Asset = { id: 'v', name: 'tela', kind: 'video', source: { type: 'file', path: 'C:/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 20 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, status: 'ready' }
@@ -54,7 +55,7 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
 
   it('16:9 → 9:16 com foco à direita: fit cover, x que centraliza o ponto, y no centro', () => {
     const p = single()
-    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ tUs: 2 * S, x: 0.8, y: 0.5 }] } })
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 2 * S, x: 0.8, y: 0.5 }] } })
     expect(r.project.canvas).toMatchObject({ width: 1080, height: 1920 })
     const v = mOf(r.project, 'm').visual!
     expect(v.fit).toBe('cover')
@@ -69,7 +70,7 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
   })
 
   it('dois pontos: keys de x nos instantes marcados com Suavizar ambos', () => {
-    const r = reframeProject(single(), '9:16', { mode: 'cover', focus: { m: [{ tUs: 6 * S, x: 0.3, y: 0.4 }, { tUs: 2 * S, x: 0.8, y: 0.5 }] } })
+    const r = reframeProject(single(), '9:16', { mode: 'cover', focus: { m: [{ localUs: 6 * S, x: 0.3, y: 0.4 }, { localUs: 2 * S, x: 0.8, y: 0.5 }] } })
     const x = mOf(r.project, 'm').visual!.transform.x
     expect(x.keys?.map((k) => k.tUs)).toEqual([2 * S, 6 * S])
     expect(x.keys![0].value).toBeCloseTo(xFor(0.8), 9)
@@ -82,16 +83,16 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
   })
 
   it('foco perto da borda: x preso para não aparecer borda preta', () => {
-    const r = reframeProject(single(), '9:16', { mode: 'cover', focus: { m: [{ tUs: 0, x: 0.98, y: 0.5 }] } })
+    const r = reframeProject(single(), '9:16', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.98, y: 0.5 }] } })
     expect(mOf(r.project, 'm').visual!.transform.x.value).toBeCloseTo(X_MIN, 9)
     const v = mOf(r.project, 'm').visual!
     expect(coversFrame(v, sourceOf(r.project, mOf(r.project, 'm')), { w: 1080, h: 1920 }, 0)).toBe(true)
   })
 
   it('1:1 e 4:5: a mesma conta no quadro novo', () => {
-    const sq = reframeProject(single(), '1:1', { mode: 'cover', focus: { m: [{ tUs: 0, x: 0.6, y: 0.5 }] } })
+    const sq = reframeProject(single(), '1:1', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.6, y: 0.5 }] } })
     expect(mOf(sq.project, 'm').visual!.transform.x.value).toBeCloseTo(0.5 - (0.1 * 1920) / 1080, 9)
-    const p45 = reframeProject(single(), '4:5', { mode: 'cover', focus: { m: [{ tUs: 0, x: 0.6, y: 0.5 }] } })
+    const p45 = reframeProject(single(), '4:5', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.6, y: 0.5 }] } })
     // 4:5 (1080×1350): camada 2400×1350
     expect(mOf(p45.project, 'm').visual!.transform.x.value).toBeCloseTo(0.5 - (0.1 * 2400) / 1080, 9)
   })
@@ -104,7 +105,7 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
   })
 
   it('pontos de outro clipe ou fora do clipe são ignorados', () => {
-    const r = reframeProject(single(), '9:16', { mode: 'cover', focus: { m: [{ tUs: 12 * S, x: 0.9, y: 0.5 }], outro: [{ tUs: 0, x: 0.9, y: 0.5 }] } })
+    const r = reframeProject(single(), '9:16', { mode: 'cover', focus: { m: [{ localUs: 12 * S, x: 0.9, y: 0.5 }], outro: [{ localUs: 0, x: 0.9, y: 0.5 }] } })
     expect(mOf(r.project, 'm').visual!.transform.x).toEqual({ value: 0.5 })
   })
 
@@ -127,7 +128,7 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
   })
 
   it("modo 'contain': fit contain, posição intacta, pontos ignorados", () => {
-    const r = reframeProject(single(), '9:16', { mode: 'contain', focus: { m: [{ tUs: 0, x: 0.9, y: 0.5 }] } })
+    const r = reframeProject(single(), '9:16', { mode: 'contain', focus: { m: [{ localUs: 0, x: 0.9, y: 0.5 }] } })
     const v = mOf(r.project, 'm').visual!
     expect(v.fit).toBe('contain')
     expect(v.transform.x).toEqual({ value: 0.5 })
@@ -137,14 +138,14 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
     const p = single()
     p.tracks[0].locked = true
     const before = JSON.stringify(p)
-    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ tUs: 0, x: 0.8, y: 0.5 }] } })
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.8, y: 0.5 }] } })
     expect(JSON.stringify(p)).toBe(before)
     expect(mOf(r.project, 'm').visual!.transform.x.value).toBeCloseTo(xFor(0.8), 9)
   })
 
   it('reframeWindow: o quadro novo no quadro atual (prévia)', () => {
     const p = single()
-    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ tUs: 0, x: 0.8, y: 0.5 }] } })
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.8, y: 0.5 }] } })
     const w = reframeWindow(p, r.project, 'm', S)!
     const xs = w.map((c) => c.x), ys = w.map((c) => c.y)
     expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(0.8, 6)
@@ -234,7 +235,7 @@ function privacyScene(): Project {
   p.tracks = [track('tv', [a, b]), track('tp', [pip]), ...effects.map((e) => track(`t${e.id}`, [e], { role: 'effects' }))]
   return attachEffects(p, 'a', ['B'])
 }
-const FOCUS: Record<string, FocusPoint[]> = { a: [{ tUs: 0, x: 0.8, y: 0.5 }, { tUs: 3 * S, x: 0.6, y: 0.4 }] }
+const FOCUS: Record<string, FocusPoint[]> = { a: [{ localUs: 0, x: 0.8, y: 0.5 }, { localUs: 3 * S, x: 0.6, y: 0.4 }] }
 const FX_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
 
 /** Ponto (px do quadro) dentro da região (normalizada ao quadro W×H)? `slack` px de folga. */
@@ -268,22 +269,40 @@ function toContent(cf: ClipFrame, X: number, Y: number): { x: number; y: number 
   return q.x >= u0 && q.x <= u1 && q.y >= v0 && q.y <= v1 ? q : null
 }
 
-/** Clipes de vídeo ativos em t abaixo da faixa do efeito (os que ele esconde), do topo para o fundo. */
-function clipsUnder(p: Project, fxId: string, t: Us): MediaItem[] {
+type Under = MediaItem | AnnotationsItem
+const itemOf = (p: Project, id: string): Under => findItem(p, id)!.item as Under
+
+/** Geometria do item: mídia pelo resolve; anotações = camada do quadro inteiro (ponto normalizado fixo). */
+function frameFor(p: Project, it: Under, t: Us): ClipFrame | null {
+  if (it.type === 'media') return clipFrameAt(p, it, t)
+  const W = p.canvas.width, H = p.canvas.height
+  const g = layerBase({ l: 0, t: 0, r: 0, b: 0 }, 'fill', { w: W, h: H, rotation: 0 }, { w: W, h: H })
+  return { cx: 0.5, cy: 0.5, rotation: 0, sx: W, sy: H, mirror: false, g, W, H }
+}
+
+/**
+ * Itens ativos em t nas faixas abaixo do efeito (mídia de vídeo — também desativada/oculta, conservador — e
+ * anotações), do topo para o fundo.
+ */
+function clipsUnder(p: Project, fxId: string, t: Us): Under[] {
   const ti = p.tracks.findIndex((tr) => tr.items.some((i) => i.id === fxId))
-  const out: MediaItem[] = []
+  const out: Under[] = []
   for (let k = ti - 1; k >= 0; k--) {
-    const m = p.tracks[k].items.find((i) => i.type === 'media' && t >= i.startUs && t < itemEndUs(i))
-    if (m?.type === 'media' && m.visual) out.push(m)
+    if (p.tracks[k].kind !== 'video') continue
+    const m = p.tracks[k].items.find((i) => (i.type === 'annotations' || (i.type === 'media' && !!i.visual)) && t >= i.startUs && t < itemEndUs(i))
+    if (m) out.push(m as Under)
   }
   return out
 }
 
+/** Mídia desenhada e opaca (esconde o que está embaixo)? */
+const opaque = (p: Project, it: Under): boolean => it.type === 'media' && it.enabled !== false && !p.tracks.find((t) => t.items.includes(it))!.hidden
+
 /**
- * Verificação densa (cada quadro a 30 fps do efeito): normal — todo ponto do conteúdo de cada clipe sob a região antiga
+ * Verificação densa (cada quadro a 30 fps do efeito): normal — todo ponto do conteúdo de cada item sob a região antiga
  * que continua no quadro novo cai dentro da região nova; invertido — todo ponto do quadro novo dentro do buraco novo
- * mostra (pelo clipe visível de cima) conteúdo que estava dentro do buraco antigo. Devolve as falhas e quantos pontos
- * foram conferidos.
+ * mostra, por cada item que aparece ali (do topo até a primeira mídia opaca), conteúdo que estava dentro do buraco
+ * antigo e que não estava escondido por outra mídia. Devolve as falhas e quantos pontos foram conferidos.
  */
 function coverage(before: Project, after: Project, id: string): { fails: string[]; checked: number } {
   const fx0 = fxOf(before, id), fx1 = fxOf(after, id)
@@ -296,7 +315,7 @@ function coverage(before: Project, after: Project, id: string): { fails: string[
     const r0 = effectRegionAt(before, fx0, t), r1 = effectRegionAt(after, fx1, t)
     if (!fx0.invert) {
       for (const m0 of clipsUnder(before, id, t)) {
-        const cf0 = clipFrameAt(before, m0, t), cf1 = clipFrameAt(after, mOf(after, m0.id), t)
+        const cf0 = frameFor(before, m0, t), cf1 = frameFor(after, itemOf(after, m0.id), t)
         if (!cf0 || !cf1) continue
         for (const P of gridIn(r0, fx0.region.shape, W0p, H0p)) {
           const q = toContent(cf0, P.x, P.y)
@@ -309,25 +328,26 @@ function coverage(before: Project, after: Project, id: string): { fails: string[
       }
     } else {
       const under1 = clipsUnder(after, id, t)
+      const under0 = clipsUnder(before, id, t)
       for (const P of gridIn(r1, fx1.region.shape, W1, H1)) {
         if (P.x < 0 || P.y < 0 || P.x > W1 || P.y > H1) continue
-        // o clipe de cima que aparece neste ponto no quadro novo
-        let shown: { m: MediaItem; q: { x: number; y: number } } | null = null
         for (const m1 of under1) {
-          const cf1 = clipFrameAt(after, m1, t)
+          const cf1 = frameFor(after, m1, t)
           const q = cf1 && toContent(cf1, P.x, P.y)
-          if (q) { shown = { m: m1, q }; break }
-        }
-        if (!shown) continue
-        const cf0 = clipFrameAt(before, mOf(before, shown.m.id), t)
-        checked++
-        if (!cf0) { fails.push(`${id} t=${t}: ${shown.m.id} invisível antes e nítido agora`); continue }
-        const s = toScreen(cf0, shown.q.x * cf0.g.dw, shown.q.y * cf0.g.dh)
-        if (!inRegion(r0, fx0.region.shape, s.x, s.y, W0p, H0p)) fails.push(`${id} t=${t} ${shown.m.id}: conteúdo de (${s.x.toFixed(1)}, ${s.y.toFixed(1)}) nítido agora, escondido antes`)
-        // e não estava coberto por outro clipe por cima no quadro antigo
-        else {
-          const top = clipsUnder(before, id, t).find((m) => { const c = clipFrameAt(before, m, t); return !!c && !!toContent(c, s.x, s.y) })
-          if (top && top.id !== shown.m.id) fails.push(`${id} t=${t}: ${shown.m.id} aparece onde antes ${top.id} o cobria`)
+          if (!q) continue
+          checked++
+          const cf0 = frameFor(before, itemOf(before, m1.id), t)
+          if (!cf0) fails.push(`${id} t=${t}: ${m1.id} invisível antes e nítido agora`)
+          else {
+            const s = toScreen(cf0, q.x * cf0.g.dw, q.y * cf0.g.dh)
+            if (!inRegion(r0, fx0.region.shape, s.x, s.y, W0p, H0p)) fails.push(`${id} t=${t} ${m1.id}: conteúdo de (${s.x.toFixed(1)}, ${s.y.toFixed(1)}) nítido agora, escondido antes`)
+            else {
+              // e não estava escondido por outra mídia opaca por cima no quadro antigo
+              const top = under0.find((m) => { const c = frameFor(before, m, t); return opaque(before, m) && !!c && !!toContent(c, s.x, s.y) })
+              if (top && under0.indexOf(top) < under0.findIndex((m) => m.id === m1.id)) fails.push(`${id} t=${t}: ${m1.id} aparece onde antes ${top.id} o cobria`)
+            }
+          }
+          if (opaque(after, m1)) break
         }
       }
     }
@@ -450,5 +470,161 @@ describe('reframeProject: privacidade (cada quadro, cada efeito)', () => {
   it("'contain': cobertura em todos os quadros, todos os efeitos", () => {
     const r = reframeProject(before, '9:16', { mode: 'contain' })
     for (const id of FX_IDS) expect(coverage(before, r.project, id).fails.slice(0, 3)).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------- revisão (Task 6): casos de privacidade
+
+const ASPECTS = ['9:16', '1:1', '4:5'] as const
+const MODES = ['cover', 'contain'] as const
+const RUNS = ASPECTS.flatMap((a) => MODES.map((m) => [a, m] as const))
+
+/** Tela 0–6 s + PiP (canto inferior direito), e os efeitos dados, um por faixa acima de tudo. */
+function pipScene(effects: EffectItem[], edit?: (p: Project) => void): Project {
+  const p = createEmptyProject('Aula')
+  p.assets = [vid, cam]
+  const a = clip('a', vid, 0, 6 * S)
+  const pip = clip('pip', cam, 0, 6 * S)
+  pip.visual!.transform.scale = { value: 0.25 }
+  pip.visual!.transform.x = { value: 0.85 }
+  pip.visual!.transform.y = { value: 0.8 }
+  p.tracks = [track('tv', [a]), track('tp', [pip]), ...effects.map((e) => track(`t${e.id}`, [e], { role: 'effects' }))]
+  edit?.(p)
+  return p
+}
+const fxAt = (id: string, preset: Parameters<typeof createEffectItem>[0], region: Parameters<typeof createEffectItem>[3], s = 0, d = 6 * S): EffectItem => ({ ...createEffectItem(preset, s, d, region), id })
+const FOCUS_A: Record<string, FocusPoint[]> = { a: [{ localUs: 0, x: 0.75, y: 0.5 }] }
+
+describe('revisão: invertido sobre vários itens fecha o buraco', () => {
+  // regiões do revisor: metade sobre o PiP, metade sobre a tela; h3 só sobre a tela (buraco que continua aberto)
+  const before = pipScene([
+    fxAt('h1', 'blurAllExcept', { x: 0.74, y: 0.75, w: 0.2, h: 0.2 }),
+    fxAt('h2', 'blurAllExcept', { x: 0.7, y: 0.7, w: 0.3, h: 0.3, shape: 'ellipse' }),
+    fxAt('h3', 'blurAllExcept', { x: 0.72, y: 0.3, w: 0.12, h: 0.2 })
+  ])
+
+  it.each(RUNS)('%s / %s: cobertura em todos os quadros; vários itens → buraco nulo e aviso exato', (aspect, mode) => {
+    const r = reframeProject(before, aspect, { mode, focus: FOCUS_A })
+    for (const id of ['h1', 'h2', 'h3']) expect(coverage(before, r.project, id).fails.slice(0, 3)).toEqual([])
+    for (const id of ['h1', 'h2']) {
+      for (let k = 0; k < 180; k++) {
+        const w = effectRegionAt(r.project, fxOf(r.project, id), frameToUs(k, 30))
+        expect(w.w > 0 && w.h > 0).toBe(false)
+      }
+      const warn = r.warnings.find((x) => x.itemId === id && x.kind === 'holeReduced')
+      expect(warn?.message).toContain('o buraco foi fechado para não expor conteúdo')
+    }
+    // o buraco só sobre a tela fica aberto e é conferido de verdade (caso não vazio)
+    expect(coverage(before, r.project, 'h3').checked).toBeGreaterThan(50)
+    expect(r.warnings.some((x) => x.itemId === 'h3' && x.kind === 'holeReduced')).toBe(false)
+  })
+
+  it('invertido já ancorado que mostra tela e PiP: desancorado, buraco nulo e os dois avisos', () => {
+    const p = attachEffects(before, 'a', ['h1'])
+    const r = reframeProject(p, '9:16', { mode: 'cover' })
+    expect(fxOf(r.project, 'h1').attach).toBeUndefined()
+    expect(r.warnings.filter((w) => w.itemId === 'h1').map((w) => w.kind).sort()).toEqual(['holeReduced', 'unanchored'])
+    expect(coverage(p, r.project, 'h1').fails).toEqual([])
+  })
+})
+
+describe('revisão: ancorado que também cobre outro item', () => {
+  it.each(RUNS)('%s / %s: blur ancorado ao PiP (a tela está embaixo) cobre os dois em todos os quadros', (aspect, mode) => {
+    const p0 = pipScene([fxAt('f', 'blurFace', { x: 0.85, y: 0.8, w: 0.08, h: 0.16 }), fxAt('g', 'blur', { x: 0.7, y: 0.3, w: 0.1, h: 0.1 })])
+    const p = attachEffects(attachEffects(p0, 'pip', ['f']), 'a', ['g'])
+    const r = reframeProject(p, aspect, { mode, focus: FOCUS_A })
+    const c = coverage(p, r.project, 'f')
+    expect(c.fails.slice(0, 3)).toEqual([])
+    expect(c.checked).toBeGreaterThan(50)
+    expect(fxOf(r.project, 'f').attach).toBeUndefined()
+    expect(r.warnings.some((w) => w.itemId === 'f' && w.kind === 'unanchored')).toBe(true)
+    // ancorado só sobre a tela continua ancorado, sem aviso
+    expect(fxOf(r.project, 'g').attach?.mediaItemId).toBe('a')
+    expect(r.warnings.filter((w) => w.itemId === 'g')).toEqual([])
+    expect(coverage(p, r.project, 'g').fails).toEqual([])
+  })
+})
+
+describe('revisão: anotações contam como item parado sob o efeito', () => {
+  const ann: AnnotationsItem = { id: 'ann', type: 'annotations', sessionId: 's', inUs: 0, startUs: 0, durationUs: 6 * S }
+  it.each(RUNS)('%s / %s: blur sobre os traços e a tela é assado e cobre os dois', (aspect, mode) => {
+    const before = pipScene([fxAt('b', 'blur', { x: 0.3, y: 0.4, w: 0.12, h: 0.1 })], (p) => { p.tracks.splice(2, 0, track('ta', [ann])) })
+    const r = reframeProject(before, aspect, { mode, focus: FOCUS_A })
+    expect(r.anchored).not.toContain('b')
+    expect(r.baked).toContain('b')
+    const c = coverage(before, r.project, 'b')
+    expect(c.fails.slice(0, 3)).toEqual([])
+    expect(c.checked).toBeGreaterThan(50)
+  })
+
+  it('blur só sobre as anotações (sem mídia embaixo): região no mesmo ponto normalizado', () => {
+    const p = createEmptyProject('x')
+    p.tracks = [track('ta', [ann]), track('tf', [fxAt('b', 'blur', { x: 0.3, y: 0.4, w: 0.1, h: 0.1 })])]
+    const r = reframeProject(p, '9:16', { mode: 'cover' })
+    const reg = effectRegionAt(r.project, fxOf(r.project, 'b'), S)
+    expect(reg.x).toBeCloseTo(0.3, 6)
+    expect(reg.y).toBeCloseTo(0.4, 6)
+    expect(coverage(p, r.project, 'b').fails).toEqual([])
+  })
+})
+
+describe('revisão: animações de entrada/saída no clipe principal e no PiP', () => {
+  const before = pipScene(
+    [
+      fxAt('s1', 'blurText', { x: 0.75, y: 0.3, w: 0.12, h: 0.06 }),
+      fxAt('s2', 'blurFace', { x: 0.85, y: 0.8, w: 0.08, h: 0.16 }),
+      fxAt('s3', 'blurAllExcept', { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }),
+      fxAt('s4', 'blurAllExcept', { x: 0.85, y: 0.8, w: 0.05, h: 0.08 })
+    ],
+    (p) => {
+      const a = p.tracks[0].items[0] as MediaItem, pip = p.tracks[1].items[0] as MediaItem
+      a.visual!.animIn = { preset: 'slideL', durationUs: S }
+      a.visual!.animOut = { preset: 'zoom', durationUs: S }
+      pip.visual!.animIn = { preset: 'zoom', durationUs: S }
+      pip.visual!.animOut = { preset: 'slideL', durationUs: S }
+    }
+  )
+  it.each(RUNS)('%s / %s: slideL/zoom — todo efeito cobre o mesmo conteúdo em todos os quadros', (aspect, mode) => {
+    const r = reframeProject(before, aspect, { mode, focus: FOCUS_A })
+    for (const id of ['s1', 's2', 's3', 's4']) expect(coverage(before, r.project, id).fails.slice(0, 3)).toEqual([])
+    expect(coverage(before, r.project, 's1').checked).toBeGreaterThan(50)
+    expect(coverage(before, r.project, 's2').checked).toBeGreaterThan(50)
+  })
+})
+
+describe('revisão: itens ocultos ou desativados entram na decisão (conservador)', () => {
+  const cases: [string, (p: Project) => void][] = [
+    ['PiP desativado', (p) => { (p.tracks[1].items[0] as MediaItem).enabled = false }],
+    ['faixa do PiP oculta', (p) => { p.tracks[1].hidden = true }]
+  ]
+  it.each(cases)('%s: o blur que encosta nele e na tela é assado e cobre os dois', (_n, edit) => {
+    const before = pipScene([fxAt('x', 'blur', { x: 0.75, y: 0.75, w: 0.1, h: 0.1 })], edit)
+    const r = reframeProject(before, '9:16', { mode: 'cover' })
+    expect(r.baked).toContain('x')
+    expect(coverage(before, r.project, 'x').fails.slice(0, 3)).toEqual([])
+  })
+})
+
+describe('pontos de foco no espaço do conteúdo', () => {
+  it('ida e volta num clipe deslocado, ampliado e cortado; mover o clipe não muda o conteúdo do ponto', () => {
+    const p = single((m) => {
+      m.startUs = 2 * S
+      m.visual!.transform.scale = { value: 1.4 }
+      m.visual!.transform.x = { value: 0.42 }
+      m.visual!.crop.l = { value: 0.1 }
+    })
+    const m = mOf(p, 'm')
+    const f = focusFromScreen(p, m, 3 * S, 0.6, 0.45)!
+    expect(f.localUs).toBe(S)
+    const back = focusToScreen(p, m, f)!
+    expect(back.tUs).toBe(3 * S)
+    expect(back.x).toBeCloseTo(0.6, 9)
+    expect(back.y).toBeCloseTo(0.45, 9)
+    const moved: MediaItem = { ...m, startUs: 5 * S, visual: { ...m.visual!, transform: { ...m.visual!.transform, x: { value: 0.6 } } } }
+    const s = focusToScreen(p, moved, f)!
+    expect(s.tUs).toBe(6 * S)
+    const q = screenToContent(clipFrameAt(p, moved, 6 * S)!, { x: s.x, y: s.y, w: 0, h: 0, rotation: 0 }, 'rect')
+    expect(q.x).toBeCloseTo(f.x, 9)
+    expect(q.y).toBeCloseTo(f.y, 9)
   })
 })

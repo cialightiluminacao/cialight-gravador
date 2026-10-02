@@ -259,7 +259,7 @@ describe('ProjectStore', () => {
     writeFileSync(join(d, 'generated', 'narracao-2.m4a'), 'pendente')
     writeFileSync(join(d, 'generated', 'narracao-2.m4a.pending.json'), '{}')
     const copy = { ...src, id: 'p-b', name: 'Projeto p-a (Vertical)', canvas: { ...src.canvas, width: 1080, height: 1920 } }
-    store.duplicate('p-a', copy)
+    expect(store.duplicate('p-a', copy)).toEqual({ skippedPending: ['generated/narracao-2.m4a'] })
     expect(store.load('p-b')).toEqual(copy)
     const b = join(root, 'p-b')
     for (const sub of ['proxies', 'cache', 'generated', 'versions']) expect(existsSync(join(b, sub))).toBe(true)
@@ -280,6 +280,21 @@ describe('ProjectStore', () => {
     expect(() => store.duplicate('p-a', mk('P-A', '2026-10-01T10:00:00.000Z'))).toThrow()
     expect(() => store.duplicate('p-x', mk('p-c', '2026-10-01T10:00:00.000Z'))).toThrow(/não existe/)
     expect(existsSync(join(root, 'p-c'))).toBe(false)
+    // pasta que já existe (mesmo sem project.json) também é recusada e fica como estava
+    mkdirSync(join(root, 'p-d'))
+    writeFileSync(join(root, 'p-d', 'outra.txt'), 'x')
+    expect(() => store.duplicate('p-a', mk('p-d', '2026-10-01T10:00:00.000Z'))).toThrow(/já existe/)
+    expect(readdirSync(join(root, 'p-d'))).toEqual(['outra.txt'])
+  })
+
+  it('duplicate desfaz a pasta nova se algo falha no meio', () => {
+    store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
+    writeFileSync(join(root, 'p-a', 'cache', 'x.bin'), 'x')
+    // falha ao gravar o project.json, depois dos arquivos já levados
+    const bad = mk('p-e', '2026-10-01T10:00:00.000Z')
+    Object.defineProperty(bad, 'tracks', { enumerable: true, get: () => { throw new Error('disco cheio') } })
+    expect(() => store.duplicate('p-a', bad)).toThrow(/disco cheio/)
+    expect(existsSync(join(root, 'p-e'))).toBe(false)
   })
 
   it('applyAssetPatch de asset que não existe em lugar nenhum lança', () => {

@@ -80,7 +80,7 @@ export async function reframeCheck(outDir: string | null): Promise<ReframeReport
     }
     const fxTrack: Track = { id: 't_fx', kind: 'video', name: 'Efeitos', role: 'effects', muted: false, hidden: false, locked: false, volume: 1, items: [fx] }
     const withFx: Project = { ...p, tracks: [...p.tracks, fxTrack] }
-    const r = reframeProject(withFx, '9:16', { mode: 'cover', focus: { [clipId]: [{ tUs: 0, x: red0.cx / W0, y: red0.cy / H0 }] } })
+    const r = reframeProject(withFx, '9:16', { mode: 'cover', focus: { [clipId]: [{ localUs: 0, x: red0.cx / W0, y: red0.cy / H0 }] } })
     // a cópia pelo IPC (pasta própria) e relida do disco
     const copy: Project = { ...r.project, id: REFRAME_COPY_ID, name: reframeName(p.name, '9:16') }
     await window.api.project.duplicate(REFRAME_PROJECT_ID, copy)
