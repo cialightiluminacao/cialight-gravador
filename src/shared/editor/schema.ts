@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
-import { ANIM_PRESETS, CURSOR_FX_LIMITS, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, AnimPreset, CursorFx, EffectItem, EffectRegion, Item, PresetAnim, Project, VisualProps } from './project'
+import { ANIM_PRESETS, CURSOR_FX_LIMITS, DEFAULT_CURSOR_FX, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
+import type { Anim, AnimPreset, CursorFx, EffectItem, MediaItem, EffectRegion, Item, PresetAnim, Project, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
 import { conservativeRegion } from './contentPose'
@@ -64,20 +64,27 @@ const transition = z.object({
   kind: z.enum(['crossfade', 'dipBlack', 'dipWhite', 'slideL', 'slideR', 'slideU', 'slideD', 'wipeL', 'wipeR', 'zoomIn', 'blur']),
   durationUs: us
 })
-// F6: efeitos de cursor do clipe da tela (ruling R2: campo da mídia; a v1.3 o descarta ao ler)
+// F6: efeitos de cursor do clipe da tela (ruling R2: campo da mídia; a v1.3 o descarta ao ler).
+// Ruling R14: ler do disco NUNCA recusa o projeto por causa dele (load cairia numa versão antiga de versions/ e o
+// trabalho se perderia — ex.: versão futura com faixa maior, arquivo editado à mão). Cada folha com tipo errado volta
+// ao padrão (DEFAULT_CURSOR_FX) e números fora da faixa são presos a CURSOR_FX_LIMITS; estrutura quebrada (sem
+// highlight/cursor, não-objeto) descarta o cursorFx inteiro (fromDiskCursorFx). validateProject continua estrito.
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
 const L = CURSOR_FX_LIMITS
+const D = DEFAULT_CURSOR_FX
+const fxNumber = (k: keyof typeof CURSOR_FX_LIMITS, def: number) =>
+  z.number().catch(def).transform((v) => Math.min(L[k].max, Math.max(L[k].min, v)))
 const cursorFx = z.object({
   highlight: z.object({
-    enabled: z.boolean(),
-    color: z.string().regex(HEX_COLOR),
-    sizePx: z.number().min(L.sizePx.min).max(L.sizePx.max),
-    durationMs: z.number().min(L.durationMs.min).max(L.durationMs.max)
+    enabled: z.boolean().catch(D.highlight.enabled),
+    color: z.string().regex(HEX_COLOR).catch(D.highlight.color),
+    sizePx: fxNumber('sizePx', D.highlight.sizePx),
+    durationMs: fxNumber('durationMs', D.highlight.durationMs)
   }),
   cursor: z.object({
-    enabled: z.boolean(),
-    scale: z.number().min(L.scale.min).max(L.scale.max),
-    smoothing: z.number().min(L.smoothing.min).max(L.smoothing.max)
+    enabled: z.boolean().catch(D.cursor.enabled),
+    scale: fxNumber('scale', D.cursor.scale),
+    smoothing: fxNumber('smoothing', D.cursor.smoothing)
   })
 })
 const itemBase = { id: z.string().min(1), startUs: us, durationUs: us, name: z.string().optional(), linkId: z.string().optional(), enabled: z.boolean().optional() }
@@ -93,7 +100,7 @@ const mediaItem = z.object({
   audio,
   visual: visual.optional(),
   transitionIn: transition.optional(),
-  cursorFx: cursorFx.optional()
+  cursorFx: cursorFx.optional().catch(undefined)
 })
 const textStyle = z.object({
   font: z.string(),
@@ -240,7 +247,24 @@ export function parseProject(json: unknown): Project {
     const msg = r.error.issues.map((i) => `${i.path.join('.') || '(raiz)'}: ${i.message}`).join('; ')
     throw new Error(`Projeto inválido: ${msg}`)
   }
-  return fromDiskAnchors(r.data as Project)
+  return fromDiskCursorFx(fromDiskAnchors(r.data as Project))
+}
+
+/** cursorFx de estrutura quebrada vira `undefined` no schema (.catch): tira a chave (o item fica como sem o efeito). */
+function fromDiskCursorFx(p: Project): Project {
+  const broken = (it: Item): boolean => it.type === 'media' && 'cursorFx' in it && it.cursorFx === undefined
+  if (!p.tracks.some((t) => t.items.some(broken))) return p
+  return {
+    ...p,
+    tracks: p.tracks.map((t) => ({
+      ...t,
+      items: t.items.map((it) => {
+        if (!broken(it)) return it
+        const { cursorFx: _drop, ...rest } = it as MediaItem
+        return rest
+      })
+    }))
+  }
 }
 
 /** Efeito ancorado lido do disco: a região do conteúdo (attach.region) volta a `region` (o modelo em memória). */

@@ -42,6 +42,25 @@ describe('ProjectStore', () => {
     expect(store.load('p-a').name).toBe('Novo')
   })
 
+  it('cursorFx fora da faixa no project.json (versão futura, edição manual) não derruba o load para uma versão antiga', () => {
+    const p = mk('p-fx', '2026-10-01T10:00:00.000Z')
+    const a: Asset = { id: 'scr', name: 'Tela', kind: 'video', durationUs: 5_000_000, status: 'ready', source: { type: 'session', sessionId: 's', stream: 'screen' }, cursor: 'cursor.json' }
+    const item: MediaItem = { ...createMediaItem(a, 0, 'video'), id: 'i1', durationUs: 1_000_000, cursorFx: { highlight: { enabled: true, color: '#00ff00', sizePx: 30, durationMs: 400 }, cursor: { enabled: true, scale: 2, smoothing: 0.5 } } }
+    store.create({ ...p, assets: [a], tracks: [{ ...p.tracks[0], items: [item] }, ...p.tracks.slice(1)] })
+    // uma versão antiga em versions/ (seria a recuperada se o parse falhasse)
+    writeFileSync(join(root, 'p-fx', 'versions', '001.json'), JSON.stringify({ ...p, name: 'Versão antiga' }), 'utf8')
+    const file = join(root, 'p-fx', 'project.json')
+    const disk = JSON.parse(readFileSync(file, 'utf8'))
+    disk.name = 'Atual'
+    disk.tracks[0].items[0].cursorFx.cursor.scale = 6
+    disk.tracks[0].items[0].cursorFx.highlight.color = '#00ff0080'
+    writeFileSync(file, JSON.stringify(disk), 'utf8')
+    store = new ProjectStore({ projectsRoot: () => root, trash: async () => {} }) // sem cache
+    const loaded = store.load('p-fx')
+    expect(loaded.name).toBe('Atual')
+    expect((loaded.tracks[0].items[0] as MediaItem).cursorFx).toEqual({ highlight: { enabled: true, color: '#ffd400', sizePx: 30, durationMs: 400 }, cursor: { enabled: true, scale: 4, smoothing: 0.5 } })
+  })
+
   it('versions: só grava nova versão após 60 s e mantém 20', () => {
     const p = mk('p-a', '2026-10-01T10:00:00.000Z')
     store.create(p)
