@@ -203,9 +203,16 @@ async function main() {
       const c = window.__qaEditor.controller
       c.seek(2_400_000); await T.settle()
       await c.play()
-      await new Promise((r) => setTimeout(r, 1300))
-      const tracks = { ...c.trackLevels }
-      const master = c.levels
+      await new Promise((r) => setTimeout(r, 300))
+      // o pico é do bloco de 100 ms que está soando e a trilha da fixture é em rajadas ((0,5+0,5·sen)^4, quase muda em
+      // ~1/3 de cada ciclo de 0,83 s, e abaixada −12 dB sob a voz): um instante só pode cair no vale. Máximo em 1 s.
+      const tracks = {}
+      const master = { l: 0, r: 0 }
+      for (let i = 0; i < 20; i++) {
+        for (const [id, v] of Object.entries(c.trackLevels)) tracks[id] = Math.max(tracks[id] ?? 0, v)
+        master.l = Math.max(master.l, c.levels.l); master.r = Math.max(master.r, c.levels.r)
+        await new Promise((r) => setTimeout(r, 50))
+      }
       const covers = [...document.querySelectorAll('[data-level-meter] > span > span:first-child')].map((e) => e.style.height || e.style.width)
       return { tracks, master, covers }`)
     await shot('f3-musica-04-medidores.png')
