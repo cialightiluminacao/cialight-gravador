@@ -54,6 +54,8 @@ const superseded = (token: number, r: NarrationRecorder): boolean => token !== c
 export async function beginNarration(playback: PlaybackController, projectId: string, opts: { deviceId: string | null; monitor: boolean }): Promise<void> {
   if (narrationActive() || !est().project) return
   if (playback.playing) playback.pause()
+  // nenhum controle do editor fica com o foco (o teclado é da barra de gravação)
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
   const token = ++countdownToken
   recProjectId = projectId
   nst().set({ phase: 'countdown', count: COUNTDOWN, level: 0, recordedUs: 0, fromUs: est().playheadUs })

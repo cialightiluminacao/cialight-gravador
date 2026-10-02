@@ -122,12 +122,18 @@ export function NarrationOverlay(): React.JSX.Element | null {
 
   useEffect(() => {
     if (phase === 'idle') return
-    // captura: antes dos atalhos do editor (Espaço não pode virar play/pause no meio da gravação)
+    // captura: antes dos atalhos do editor e dos controles focados. Espaço/Esc param (na contagem, desistem); qualquer
+    // outra tecla fora da barra de gravação é engolida (Enter num botão do editor focado não pode editar no meio)
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== ' ' && e.key !== 'Escape' && e.code !== 'Space') return
-      e.preventDefault()
-      e.stopImmediatePropagation()
-      if (!e.repeat) void finishNarration()
+      const inBar = e.target instanceof Element && !!e.target.closest('[data-narration-bar]')
+      if (e.key === ' ' || e.key === 'Escape' || e.code === 'Space') {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        if (!e.repeat) void finishNarration()
+      } else if (!inBar) {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+      }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)

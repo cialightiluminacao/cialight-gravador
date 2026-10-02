@@ -42,6 +42,7 @@ export class PlaybackController {
   private master: GainNode | null = null
   private volume = 1
   private muted = false
+  private atLimit = false
   private gen = 0
   private active = false
   private t0 = 0 // ctx.currentTime do início (bloco 0)
@@ -120,6 +121,7 @@ export class PlaybackController {
   /** Toca a `rate`× a partir do playhead (Espaço: 1×; shuttle: ±1, ±2, ±4, ±8). */
   async play(rate = 1): Promise<void> {
     if (this.active) return
+    this.atLimit = false
     const st = this.store.getState()
     const p = st.project
     if (!p) return
@@ -230,6 +232,14 @@ export class PlaybackController {
     return { us0: this.us0, t0S: this.t0, outputLatencyS: this.latencyS(), rate: this.playRate }
   }
 
+  /**
+   * A última reprodução parou por ter chegado ao limite (ponto de saída/fim, ou o início para trás) — e não por pausa,
+   * seek ou troca de taxa. Volta a false ao tocar de novo.
+   */
+  get endedAtLimit(): boolean {
+    return this.atLimit
+  }
+
   /** Há o que tocar para frente a partir do playhead (sem voltar ao início, como o play() faz no fim)? */
   canPlayForward(): boolean {
     const st = this.store.getState()
@@ -293,6 +303,7 @@ export class PlaybackController {
 
   private stop(): void {
     this.gen++
+    this.atLimit = false
     this.audio.cancel()
     const wasActive = this.active
     this.active = false
@@ -392,6 +403,7 @@ export class PlaybackController {
     if (t === null || (this.playRate > 0 ? t < this.endUs : t > this.endUs)) return false
     const end = this.endUs
     this.stop()
+    this.atLimit = true
     this.playRate = 1
     this.store.getState().setPlayhead(end)
     void this.render.requestFrame(end, false)

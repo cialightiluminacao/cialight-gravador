@@ -188,4 +188,26 @@ describe('PlaybackController — shuttle J/K/L', () => {
     expect([ctl.playing, ctl.rate]).toEqual([true, 2])
     ctl.dispose()
   })
+
+  it('endedAtLimit: true só quando a reprodução chegou ao limite (ponto de saída ou fim); pausa/seek: false', async () => {
+    const { ctl } = setup()
+    const st = useEditorStore.getState()
+    st.setInOut(null, 2_000_000)
+    st.setPlayhead(1_000_000)
+    await ctl.play()
+    await vi.advanceTimersByTimeAsync(600) // relógio pelo fallback
+    expect(ctl.endedAtLimit).toBe(false)
+    ctx.currentTime += 1.5 // passa do ponto de saída (2 s)
+    rafQueue.shift()?.()
+    expect([ctl.playing, ctl.endedAtLimit, useEditorStore.getState().playheadUs]).toEqual([false, true, 2_000_000])
+    // de novo e pausado no meio: não terminou no limite
+    st.setInOut(null, null)
+    st.setPlayhead(0)
+    await ctl.play()
+    expect(ctl.endedAtLimit).toBe(false)
+    await vi.advanceTimersByTimeAsync(600)
+    ctl.pause()
+    expect([ctl.playing, ctl.endedAtLimit]).toEqual([false, false])
+    ctl.dispose()
+  })
 })

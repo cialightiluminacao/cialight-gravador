@@ -112,7 +112,10 @@ export class NarrationRecorder {
       throw new NarrationCancelled()
     }
     const track = stream.getAudioTracks()[0]
-    if (!track) throw new Error('o microfone não entregou áudio')
+    if (!track) {
+      this.release() // solta o que veio (vídeo, nada) antes de desistir
+      throw new Error('o microfone não entregou áudio')
+    }
     // microfone desconectado/perdido no meio: termina preservando o que já foi gravado
     track.addEventListener('ended', () => this.interrupt('device', 'O microfone foi desconectado durante a gravação.'))
     this.source = ctx.createMediaStreamSource(stream)
@@ -193,7 +196,8 @@ export class NarrationRecorder {
   /**
    * Espera a reprodução começar (1º bloco) para fixar a âncora do relógio e grava o início no marcador do main. Depois
    * vigia: a reprodução recomeçou de outro ponto (âncora nova) ou parou antes do fim → a narração termina (o início já
-   * calculado deixaria de valer). Parar no fim da timeline é normal: a gravação continua contra o último quadro.
+   * calculado deixaria de valer). Parar no limite da reprodução (ponto de saída ou fim) é normal: a gravação continua
+   * contra o quadro parado.
    */
   private watchAnchor(): void {
     const t0 = performance.now()
@@ -211,7 +215,8 @@ export class NarrationRecorder {
         this.interrupt('playback', 'A reprodução da linha do tempo mudou de ponto durante a gravação.')
       } else if (!a && !this.playback.playing) {
         this.clearAnchorTimer()
-        if (this.playback.canPlayForward()) this.interrupt('playback', 'A reprodução da linha do tempo parou durante a gravação.')
+        // parou no limite (ponto de saída ou fim): normal, a gravação segue contra o último quadro; senão, alguém parou
+        if (!this.playback.endedAtLimit) this.interrupt('playback', 'A reprodução da linha do tempo parou durante a gravação.')
       }
     }, ANCHOR_POLL_MS)
   }

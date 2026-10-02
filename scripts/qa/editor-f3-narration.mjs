@@ -251,8 +251,16 @@ async function main() {
     document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 's', code: 'KeyS', bubbles: true, cancelable: true }))
     document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', code: 'Home', bubbles: true, cancelable: true }))
     await new Promise((r) => setTimeout(r, 200))
-    return { hits, hint: document.querySelector('[data-narration-hint]')?.textContent, dp: T.st().history.past.length - past, playing: T.st().playing, phase: T.nar().phase, playhead: T.st().playheadUs }`)
-  check('gravando: bloqueio cobre linha do tempo, visualizador, inspetor e barra; "Gravando narração — pare para editar"; clique e atalhos (S, Home) não editam nem pulam', blocked.hits.every((h) => h === 1) && blocked.hint === 'Gravando narração — pare para editar' && blocked.dp === 0 && blocked.playing && blocked.phase === 'recording' && blocked.playhead > START_S * S, blocked)
+    // teclado: nenhum controle do editor com o foco; Enter/Tab num botão focado à força são engolidos
+    const focused = document.activeElement
+    const focusFree = !focused || focused === document.body || !!focused.closest('[data-narration-bar]')
+    const btn = document.querySelector('button[aria-label="Dividir no playhead"]')
+    btn.focus()
+    const kd = (k) => { const e = new KeyboardEvent('keydown', { key: k, code: k, bubbles: true, cancelable: true }); btn.dispatchEvent(e); return e.defaultPrevented }
+    const swallowed = [kd('Enter'), kd('Tab')]
+    btn.blur()
+    return { focusFree, focusedTag: focused?.tagName + ':' + (focused?.getAttribute?.('aria-label') ?? ''), swallowed, hits, hint: document.querySelector('[data-narration-hint]')?.textContent, dp: T.st().history.past.length - past, playing: T.st().playing, phase: T.nar().phase, playhead: T.st().playheadUs }`)
+  check('gravando: bloqueio cobre linha do tempo, visualizador, inspetor e barra; "Gravando narração — pare para editar"; clique e atalhos (S, Home) não editam nem pulam; foco fora do editor, Enter/Tab num botão focado engolidos', blocked.hits.every((h) => h === 1) && blocked.focusFree && blocked.swallowed.every(Boolean) && blocked.hint === 'Gravando narração — pare para editar' && blocked.dp === 0 && blocked.playing && blocked.phase === 'recording' && blocked.playhead > START_S * S, blocked)
   await shot('f3-narracao-03-gravando.png')
   await until(`return T.nar().recordedUs >= 3000000`, 8000, 20)
   const stopAt = await ev(`const r = { recordedUs: T.nar().recordedUs, playhead: T.st().playheadUs }; T.key(' ', 'Space'); return r`)
@@ -391,6 +399,20 @@ async function main() {
   check('escrita falhou: a gravação para sozinha com aviso, o parcial fica no disco e entra na timeline no lugar', !!wf && wf.toasts.some((t) => t.includes('Falha ao gravar no disco')) && !!wf.item && Math.abs(wf.item.startUs - 3 * S) <= TOL_US && wf.item.durationUs > 0.1 * S && Number(wprobe?.format?.duration) > 0.1 && !existsSync(`${wfile}.pending.json`), { wf, wprobe })
   await sleep(300)
   await shot('f3-narracao-07-falha-de-escrita.png')
+
+  // ---------- 7) ponto de saída no meio da gravação: a reprodução para nele e a gravação continua ----------
+  console.log('gravação atravessando o ponto de saída (I/O marcados)')
+  await ev(`T.st().setInOut(${1 * S}, ${6.5 * S}); await T.seek(${5.8 * S}); return 1`)
+  check('6ª gravação começou', (await startNarration(false, false)).ok, null)
+  // depois do ponto de saída (≈ 0,7 s de gravação): parado em 6,5 s, ainda gravando
+  await until(`return T.nar().recordedUs >= 1400000`, 6000, 20)
+  const frozen = await ev(`return { phase: T.nar().phase, playing: T.st().playing, playhead: T.st().playheadUs, endedAtLimit: window.__qaEditor.controller.endedAtLimit }`)
+  check('a reprodução parou no ponto de saída (6,5 s) e a gravação continua contra o quadro parado', frozen.phase === 'recording' && frozen.playing === false && frozen.playhead === 6.5 * S && frozen.endedAtLimit === true, frozen)
+  await until(`return T.nar().recordedUs >= 1800000`, 6000, 20)
+  const io = await ev(`const rec = T.nar().recordedUs; T.key(' ', 'Space'); return rec`)
+  const ioItem = await until(`const i = T.narrItems().find((x) => x.asset.name === 'Narração 6'); return T.nar().phase === 'idle' && i ? { startUs: i.startUs, durationUs: i.durationUs, toasts: T.toasts() } : null`, 15000, 100)
+  check(`gravação inteira inserida (≈ ${(io / S).toFixed(2)} s a partir de 5,8 s), sem aviso de interrupção`, !!ioItem && Math.abs(ioItem.startUs - 5.8 * S) <= TOL_US && ioItem.durationUs >= io - 150_000 && !ioItem.toasts.some((t) => t.includes('A reprodução parou no meio')), { ioItem, io })
+  await ev(`T.st().setInOut(null, null); return 1`)
 }
 
 try {

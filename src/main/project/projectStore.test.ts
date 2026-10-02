@@ -330,8 +330,14 @@ describe('ProjectStore: arquivos gerados (narração) e recuperação', () => {
     expect(() => store.setGeneratedMeta(a.handle, meta(2), 8)).toThrow(/não pertence/)
     expect(() => store.closeGeneratedWrite(a.handle, 8)).toThrow(/não pertence/)
     store.writeGenerated(a.handle, new Uint8Array([1]), 0, 7)
+    // aberta: descartar/limpar também só pela dona
+    expect(() => store.clearPendingGenerated('p-a', a.rel, { discardFile: true }, 8)).toThrow(/não pertence/)
+    expect(existsSync(join(root, 'p-a', a.rel))).toBe(true)
     store.closeGeneratedWrite(a.handle, 7)
     expect(store.pendingGenerated('p-a')).toHaveLength(1)
+    // fechada: qualquer janela limpa (recuperação ao abrir o projeto em outra janela)
+    store.clearPendingGenerated('p-a', a.rel, undefined, 8)
+    expect(store.pendingGenerated('p-a')).toHaveLength(0)
   })
 
   it('clearPendingGenerated: arquivo vazio sai junto; discardFile apaga mesmo com bytes (gravação que não valeu)', () => {

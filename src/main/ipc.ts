@@ -273,7 +273,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     return asset
   })
   ipcMain.handle(IPC.project.pendingGenerated, (_e, projectId: string) => projects.pendingGenerated(projectId))
-  ipcMain.handle(IPC.project.clearPendingGenerated, (_e, projectId: string, rel: string, opts?: { discardFile?: boolean }) => projects.clearPendingGenerated(projectId, rel, { discardFile: !!opts?.discardFile }))
+  ipcMain.handle(IPC.project.clearPendingGenerated, (e, projectId: string, rel: string, opts?: { discardFile?: boolean }) => projects.clearPendingGenerated(projectId, rel, { discardFile: !!opts?.discardFile }, e.sender.id))
 
   // ---- media (ingestão do editor) ----
   ipcMain.handle(IPC.media.import, async (_e, projectId: string, paths: string[]) => {
