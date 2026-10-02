@@ -118,9 +118,11 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
       if (it.effect === 'pixelate' && min < WEAK_PIXELATE) out.push({ itemId: it.id, kind: 'weakPixelate', message: MSG.weakPixelate, tUs: s + tMin })
       // mídia visível numa faixa de vídeo mais alta no mesmo trecho (e no mesmo lugar, quando dá para saber): fica por cima
       const region = regionBox(it, W, H)
+      // escopo `track`: a faixa-alvo é o que o efeito esconde, mesmo estando acima dele (ligação explícita)
+      const target = it.scope === 'track' ? (it.targetTrackId ?? visualTrackBelow(p, track.id)) : null
       let cover: Us | null = null
       for (const upper of p.tracks.slice(ti + 1)) {
-        if (upper.kind !== 'video' || upper.hidden) continue
+        if (upper.kind !== 'video' || upper.hidden || upper.id === target) continue
         for (const m of upper.items) {
           if (m.type !== 'media' || m.enabled === false) continue
           const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)

@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { Maximize, ShieldAlert } from 'lucide-react'
-import { convertEffects, setAnimValue, setEffectScope, setItemEnabled, type AnimPath } from '@shared/editor/ops'
+import { convertEffects, scopeTargetTrack, setAnimValue, setEffectScope, setItemEnabled, type AnimPath } from '@shared/editor/ops'
 import { privacyWarnings } from '@shared/editor/privacy'
 import type { EffectItem, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
@@ -28,9 +28,14 @@ const SHAPE_OPTIONS: { value: EffectItem['region']['shape']; label: string }[] =
 ]
 const SCOPE_OPTIONS: { value: EffectItem['scope']; label: string; title: string }[] = [
   { value: 'below', label: 'Tudo abaixo', title: 'Aplica a todas as faixas abaixo do efeito' },
-  { value: 'track', label: 'Só a faixa abaixo', title: 'Aplica só à faixa logo abaixo do efeito' }
+  { value: 'track', label: 'Só a faixa abaixo', title: 'Aplica só à faixa escolhida (a do clipe vinculado)' }
 ]
 const FULL_FRAME = { x: 0.5, y: 0.5, w: 1, h: 1, rotation: 0 }
+
+/** Nome da faixa que o escopo `track` afeta (ops.scopeTargetTrack). */
+function scopeTargetName(project: Project, item: EffectItem): string {
+  return scopeTargetTrack(project, item.id)?.name ?? 'nenhuma faixa (apagada)'
+}
 
 export function EffectPanel({ project, item, locked }: { project: Project; item: EffectItem; locked: boolean }): React.JSX.Element {
   // tocando, o inspetor não acompanha o playhead (evita re-render a cada quadro)
@@ -82,6 +87,7 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
         <div className="space-y-1 pt-0.5 text-[11px]">
           <span className="text-muted">Escopo</span>
           <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={item.scope} options={lock(SCOPE_OPTIONS)} onValueChange={(scope) => apply((p) => setEffectScope(p, id, scope))} />
+          {item.scope === 'track' ? <p className="text-[10.5px] text-muted" data-scope-target="">Alvo: {scopeTargetName(project, item)}</p> : null}
         </div>
       </PanelSection>
 

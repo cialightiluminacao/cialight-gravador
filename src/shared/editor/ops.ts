@@ -372,13 +372,24 @@ function linkedClipTrack(p: Project, it: Item): string | null {
   return best
 }
 
-/** Faixa de mídia visível mais próxima abaixo de trackId (pula ocultas, de áudio e de efeitos); null = nenhuma. */
+/** Faixa de anotações (traços da gravação): só itens de anotações. Não é alvo nem clipe de efeito. */
+const isAnnotationsTrack = (t: Track): boolean => t.items.length > 0 && t.items.every((i) => i.type === 'annotations')
+
+/** Faixa de mídia visível mais próxima abaixo de trackId (pula ocultas, de áudio, de efeitos e de anotações); null = nenhuma. */
 function mediaTrackBelow(p: Project, trackId: string): string | null {
   for (let i = p.tracks.findIndex((t) => t.id === trackId) - 1; i >= 0; i--) {
     const t = p.tracks[i]
-    if (t.kind === 'video' && !t.hidden && !isFxTrack(t)) return t.id
+    if (t.kind === 'video' && !t.hidden && !isFxTrack(t) && !isAnnotationsTrack(t)) return t.id
   }
   return null
+}
+
+/** Faixa que o escopo `track` do efeito afeta hoje: targetTrackId (projeto antigo: a de vídeo visível logo abaixo). */
+export function scopeTargetTrack(p: Project, itemId: string): Track | null {
+  const f = findItem(p, itemId)
+  if (!f || f.item.type !== 'effect') return null
+  const id = f.item.targetTrackId ?? visualTrackBelow(p, f.track.id)
+  return p.tracks.find((t) => t.id === id) ?? null
 }
 
 /** Alvo do escopo `track` de um efeito na faixa effectTrackId: a faixa do clipe vinculado, senão a mídia logo abaixo. */
@@ -1061,9 +1072,11 @@ export function updateItem<T extends Item>(p: Project, itemId: string, recipe: (
  * recriados entre as cópias. Se não couber na faixa de origem, cria uma faixa do mesmo tipo logo acima; efeito
  * copiado que não cabe vai para outra faixa de efeitos (placeEffect), nunca para uma "Vídeo N".
  */
-export function duplicateItems(p: Project, itemIds: string[], atUs?: Us): { project: Project; itemIds: string[] } {
+export function duplicateItems(p0: Project, itemIds: string[], atUs?: Us): { project: Project; itemIds: string[] } {
+  // cópias a partir do projeto já com os alvos antigos gravados (a cópia de um efeito antigo herda o alvo e é remapeada)
+  const p = produce(p0, stampLegacyTargets)
   const ids = expand(p, itemIds, true)
-  if (ids.length === 0) return { project: p, itemIds: [] }
+  if (ids.length === 0) return { project: p0, itemIds: [] }
   const found = ids.map((id) => mustFind(p, id))
   const blockStart = Math.min(...found.map((f) => f.item.startUs))
   const at = Math.max(0, Math.round(atUs ?? Math.max(...found.map((f) => end(f.item)))))
@@ -1340,12 +1353,15 @@ export function toggleEnabled(p: Project, itemIds: string[], includeLinked: bool
   return setItemEnabled(p, ids, !anyOn)
 }
 
-/** Clipe visível sob atUs: item não-efeito ativo da faixa de vídeo visível mais alta que tem algo ali. */
+/**
+ * Clipe visível sob atUs: item ativo (nem efeito, nem anotações — os traços da gravação não são o conteúdo a
+ * esconder) da faixa de vídeo visível mais alta que tem algo ali.
+ */
 function clipUnder(p: Project, atUs: Us): { track: Track; item: Item } | null {
   for (let i = p.tracks.length - 1; i >= 0; i--) {
     const t = p.tracks[i]
     if (t.kind !== 'video' || t.hidden) continue
-    const under = t.items.find((it) => it.type !== 'effect' && it.enabled !== false && it.startUs <= atUs && atUs < end(it))
+    const under = t.items.find((it) => it.type !== 'effect' && it.type !== 'annotations' && it.enabled !== false && it.startUs <= atUs && atUs < end(it))
     if (under) return { track: t, item: under }
   }
   return null
