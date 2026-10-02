@@ -112,7 +112,8 @@ const api: IpcApi = {
     openPipe: (outputDir, fileName, spec, opts) => ipcRenderer.invoke(IPC.editorExport.openPipe, outputDir, fileName, spec, opts),
     pipeWrite: (jobId, data) => ipcRenderer.invoke(IPC.editorExport.pipeWrite, jobId, data),
     pipeFinish: (jobId) => ipcRenderer.invoke(IPC.editorExport.pipeFinish, jobId),
-    writeStill: (outputDir, fileName, png) => ipcRenderer.invoke(IPC.editorExport.writeStill, outputDir, fileName, png)
+    writeStill: (outputDir, fileName, png) => ipcRenderer.invoke(IPC.editorExport.writeStill, outputDir, fileName, png),
+    saveText: (defaultPath, text) => ipcRenderer.invoke(IPC.editorExport.saveText, defaultPath, text)
   },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),

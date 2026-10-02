@@ -321,6 +321,8 @@ export interface IpcApi {
     pipeWrite(jobId: string, data: Uint8Array): Promise<void | { cancelled: true }>
     pipeFinish(jobId: string): Promise<{ path: string; size: number; warning?: string } | { cancelled: true }>
     writeStill(outputDir: string, fileName: string, png: Uint8Array): Promise<{ path: string; size: number }>
+    /** "Salvar como" de um .txt (capítulos): UTF-8 sem BOM, CRLF. Devolve o caminho ou null se o usuário cancelou. */
+    saveText(defaultPath: string, text: string): Promise<string | null>
   }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
@@ -440,7 +442,8 @@ export const IPC = {
     openPipe: 'editorExport:openPipe',
     pipeWrite: 'editorExport:pipeWrite',
     pipeFinish: 'editorExport:pipeFinish',
-    writeStill: 'editorExport:writeStill'
+    writeStill: 'editorExport:writeStill',
+    saveText: 'editorExport:saveText'
   },
   recording: {
     setPhase: 'recording:setPhase',

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronLeft, CloudAlert, Crop, ImageDown, LoaderCircle, Redo2, Undo2, Upload } from 'lucide-react'
+import { Check, ChevronLeft, CloudAlert, Crop, ImageDown, ListOrdered, LoaderCircle, Redo2, Undo2, Upload } from 'lucide-react'
 import type { Project } from '@shared/editor/project'
 import { Button } from '@/components/ui/Button'
 import { Select, Tip, type SelectOption } from '@/components/ui/primitives'
@@ -9,6 +9,7 @@ import { ASPECTS, aspectIdOf, canvasForAspect, firstMediaSize, type AspectId } f
 import { useReframe } from '../state/reframe'
 import { defaultReframeAspect } from './ReframeDialog'
 import { exportCurrentFrame } from './frameExport'
+import { copyProjectChapters } from './chaptersActions'
 
 // Barra superior do editor: voltar (salva antes), nome editável, desfazer/refazer, estado do
 // autosave, proporção do quadro (só o quadro), "Reenquadrar" (proporção nova com o conteúdo reposicionado),
@@ -132,6 +133,11 @@ export function TopBar({ onBack, onExport }: { onBack: () => void; onExport: () 
         <Tip content="Exportar o quadro do cursor como PNG (tamanho do projeto)" shortcut={SHORTCUT_LABELS.exportFrame} side="bottom">
           <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" aria-label="Exportar quadro (PNG)" data-export-frame="" onClick={() => void exportCurrentFrame()}>
             <ImageDown className="h-3.5 w-3.5" /> Quadro
+          </Button>
+        </Tip>
+        <Tip content="Copiar capítulos do YouTube (dos marcadores; usa I–O se marcado)" side="bottom">
+          <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" aria-label="Copiar capítulos" data-copy-chapters="" onClick={() => void copyProjectChapters()}>
+            <ListOrdered className="h-3.5 w-3.5" /> Capítulos
           </Button>
         </Tip>
         <Tip content="Exportar vídeo, GIF ou áudio" shortcut={SHORTCUT_LABELS.export} side="bottom">

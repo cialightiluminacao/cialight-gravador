@@ -14,6 +14,7 @@ import { formatBytes, formatClock, formatTimecode } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { ipcErrorMessage } from '@/lib/ipcError'
 import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
+import { ChaptersSection } from './ChaptersSection'
 import { useEditorStore } from '../state/editorStore'
 import { EditorExportCancelled, editorExportRunning, runEditorExport, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
 import { exportMediaIssues, exportRange, hasInOut, type ExportMediaIssue } from '../export/exportPlan'
@@ -460,6 +461,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               </div>
             )}
 
+            {!isPng ? <ChaptersSection markers={project.markers} fromUs={range.fromUs} toUs={range.toUs} projectName={project.name} folder={targetFolder} /> : null}
+
             <label className="flex flex-col gap-1.5">
               <span className="text-[12px] font-medium text-fg-2">Nome do arquivo</span>
               <input
@@ -596,6 +599,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                 {phase.done.kind === 'video' ? <VideoDoneInfo result={phase.done.result} /> : <FormatDoneInfo result={phase.done.result} />}
               </span>
             </div>
+            {phase.done.kind === 'video' ? <ChaptersSection markers={project.markers} fromUs={range.fromUs} toUs={range.toUs} projectName={project.name} folder={targetFolder} /> : null}
             {phase.done.result.warnings.length ? (
               <ul className="flex flex-col gap-1 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] text-warn">
                 {phase.done.result.warnings.map((w) => (

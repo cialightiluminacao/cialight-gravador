@@ -317,6 +317,53 @@ async function main() {
   check('Ctrl+Shift+E exporta outro quadro (nome numerado, nunca sobrescreve)', pngs.length === before.length + 2 && pngs.some((f) => / - 00m03s \(2\)\.png$/.test(f)), pngs)
   const all = readdirSync(OUT)
   check('pasta do QA: .gif, .mp3 e os PNGs, sem .part', all.some((f) => f.endsWith('.gif')) && all.some((f) => f.endsWith('.mp3')) && all.every((f) => !f.endsWith('.part')), all)
+
+  // ---- F7 Task 3: capítulos do YouTube a partir dos marcadores ----
+  const total = await ev(`const s = window.__qaEditor.store.getState(); s.setInOut(null, null); return s.project.tracks.flatMap((t) => t.items).reduce((m, it) => Math.max(m, it.startUs + it.durationUs), 0)`)
+  const mks = [
+    { id: 'qa-m1', tUs: 0, label: 'Abertura', color: '#f59e0b' },
+    { id: 'qa-m2', tUs: Math.round(total * 0.4 / 1e6) * 1e6, label: 'Demonstração', color: '#f59e0b' },
+    { id: 'qa-m3', tUs: Math.round(total * 0.7 / 1e6) * 1e6, label: '', color: '#f59e0b' }
+  ]
+  await ev(`const s = window.__qaEditor.store.getState(); s.apply((p) => ({ ...p, markers: ${JSON.stringify(mks)} })); return 1`)
+  const mmss = (us) => `${String(Math.floor(us / 6e7)).padStart(2, '0')}:${String(Math.floor(us / 1e6) % 60).padStart(2, '0')}`
+  const expectedChapters = mks.map((m, i) => `${mmss(m.tUs)} ${m.label || `Capítulo ${i + 1}`}`).join('\n')
+  await ev(`document.activeElement?.blur?.(); return 1`)
+  await key('e', 'KeyE', 69, 2)
+  await sleep(500)
+  text = await ev(dialogText)
+  await ev(`${clickText('Vídeo')}; return 1`)
+  await sleep(300)
+  await ev(`const t = ${DLG}.querySelector('[data-chapters-toggle]'); if (!t) throw new Error('sem seção de capítulos'); t.click(); return 1`)
+  await sleep(300)
+  const chText = await ev(`return ${DLG}.querySelector('[data-chapters-text]')?.value ?? null`)
+  check('capítulos: texto gerado dos 3 marcadores (Capítulo 3 para o rótulo vazio)', chText === expectedChapters, { chText, expectedChapters })
+  const chAria = await ev(`const t = ${DLG}.querySelector('[data-chapters-text]'); return [t?.getAttribute('aria-label'), t?.readOnly, ${DLG}.querySelector('[data-chapters-copy]')?.getAttribute('aria-label')]`)
+  check('capítulos: textarea somente leitura com aria-label e botão Copiar rotulado', chAria[0]?.includes('Capítulos') && chAria[1] === true && chAria[2] === 'Copiar capítulos', chAria)
+  await ev(`${DLG}.querySelector('[data-chapters]').scrollIntoView({ block: 'center' }); return 1`)
+  await sleep(300)
+  await shot('f7-15-capitulos.png')
+  await ev(`window.focus(); ${DLG}.querySelector('[data-chapters-copy]').click(); return 1`)
+  let clip = null
+  for (let i = 0; i < 30; i++) {
+    clip = await ev(`try { return (await navigator.clipboard.readText()).replace(/\\r\\n/g, '\\n') } catch (e) { return 'ERRO: ' + e.message }`) // o Windows normaliza para CRLF
+    if (clip === expectedChapters) break
+    await sleep(100)
+  }
+  toastText = await ev(`return [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.textContent).join(' | ')`)
+  check('Copiar: área de transferência com o texto exato e toast "Capítulos copiados"', clip === expectedChapters && toastText.includes('Capítulos copiados'), { clip, toastText })
+  await key('Escape', 'Escape', 27)
+  await sleep(400)
+  // ação da barra superior
+  await ev(`navigator.clipboard.writeText('x'); document.querySelector('[data-copy-chapters]').click(); return 1`)
+  await sleep(500)
+  clip = await ev(`try { return (await navigator.clipboard.readText()).replace(/\\r\\n/g, '\\n') } catch (e) { return 'ERRO: ' + e.message }`)
+  check('barra superior "Capítulos": copia o mesmo texto (Tudo)', clip === expectedChapters, clip)
+  // sem marcadores: toast orientando
+  await ev(`const s = window.__qaEditor.store.getState(); s.apply((p) => ({ ...p, markers: [] })); document.querySelector('[data-copy-chapters]').click(); return 1`)
+  await sleep(600)
+  toastText = await ev(`return [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.textContent).join(' | ')`)
+  check('sem marcadores: toast "Adicione marcadores (M)…"', toastText.includes('Adicione marcadores (M) para gerar capítulos'), toastText)
 }
 
 try {

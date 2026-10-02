@@ -29,6 +29,7 @@ import { buildReviewAssets } from './export/reviewAssets'
 import { runFfmpeg } from './export/ffmpegRunner'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
+import { saveTextFile } from './export/saveText'
 import { EditorExportJobs, ExportCancelledError } from './export/editorExportJob'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
@@ -464,6 +465,12 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ipcMain.handle(IPC.editorExport.writeStill, (e, outputDir: string, fileName: string, png: Uint8Array) => {
     ownExport(e.sender)
     return editorExports.writeStill(outputDir, fileName, png, e.sender.id)
+  })
+  // capítulos (.txt): o diálogo abre sobre a janela que pediu
+  ipcMain.handle(IPC.editorExport.saveText, (e, defaultPath: string, text: string) => {
+    if (typeof defaultPath !== 'string' || typeof text !== 'string' || text.length > 1_000_000) throw new Error('Texto inválido')
+    const w = BrowserWindow.fromWebContents(e.sender)
+    return saveTextFile({ showSave: (opts) => (w ? dialog.showSaveDialog(w, opts) : dialog.showSaveDialog(opts)) }, defaultPath, text)
   })
   ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => cancelAware(jobId, editorExports.write(jobId, data, position)))
   ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))
