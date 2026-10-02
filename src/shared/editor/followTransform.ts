@@ -54,7 +54,7 @@ function visibleFrame(p: Project, m: MediaItem, at: Us, a: Us, b: Us): ClipFrame
  * comum (o início do efeito, se não se cruzam); com keys, cada key (a união dos instantes das 5 propriedades; as
  * curvas cortadas exatamente — insertKeyExact — para manter os eases) convertido no próprio instante.
  */
-function toContentRegion(p: Project, fx: EffectItem, m: MediaItem): EffectRegion {
+export function toContentRegion(p: Project, fx: EffectItem, m: MediaItem): EffectRegion {
   const r = fx.region
   const a = Math.max(m.startUs, fx.startUs), b = Math.min(itemEndUs(m), itemEndUs(fx))
   const span: [Us, Us] = a < b ? [a, b] : [fx.startUs, itemEndUs(fx)]
@@ -162,30 +162,43 @@ function sampleTimes(p: Project, fx: EffectItem, m: MediaItem | null, a: Us, b: 
  * "não acompanha" num zoom forte (~19×: 1,9 px de conteúdo × 19 ≈ 36 px na tela, acima da tolerância de 1 %). Sem a
  * folga, a pose assada é constante no conteúdo; a folga só serve à renderização do ancorado.
  * Invertido (a região é o buraco nítido): as amostras são o buraco contido na região exata ('hole', effectRegionAt) e
- * a simplificação não pode alargá-lo. Com tolerância HOLE_TOL_DIV× menor, cada amostra encolhe antes pela margem μ que
- * cobre o desvio máximo da interpolação (centro ≤ tol, meio-tamanho ≤ tol/2 em cada eixo, rotação ≤ tolDeg num raio
- * de meia-diagonal R): μ = tol + tol·√2/2 + R·tolDeg. Retângulo: meias-larguras − μ; elipse: × (1 − μ/min(a, b))
- * (a elipse assim encolhida, somada a um disco de raio μ, cabe na original). O desvio fica dentro dela ⇒ o buraco
- * interpolado cabe no buraco de cada amostra.
+ * a simplificação não pode alargá-lo — margem 'shrink' de simplifyRegionSamples.
  */
 export function bakeScreenRegion(p: Project, fx: EffectItem): EffectRegion {
-  const W = p.canvas.width, H = p.canvas.height
   const a = fx.startUs, b = itemEndUs(fx)
   const { times, must } = sampleTimes(p, fx, attachedMedia(p, fx), a, b)
-  const div = fx.invert ? HOLE_TOL_DIV : 1
+  const samples = times.map((t) => ({ t, r: effectRegionAt(p, fx, t, 0), must: must.has(t) }))
+  return simplifyRegionSamples(samples, fx.region.shape, fx.startUs, p.canvas.width, p.canvas.height, fx.invert ? 'shrink' : 'none')
+}
+
+/** Amostra da região do quadro num instante absoluto; `must` = vira key sempre. */
+export interface RegionSample { t: Us; r: RegionValues; must: boolean }
+
+/**
+ * Amostras (instantes absolutos crescentes) → região com keys lineares (tempos locais a `startUs`), simplificada por
+ * Douglas–Peucker: nenhuma amostra se afasta mais que FIT_TOL do quadro (FIT_TOL_DEG na rotação). `margin`:
+ * - 'none': os valores das amostras, a interpolação pode sair até a tolerância para qualquer lado (desancorar normal);
+ * - 'shrink' (buraco do invertido): tolerância HOLE_TOL_DIV× menor e cada amostra encolhida antes pela margem μ que
+ *   cobre o desvio máximo da interpolação (centro ≤ tol, meio-tamanho ≤ tol/2 em cada eixo, rotação ≤ tolDeg num raio
+ *   de meia-diagonal R): μ = tol + tol·√2/2 + R·tolDeg. Retângulo: meias-larguras − μ; elipse: × (1 − μ/min(a, b))
+ *   (a elipse assim encolhida, somada a um disco de raio μ, cabe na original) ⇒ o buraco interpolado cabe no de cada
+ *   amostra;
+ * - 'grow' (cobrir com garantia): o mesmo μ para fora — retângulo: meias-larguras + μ; elipse: × (1 + μ/min(a, b))
+ *   (contém a original somada a um disco de raio μ) ⇒ a região interpolada contém a de cada amostra.
+ */
+export function simplifyRegionSamples(input: RegionSample[], shape: EffectRegion['shape'], startUs: Us, W: number, H: number, margin: 'none' | 'shrink' | 'grow'): EffectRegion {
+  const div = margin === 'none' ? 1 : HOLE_TOL_DIV
   const tolPx = (FIT_TOL * Math.max(W, H)) / div, tolDeg = FIT_TOL_DEG / div
-  const shrink = (r: RegionValues): RegionValues => {
+  const adjust = (r: RegionValues): RegionValues => {
     const hx = (r.w * W) / 2, hy = (r.h * H) / 2
     const mu = tolPx * (1 + Math.SQRT1_2) + Math.hypot(hx, hy) * ((tolDeg * Math.PI) / 180)
-    const [ex, ey] = fx.region.shape === 'rect'
-      ? [Math.max(0, hx - mu), Math.max(0, hy - mu)]
-      : ((k) => [hx * k, hy * k])(Math.max(0, 1 - mu / Math.max(1e-9, Math.min(hx, hy))))
+    const sign = margin === 'grow' ? 1 : -1
+    const [ex, ey] = shape === 'rect'
+      ? [Math.max(0, hx + sign * mu), Math.max(0, hy + sign * mu)]
+      : ((k) => [hx * k, hy * k])(Math.max(0, 1 + (sign * mu) / Math.max(1e-9, Math.min(hx, hy))))
     return { ...r, w: (2 * ex) / W, h: (2 * ey) / H }
   }
-  const samples = times.map((t) => {
-    const r = effectRegionAt(p, fx, t, 0)
-    return { t, r: fx.invert ? shrink(r) : r, must: must.has(t) }
-  })
+  const samples = margin === 'none' ? input : input.map((s) => ({ ...s, r: adjust(s.r) }))
   const err = (k: number, i: number, j: number): number => {
     const si = samples[i], sj = samples[j], sk = samples[k]
     const u = (sk.t - si.t) / (sj.t - si.t)
@@ -210,10 +223,10 @@ export function bakeScreenRegion(p: Project, fx: EffectItem): EffectRegion {
   }
   const kept = samples.filter((_, i) => keep[i])
   const channel = (c: Channel): Anim<number> => {
-    const keys: Keyframe<number>[] = kept.map((s) => ({ tUs: s.t - fx.startUs, value: s.r[c], ease: 'linear' }))
+    const keys: Keyframe<number>[] = kept.map((s) => ({ tUs: s.t - startUs, value: s.r[c], ease: 'linear' }))
     return keys.every((k) => Math.abs(k.value - keys[0].value) < 1e-12) ? { value: keys[0].value } : { value: keys[0].value, keys }
   }
-  return { shape: fx.region.shape, x: channel('x'), y: channel('y'), w: channel('w'), h: channel('h'), rotation: channel('rotation') }
+  return { shape, x: channel('x'), y: channel('y'), w: channel('w'), h: channel('h'), rotation: channel('rotation') }
 }
 
 /** "Desancorar": a região volta ao espaço do quadro com o comportamento atual assado (bakeScreenRegion). Um passo. */

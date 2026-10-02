@@ -203,6 +203,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     ingest.cancel(id)
     return projects.remove(id)
   })
+  ipcMain.handle(IPC.project.duplicate, (_e, sourceId: string, p: unknown) => projects.duplicate(sourceId, parseProject(p)))
   ipcMain.handle(IPC.project.fromSession, async (_e, sessionId: string) => {
     const session = await sessionForEditor(sessionId)
     if (!session) throw new Error('Sessão não encontrada')

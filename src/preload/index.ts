@@ -74,6 +74,7 @@ const api: IpcApi = {
     load: (id) => ipcRenderer.invoke(IPC.project.load, id),
     save: (p) => ipcRenderer.invoke(IPC.project.save, p),
     remove: (id) => ipcRenderer.invoke(IPC.project.remove, id),
+    duplicate: (sourceId, p) => ipcRenderer.invoke(IPC.project.duplicate, sourceId, p),
     fromSession: (sessionId) => ipcRenderer.invoke(IPC.project.fromSession, sessionId),
     pickMedia: () => ipcRenderer.invoke(IPC.project.pickMedia),
     writeGeneratedOpen: (projectId, base, ext, meta) => ipcRenderer.invoke(IPC.project.writeGeneratedOpen, projectId, base, ext, meta),

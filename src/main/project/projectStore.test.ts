@@ -247,6 +247,41 @@ describe('ProjectStore', () => {
     expect((store.load('p-a').tracks[0].items[0] as MediaItem).visual!.crop.l).toEqual({ value: 0.1 })
   })
 
+  it('duplicate: pasta própria com o projeto novo e os derivados (proxies, cache, narrações); sem temporários nem pendentes', () => {
+    const src = mk('p-a', '2026-10-01T10:00:00.000Z')
+    store.create(src)
+    const d = join(root, 'p-a')
+    writeFileSync(join(d, 'proxies', 'a1.mp4'), 'proxy')
+    writeFileSync(join(d, 'proxies', 'a2.part-12-1.mp4'), 'parcial')
+    writeFileSync(join(d, 'cache', 'thumb.jpg'), 'thumb')
+    writeFileSync(join(d, 'cache', 'a1.peaks.bin.tmp'), 'tmp')
+    writeFileSync(join(d, 'generated', 'narracao-1.m4a'), 'voz')
+    writeFileSync(join(d, 'generated', 'narracao-2.m4a'), 'pendente')
+    writeFileSync(join(d, 'generated', 'narracao-2.m4a.pending.json'), '{}')
+    const copy = { ...src, id: 'p-b', name: 'Projeto p-a (Vertical)', canvas: { ...src.canvas, width: 1080, height: 1920 } }
+    store.duplicate('p-a', copy)
+    expect(store.load('p-b')).toEqual(copy)
+    const b = join(root, 'p-b')
+    for (const sub of ['proxies', 'cache', 'generated', 'versions']) expect(existsSync(join(b, sub))).toBe(true)
+    expect(readdirSync(join(b, 'proxies'))).toEqual(['a1.mp4'])
+    expect(readdirSync(join(b, 'cache'))).toEqual(['thumb.jpg'])
+    expect(readdirSync(join(b, 'generated'))).toEqual(['narracao-1.m4a'])
+    expect(readFileSync(join(b, 'generated', 'narracao-1.m4a'), 'utf8')).toBe('voz')
+    // independentes: apagar a origem não leva os arquivos da cópia; o original fica intacto
+    expect(store.load('p-a')).toEqual(src)
+    rmSync(d, { recursive: true, force: true })
+    expect(readFileSync(join(b, 'proxies', 'a1.mp4'), 'utf8')).toBe('proxy')
+  })
+
+  it('duplicate recusa id existente, a própria origem e origem inexistente', () => {
+    store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
+    store.create(mk('p-b', '2026-10-01T10:00:00.000Z'))
+    expect(() => store.duplicate('p-a', mk('p-b', '2026-10-01T10:00:00.000Z'))).toThrow(/já existe/)
+    expect(() => store.duplicate('p-a', mk('P-A', '2026-10-01T10:00:00.000Z'))).toThrow()
+    expect(() => store.duplicate('p-x', mk('p-c', '2026-10-01T10:00:00.000Z'))).toThrow(/não existe/)
+    expect(existsSync(join(root, 'p-c'))).toBe(false)
+  })
+
   it('applyAssetPatch de asset que não existe em lugar nenhum lança', () => {
     store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
     expect(() => store.applyAssetPatch('p-a', 'zz', { status: 'ready' }, '2026-10-02T00:00:00.000Z')).toThrow()

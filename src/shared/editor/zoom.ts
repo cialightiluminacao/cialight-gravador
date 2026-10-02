@@ -57,17 +57,27 @@ export function zoomPose(cur: ZoomPose, rect: ZoomRect, canvas: ZoomCanvas, clam
   let x = 0.5 + k * (cur.x - rect.x)
   let y = 0.5 + k * (cur.y - rect.y)
   if (clamp) {
-    const [lw, lh] = coverBox(clamp.bw * scale, clamp.bh * scale, clamp.rotation, canvas)
-    const range = (len: number, full: number): [number, number] => {
-      const a = (full - len / 2) / full, b = len / 2 / full
-      return [Math.min(a, b), Math.max(a, b)]
-    }
-    const [x0, x1] = range(lw, canvas.w)
-    const [y0, y1] = range(lh, canvas.h)
-    x = Math.min(x1, Math.max(x0, x))
-    y = Math.min(y1, Math.max(y0, y))
+    const r = coverRange(clamp.bw * scale, clamp.bh * scale, clamp.rotation, canvas)
+    x = Math.min(r.x1, Math.max(r.x0, x))
+    y = Math.min(r.y1, Math.max(r.y0, y))
   }
   return { x, y, scale }
+}
+
+/**
+ * Faixa do centro (normalizada) em que a camada de lw × lh px (já com a escala) girada `rotation` graus não descobre
+ * o fundo: as bordas continuam fora do quadro (ou, se a camada for menor que o quadro num eixo, dentro dele).
+ * Rotação qualquer: conservadora pelo retângulo inscrito (coverBox).
+ */
+export function coverRange(lw: number, lh: number, rotation: number, canvas: ZoomCanvas): { x0: number; x1: number; y0: number; y1: number } {
+  const [ew, eh] = coverBox(lw, lh, rotation, canvas)
+  const range = (len: number, full: number): [number, number] => {
+    const a = (full - len / 2) / full, b = len / 2 / full
+    return [Math.min(a, b), Math.max(a, b)]
+  }
+  const [x0, x1] = range(ew, canvas.w)
+  const [y0, y1] = range(eh, canvas.h)
+  return { x0, x1, y0, y1 }
 }
 
 /**
@@ -168,7 +178,7 @@ export function zoomKeys(
 }
 
 /** Fonte exibida do item (dimensões e rotação do vídeo; sem dados de vídeo, o próprio quadro). */
-function sourceOf(p: Project, item: MediaItem): Src {
+export function sourceOf(p: Project, item: MediaItem): Src {
   const info = p.assets.find((a) => a.id === item.assetId)?.video
   return info && info.width > 0 && info.height > 0 ? { w: info.width, h: info.height, rotation: info.rotation } : { w: p.canvas.width, h: p.canvas.height, rotation: 0 }
 }
@@ -199,7 +209,7 @@ export function applyZoom(p: Project, itemId: string, rect: ZoomRect, atUs: Us, 
  * A camada cobre o quadro inteiro no instante local (bordas fora do quadro, ±½ px; rotação múltipla de 90° — outra
  * rotação nunca cobre exatamente e cai no Ken Burns por corte).
  */
-function coversFrame(v: VisualProps, src: Src, canvas: ZoomCanvas, local: Us): boolean {
+export function coversFrame(v: VisualProps, src: Src, canvas: ZoomCanvas, local: Us): boolean {
   const t = v.transform, c = v.crop
   const rot = evalAnim(t.rotation, local)
   const q = ((rot % 360) + 360) % 360

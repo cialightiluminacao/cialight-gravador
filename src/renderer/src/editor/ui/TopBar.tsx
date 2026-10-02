@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronLeft, CloudAlert, LoaderCircle, Redo2, Undo2, Upload } from 'lucide-react'
+import { Check, ChevronLeft, CloudAlert, Crop, LoaderCircle, Redo2, Undo2, Upload } from 'lucide-react'
 import type { Project } from '@shared/editor/project'
 import { Button } from '@/components/ui/Button'
 import { Select, Tip, type SelectOption } from '@/components/ui/primitives'
 import { useEditorStore } from '../state/editorStore'
 import { ASPECTS, aspectIdOf, canvasForAspect, firstMediaSize, type AspectId } from './aspects'
+import { useReframe } from '../state/reframe'
+import { defaultReframeAspect } from './ReframeDialog'
 
 // Barra superior do editor: voltar (salva antes), nome editável, desfazer/refazer, estado do
-// autosave, proporção do quadro e Exportar.
+// autosave, proporção do quadro (só o quadro), "Reenquadrar" (proporção nova com o conteúdo reposicionado) e Exportar.
 
 function useNow(everyMs: number): number {
   const [now, setNow] = useState(() => Date.now())
@@ -86,6 +88,7 @@ export function TopBar({ onBack, onExport }: { onBack: () => void; onExport: () 
   const canRedo = useEditorStore((s) => s.canRedo)
   const undo = useEditorStore((s) => s.undo)
   const redo = useEditorStore((s) => s.redo)
+  const reframing = useReframe((s) => s.open)
   if (!project) return <div className="h-12 shrink-0 border-b border-border" />
   const aspect = aspectIdOf(project)
   const original = firstMediaSize(project)
@@ -117,6 +120,11 @@ export function TopBar({ onBack, onExport }: { onBack: () => void; onExport: () 
           <span className="block w-[200px]">
             <Select triggerClassName="h-8 rounded-lg px-2.5 text-xs" value={aspect} options={options} onValueChange={setAspect} />
           </span>
+        </Tip>
+        <Tip content="Reenquadrar para vertical, quadrado ou 4:5 seguindo o ponto de interesse" side="bottom">
+          <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" data-reframe-open="" aria-pressed={reframing} onClick={() => (reframing ? useReframe.getState().close() : useReframe.getState().openPanel(defaultReframeAspect(project)))}>
+            <Crop className="h-3.5 w-3.5" /> Reenquadrar
+          </Button>
         </Tip>
         <Button variant="primary" size="sm" className="ml-1.5 h-8 px-3.5" onClick={onExport}>
           <Upload className="h-3.5 w-3.5" /> Exportar

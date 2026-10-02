@@ -218,6 +218,11 @@ export interface IpcApi {
     load(id: string): Promise<Project>
     save(p: Project): Promise<void>
     remove(id: string): Promise<void>
+    /**
+     * Cópia do projeto `sourceId` gravada como `p` (id novo, pasta própria, ex.: "Reenquadrar"): os derivados (proxies,
+     * cache, narrações) vão junto por hard link ou cópia. Lança se `p.id` já existe ou a origem não existe.
+     */
+    duplicate(sourceId: string, p: Project): Promise<void>
     /** Lê a sessão no main, converte com projectFromSession, cria o projeto e o retorna. */
     fromSession(sessionId: string): Promise<Project>
     /** Diálogo de abrir arquivos de mídia (multi-seleção); [] se cancelado. */
@@ -384,6 +389,7 @@ export const IPC = {
     load: 'project:load',
     save: 'project:save',
     remove: 'project:remove',
+    duplicate: 'project:duplicate',
     fromSession: 'project:fromSession',
     pickMedia: 'project:pickMedia',
     writeGeneratedOpen: 'project:writeGeneratedOpen',

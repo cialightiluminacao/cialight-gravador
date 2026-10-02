@@ -30,6 +30,10 @@ const SPEED_PROJECT_ID = 'p-editor-speed-test'
 const SPEED_SD_PROJECT_ID = 'p-editor-speed-sd-test'
 // zoom/pan (F4): PNG escuro com um quadrado vermelho de 12 px em (1300, 350); o harness aplica o zoom (zoomHarness.ts)
 const ZOOM_PROJECT_ID = 'p-editor-zoom-test'
+// reenquadrar (F4): PNG com quadrado vermelho de 24 px em (1500, 540) e o texto "Senha 4821" perto; o harness grava a
+// cópia 9:16 pelo IPC project.duplicate (reframeHarness.ts)
+const REFRAME_PROJECT_ID = 'p-editor-reframe-test'
+const REFRAME_COPY_ID = 'p-editor-reframe-copia'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -51,6 +55,7 @@ interface HarnessReport {
   zoom?: ZoomReport
   follow?: FollowReport
   anim?: AnimReport
+  reframe?: ReframeReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -101,6 +106,11 @@ interface FollowInstant { frame: number; tUs: number; box: PxBox; ref: Legib; pr
 interface FollowRun { instants: FollowInstant[]; exportPath?: string; exportError?: string }
 interface FollowReport { error?: string; attached?: FollowRun; later?: FollowRun }
 type AnimKey = keyof typeof ANIM_TIMES
+interface ReframeReport {
+  error?: string; before?: { red: RedBlob | null; text: PxBox | null }; copy?: { name: string; width: number; height: number; anchored: string[]; warnings: string[] }
+  red?: RedBlob | null; textBox?: PxBox; ref?: Legib; preview?: Legib; control?: Legib; exportPath?: string; exportError?: string
+  exported?: { width: number; height: number; red: RedBlob | null; legib?: Legib }
+}
 interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>> }
 
 interface StretchReport {
@@ -260,6 +270,14 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const zoomProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Zoom', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: ZOOM_PROJECT_ID }, aZoom), aZoom.id, 0).project
   rmSync(projects.dirOf(ZOOM_PROJECT_ID), { recursive: true, force: true })
   projects.create(zoomProject)
+  // reenquadrar: fundo escuro, quadrado vermelho 24×24 centrado em (1500, 540) e o texto "Senha 4821" (Consolas 72)
+  const reframePng = join(dir, 'reenquadrar.png')
+  await gen(['-f', 'lavfi', '-i', 'color=c=0x1e293b:s=1920x1080', '-vf', `drawbox=x=1488:y=528:w=24:h=24:color=red:t=fill,${line('Senha 4821', 1320, 760)}`, '-frames:v', '1', '-update', '1', reframePng], 'editor: reenquadrar')
+  const aReframe = assetFromInfo('a_reframe', reframePng, statSync(reframePng), await probe(reframePng))
+  const reframeProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Aula', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: REFRAME_PROJECT_ID }, aReframe), aReframe.id, 0).project
+  rmSync(projects.dirOf(REFRAME_PROJECT_ID), { recursive: true, force: true })
+  rmSync(projects.dirOf(REFRAME_COPY_ID), { recursive: true, force: true })
+  projects.create(reframeProject)
 
   // janela visível sem foco (fora da barra de tarefas): oculta, o Chromium derruba o requestAnimationFrame para ~2/s
   // depois de umas dezenas de segundos, e a reprodução do editor anda por rAF
@@ -321,6 +339,22 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       }
     } catch (e) {
       animRun.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
+  // reenquadrar: dimensões da exportação 1080×1920 e o mesmo quadro medido (vermelho no centro; texto ilegível)
+  const rf = result.report.reframe
+  if (rf?.exportPath) {
+    try {
+      const info = await probe(rf.exportPath)
+      const raw = join(dir, 'reenquadrar.rgb')
+      await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', '0.4833', '-i', rf.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro reenquadrado' })
+      const w = info.video?.width ?? 0, h = info.video?.height ?? 0
+      const d = new Uint8Array(readFileSync(raw))
+      const r4 = (v: number): number => Math.round(v * 1e4) / 1e4
+      rf.exported = { width: w, height: h, red: w && h ? redBlob(d, w, h, 3) : null }
+      if (rf.textBox && rf.ref && w === 1080 && h === 1920) rf.exported.legib = { c: r4(localContrast(d, w, h, rf.textBox, 4, 3) / rf.ref.c), lap: r4(laplacianVar(d, w, h, rf.textBox, 4, 3) / rf.ref.lap) }
+    } catch (e) {
+      rf.exportError = e instanceof Error ? e.message : String(e)
     }
   }
   win.destroy()
@@ -511,6 +545,21 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   }
   const e10 = (ea?.blur10?.detail ?? NaN) / (ea?.rest?.detail ?? NaN), e4 = (ea?.blur4?.detail ?? NaN) / (ea?.rest?.detail ?? NaN)
   check(Math.abs(e10 - r10) <= Math.max(0.03, 0.25 * r10) && Math.abs(e4 - r4) <= Math.max(0.03, 0.25 * r4), `exportação = preview (desfoque): energia ÷ repouso 4 px ${f3(e4)} (preview ${f3(r4)}), 10 px ${f3(e10)} (preview ${f3(r10)})`, failures)
+
+  const rr = r.reframe
+  console.log(`reenquadrar: ${JSON.stringify(rr)}`)
+  check(!!rr && !rr.error, `reenquadrar: harness sem erro (${rr?.error ?? ''})`, failures)
+  check(rr?.copy?.width === 1080 && rr.copy.height === 1920 && rr.copy.name === 'Aula (Vertical)', `reenquadrar: cópia "Aula (Vertical)" gravada pelo IPC e relida em 1080×1920 (${JSON.stringify(rr?.copy)})`, failures)
+  check(!!rr?.copy?.anchored.includes('i_blur_texto'), `reenquadrar: o blur solto sobre o texto foi ancorado ao clipe (${rr?.copy?.anchored})`, failures)
+  const rb = rr?.red, rbx = rr?.before?.red
+  check(!!rb && Math.abs(rb.cx - 540) <= 3 && Math.abs(rb.cy - 960) <= 3, `reenquadrar (preview): o foco (vermelho em ${at(rbx ?? null)} no 16:9) fica no centro do 9:16 — ${at(rb ?? null)} ±3 px`, failures)
+  check(!!rb && !!rbx && Math.abs(rb.w / rbx.w - 1920 / 1080) <= 0.15, `reenquadrar (preview): o quadrado cresce 1080→1920 (${rbx?.w} → ${rb?.w} px)`, failures)
+  check(unreadable(rr?.preview), `reenquadrar (preview): texto sob o blur continua ilegível (contraste/laplaciano ${fmt([rr?.preview])})`, failures)
+  check((rr?.control?.c ?? 0) >= 0.15, `reenquadrar (controle): a região deixada como estava no quadro deixa o texto legível (contraste ${rr?.control?.c})`, failures)
+  const re = rr?.exported
+  check(re?.width === 1080 && re.height === 1920, `reenquadrar: exportação em 1080×1920 (${re?.width}×${re?.height}) ${rr?.exportError ?? ''}`, failures)
+  check(!!re?.red && Math.abs(re.red.cx - 540) <= 3 && Math.abs(re.red.cy - 960) <= 3, `reenquadrar (exportação): foco no centro — ${at(re?.red ?? null)} ±3 px`, failures)
+  check(unreadable(re?.legib), `reenquadrar (exportação): texto sob o blur ilegível (${fmt([re?.legib])})`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

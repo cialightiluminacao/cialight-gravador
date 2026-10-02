@@ -13,6 +13,8 @@ import { audioSourceKey } from '@shared/editor/audioProcess'
 import { TopBar } from './TopBar'
 import { ExportDialog } from './ExportDialog'
 import { SilenceDialog } from './SilenceDialog'
+import { ReframeDialog } from './ReframeDialog'
+import { useReframe } from '../state/reframe'
 import { useSilencePreview } from '../state/silencePreview'
 import { useNarration } from '../state/narration'
 import { useExpandedItems } from '../state/keyframeLanes'
@@ -33,7 +35,7 @@ import { viewerGestureActive } from './viewer/viewerGesture'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; narration: typeof useNarration; expanded: typeof useExpandedItems; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string; narrationFailWritesAfter?: number }
+    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; reframe: typeof useReframe; narration: typeof useNarration; expanded: typeof useExpandedItems; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string; narrationFailWritesAfter?: number }
   }
 }
 
@@ -72,7 +74,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     setEngine(eng)
     const stopAutosave = startAutosave((p) => api.project.save(p))
     // QA (fora do pacote): store e motor acessíveis por CDP
-    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, narration: useNarration, expanded: useExpandedItems, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
+    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, reframe: useReframe, narration: useNarration, expanded: useExpandedItems, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
     const offProgress = api.media.onProgress((j) => {
       if (j.projectId.toLowerCase() !== projectId.toLowerCase()) return
       const st = useEditorStore.getState()
@@ -175,12 +177,12 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       if (useEditorStore.getState().project?.id !== projectId) return // outro projeto ainda no store (troca em curso)
       if (narrationActive()) return // gravando narração: o teclado é da barra de gravação (Espaço/Esc param)
       if (gestureActive() || viewerGestureActive()) return // arraste na linha do tempo/no visualizador: o teclado é do gesto
-      // diálogo aberto (ex.: exportação): o teclado é dele. O painel "Remover silêncios" (não modal) só deixa passar o
-      // transporte, e os controles dele (sliders, interruptores, botões) ficam com as próprias teclas
+      // diálogo aberto (ex.: exportação): o teclado é dele. Os painéis "Remover silêncios" e "Reenquadrar" (não modais)
+      // só deixam passar o transporte, e os controles deles (sliders, interruptores, botões) ficam com as próprias teclas
       const dialogs = [...document.querySelectorAll('[role="dialog"]')]
       // O editor de curvas (popover não modal) deixa passar o transporte e desfazer/refazer, também com o foco
       // nele (as setas das alças são dele)
-      const panel = dialogs.find((d) => d.hasAttribute('data-silence-dialog'))
+      const panel = dialogs.find((d) => d.hasAttribute('data-silence-dialog') || d.hasAttribute('data-reframe-dialog'))
       const curve = dialogs.find((d) => d.hasAttribute('data-curve-editor'))
       if (dialogs.some((d) => d !== panel && d !== curve)) return
       const t = e.target as Element | null
@@ -266,6 +268,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         {loaded ? <Timeline playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
       </div>
       {loaded ? <SilenceDialog /> : null}
+      {loaded ? <ReframeDialog playback={engine?.playback ?? null} /> : null}
       {loaded ? <CurveEditor /> : null}
       {loaded ? <NarrationOverlay /> : null}
       {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} onSeek={(us) => seekTo(engineRef.current?.playback ?? null, us)} /> : null}
