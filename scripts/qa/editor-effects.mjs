@@ -105,17 +105,19 @@ window.__fx = (() => {
   const at = (fx, fy) => { const r = overlay().getBoundingClientRect(); return { x: r.left + r.width * fx, y: r.top + r.height * fy } }
   const center = (e) => { const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 } }
   const pe = (type, x, y, mods) => new PointerEvent(type, { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, buttons: type === 'pointerup' ? 0 : 1, pointerId: 1, pointerType: 'mouse', isPrimary: true, ...(mods || {}) })
-  const down = (target, x, y, mods) => target.dispatchEvent(pe('pointerdown', x, y, mods))
+  /** Elemento real mais ao topo no ponto (como o navegador escolheria o alvo de um clique de verdade). */
+  const topAt = (x, y) => { const e = document.elementFromPoint(x, y); if (!e) throw new Error('nada em ' + x + ',' + y); return e }
+  const down = (x, y, mods) => topAt(x, y).dispatchEvent(pe('pointerdown', x, y, mods))
   const move = (x, y, mods) => window.dispatchEvent(pe('pointermove', x, y, mods))
   const up = (x, y, mods) => window.dispatchEvent(pe('pointerup', x, y, mods))
-  async function drag(target, from, to, opts = {}) {
+  async function drag(from, to, opts = {}) {
     const steps = opts.steps ?? 8
-    down(target, from.x, from.y, opts.mods)
+    down(from.x, from.y, opts.mods)
     for (let i = 1; i <= steps; i++) move(from.x + ((to.x - from.x) * i) / steps, from.y + ((to.y - from.y) * i) / steps, opts.mods)
     await settle()
     if (opts.release !== false) { up(to.x, to.y, opts.mods); await settle() }
   }
-  const click = async (target, p, mods) => { down(target, p.x, p.y, mods); up(p.x, p.y, mods); await settle() }
+  const click = async (p, mods) => { down(p.x, p.y, mods); up(p.x, p.y, mods); await settle() }
   const key = async (k, mods) => { window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...(mods || {}) })); await settle() }
   const items = () => st().project.tracks.flatMap((t) => t.items.map((i) => ({ ...i, track: t.name })))
   const effects = () => items().filter((i) => i.type === 'effect')
@@ -147,7 +149,7 @@ window.__fx = (() => {
     }
     return { W, H, count: cols.length, first: cols[0] ?? -1, last: cols[cols.length - 1] ?? -1, mid: cols.length ? (cols[0] + cols[cols.length - 1]) / 2 / W : -1 }
   }
-  return { st, settle, el, overlay, at, center, down, move, up, drag, click, key, items, effects, fx, region, past, seek, tool, rowMatches }
+  return { st, settle, el, topAt, overlay, at, center, down, move, up, drag, click, key, items, effects, fx, region, past, seek, tool, rowMatches }
 })()
 'ok'`
 
@@ -181,7 +183,7 @@ async function main() {
   console.log('desenhar retângulo')
   {
     const before = await ev(`return { past: T.past(), n: T.effects().length }`)
-    const r = await ev(`await T.drag(T.overlay(), T.at(0.2, 0.2), T.at(0.45, 0.5)); const fx = T.effects(); const last = fx[fx.length - 1]; return { past: T.past(), n: fx.length, id: last?.id, effect: last?.effect, track: last?.track, start: last?.startUs, sel: T.st().selection, region: last ? T.region(last.id) : null }`)
+    const r = await ev(`await T.drag(T.at(0.2, 0.2), T.at(0.45, 0.5)); const fx = T.effects(); const last = fx[fx.length - 1]; return { past: T.past(), n: fx.length, id: last?.id, effect: last?.effect, track: last?.track, start: last?.startUs, sel: T.st().selection, region: last ? T.region(last.id) : null }`)
     rectId = r.id
     check('um efeito novo, um passo de desfazer', r.n === before.n + 1 && r.past === before.past + 1, { before, r })
     check('blur na faixa "Efeitos", no playhead', r.effect === 'blur' && r.track === 'Efeitos' && r.start === 2_000_000, r)
@@ -196,7 +198,7 @@ async function main() {
   {
     await ev(`document.querySelector('[data-viewer-toolbar] [aria-label="Pixelizar"]').click(); await T.settle(); return 1`)
     const before = await ev(`return T.past()`)
-    const r = await ev(`await T.drag(T.overlay(), T.at(0.6, 0.55), T.at(0.85, 0.9), { mods: { shiftKey: true } }); const last = T.effects().at(-1); return { past: T.past(), id: last.id, effect: last.effect, region: T.region(last.id) }`)
+    const r = await ev(`await T.drag(T.at(0.6, 0.55), T.at(0.85, 0.9), { mods: { shiftKey: true } }); const last = T.effects().at(-1); return { past: T.past(), id: last.id, effect: last.effect, region: T.region(last.id) }`)
     ellipseId = r.id
     check('pixelização em elipse (Shift), um passo', r.past === before + 1 && r.effect === 'pixelate' && r.region.shape === 'ellipse', r)
     check('região da elipse', near(r.region.x, 0.725, 0.004) && near(r.region.y, 0.725, 0.004), r.region)
@@ -208,11 +210,14 @@ async function main() {
 
   console.log('selecionar (efeitos por cima) e clique fora seleciona a mídia')
   {
-    await ev(`await T.click(T.overlay(), T.at(0.325, 0.35)); return 1`)
+    await ev(`await T.click(T.at(0.325, 0.35)); return 1`)
     check('clique na região seleciona o efeito', (await ev(`return T.st().selection`)).join() === rectId, null)
-    await ev(`await T.click(T.overlay(), T.at(0.1, 0.9)); return 1`)
+    await ev(`await T.click(T.at(0.1, 0.9)); return 1`)
     check('clique fora seleciona o vídeo abaixo', (await ev(`return T.st().selection`)).join() === videoId, null)
-    await ev(`await T.click(T.overlay(), T.at(0.325, 0.35)); return 1`)
+    // com o vídeo de tela cheia selecionado, as alças dele não podem tapar a região
+    const r = await ev(`const top = T.topAt(T.at(0.325, 0.35).x, T.at(0.325, 0.35).y); const hasMedia = !!document.querySelector('[data-media-handles]'); const p0 = T.past(); const reg0 = T.region('${rectId}'); const from = T.at(0.325, 0.35); await T.drag(from, { x: from.x + 30, y: from.y + 20 }); const reg1 = T.region('${rectId}'); const sel = T.st().selection; const past = T.past(); T.st().undo(); await T.settle(); return { hasMedia, top: top.tagName + '.' + (top.dataset ? Object.keys(top.dataset).join() : ''), sel, past, p0, reg0, reg1, back: T.region('${rectId}') }`)
+    check('vídeo selecionado: clicar e arrastar a região seleciona e move o efeito', r.hasMedia && r.sel.join() === rectId && r.reg1.x > r.reg0.x && r.past === r.p0 + 1 && r.back.x === r.reg0.x, r)
+    await ev(`await T.click(T.at(0.325, 0.35)); return 1`)
   }
 
   console.log('mover, redimensionar, girar (1 passo por gesto)')
@@ -220,33 +225,33 @@ async function main() {
   const steps = [r0]
   {
     const p0 = await ev(`return T.past()`)
-    const r = await ev(`const o = T.overlay().getBoundingClientRect(); await T.drag(T.el('[data-region-handles]'), T.at(0.325, 0.35), { x: T.at(0.325, 0.35).x + o.width * 0.1, y: T.at(0.325, 0.35).y + o.height * 0.05 }); return { past: T.past(), r: T.region('${rectId}') }`)
+    const r = await ev(`const o = T.overlay().getBoundingClientRect(); await T.drag(T.at(0.325, 0.35), { x: T.at(0.325, 0.35).x + o.width * 0.1, y: T.at(0.325, 0.35).y + o.height * 0.05 }); return { past: T.past(), r: T.region('${rectId}') }`)
     check('mover: +0,10 / +0,05, tamanho igual, 1 passo', near(r.r.x, r0.x + 0.1, 0.003) && near(r.r.y, r0.y + 0.05, 0.003) && near(r.r.w, r0.w, 1e-9) && r.past === p0 + 1, { r0, r })
     steps.push(r.r)
   }
   {
     const p0 = await ev(`return T.past()`)
-    const r = await ev(`const h = T.center(T.el('[data-region-handle="se"]')); const o = T.overlay().getBoundingClientRect(); await T.drag(T.el('[data-region-handle="se"]'), h, { x: h.x + o.width * 0.05, y: h.y + o.height * 0.1 }); return { past: T.past(), r: T.region('${rectId}') }`)
+    const r = await ev(`const h = T.center(T.el('[data-region-handle="se"]')); const o = T.overlay().getBoundingClientRect(); await T.drag(h, { x: h.x + o.width * 0.05, y: h.y + o.height * 0.1 }); return { past: T.past(), r: T.region('${rectId}') }`)
     const prev = steps.at(-1)
     check('canto: cresce +0,05 × +0,10 com o canto oposto parado, 1 passo', near(r.r.w, prev.w + 0.05, 0.004) && near(r.r.h, prev.h + 0.1, 0.004) && near(r.r.x - r.r.w / 2, prev.x - prev.w / 2, 0.002) && near(r.r.y - r.r.h / 2, prev.y - prev.h / 2, 0.002) && r.past === p0 + 1, { prev, r })
     steps.push(r.r)
   }
   {
     const prev = steps.at(-1)
-    const r = await ev(`const h = T.center(T.el('[data-region-handle="e"]')); const o = T.overlay().getBoundingClientRect(); await T.drag(T.el('[data-region-handle="e"]'), h, { x: h.x + o.width * 0.05, y: h.y }, { mods: { altKey: true } }); return { past: T.past(), r: T.region('${rectId}') }`)
+    const r = await ev(`const h = T.center(T.el('[data-region-handle="e"]')); const o = T.overlay().getBoundingClientRect(); await T.drag(h, { x: h.x + o.width * 0.05, y: h.y }, { mods: { altKey: true } }); return { past: T.past(), r: T.region('${rectId}') }`)
     check('borda com Alt: a partir do centro (+0,10 de largura, centro parado)', near(r.r.w, prev.w + 0.1, 0.004) && near(r.r.x, prev.x, 0.002) && near(r.r.h, prev.h, 1e-9), { prev, r })
     steps.push(r.r)
   }
   {
     const prev = steps.at(-1)
-    const r = await ev(`const h = T.center(T.el('[data-region-handle="se"]')); const o = T.overlay().getBoundingClientRect(); await T.drag(T.el('[data-region-handle="se"]'), h, { x: h.x + o.width * 0.08, y: h.y + o.height * 0.01 }, { mods: { shiftKey: true } }); return { past: T.past(), r: T.region('${rectId}') }`)
+    const r = await ev(`const h = T.center(T.el('[data-region-handle="se"]')); const o = T.overlay().getBoundingClientRect(); await T.drag(h, { x: h.x + o.width * 0.08, y: h.y + o.height * 0.01 }, { mods: { shiftKey: true } }); return { past: T.past(), r: T.region('${rectId}') }`)
     const ar = (x) => (x.w * 16) / (x.h * 9)
     check('canto com Shift: mantém a proporção', near(ar(r.r), ar(prev), 0.01) && r.r.w > prev.w, { prev, r, before: ar(prev), after: ar(r.r) })
     steps.push(r.r)
   }
   {
     const prev = steps.at(-1)
-    const r = await ev(`const h = T.center(T.el('[data-region-handle="rotate"]')); const box = T.el('[data-region-handles]').getBoundingClientRect(); const c = { x: box.left + box.width / 2, y: box.top + box.height / 2 }; const d = c.y - h.y; await T.drag(T.el('[data-region-handle="rotate"]'), h, { x: c.x + d, y: c.y + 2 }, { mods: { shiftKey: true } }); return { past: T.past(), r: T.region('${rectId}') }`)
+    const r = await ev(`const h = T.center(T.el('[data-region-handle="rotate"]')); const box = T.el('[data-region-handles]').getBoundingClientRect(); const c = { x: box.left + box.width / 2, y: box.top + box.height / 2 }; const d = c.y - h.y; await T.drag(h, { x: c.x + d, y: c.y + 2 }, { mods: { shiftKey: true } }); return { past: T.past(), r: T.region('${rectId}') }`)
     check('girar com Shift: 90°, centro e tamanho iguais', r.r.rotation === 90 && near(r.r.x, prev.x, 1e-9) && near(r.r.w, prev.w, 1e-9), { prev, r })
     steps.push(r.r)
     await sleep(400)
@@ -257,12 +262,12 @@ async function main() {
   {
     // gira de volta para 0 para as bordas também grudarem
     await ev(`T.st().undo(); await T.settle(); return 1`)
-    const r = await ev(`const p0 = T.past(); const reg = T.region('${rectId}'); const from = T.at(reg.x, reg.y); const to = T.at(0.503, 0.3); await T.drag(T.el('[data-region-handles]'), from, to, { release: false }); const guide = document.querySelectorAll('[data-guide]').length; return { p0, guide, live: T.region('${rectId}') }`)
+    const r = await ev(`const p0 = T.past(); const reg = T.region('${rectId}'); const from = T.at(reg.x, reg.y); const to = T.at(0.503, 0.3); await T.drag(from, to, { release: false }); const guide = document.querySelectorAll('[data-guide]').length; return { p0, guide, live: T.region('${rectId}') }`)
     await sleep(300)
     await shot('effects-05-guia.png')
     const after = await ev(`const to = T.at(0.503, 0.3); T.up(to.x, to.y); await T.settle(); return { past: T.past(), r: T.region('${rectId}') }`)
     check('centro gruda em 0,5 com guia visível', r.guide >= 1 && after.r.x === 0.5 && after.past === r.p0 + 1, { r, after })
-    const esc = await ev(`const p0 = T.past(); const reg = T.region('${rectId}'); const from = T.at(reg.x, reg.y); await T.drag(T.el('[data-region-handles]'), from, T.at(0.2, 0.7), { release: false }); const moved = T.region('${rectId}'); await T.key('Escape'); T.up(0, 0); await T.settle(); return { past: T.past(), p0, moved, r: T.region('${rectId}'), reg }`)
+    const esc = await ev(`const p0 = T.past(); const reg = T.region('${rectId}'); const from = T.at(reg.x, reg.y); await T.drag(from, T.at(0.2, 0.7), { release: false }); const moved = T.region('${rectId}'); await T.key('Escape'); T.up(0, 0); await T.settle(); return { past: T.past(), p0, moved, r: T.region('${rectId}'), reg }`)
     check('Esc cancela o arraste (nada no histórico, região original)', esc.past === esc.p0 && esc.r.x === esc.reg.x && esc.moved.x !== esc.reg.x, esc)
   }
 
@@ -278,7 +283,7 @@ async function main() {
 
   console.log('mídia continua manipulável (F1, mesmo gesto do visualizador)')
   {
-    const r = await ev(`await T.seek(2_000_000); const logo = T.items().find((i) => i.assetId === 'a_qa_logo'); const p0 = T.past(); const o = T.overlay().getBoundingClientRect(); const from = T.at(0.84, 0.22); await T.drag(T.overlay(), from, { x: from.x - o.width * 0.2, y: from.y }); const after = T.items().find((i) => i.id === logo.id); const past = T.past(); T.st().undo(); await T.settle(); const undone = T.items().find((i) => i.id === logo.id); return { sel: T.st().selection, x0: logo.visual.transform.x.value, x1: after.visual.transform.x.value, x2: undone.visual.transform.x.value, p0, past, id: logo.id }`)
+    const r = await ev(`await T.seek(2_000_000); const logo = T.items().find((i) => i.assetId === 'a_qa_logo'); const p0 = T.past(); const o = T.overlay().getBoundingClientRect(); const from = T.at(0.84, 0.22); await T.drag(from, { x: from.x - o.width * 0.2, y: from.y }); const after = T.items().find((i) => i.id === logo.id); const past = T.past(); T.st().undo(); await T.settle(); const undone = T.items().find((i) => i.id === logo.id); return { sel: T.st().selection, x0: logo.visual.transform.x.value, x1: after.visual.transform.x.value, x2: undone.visual.transform.x.value, p0, past, id: logo.id }`)
     check('arrastar o PiP move a mídia (1 passo) e desfazer volta', r.sel.join() === r.id && near(r.x1, r.x0 - 0.2, 0.003) && r.past === r.p0 + 1 && r.x2 === r.x0, r)
   }
 
@@ -287,16 +292,16 @@ async function main() {
     const T1 = 2_000_000
     const T2 = 4_000_000
     await ev(`await T.seek(${T1}); const t = window.__qaEditor.store; document.querySelector('[data-viewer-toolbar] button').click(); await T.settle(); document.querySelector('[data-viewer-toolbar] [aria-label^="Tarja"]').click(); await T.settle(); return 1`)
-    const id = await ev(`await T.drag(T.overlay(), T.at(0.2, 0.4), T.at(0.3, 0.6)); await T.key('Escape'); return T.effects().at(-1).id`)
+    const id = await ev(`await T.drag(T.at(0.2, 0.4), T.at(0.3, 0.6)); await T.key('Escape'); return T.effects().at(-1).id`)
     // cor de teste e keyframes ligados em x/y (o painel de keyframes é da Task 4): key no instante atual
     await ev(`const s = T.st(); s.apply((p) => ({ ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map((i) => i.id !== '${id}' ? i : { ...i, color: '#12ff34', feather: 0, region: { ...i.region, x: { value: i.region.x.value, keys: [{ tUs: 0, value: i.region.x.value, ease: 'linear' }] }, y: { value: i.region.y.value, keys: [{ tUs: 0, value: i.region.y.value, ease: 'linear' }] } } }) })) })); await T.seek(${T1}); return 1`)
     check('losango de keyframe no playhead (t1)', await ev(`return !!document.querySelector('[data-keyframe-indicator]')`), null)
     // mover em t1: atualiza o key existente (sem criar outro)
-    const m1 = await ev(`const p0 = T.past(); const reg = T.region('${id}'); await T.drag(T.el('[data-region-handles]'), T.at(reg.x, reg.y), T.at(reg.x - 0.05, reg.y)); const f = T.fx('${id}'); return { p0, past: T.past(), keys: f.region.x.keys, ykeys: f.region.y.keys, r: T.region('${id}') }`)
+    const m1 = await ev(`const p0 = T.past(); const reg = T.region('${id}'); await T.drag(T.at(reg.x, reg.y), T.at(reg.x - 0.05, reg.y)); const f = T.fx('${id}'); return { p0, past: T.past(), keys: f.region.x.keys, ykeys: f.region.y.keys, r: T.region('${id}') }`)
     check('t1: key de x atualizado (1 key), 1 passo', m1.keys.length === 1 && near(m1.keys[0].value, 0.2, 0.003) && m1.past === m1.p0 + 1, m1)
     await ev(`await T.seek(${T2}); return 1`)
     check('sem losango fora de keyframe (t2)', !(await ev(`return !!document.querySelector('[data-keyframe-indicator]')`)), null)
-    const m2 = await ev(`const p0 = T.past(); const reg = T.region('${id}'); await T.drag(T.el('[data-region-handles]'), T.at(reg.x, reg.y), T.at(0.8, 0.45)); const f = T.fx('${id}'); return { p0, past: T.past(), keys: f.region.x.keys, ykeys: f.region.y.keys, w: f.region.w, r: T.region('${id}') }`)
+    const m2 = await ev(`const p0 = T.past(); const reg = T.region('${id}'); await T.drag(T.at(reg.x, reg.y), T.at(0.8, 0.45)); const f = T.fx('${id}'); return { p0, past: T.past(), keys: f.region.x.keys, ykeys: f.region.y.keys, w: f.region.w, r: T.region('${id}') }`)
     check('t2: key novo em x e y; w continua fixo; 1 passo', m2.keys.length === 2 && m2.keys[1].tUs === T2 - T1 && near(m2.keys[1].value, 0.8, 0.003) && m2.ykeys.length === 2 && near(m2.ykeys[1].value, 0.45, 0.003) && !m2.w.keys && m2.past === m2.p0 + 1, m2)
     check('losango no playhead (t2)', await ev(`return !!document.querySelector('[data-keyframe-indicator]')`), null)
     await sleep(300)
@@ -317,6 +322,14 @@ async function main() {
     await ev(`T.st().select(['${id}']); await T.settle(); return 1`)
     await sleep(300)
     await shot('effects-08-interpolado-selecionado.png')
+
+    console.log('desativado / faixa bloqueada')
+    const patch = (fn) => `T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => (${fn})) })); await T.settle(); await new Promise((r) => setTimeout(r, 300)); await T.settle();`
+    const off = await ev(`${patch(`({ ...t, items: t.items.map((i) => (i.id === '${id}' ? { ...i, enabled: false } : i)) })`)} T.st().select(['${id}']); await T.settle(); return { inactive: !!document.querySelector('[data-region-inactive]'), tag: document.querySelector('[data-region-inactive]')?.textContent, handles: document.querySelectorAll('[data-region-handle]').length }`)
+    check('desativado selecionado: contorno cinza com "Desativado" e sem alças', off.inactive && off.tag === 'Desativado' && off.handles === 0, off)
+    await shot('effects-10-desativado.png')
+    const locked = await ev(`${patch(`t.items.some((i) => i.id === '${id}') ? { ...t, locked: true, items: t.items.map((i) => (i.id === '${id}' ? { ...i, enabled: undefined } : i)) } : t`)} T.st().select([]); await T.settle(); const reg = T.region('${id}'); await T.click(T.at(reg.x, reg.y)); return { sel: T.st().selection }`)
+    check('faixa bloqueada: clique na região seleciona a mídia abaixo, não o efeito', locked.sel.length === 1 && locked.sel[0] !== id, locked)
   }
 
   await viewport(1920, 1080)

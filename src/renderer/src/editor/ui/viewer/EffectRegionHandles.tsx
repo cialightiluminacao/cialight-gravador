@@ -27,8 +27,11 @@ function resizeCursor(h: RegionHandle, rotation: number): string {
   return RESIZE_CURSORS[Math.round(a / 45) % 4]
 }
 
-/** Efeito selecionado com a região no playhead (null se não é efeito ou o playhead está fora do item). */
-export function selectedRegion(p: Project, itemId: string, tUs: Us): { box: RegionBox; locked: boolean; keyed: boolean } | null {
+/**
+ * Efeito selecionado com a região no playhead (null se não é efeito ou o playhead está fora do item).
+ * inactive: desativado ou em faixa oculta (não aparece no quadro) — só contorno cinza, sem alças.
+ */
+export function selectedRegion(p: Project, itemId: string, tUs: Us): { box: RegionBox; locked: boolean; inactive: boolean; keyed: boolean } | null {
   const f = findItem(p, itemId)
   if (!f || f.item.type !== 'effect') return null
   const local = tUs - f.item.startUs
@@ -36,6 +39,7 @@ export function selectedRegion(p: Project, itemId: string, tUs: Us): { box: Regi
   return {
     box: regionBoxOf(f.item, local, p.canvas.width, p.canvas.height),
     locked: f.track.locked,
+    inactive: f.item.enabled === false || f.track.hidden,
     keyed: keyframeAt(f.item, local, frameDurUs(p.canvas.fps) / 2)
   }
 }
@@ -44,7 +48,7 @@ export function startRegionGesture(e: React.PointerEvent, itemId: string, g: Reg
   const st = useEditorStore.getState()
   const p = st.project
   const f = p && findItem(p, itemId)
-  if (!p || !f || f.item.type !== 'effect' || f.track.locked) return
+  if (!p || !f || f.item.type !== 'effect' || f.track.locked || f.item.enabled === false || f.track.hidden) return
   const tUs = st.playheadUs
   const local = tUs - f.item.startUs
   if (local < 0 || local >= f.item.durationUs) return
@@ -128,11 +132,23 @@ export function RegionOutline({ box, k }: { box: RegionBox; k: number }): React.
   return <div data-region-outline={box.itemId} className={cn('pointer-events-none absolute border border-dashed border-white/35', box.shape === 'ellipse' && 'rounded-[50%]')} style={boxStyle(box, k)} />
 }
 
-export function EffectRegionHandles({ box, k, locked, keyed, drawing, onGesture }: { box: RegionBox; k: number; locked: boolean; keyed: boolean; drawing: boolean; onGesture: (e: React.PointerEvent, g: RegionGesture) => void }): React.JSX.Element {
+/** Efeito selecionado que não aparece no quadro (desativado/faixa oculta): contorno cinza, etiqueta, sem alças. */
+function InactiveRegion({ box, k }: { box: RegionBox; k: number }): React.JSX.Element {
+  return (
+    <div data-region-inactive={box.itemId} className="pointer-events-none absolute" style={boxStyle(box, k)}>
+      <div className={cn('absolute inset-0 border-[1.5px] border-dashed border-muted', box.shape === 'ellipse' && 'rounded-[50%]')} />
+      <span className="absolute left-0 top-0 -translate-y-[calc(100%+4px)] whitespace-nowrap rounded bg-surface-3/90 px-1.5 py-0.5 text-[10px] font-medium text-fg-2 shadow">Desativado</span>
+    </div>
+  )
+}
+
+export function EffectRegionHandles({ box, k, locked, inactive, keyed, drawing, onGesture }: { box: RegionBox; k: number; locked: boolean; inactive: boolean; keyed: boolean; drawing: boolean; onGesture: (e: React.PointerEvent, g: RegionGesture) => void }): React.JSX.Element {
+  if (inactive) return <InactiveRegion box={box} k={k} />
   const wPx = box.w * k
   const hPx = box.h * k
   const inside = box.cy * k - hPx / 2 < 24
   const handles = locked ? [] : HANDLES.filter((h) => (h === 'n' || h === 's' ? wPx >= 36 : h === 'e' || h === 'w' ? hPx >= 36 : true))
+  // desenhando: o interior deixa o arraste passar para criar outra região; as alças continuam ativas
   return (
     <div
       data-region-handles={box.itemId}

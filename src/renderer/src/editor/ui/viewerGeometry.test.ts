@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
-import { addAsset, addEffect, insertItems, setAnimValue, setItemEnabled, toggleKeyframe } from '@shared/editor/ops'
+import { addAsset, addEffect, insertItems, setAnimValue, setItemEnabled, toggleKeyframe, updateTrack } from '@shared/editor/ops'
 import type { Asset, EffectItem, Project } from '@shared/editor/project'
 import { cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, type RegionBox } from './viewerGeometry'
 
@@ -86,6 +86,8 @@ describe('viewerGeometry — regiões de efeito', () => {
     expect(at1[1]).toMatchObject({ shape: 'ellipse', rotation: 30 })
     expect(effectBoxes(p, 5_000_000)).toEqual([])
     expect(effectBoxes(setItemEnabled(p, [b.itemId], false), 1_000_000).map((x) => x.itemId)).toEqual([a.itemId])
+    const fxTrack = p.tracks.find((t) => t.items.some((i) => i.id === b.itemId))!
+    expect(effectBoxes(updateTrack(p, fxTrack.id, { locked: true }), 1_000_000)[1]).toMatchObject({ itemId: b.itemId, locked: true })
   })
 
   it('regionHit: retângulo e elipse rotacionados', () => {
@@ -101,6 +103,8 @@ describe('viewerGeometry — regiões de efeito', () => {
     expect(regionHit(box(), 960 + 205, 540, 6)).toBe(true)
     expect(hitTestRegions([box({ itemId: 'a' }), box({ itemId: 'b', cx: 1000 })], 1000, 540)).toBe('b')
     expect(hitTestRegions([box()], 10, 10)).toBeNull()
+    // faixa bloqueada: não é selecionável; a de baixo (desbloqueada) é
+    expect(hitTestRegions([box({ itemId: 'a' }), box({ itemId: 'b', locked: true })], 960, 540)).toBe('a')
   })
 
   it('dragToRegion: canto a canto, Alt a partir do centro, Shift = elipse, mínimo de 1 % do quadro', () => {
@@ -162,6 +166,12 @@ describe('viewerGeometry — regiões de efeito', () => {
     expect(s.guides).toEqual({ v: [1], h: [] })
     const c = snapResize({ itemId: 'x', cx: 960, cy: 540, w: 1900, h: 200, rotation: 0 }, 'w', true, W, H) // Alt: espelha
     expect(c.box).toMatchObject({ cx: 960, w: 1920 })
+    // borda arrastada até perto do centro (0,5) com a outra também lá: prende no mínimo de 1 % do quadro
+    const tiny = snapResize({ itemId: 'x', cx: 955, cy: 540, w: 10, h: 200, rotation: 0 }, 'e', false, W, H) // direita em 960 → 960, esquerda em 950
+    expect(tiny.box.w).toBeCloseTo(19.2)
+    expect(tiny.box.cx - tiny.box.w / 2).toBeCloseTo(950)
+    const tinyAlt = snapResize({ itemId: 'x', cx: 958, cy: 540, w: 8, h: 200, rotation: 0 }, 'e', true, W, H) // Alt: 2·|960−958| = 4 → 19,2
+    expect(tinyAlt.box.w).toBeCloseTo(19.2)
     const rot = snapResize({ itemId: 'x', cx: 1000, cy: 540, w: 1820, h: 200, rotation: 10 }, 'e', false, W, H)
     expect(rot.box.w).toBe(1820)
   })

@@ -101,6 +101,8 @@ export function rotateAngle(center: Pt, from: Pt, to: Pt, start: number, step15:
 /** Região de efeito em pixels do canvas do projeto (centro, tamanho, rotação horária em graus). */
 export interface RegionBox extends ItemBox {
   shape: 'rect' | 'ellipse'
+  /** Faixa bloqueada: aparece, mas não é selecionável pelo visualizador. */
+  locked?: boolean
 }
 
 /** Menor lado da região: 1 % do quadro. */
@@ -113,7 +115,7 @@ export function effectBoxes(p: Project, tUs: Us): RegionBox[] {
     if (t.kind !== 'video' || t.hidden) continue
     const it = t.items.find((i) => tUs >= i.startUs && tUs < i.startUs + i.durationUs)
     if (!it || it.type !== 'effect' || it.enabled === false) continue
-    out.push(regionBoxOf(it, tUs - it.startUs, p.canvas.width, p.canvas.height))
+    out.push({ ...regionBoxOf(it, tUs - it.startUs, p.canvas.width, p.canvas.height), ...(t.locked ? { locked: true } : {}) })
   }
   return out
 }
@@ -141,9 +143,9 @@ export function regionHit(b: RegionBox, x: number, y: number, slackPx = 0): bool
   return Math.abs(l.x) <= hw && Math.abs(l.y) <= hh
 }
 
-/** Região mais ao topo sob (x, y); null se nenhuma. */
+/** Região mais ao topo sob (x, y), ignorando as de faixas bloqueadas; null se nenhuma. */
 export function hitTestRegions(boxes: RegionBox[], x: number, y: number, slackPx = 0): string | null {
-  for (let i = boxes.length - 1; i >= 0; i--) if (regionHit(boxes[i], x, y, slackPx)) return boxes[i].itemId
+  for (let i = boxes.length - 1; i >= 0; i--) if (!boxes[i].locked && regionHit(boxes[i], x, y, slackPx)) return boxes[i].itemId
   return null
 }
 
@@ -236,6 +238,7 @@ export function snapRegion(r: { x: number; y: number; w: number; h: number; rota
 /**
  * Depois de redimensionar (pixels; sem Shift): sem rotação, a(s) borda(s) arrastada(s) grudam nas
  * bordas/centro do quadro (±1 %). Sem Alt o lado oposto continua parado; com Alt a outra borda espelha.
+ * Lados continuam ≥ MIN_REGION do quadro (o mesmo mínimo de resizeRegion).
  */
 export function snapResize<B extends ItemBox>(b: B, handle: RegionHandle, fromCenter: boolean, W: number, H: number): { box: B; guides: Guides } {
   const guides: Guides = { v: [], h: [] }
@@ -248,9 +251,10 @@ export function snapResize<B extends ItemBox>(b: B, handle: RegionHandle, fromCe
     const hit = bestSnap([{ v: (c + (s * size) / 2) / full, lines: GUIDE_LINES }])
     if (!hit) return { c, size, guide: null }
     const e = hit.line * full
-    if (fromCenter) return { c, size: Math.max(1, 2 * Math.abs(e - c)), guide: hit.line }
+    const min = MIN_REGION * full
+    if (fromCenter) return { c, size: Math.max(min, 2 * Math.abs(e - c)), guide: hit.line }
     const anchor = c - (s * size) / 2
-    const n = Math.max(1, s * (e - anchor))
+    const n = Math.max(min, s * (e - anchor))
     return { c: anchor + (s * n) / 2, size: n, guide: hit.line }
   }
   const x = axis(hx * flip, b.cx, b.w, W)

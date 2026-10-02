@@ -85,22 +85,22 @@ export function startItemTransform(e: React.PointerEvent, box: ItemBox, g: ItemG
 }
 
 /** Alças do item selecionado. A de rotação fica acima da caixa, ou por dentro se a borda de cima estiver rente ao palco. */
+// O corpo não recebe cliques (pointer-events-none): o clique no interior vai para o fundo do
+// visualizador, que testa as regiões de efeito primeiro e só então move a mídia sob o ponteiro.
 export function ItemTransformHandles({ box, k, onGesture }: { box: ItemBox; k: number; onGesture: (e: React.PointerEvent, box: ItemBox, g: ItemGesture) => void }): React.JSX.Element {
   const inside = box.cy * k - (box.h * k) / 2 < 24
   return (
     <div
-      className="absolute cursor-move"
+      data-media-handles={box.itemId}
+      className="pointer-events-none absolute"
       style={{ left: box.cx * k - (box.w * k) / 2, top: box.cy * k - (box.h * k) / 2, width: box.w * k, height: box.h * k, transform: `rotate(${box.rotation}deg)` }}
-      onPointerDown={(e) => {
-        if (e.button === 0 && !e.ctrlKey && !e.shiftKey) onGesture(e, box, { kind: 'move' })
-      }}
     >
       <div className={cn('pointer-events-none absolute left-1/2 top-0 h-5 w-px -translate-x-1/2 bg-accent/80', !inside && '-translate-y-full')} />
       <button
         type="button"
         aria-label="Girar (Shift: passos de 15°)"
         title="Girar (Shift: passos de 15°)"
-        className={cn('absolute left-1/2 top-0 h-3.5 w-3.5 -translate-x-1/2 cursor-grab rounded-full border-2 border-accent bg-fg shadow', inside ? 'translate-y-5' : '-translate-y-[calc(100%+20px)]')}
+        className={cn('pointer-events-auto absolute left-1/2 top-0 h-3.5 w-3.5 -translate-x-1/2 cursor-grab rounded-full border-2 border-accent bg-fg shadow', inside ? 'translate-y-5' : '-translate-y-[calc(100%+20px)]')}
         onPointerDown={(e) => onGesture(e, box, { kind: 'rotate' })}
       />
       {CORNERS.map((c) => (
@@ -109,7 +109,7 @@ export function ItemTransformHandles({ box, k, onGesture }: { box: ItemBox; k: n
           type="button"
           aria-label="Redimensionar (Shift: a partir do centro)"
           title="Redimensionar (Shift: a partir do centro)"
-          className="absolute h-3 w-3 rounded-[3px] border-2 border-accent bg-fg shadow"
+          className="pointer-events-auto absolute h-3 w-3 rounded-[3px] border-2 border-accent bg-fg shadow"
           style={{
             cursor: CORNER_CURSOR[c],
             left: c.endsWith('l') ? -6 : undefined,

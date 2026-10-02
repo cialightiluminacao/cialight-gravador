@@ -90,7 +90,7 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
       ))}
       {selectedMedia ? <ItemTransformHandles box={selectedMedia} k={scale} onGesture={(e, box, g) => startItemTransform(e, box, g, ctx)} /> : null}
       {selectedFx && !playing ? (
-        <EffectRegionHandles box={selectedFx.box} k={scale} locked={selectedFx.locked} keyed={selectedFx.keyed} drawing={drawing} onGesture={(e, g) => startRegionGesture(e, selectedFx.box.itemId, g, ctx)} />
+        <EffectRegionHandles box={selectedFx.box} k={scale} locked={selectedFx.locked} inactive={selectedFx.inactive} keyed={selectedFx.keyed} drawing={drawing} onGesture={(e, g) => startRegionGesture(e, selectedFx.box.itemId, g, ctx)} />
       ) : null}
     </div>
   )
