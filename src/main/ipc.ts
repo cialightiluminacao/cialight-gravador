@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { basename, extname, join } from 'path'
 import { renameSync, rmSync, statSync } from 'fs'
-import { IPC, type GeneratedExt, type GeneratedMeta, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
+import { IPC, type GeneratedExt, type GeneratedMeta, type BarState, type CursorBeginInfo, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
 import { getSettings, outputDir, rawDir, setSettings } from './settings/settingsStore'
 import { listDisplays, listSources, sourceThumbnail } from './capture/sources'
@@ -34,6 +34,7 @@ import { check as updateCheck, download as updateDownload, getUpdateStatus, inst
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
 import { setExportBusyCheck } from './quitGuard'
+import { cursorBegin, cursorDiscard, cursorPause, cursorResume, cursorStop, warmUpCursorNative } from './cursor/cursorCapture'
 
 const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'ts']
 const AUDIO_EXT = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
@@ -192,6 +193,20 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ipcMain.handle(IPC.session.freeSpaceMB, () => store.freeSpaceMB())
   ipcMain.handle(IPC.session.unfinished, () => store.findUnfinished())
   ipcMain.handle(IPC.session.filePath, (_e, id: string, name: string) => store.filePath(id, name))
+
+  // ---- trilha do cursor (F6): <sessão>/cursor.json, nunca campo no session.json ----
+  ipcMain.on(IPC.cursor.begin, (e, info: CursorBeginInfo) => {
+    try {
+      cursorBegin(info, store.dirOf(info.sessionId), e.sender)
+    } catch (err) {
+      log.warn('cursor: início recusado', err)
+    }
+  })
+  ipcMain.on(IPC.cursor.pause, () => cursorPause())
+  ipcMain.on(IPC.cursor.resume, () => cursorResume())
+  ipcMain.handle(IPC.cursor.stop, (_e, sessionId: string) => cursorStop(sessionId))
+  ipcMain.on(IPC.cursor.discard, (_e, sessionId: string) => cursorDiscard(sessionId))
+  warmUpCursorNative()
 
   // ---- project (editor) ----
   ipcMain.handle(IPC.project.list, () => projects.list())

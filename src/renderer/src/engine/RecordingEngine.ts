@@ -174,6 +174,9 @@ export class RecordingEngine {
       await this.startFallback(screen, cam, mic, systemAudioTrack, session)
     }
     this.recorder.begin()
+    // trilha do cursor no main (F6): mesmo instante do relógio de mídia; envio sem espera
+    const src = this.config.source
+    this.api.cursor.begin({ sessionId: session.id, width: video.width, height: video.height, source: { kind: src.kind, id: src.id, displayId: src.displayId } })
     this.state = 'recording'
     this.bytesTimer = setInterval(() => this.emit({ type: 'bytes', bytes: this.bytes, elapsedMs: this.recorder?.mediaTimeMs() ?? 0 }), 1000)
   }
@@ -270,6 +273,7 @@ export class RecordingEngine {
     for (const s of this.sources) s.src.pause()
     this.fallback?.pause()
     this.recorder.pause()
+    this.api.cursor.pause()
     this.state = 'paused'
   }
 
@@ -278,6 +282,7 @@ export class RecordingEngine {
     for (const s of this.sources) s.src.resume()
     this.fallback?.resume()
     this.recorder.resume()
+    this.api.cursor.resume()
     this.state = 'recording'
   }
 
@@ -345,6 +350,8 @@ export class RecordingEngine {
     this.state = 'stopping'
     if (this.bytesTimer) clearInterval(this.bytesTimer)
     this.bytesTimer = null
+    // a trilha do cursor termina onde o vídeo termina (antes do finalize); o main grava o cursor.json
+    const cursorSaved = this.api.cursor.stop(this.recorder.session.id).catch(() => false)
     try {
       if (this.output) {
         for (const s of this.sources) if ((s.src as MediaStreamVideoTrackSource).resume) s.src.resume()
@@ -364,6 +371,7 @@ export class RecordingEngine {
     const session = this.recorder.stop()
     session.bytes = this.bytes
     await this.api.session.save(session)
+    await cursorSaved
     this.state = 'stopped'
     this.output = null
     this.sources = []
@@ -380,6 +388,7 @@ export class RecordingEngine {
       return
     }
     const id = this.recorder.session.id
+    this.api.cursor.discard(id)
     try {
       if (this.state === 'recording' || this.state === 'paused') {
         this.state = 'stopping'

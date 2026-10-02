@@ -157,6 +157,14 @@ export interface RecordingPhaseContext {
   sourceName?: string
 }
 
+/** Início da trilha do cursor (F6): sessão, tamanho do vídeo de tela gravado e fonte (monitor ou janela). */
+export interface CursorBeginInfo {
+  sessionId: string
+  width: number
+  height: number
+  source: { kind: 'screen' | 'window'; id: string; displayId?: string }
+}
+
 export interface IpcApi {
   app: {
     info(): Promise<AppInfo>
@@ -311,6 +319,17 @@ export interface IpcApi {
     onCommand(cb: (cmd: RecorderCommand) => void): Unsubscribe
     onRecover(cb: (sessions: Session[]) => void): Unsubscribe
   }
+  /**
+   * Trilha do cursor (F6, <sessão>/cursor.json): o engine avisa no mesmo instante em que o relógio de mídia dele
+   * começa/pausa/retoma (envio sem espera: nunca atrasa a gravação). `stop` grava o arquivo; `discard` não grava.
+   */
+  cursor: {
+    begin(info: CursorBeginInfo): void
+    pause(): void
+    resume(): void
+    stop(sessionId: string): Promise<boolean>
+    discard(sessionId: string): void
+  }
   overlay: {
     setMode(payload: OverlayModePayload): Promise<void>
     onMode(cb: (p: OverlayModePayload) => void): Unsubscribe
@@ -426,6 +445,7 @@ export const IPC = {
     command: 'recording:command',
     recover: 'recording:recover'
   },
+  cursor: { begin: 'cursor:begin', pause: 'cursor:pause', resume: 'cursor:resume', stop: 'cursor:stop', discard: 'cursor:discard' },
   overlay: {
     setMode: 'overlay:setMode',
     mode: 'overlay:mode',
