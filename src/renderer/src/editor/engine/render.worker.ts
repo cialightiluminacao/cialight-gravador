@@ -24,6 +24,7 @@ import type { CursorTrackV1 } from '@shared/cursor'
 import { resolveFrame, type AnnotationsLayer } from '@shared/editor/resolve'
 import type { Project, Us } from '@shared/editor/project'
 import { frameToUs } from '@shared/editor/time'
+import { grayFromRgba, layersBelowEffect, startTracker, trackFrameTimes, trackNext, type TrackResult, type Tracker } from '@shared/editor/track'
 import type { Session } from '@shared/types'
 import { drawStrokes } from '@shared/compositor'
 import { FILE_PROTOCOL } from '@shared/ipc'
@@ -33,7 +34,7 @@ import { DecoderPool } from './decoderPool'
 import { SR } from './audio/mixer'
 import type { AudioIn, AudioOut } from './audio/protocol'
 import { frameCount } from '../export/exportPlan'
-import type { ExportJobSpec, RenderIn, RenderOut } from './protocol'
+import type { ExportJobSpec, RenderIn, RenderOut, TrackJobSpec } from './protocol'
 
 type FrameMsg = Extract<RenderIn, { t: 'frame' }>
 
@@ -139,6 +140,12 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
       case 'chunkAck':
         if (exporting?.jobId === m.jobId) exporting.outbox.ack(m.seq)
         break
+      case 'trackStart':
+        startTracking(m.job)
+        break
+      case 'trackCancel':
+        if (tracking?.jobId === m.jobId) tracking.abort.abort()
+        break
     }
   } catch (err) {
     post({ t: 'error', message: errMsg(err), fatal: m.t === 'init' })
@@ -180,14 +187,16 @@ async function renderFrame(m: FrameMsg): Promise<void> {
 /**
  * Desenha o quadro tUs no canvas (resolveFrame → fontes → compositor). Os VideoFrames obtidos são fechados
  * antes de retornar; o desenho fica no canvas (preserveDrawingBuffer). `sequential`: reprodução/exportação
- * (iterador por entrada do pool); senão, seek. Devolve os assets ausentes e as entradas [asset, slot] usadas.
+ * (iterador por entrada do pool); senão, seek. `belowFx`: só as camadas abaixo desse efeito (rastreamento, R10).
+ * Devolve os assets ausentes e as entradas [asset, slot] usadas.
  */
-async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { drawMs: number }): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][] }> {
+async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { drawMs: number }, belowFx?: string): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][] }> {
   const comp = compositor
   if (!comp || !canvas) throw new Error('render antes de init')
   const W = canvas.width
   const H = canvas.height
-  const layers = resolveFrame(p, tUs, cursors)
+  const all = resolveFrame(p, tUs, cursors)
+  const layers = belowFx ? layersBelowEffect(all, belowFx) : all
   const sources = new Map<string, TexImageSource | VideoFrame | null>()
   const meta = new Map<string, SourceMeta>()
   const missing = new Set<string>()
@@ -593,6 +602,59 @@ async function runExport(
   } finally {
     feed?.close()
   }
+}
+
+// ---------------------------------------------------------------- rastreamento de conteúdo ("Seguir conteúdo", F6)
+
+let tracking: { jobId: string; abort: AbortController } | null = null
+
+function startTracking(job: TrackJobSpec): void {
+  if (tracking || exporting) {
+    post({ t: 'trackError', jobId: job.jobId, message: 'Este worker já está ocupado', cancelled: false })
+    return
+  }
+  const abort = new AbortController()
+  const me = { jobId: job.jobId, abort }
+  tracking = me
+  runTracking(job, abort.signal)
+    .then((results) => post({ t: 'trackDone', jobId: job.jobId, results }))
+    .catch((err: unknown) => {
+      const cancelled = abort.signal.aborted || err instanceof Cancelled
+      post({ t: 'trackError', jobId: job.jobId, message: cancelled ? 'cancelado' : errMsg(err), cancelled })
+    })
+    .finally(() => {
+      if (tracking === me) tracking = null
+      prefetched.clear()
+      pool.releaseAll()
+    })
+}
+
+/**
+ * Para cada instante: compõe só o que está abaixo do efeito (mesmo resolveFrame + Compositor do preview, canvas na
+ * resolução de análise), lê os pixels (cinza) e dá um passo do NCC. Os VideoFrames são fechados dentro de composeAt.
+ */
+async function runTracking(job: TrackJobSpec, signal: AbortSignal): Promise<TrackResult[]> {
+  const p = project
+  if (!compositor || !canvas || !p) throw new Error('rastreamento antes de init/project')
+  compositor.resize(job.width, job.height)
+  selection = []
+  prefetched.clear()
+  const times = trackFrameTimes(job.fromUs, job.toUs, job.fps)
+  if (times.length === 0) throw new Error('Intervalo de rastreamento vazio')
+  const results: TrackResult[] = []
+  let tracker: Tracker | null = null
+  for (let n = 0; n < times.length; n++) {
+    if (signal.aborted) throw new Cancelled()
+    const tUs = times[n]
+    const { used } = await composeAt(p, tUs, true, undefined, job.effectItemId)
+    const img = grayFromRgba(compositor.readPixels(0, 0, job.width, job.height), job.width, job.height)
+    const step: { tracker: Tracker; result: TrackResult } = tracker ? trackNext(tracker, img, tUs) : startTracker(img, job.box, tUs, job.opts)
+    tracker = step.tracker
+    results.push(step.result)
+    pool.releaseExcept([...used, ...prefetchUpcoming(p, tUs, used)])
+    post({ t: 'trackProgress', jobId: job.jobId, frame: n + 1, total: times.length, result: step.result })
+  }
+  return results
 }
 
 function errMsg(err: unknown): string {

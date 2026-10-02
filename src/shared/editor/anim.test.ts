@@ -5,6 +5,21 @@ describe('anim', () => {
   it('constante sem keys', () => expect(evalAnim({ value: 3 }, 999)).toBe(3))
   it('clamp antes/depois', () => { const x = a([[100, 1], [200, 2]]); expect(evalAnim(x, 0)).toBe(1); expect(evalAnim(x, 500)).toBe(2) })
   it('linear no meio', () => expect(evalAnim(a([[0, 0], [100, 10]]), 25)).toBeCloseTo(2.5))
+  it('curva densa (um key por quadro): igual à busca linear de referência, inclusive nos keys e entre eles', () => {
+    const eases = ['linear', 'hold', 'in', 'out', 'inOut'] as const
+    const keys = Array.from({ length: 1801 }, (_, i) => ({ tUs: i * 33_333 + (i % 7), value: Math.sin(i / 9) * 100, ease: eases[i % 5] }))
+    const anim = { value: 0, keys }
+    const ref = (t: number): number => {
+      if (t <= keys[0].tUs) return keys[0].value
+      if (t >= keys[keys.length - 1].tUs) return keys[keys.length - 1].value
+      let i = 0
+      while (i < keys.length - 2 && t >= keys[i + 1].tUs) i++
+      const k0 = keys[i], k1 = keys[i + 1]
+      return k0.value + (k1.value - k0.value) * easeValue(k0.ease, (t - k0.tUs) / (k1.tUs - k0.tUs))
+    }
+    for (let t = -10; t < 60_100_000; t += 4_111) expect(evalAnim(anim, t)).toBe(ref(t))
+    for (const k of keys) expect(evalAnim(anim, k.tUs)).toBe(ref(k.tUs))
+  })
   it('hold segura até o próximo key', () => expect(evalAnim({ value: 0, keys: [{ tUs: 0, value: 1, ease: 'hold' }, { tUs: 100, value: 5, ease: 'linear' }] }, 99)).toBe(1))
   it('inOut é simétrico', () => { expect(easeValue('inOut', 0.5)).toBeCloseTo(0.5); expect(easeValue('inOut', 0.25)).toBeLessThan(0.25) })
   it('bezier linear equivale a linear', () => expect(easeValue({ bezier: [0, 0, 1, 1] }, 0.3)).toBeCloseTo(0.3, 3))

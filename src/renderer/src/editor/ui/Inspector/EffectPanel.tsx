@@ -12,6 +12,7 @@ import { useEditorStore } from '../../state/editorStore'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
 import { writeRegion, writeRegionValues } from '../viewerGeometry'
 import { KeyframeButton } from './KeyframeButton'
+import { TrackPanel } from './TrackPanel'
 import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs } from './common'
 
@@ -157,6 +158,8 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
           <Maximize className="h-3 w-3" /> Ajustar ao quadro inteiro
         </button>
       </PanelSection>
+
+      <TrackPanel project={project} item={item} />
     </>
   )
 }

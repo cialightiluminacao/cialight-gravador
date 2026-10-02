@@ -286,6 +286,15 @@ describe('keyframeMarkLefts (losangos na timeline)', () => {
     expect(keyframeMarkLefts([0, S, 3 * S, 5 * S], 100, 200, 250, 10).map((m) => m.tUs)).toEqual([3 * S])
     expect(keyframeMarkLefts([2 * S + 40_000], 100, 200, 250, 10).map((m) => m.tUs)).toEqual([2 * S + 40_000]) // meio losango ainda aparece
   })
+  it('keys densos (um por quadro): losangos a menos de 2 px do anterior não viram elementos', () => {
+    // 10 min a 30 fps num item de 1200 px (2 px/s): 18 000 keys → no máximo ~600 losangos
+    const times = Array.from({ length: 18_000 }, (_, i) => Math.round((i * S) / 30))
+    const marks = keyframeMarkLefts(times, 2, 0, 1200, 13)
+    expect(marks.length).toBeLessThanOrEqual(601)
+    for (let i = 1; i < marks.length; i++) expect(marks[i].left - marks[i - 1].left).toBeGreaterThanOrEqual(2)
+    // com zoom suficiente, todos aparecem
+    expect(keyframeMarkLefts(times.slice(0, 30), 200, 0, 1200, 13)).toHaveLength(30)
+  })
 })
 
 describe('planKeyframeDrag', () => {

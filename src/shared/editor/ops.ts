@@ -1768,6 +1768,29 @@ export function pasteKeyframes(p: Project, itemId: string, clip: KeyframeClipboa
   })
 }
 
+/** Recusa do "Seguir conteúdo" num efeito ancorado (ruling R10): a âncora já leva a região pelo clipe. */
+export const TRACK_ATTACHED_MESSAGE = 'O efeito já está ancorado ao clipe; desancore para seguir o conteúdo'
+
+/**
+ * Grava a região calculada pelo "Seguir conteúdo" (track.trackToKeys) no efeito — um passo de desfazer. Só a região
+ * muda (vínculo, escopo, alvo, tempo e o resto ficam). Recusa: faixa bloqueada, item que não é efeito, efeito ancorado
+ * (TRACK_ATTACHED_MESSAGE) e keys fora de ordem/repetidos ou fora de [0, duração].
+ */
+export function applyTrackedRegion(p: Project, itemId: string, region: EffectItem['region']): Project {
+  const f = mustFind(p, itemId)
+  if (f.item.type !== 'effect') throw new EditError('invalid', 'Só efeitos de privacidade podem seguir o conteúdo')
+  assertUnlocked(f.track)
+  if (f.item.attach) throw new EditError('invalid', TRACK_ATTACHED_MESSAGE)
+  const dur = f.item.durationUs
+  for (const a of [region.x, region.y, region.w, region.h, region.rotation]) {
+    const k = a.keys ?? []
+    if (k.some((x, i) => x.tUs < 0 || x.tUs > dur || (i > 0 && x.tUs <= k[i - 1].tUs))) throw new EditError('invalid', 'Keys da região fora de ordem ou fora do efeito')
+  }
+  return edit(p, (d) => {
+    ;(d.tracks[f.trackIndex].items[f.itemIndex] as EffectItem).region = region
+  })
+}
+
 /**
  * Troca o tipo dos efeitos (os outros itens e os que já são do tipo são ignorados). Tarja: borda suave 0
  * (cor exata, irreversível) e sem keys de intensidade (não valem para cor sólida). Saindo da Tarja, a

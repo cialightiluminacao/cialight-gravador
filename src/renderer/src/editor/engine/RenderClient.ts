@@ -5,7 +5,7 @@
 import type { CursorTrackV1 } from '@shared/cursor'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from './mediaUrls'
-import type { ExportJobSpec, RenderIn, RenderOut } from './protocol'
+import type { ExportJobSpec, RenderIn, RenderOut, TrackJobSpec } from './protocol'
 
 type Rendered = Extract<RenderOut, { t: 'rendered' }>
 type ErrorOut = Extract<RenderOut, { t: 'error' }>
@@ -186,6 +186,15 @@ export class RenderClient {
   /** Chunk `seq` gravado: libera o encoder (contrapressão). */
   chunkAck(jobId: string, seq: number): void {
     this.send({ t: 'chunkAck', jobId, seq })
+  }
+
+  /** "Seguir conteúdo": inicia o rastreamento (instância própria, canvas na resolução de análise). */
+  trackStart(job: TrackJobSpec): void {
+    this.send({ t: 'trackStart', job })
+  }
+
+  trackCancel(jobId: string): void {
+    this.send({ t: 'trackCancel', jobId })
   }
 
   /** Mensagens do worker (progresso/chunks de exportação, erros). Devolve a função de remoção. */

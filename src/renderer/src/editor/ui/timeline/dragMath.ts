@@ -239,10 +239,18 @@ export function keyframeMarkLefts(timesUs: Us[], pxPerSec: number, clipFrom: num
   const out: { tUs: Us; left: number }[] = []
   for (const tUs of timesUs) {
     const left = (tUs * pxPerSec) / 1e6 - clipFrom - size / 2
-    if (left + size >= 0 && left <= visW) out.push({ tUs, left })
+    if (left + size < 0 || left > visW) continue
+    // keys densos (um por quadro do "Seguir conteúdo"): losangos a menos de MARK_MIN_GAP_PX do anterior ficam de fora
+    // (seriam o mesmo losango na tela) — no máximo ~visW/MARK_MIN_GAP_PX elementos, em qualquer zoom
+    const prev = out[out.length - 1]
+    if (prev && left - prev.left < MARK_MIN_GAP_PX) continue
+    out.push({ tUs, left })
   }
   return out
 }
+
+/** Distância mínima (px) entre losangos desenhados. */
+export const MARK_MIN_GAP_PX = 2
 
 export interface KeyframeDragInput {
   itemId: string

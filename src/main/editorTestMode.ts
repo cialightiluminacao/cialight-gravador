@@ -7,6 +7,7 @@ import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
 import { laplacianVar, localContrast, magentaBlob, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
 import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShots'
+import { occludedFrame, TEXT_X_EXPR, textX, TRACK_SCENE } from '@shared/testing/trackingScene'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -40,6 +41,9 @@ const REFRAME_COPY_ID = 'p-editor-reframe-copia'
 // realce de cliques e cursor ampliado (F6): o mesmo vídeo do zoom automático; trilha sintética em memória
 // (cursorFxHarness.ts)
 const CURSOR_FX_PROJECT_ID = 'p-editor-cursorfx-test'
+// "Seguir conteúdo" (F6): o texto "CPF…" andando com pausa e oclusão (trackingScene.ts); o harness rastreia e exporta
+// (trackingHarness.ts) e aqui cada quadro exportado é medido
+const TRACKING_PROJECT_ID = 'p-editor-tracking-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -64,6 +68,7 @@ interface HarnessReport {
   anim?: AnimReport
   reframe?: ReframeReport
   cursorFx?: CursorFxReport
+  tracking?: TrackingReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -128,6 +133,12 @@ interface CursorFxReport {
   privacy?: { plain: number; blurred: number }
   sprite?: { tip: { x: number; y: number } | null; expected: { x: number; y: number } | null; whiteH: number; dark: number }
   exportPath?: string; exportError?: string
+}
+interface TrackingReport {
+  error?: string; box0?: PxBox; frames?: number; states?: { ok: number; weak: number; lost: number }; timeline?: string; lost?: number[]; lossMessage?: string; keys?: number
+  analysis?: { width: number; height: number }; trackMs?: number; preview?: { frame: number; tracked: Legib; untracked: Legib }[]; exportPath?: string; exportError?: string
+  /** Medido aqui: legibilidade de cada quadro exportado (÷ o mesmo quadro da fonte) na caixa do texto. */
+  exported?: { frames: number; measured: number; occluded: number; srcMinC: number; worst: { frame: number; c: number; lap: number } | null; legible: { frame: number; c: number; lap: number }[]; error?: string }
 }
 interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>>; pip?: PipBlurReport }
 type PxRect4 = { x0: number; y0: number; x1: number; y1: number }
@@ -301,6 +312,14 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const cursorFxProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Realce de cliques', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: CURSOR_FX_PROJECT_ID }, aCursorFx), aCursorFx.id, 0).project
   rmSync(projects.dirOf(CURSOR_FX_PROJECT_ID), { recursive: true, force: true })
   projects.create(cursorFxProject)
+  // "Seguir conteúdo": o texto andando (x pela mesma conta de trackingScene.textX), com a faixa cinza da oclusão por cima
+  const trackMp4 = join(dir, 'seguir-conteudo-fonte.mp4')
+  const S = TRACK_SCENE
+  await gen(['-f', 'lavfi', '-i', `color=c=0x1e293b:s=${S.width}x${S.height}:r=${S.fps}`, '-t', String(S.durationS), '-vf', `drawtext=${font}:text='${S.text}':fontsize=${S.fontSize}:fontcolor=white:x='${TEXT_X_EXPR}':y=${S.textY},drawbox=x=0:y=${S.occluder.y}:w=${S.width}:h=${S.occluder.h}:color=0x808080:t=fill:enable='between(t,${S.occludeFrom},${S.occludeTo})'`, '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', trackMp4], 'editor: texto andando com oclusão')
+  const aTrack: Asset = { ...assetFromInfo('a_track', trackMp4, statSync(trackMp4), await probe(trackMp4)), status: 'ready' }
+  const trackProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Seguir conteúdo', { width: S.width, height: S.height, fps: S.fps, background: '#000000' }), id: TRACKING_PROJECT_ID }, aTrack), aTrack.id, 0).project
+  rmSync(projects.dirOf(TRACKING_PROJECT_ID), { recursive: true, force: true })
+  projects.create(trackProject)
   // reenquadrar: fundo escuro, quadrado vermelho 24×24 centrado em (1500, 540) e o texto "Senha 4821" (Consolas 72)
   const reframePng = join(dir, 'reenquadrar.png')
   await gen(['-f', 'lavfi', '-i', 'color=c=0x1e293b:s=1920x1080', '-vf', `drawbox=x=1488:y=528:w=24:h=24:color=red:t=fill,${line('Senha 4821', 1320, 760)}`, '-frames:v', '1', '-update', '1', reframePng], 'editor: reenquadrar')
@@ -316,7 +335,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const win = new BrowserWindow({ width: 800, height: 600, show: false, focusable: false, skipTaskbar: true, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
   win.showInactive()
   const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 180 s'] } }), 180_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 240 s'] } }), 240_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
       clearTimeout(timer)
       resolve(r)
@@ -398,6 +417,46 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       ringExported = magentaBlob(new Uint8Array(readFileSync(raw)), 1920, 1080, 3)
     } catch (e) {
       cfx.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
+  // "Seguir conteúdo": TODOS os quadros exportados, na faixa da linha do texto, × os mesmos quadros da fonte
+  const seg5 = result.report.tracking
+  if (seg5?.exportPath && seg5.box0) {
+    try {
+      const S2 = TRACK_SCENE
+      const band = async (file: string, tag: string): Promise<Uint8Array> => {
+        const raw = join(dir, `seguir-${tag}.rgb`)
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-vf', `crop=${S2.width}:${S2.band.h}:0:${S2.band.y}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: `teste: faixa do texto (${tag})` })
+        const d = new Uint8Array(readFileSync(raw))
+        rmSync(raw, { force: true })
+        return d
+      }
+      const src = await band(trackMp4, 'fonte')
+      const exp = await band(seg5.exportPath, 'exportado')
+      const fsz = S2.width * S2.band.h * 3
+      const frames = Math.min(src.length, exp.length) / fsz
+      const out: NonNullable<TrackingReport['exported']> = { frames: exp.length / fsz, measured: 0, occluded: 0, srcMinC: Infinity, worst: null, legible: [] }
+      for (let n = 0; n < frames; n++) {
+        // a oclusão (e as bordas dela, meio quadro) cobre o texto na própria fonte: não há o que ler
+        if (occludedFrame(n) !== 'no') {
+          out.occluded++
+          continue
+        }
+        const dx = Math.round(textX(n / S2.fps) - textX(0))
+        const box: PxBox = { x0: seg5.box0.x0 + dx, y0: seg5.box0.y0 - S2.band.y, x1: seg5.box0.x1 + dx, y1: seg5.box0.y1 - S2.band.y }
+        const s0 = src.subarray(n * fsz, (n + 1) * fsz), e0 = exp.subarray(n * fsz, (n + 1) * fsz)
+        // a caixa tem de estar sobre o texto nítido da fonte (senão a razão mediria fundo liso)
+        const srcC = localContrast(s0, S2.width, S2.band.h, box, 4, 3)
+        out.srcMinC = Math.min(out.srcMinC, Math.round(srcC))
+        const c = localContrast(e0, S2.width, S2.band.h, box, 4, 3) / srcC
+        const lap = laplacianVar(e0, S2.width, S2.band.h, box, 4, 3) / laplacianVar(s0, S2.width, S2.band.h, box, 4, 3)
+        out.measured++
+        if (!out.worst || c > out.worst.c) out.worst = { frame: n, c: Math.round(c * 1e4) / 1e4, lap: Math.round(lap * 1e4) / 1e4 }
+        if (!(c < 0.15 && lap < 0.2)) out.legible.push({ frame: n, c: Math.round(c * 1e4) / 1e4, lap: Math.round(lap * 1e4) / 1e4 })
+      }
+      seg5.exported = out
+    } catch (e) {
+      seg5.exported = { frames: 0, measured: 0, occluded: 0, srcMinC: 0, worst: null, legible: [], error: e instanceof Error ? e.message : String(e) }
     }
   }
   win.destroy()
@@ -659,6 +718,28 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!arrow?.tip && !!arrow.expected && Math.abs(arrow.tip.x - arrow.expected.x) <= 3 && Math.abs(arrow.tip.y - arrow.expected.y) <= 4 && arrow.whiteH >= 22 && arrow.whiteH <= 40 && arrow.dark > 20, `cursor ampliado: ponta da seta em (${arrow?.tip?.x}, ${arrow?.tip?.y}) × ponto do cursor (${arrow?.expected?.x.toFixed(2)}, ${arrow?.expected?.y.toFixed(2)}) (±3/±4 px), seta branca de ${arrow?.whiteH} px de altura (22–40 com escala 1,8), ${arrow?.dark} px de contorno preto`, failures)
   const ip = cf?.identity?.ring
   check(!!ringExported && !!ip && Math.hypot(ringExported.cx - ip.cx, ringExported.cy - ip.cy) <= 1.5 && Math.abs(ringExported.w - ip.w) <= 3, `realce de cliques: exportação = preview no quadro do clique — anel exportado ${at(ringExported)} (${ringExported?.w} px; preview ${at(ip ?? null)}, ${ip?.w} px) ±1,5 px ${cf?.exportError ?? ''}`, failures)
+
+  // "Seguir conteúdo" (F6): legível = contraste local ≥ 0,15 ou laplaciano ≥ 0,2 do mesmo quadro sem efeito (limiares do
+  // F2, calibrados no texto de 47 px; aqui 48 px). Ilegível exige os dois abaixo.
+  const sc5 = r.tracking
+  console.log(`seguir conteúdo: ${JSON.stringify({ ...sc5, exported: sc5?.exported ? { ...sc5.exported, legible: sc5.exported.legible.slice(0, 10) } : undefined })}`)
+  check(!!sc5 && !sc5.error, `seguir conteúdo: harness sem erro (${sc5?.error ?? ''})`, failures)
+  const fps5 = TRACK_SCENE.fps
+  check(sc5?.frames === TRACK_SCENE.durationS * fps5, `seguir conteúdo: o worker real analisou todos os quadros do 0 ao fim (${sc5?.frames}, ${sc5?.analysis?.width}×${sc5?.analysis?.height}, ${sc5?.trackMs} ms)`, failures)
+  const lostAt5 = sc5?.lost ?? []
+  check(lostAt5.length === 1 && lostAt5[0] >= TRACK_SCENE.occludeFrom * 1e6 - 1 && lostAt5[0] <= TRACK_SCENE.occludeFrom * 1e6 + 2e6 / fps5, `seguir conteúdo: uma perda, no início da oclusão (${TRACK_SCENE.occludeFrom} s): ${JSON.stringify(lostAt5)}`, failures)
+  check(!!sc5?.lossMessage && sc5.lossMessage.startsWith('Rastreamento perdido em 00:02,2 — a região foi ampliada'), `seguir conteúdo: toast da perda "${sc5?.lossMessage}"`, failures)
+  const tl5 = sc5?.timeline ?? ''
+  const before5 = tl5.slice(0, Math.round(TRACK_SCENE.occludeFrom * fps5) - 1), after5 = tl5.slice(Math.round((TRACK_SCENE.occludeTo + 0.2) * fps5))
+  check(before5.length > 0 && !before5.includes('l') && after5.length > 0 && !after5.includes('l'), `seguir conteúdo: confiante antes da oclusão e reencontrado depois dela (${tl5})`, failures)
+  check((sc5?.keys ?? 0) >= TRACK_SCENE.durationS * fps5, `seguir conteúdo: um key por quadro analisado (${sc5?.keys})`, failures)
+  const unreadableL = (l?: Legib): boolean => !!l && l.c < 0.15 && l.lap < 0.2
+  for (const pv of sc5?.preview ?? []) check(unreadableL(pv.tracked), `seguir conteúdo (preview, quadro ${pv.frame}): texto ilegível sob o blur rastreado (contraste ${pv.tracked.c}, laplaciano ${pv.tracked.lap})`, failures)
+  const ctl5 = sc5?.preview?.find((x) => x.frame === 105)
+  check(!!ctl5 && ctl5.untracked.c >= 0.5, `seguir conteúdo (controle): sem rastrear, o texto sai de baixo da região parada e fica legível no quadro 105 (contraste ${ctl5?.untracked.c})`, failures)
+  const ex5 = sc5?.exported
+  check(!!ex5 && !ex5.error && ex5.frames === TRACK_SCENE.durationS * fps5 && ex5.measured > 90 && ex5.srcMinC >= 120, `seguir conteúdo (exportação): ${ex5?.frames} quadros, ${ex5?.measured} medidos (texto nítido na fonte em todos: contraste ≥ ${ex5?.srcMinC} ≥ 120) + ${ex5?.occluded} na oclusão ${ex5?.error ?? sc5?.exportError ?? ''}`, failures)
+  check(!!ex5 && ex5.legible.length === 0, `seguir conteúdo (exportação): o texto é ilegível em TODO quadro exportado — pior ${JSON.stringify(ex5?.worst)}; legíveis ${JSON.stringify(ex5?.legible.slice(0, 5))}`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

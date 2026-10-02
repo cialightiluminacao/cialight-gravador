@@ -56,8 +56,13 @@ export function evalAnim(a: Anim<number>, tUs: Us): number {
   if (tUs <= k[0].tUs) return k[0].value
   const last = k[k.length - 1]
   if (tUs >= last.tUs) return last.value
-  let i = 0
-  while (i < k.length - 2 && tUs >= k[i + 1].tUs) i++
+  // busca binária: o último key com tUs ≤ instante (curvas densas do "Seguir conteúdo": um key por quadro)
+  let i = 0, hi = k.length - 1
+  while (hi - i > 1) {
+    const mid = (i + hi) >> 1
+    if (tUs >= k[mid].tUs) i = mid
+    else hi = mid
+  }
   const k0 = k[i], k1 = k[i + 1]
   const p = (tUs - k0.tUs) / (k1.tUs - k0.tUs)
   return k0.value + (k1.value - k0.value) * easeValue(k0.ease, p)
