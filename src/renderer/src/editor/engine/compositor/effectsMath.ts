@@ -34,20 +34,34 @@ function regionMinSidePx(region: { w: number; h: number }, W: number, H: number)
 }
 
 /**
- * Raio efetivo do blur (preview e exportação): o maior entre o raio pela altura do quadro e
- * REGION_BLUR_K × menor lado da região × intensidade. Uma região justa num texto grande borra na escala das
- * letras (só pela altura, 60 deixava legível um texto de 47 px em 1080p). Invertido: a região é a parte nítida,
- * então vale só o raio pela altura.
+ * Lado de referência da área escondida: o menor lado da região; invertido ("Borrar tudo menos…"), a área escondida
+ * é o quadro inteiro fora da região, então o menor lado do quadro (com só o raio pela altura, 60 deixava legível um
+ * texto de 47 px fora da região).
  */
-export function effectBlurRadiusPx(strength: number, region: { w: number; h: number }, W: number, H: number, invert = false): number {
-  const base = blurRadiusPx(strength, H)
-  return invert ? base : Math.max(base, REGION_BLUR_K * regionMinSidePx(region, W, H) * clampStrength(strength))
+function hiddenSidePx(region: { w: number; h: number }, W: number, H: number, invert: boolean): number {
+  return invert ? Math.min(W, H) : regionMinSidePx(region, W, H)
 }
 
-/** Lado efetivo do bloco da pixelização: maior entre o bloco pela altura e REGION_PIXEL_K × menor lado × intensidade. */
+/**
+ * Raio efetivo do blur (preview e exportação): o maior entre o raio pela altura do quadro e
+ * REGION_BLUR_K × lado da área escondida × intensidade. Uma região justa num texto grande borra na escala das
+ * letras (só pela altura, 60 deixava legível um texto de 47 px em 1080p).
+ */
+export function effectBlurRadiusPx(strength: number, region: { w: number; h: number }, W: number, H: number, invert = false): number {
+  return Math.max(blurRadiusPx(strength, H), REGION_BLUR_K * hiddenSidePx(region, W, H, invert) * clampStrength(strength))
+}
+
+/** Lado efetivo do bloco da pixelização: maior entre o bloco pela altura e REGION_PIXEL_K × lado da área escondida × intensidade. */
 export function effectPixelBlockPx(strength: number, region: { w: number; h: number }, W: number, H: number, invert = false): number {
-  const base = pixelBlockPx(strength, H)
-  return invert ? base : Math.max(base, REGION_PIXEL_K * regionMinSidePx(region, W, H) * clampStrength(strength))
+  return Math.max(pixelBlockPx(strength, H), REGION_PIXEL_K * hiddenSidePx(region, W, H, invert) * clampStrength(strength))
+}
+
+/**
+ * Lado do bloco da pixelização em 1/256 px (inteiro ≥ 512, ou seja ≥ 2 px): os shaders decidem o bloco de cada
+ * pixel com conta inteira exata, ((2i + 1)·128) / q, igual em todos os passes e no teste de render.
+ */
+export function pixelCellQ(cellPx: number): number {
+  return Math.max(512, Math.round(cellPx * 256))
 }
 
 /** Redução da resolução antes do blur (ruling F0: sempre ≥ 2×). */

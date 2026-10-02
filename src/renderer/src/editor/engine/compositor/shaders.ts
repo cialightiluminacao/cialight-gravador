@@ -155,10 +155,60 @@ void main() {
   o = acc;
 }`
 
-// Aplicação do efeito com máscara: u_src = cópia do que está abaixo (W×H), u_fx = resultado do blur (escala 1/ds).
+// Pixelização: bloco de u_q/256 px (effectsMath.pixelCellQ). O pixel i (centro i + ½) é do bloco
+// ((2i + 1)·128) / u_q em inteiros: conta exata, idêntica nos três shaders e no teste (com divisão em float a GPU
+// arredondava diferente em cada shader e a linha da borda do bloco caía no bloco vizinho).
+// Passe 1 (horizontal): texel (bx, j) = média dos pixels da linha j do bloco bx (grade presa ao quadro). Média da
+// caixa inteira, não um ponto: com conteúdo andando sob a grade, cada quadro amostrar pontos diferentes refaria o detalhe.
+export const FS_PIXH = `#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+uniform int u_q;
+out vec4 o;
+void main() {
+  int bx = int(gl_FragCoord.x);
+  int j = int(gl_FragCoord.y);
+  int mx = textureSize(u_src, 0).x - 1;
+  int x0 = max(0, bx * u_q / 256 - 1);
+  int x1 = min(mx, (bx + 1) * u_q / 256 + 1);
+  vec4 acc = vec4(0.0);
+  float n = 0.0;
+  for (int x = x0; x <= x1; x++) {
+    if ((2 * x + 1) * 128 / u_q != bx) continue;
+    acc += texelFetch(u_src, ivec2(x, j), 0);
+    n += 1.0;
+  }
+  o = n > 0.0 ? acc / n : vec4(0.0);
+}`
+
+// Pixelização, passe 2 (vertical): texel (bx, by) = média das linhas do bloco by (by contado de CIMA, como pd em
+// FS_APPLY: linha GL j ↔ k = H − 1 − j) no resultado do passe 1 → média exata do bloco.
+export const FS_PIXV = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex;
+uniform int u_q;
+uniform int u_h;
+out vec4 o;
+void main() {
+  int bx = int(gl_FragCoord.x);
+  int by = int(gl_FragCoord.y);
+  int k0 = max(0, by * u_q / 256 - 1);
+  int k1 = min(u_h - 1, (by + 1) * u_q / 256 + 1);
+  vec4 acc = vec4(0.0);
+  float n = 0.0;
+  for (int k = k0; k <= k1; k++) {
+    if ((2 * k + 1) * 128 / u_q != by) continue;
+    acc += texelFetch(u_tex, ivec2(bx, u_h - 1 - k), 0);
+    n += 1.0;
+  }
+  o = n > 0.0 ? acc / n : vec4(0.0);
+}`
+
+// Aplicação do efeito com máscara: u_src = cópia do que está abaixo (W×H), u_fx = resultado do blur (escala 1/ds)
+// ou, na pixelização, a média de cada bloco (texel (bx, by), by de cima).
 // Região em px do quadro com y para baixo: centro, meia-largura/altura, rotação horária (cos, sin); máscara
 // 1 dentro, borda suave para FORA com largura u_feather (0 = borda dura, cobre exatamente a região);
-// u_invert: efeito fora da região, borda suave para DENTRO dela (fora = 100 % efeito). u_mode: 0 blur, 1 pixelização (amostra no centro do bloco, grade presa ao quadro), 2 sólido
+// u_invert: efeito fora da região, borda suave para DENTRO dela (fora = 100 % efeito). u_mode: 0 blur, 1 pixelização (média do bloco, grade presa ao quadro), 2 sólido
 // (cor exata; × alpha do que está abaixo, que no acumulado é 1). mix com m ∈ {0,1} devolve os pixels exatos.
 export const FS_APPLY = `#version 300 es
 precision highp float;
@@ -167,7 +217,7 @@ uniform sampler2D u_fx;
 uniform vec2 u_fxScale;
 uniform vec2 u_frame;
 uniform int u_mode;
-uniform float u_cell;
+uniform int u_q;
 uniform vec3 u_color;
 uniform vec2 u_center;
 uniform vec2 u_half;
@@ -206,8 +256,9 @@ void main() {
   if (u_mode == 0) {
     e = texture(u_fx, p * u_fxScale);
   } else if (u_mode == 1) {
-    vec2 c = clamp((floor(pd / u_cell) + 0.5) * u_cell, vec2(0.5), u_frame - 0.5);
-    e = texture(u_src, vec2(c.x, u_frame.y - c.y) / u_frame);
+    // pixel (i, k), k contado de cima como pd; bloco pela mesma conta inteira dos passes
+    ivec2 ik = ivec2(int(p.x), int(u_frame.y) - 1 - int(p.y));
+    e = texelFetch(u_fx, (2 * ik + 1) * 128 / u_q, 0);
   } else {
     e = vec4(u_color * s.a, s.a);
   }

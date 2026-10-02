@@ -2,7 +2,7 @@ import { createEffectItem, createMediaItem, type EffectPresetId, type EffectRegi
 import type { EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
-import { effectPixelBlockPx, featherPx, regionDistPx, regionScissor } from '../engine/compositor/effectsMath'
+import { effectPixelBlockPx, featherPx, pixelCellQ, regionDistPx, regionScissor } from '../engine/compositor/effectsMath'
 
 // Cenários de pixel do passe de efeitos (F2) para o teste de render (CIALIGHT_TEST=editor-render).
 // Projeto base p-editor-effects-test (testsrc2 1080p + ruído + PNG vermelho, criado pelo main); as variantes
@@ -88,6 +88,72 @@ function diffCentroidX(a: Img, b: Img, thr: number): { cx: number; n: number } {
   return { cx: n ? sx / n / W : NaN, n }
 }
 
+/**
+ * Blocos da pixelização inteiramente dentro da região (grade presa ao quadro, célula pelo centro do pixel): lista
+ * de pixels [x, y] (y para baixo) de cada bloco.
+ */
+function fullBlocks(r: Region, cell: number): [number, number][][] {
+  const px0 = (r.x - r.w / 2) * W
+  const px1 = (r.x + r.w / 2) * W
+  const py0 = (r.y - r.h / 2) * H
+  const py1 = (r.y + r.h / 2) * H
+  const out: [number, number][][] = []
+  for (let j = Math.ceil(py0 / cell); (j + 1) * cell <= py1; j++) {
+    for (let i = Math.ceil(px0 / cell); (i + 1) * cell <= px1; i++) {
+      const b: [number, number][] = []
+      for (let y = Math.ceil(j * cell - 0.5); y + 0.5 < (j + 1) * cell; y++) for (let x = Math.ceil(i * cell - 0.5); x + 0.5 < (i + 1) * cell; x++) b.push([x, y])
+      out.push(b)
+    }
+  }
+  return out
+}
+
+interface Box { x0: number; y0: number; x1: number; y1: number }
+
+/** Caixa dos pixels claros (texto branco, luma > 128) entre as linhas y0 e y1. */
+function brightBox(d: Img, y0: number, y1: number): Box | null {
+  let b: Box | null = null
+  for (let y = y0; y < y1; y++) {
+    for (let x = 0; x < W; x++) {
+      if (luma(d, (y * W + x) * 4) <= 128) continue
+      b = b ? { x0: Math.min(b.x0, x), y0: Math.min(b.y0, y), x1: Math.max(b.x1, x), y1: Math.max(b.y1, y) } : { x0: x, y0: y, x1: x, y1: y }
+    }
+  }
+  return b
+}
+
+/** Contraste local da linha de texto (como o E2E F2): caixa 3×3 na luma e p99 − p1 dentro da caixa + 4 px. */
+function localContrast(d: Img, b: Box, pad = 4): number {
+  const vals: number[] = []
+  for (let y = Math.max(1, b.y0 - pad); y <= Math.min(H - 2, b.y1 + pad); y++) {
+    for (let x = Math.max(1, b.x0 - pad); x <= Math.min(W - 2, b.x1 + pad); x++) {
+      let s = 0
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += luma(d, ((y + dy) * W + x + dx) * 4)
+      vals.push(s / 9)
+    }
+  }
+  vals.sort((p, q) => p - q)
+  const at = (q: number): number => vals[Math.min(vals.length - 1, Math.floor(q * (vals.length - 1)))]
+  return at(0.99) - at(0.01)
+}
+
+/** Variância do laplaciano (4 vizinhos) da luma na caixa + 4 px (como o E2E F2). */
+function lapVar(d: Img, b: Box, pad = 4): number {
+  let n = 0
+  let s = 0
+  let s2 = 0
+  const L = (x: number, y: number): number => luma(d, (y * W + x) * 4)
+  for (let y = Math.max(1, b.y0 - pad); y <= Math.min(H - 2, b.y1 + pad); y++) {
+    for (let x = Math.max(1, b.x0 - pad); x <= Math.min(W - 2, b.x1 + pad); x++) {
+      const l = 4 * L(x, y) - L(x - 1, y) - L(x + 1, y) - L(x, y - 1) - L(x, y + 1)
+      n++
+      s += l
+      s2 += l * l
+    }
+  }
+  return s2 / n - (s / n) ** 2
+}
+
 /** Nome da GPU (WebGL2 desta página: o worker usa o mesmo adaptador). */
 function rendererName(): string {
   const gl = document.createElement('canvas').getContext('webgl2')
@@ -137,7 +203,8 @@ export async function effectsCheck(): Promise<Record<string, unknown>> {
 
     // pixelização: grade presa ao quadro (célula pelo centro do pixel), só blocos inteiros dentro da região
     const rp = regionOf(pix)
-    const cell = effectPixelBlockPx(pix.strength.value, rp, W, H, pix.invert)
+    // bloco quantizado como no compositor (1/256 px): q/256 é exato em double, as contas abaixo também
+    const cell = pixelCellQ(effectPixelBlockPx(pix.strength.value, rp, W, H, pix.invert)) / 256
     const px0 = (rp.x - rp.w / 2) * W
     const px1 = (rp.x + rp.w / 2) * W
     const py0 = (rp.y - rp.h / 2) * H
@@ -280,6 +347,58 @@ export async function effectsCheck(): Promise<Record<string, unknown>> {
       // o efeito agiu dentro de cada caixa (bordas das barras do testsrc2 borradas)
       changed: tailBoxes.map((b) => maxDiff(ref, tailImg, b.x0, b.y0, b.x1, b.y1))
     }
+
+    // ---- pixelização = média do bloco: ruído andando sob a grade fixa (quadro a quadro, pontos diferentes) ----
+    const nv = noiseItem.visual!
+    const noiseMoving: MediaItem = { ...noiseItem, visual: { ...nv, transform: { ...nv.transform, x: { value: 0.5, keys: [{ tUs: 0, value: 0.45, ease: 'linear' }, { tUs: 4_000_000, value: 0.55, ease: 'linear' }] } } } }
+    const movingOnly: Project = { ...base, tracks: [fxTrack('t_noise', noiseMoving)] }
+    const pixN = effect('pixelate', { x: 0.5, y: 0.5, w: 0.3, h: 0.3 }, {}, 4_000_000)
+    const rn = regionOf(pixN)
+    const ncell = pixelCellQ(effectPixelBlockPx(pixN.strength.value, rn, W, H, false)) / 256
+    const pm = { blocks: 0, maxErr: 0, maxDev: 0, cell: ncell }
+    for (const t of [1_000_000, 1_033_333]) {
+      const src = await frame(movingOnly, t)
+      const img = await frame({ ...movingOnly, tracks: [...movingOnly.tracks, fxTrack('t_pixn', pixN)] }, t)
+      for (const b of fullBlocks(rn, ncell)) {
+        const sum = [0, 0, 0]
+        let n = 0
+        const lo = [255, 255, 255]
+        const hi = [0, 0, 0]
+        for (const [x, y] of b) {
+          const k = (y * W + x) * 4
+          for (let c = 0; c < 3; c++) {
+            sum[c] += src[k + c]
+            lo[c] = Math.min(lo[c], img[k + c])
+            hi[c] = Math.max(hi[c], img[k + c])
+          }
+          n++
+        }
+        const [cx0, cy0] = b[Math.floor(b.length / 2)]
+        const kc = (cy0 * W + cx0) * 4
+        pm.blocks++
+        pm.maxErr = Math.max(pm.maxErr, ...sum.map((s, c) => Math.abs(s / n - img[kc + c])))
+        pm.maxDev = Math.max(pm.maxDev, ...hi.map((h, c) => h - lo[c]))
+      }
+    }
+    pm.maxErr = Math.round(pm.maxErr * 100) / 100
+    out.pixelateMean = pm
+
+    // ---- "Borrar tudo menos…" sobre texto de 47 px fora da região (mesma métrica de legibilidade do E2E) ----
+    const textAsset = base.assets.find((a) => a.id === 'a_text')!
+    const textOnly: Project = { ...base, tracks: [fxTrack('t_text', { ...createMediaItem(textAsset, 0, 'video'), durationUs: DUR })] }
+    const tRef = await frame(textOnly, 1_000_000)
+    const lines = [brightBox(tRef, 150, 320), brightBox(tRef, 760, 960)].filter((b): b is Box => !!b)
+    const byStrength: { strength: number; lines: { c: number; lap: number }[] }[] = []
+    let centerMaxDiff = 0
+    for (const s of [80, 50, 35, 20]) {
+      const inv2 = effect('blurAllExcept', { x: 0.5, y: 0.5, w: 0.3, h: 0.1 }, s === 80 ? {} : { strength: { value: s } })
+      const img = await frame({ ...textOnly, tracks: [...textOnly.tracks, fxTrack('t_inv2', inv2)] }, 1_000_000)
+      const r3 = (v: number): number => Math.round(v * 1e4) / 1e4
+      byStrength.push({ strength: inv2.strength.value, lines: lines.map((b) => ({ c: r3(localContrast(img, b) / localContrast(tRef, b)), lap: r3(lapVar(img, b) / lapVar(tRef, b)) })) })
+      // miolo (região menos a borda suave para dentro): idêntico
+      if (s === 80) centerMaxDiff = maxDiff(tRef, img, Math.ceil(0.35 * W) + 40, Math.ceil(0.45 * H) + 40, Math.floor(0.65 * W) - 40, Math.floor(0.55 * H) - 40)
+    }
+    out.invertText = { boxes: lines.length, byStrength, centerMaxDiff }
 
     // ---- desempenho: 1080p, reprodução sequencial, sem efeito × 3 blurs fortes (intensidade 100) ----
     client.setProject(base, mediaUrlsFor(base, 'preview'), true)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { blurRadiusPx, downsampleFactor, effectBlurRadiusPx, effectPixelBlockPx, featherPx, gaussianWeights, pixelBlockPx, REGION_BLUR_K, regionDistPx, regionScissor } from './effectsMath'
+import { blurRadiusPx, downsampleFactor, effectBlurRadiusPx, effectPixelBlockPx, featherPx, gaussianWeights, pixelBlockPx, pixelCellQ, REGION_BLUR_K, regionDistPx, regionScissor } from './effectsMath'
 
 describe('blurRadiusPx', () => {
   it('0–100 → 0…4 % da altura de saída; 60 em 1080p ≈ 26 px', () => {
@@ -45,9 +45,14 @@ describe('effectBlurRadiusPx (raio também proporcional à região)', () => {
   it('mesma aparência em qualquer resolução (escala com a saída)', () => {
     expect(effectBlurRadiusPx(80, text, 1280, 720) / 720).toBeCloseTo(effectBlurRadiusPx(80, text, 1920, 1080) / 1080, 10)
   })
-  it('lado da região limitado ao quadro; inverter usa só o raio pela altura (a região é a parte nítida)', () => {
+  it('lado da região limitado ao quadro; inverter usa o menor lado do QUADRO (a área escondida é o quadro fora da região)', () => {
     expect(effectBlurRadiusPx(100, { w: 4, h: 4 }, 1920, 1080)).toBeCloseTo(1.25 * 1080, 5)
-    expect(effectBlurRadiusPx(60, { w: 0.5, h: 0.5 }, 1920, 1080, true)).toBeCloseTo(blurRadiusPx(60, 1080), 10)
+    // invertido: o tamanho da região (a parte nítida) não importa
+    expect(effectBlurRadiusPx(80, { w: 0.5, h: 0.5 }, 1920, 1080, true)).toBeCloseTo(1.25 * 1080 * 0.8, 5)
+    expect(effectBlurRadiusPx(80, { w: 0.05, h: 0.05 }, 1920, 1080, true)).toBeCloseTo(1.25 * 1080 * 0.8, 5)
+    expect(effectBlurRadiusPx(80, { w: 0.5, h: 0.5 }, 1280, 720, true) / 720).toBeCloseTo(effectBlurRadiusPx(80, { w: 0.5, h: 0.5 }, 1920, 1080, true) / 1080, 10)
+    // a 50 (piso do aviso) o invertido é ≥ ao blur normal de qualquer região a 50
+    expect(effectBlurRadiusPx(50, { w: 0.2, h: 0.2 }, 1920, 1080, true)).toBeGreaterThanOrEqual(effectBlurRadiusPx(50, { w: 1, h: 1 }, 1920, 1080))
     expect(effectBlurRadiusPx(60, { w: -0.4, h: -0.3 }, 1920, 1080)).toBeCloseTo(1.25 * 324 * 0.6, 5)
   })
 })
@@ -57,7 +62,7 @@ describe('effectPixelBlockPx (bloco também proporcional à região)', () => {
     expect(effectPixelBlockPx(50, { w: 0.3, h: 0.3 }, 1920, 1080)).toBeCloseTo(Math.max(pixelBlockPx(50, 1080), 0.35 * 324 * 0.5), 5)
     expect(effectPixelBlockPx(50, { w: 0.2, h: 0.1 }, 1920, 1080)).toBeCloseTo(pixelBlockPx(50, 1080), 10)
     expect(effectPixelBlockPx(0, { w: 1, h: 1 }, 1920, 1080)).toBe(2)
-    expect(effectPixelBlockPx(100, { w: 0.6, h: 0.6 }, 1920, 1080, true)).toBe(pixelBlockPx(100, 1080))
+    expect(effectPixelBlockPx(100, { w: 0.2, h: 0.2 }, 1920, 1080, true)).toBeCloseTo(0.35 * 1080, 5)
   })
 })
 
@@ -197,5 +202,14 @@ describe('regionDistPx', () => {
     expect(regionDistPx(r, 960 + 192 + 20, 540, 1920, 1080)).toBeCloseTo(20, 6)
     expect(regionDistPx(r, 960, 540 - 54 - 7, 1920, 1080)).toBeCloseTo(7, 6)
     expect(regionDistPx(r, 960, 540, 1920, 1080)).toBeLessThan(0)
+  })
+})
+
+describe('pixelCellQ (bloco da pixelização em 1/256 px)', () => {
+  it('arredonda para 1/256 px, nunca abaixo de 2 px; q/256 é exato e a conta inteira do shader bate com floor((i + ½)/célula)', () => {
+    expect(pixelCellQ(56.7)).toBe(14515)
+    expect(pixelCellQ(1)).toBe(512)
+    const q = pixelCellQ(56.7)
+    for (let i = 0; i < 1920; i++) expect(Math.floor(((2 * i + 1) * 128) / q)).toBe(Math.floor((i + 0.5) / (q / 256)))
   })
 })

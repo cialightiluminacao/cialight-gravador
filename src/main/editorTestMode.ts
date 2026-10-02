@@ -51,6 +51,10 @@ interface EffectsReport {
   /** maior diferença por canal fora das regiões (+ feather + 2 px) com efeitos × sem */
   outsideMaxDiff?: number
   pixelate?: { blocks: number; maxDev: number; changedMaxDiff: number; cell: number }
+  /** pixelização sobre ruído em movimento: cor de cada bloco × média da fonte no bloco (2 quadros) */
+  pixelateMean?: { blocks: number; maxErr: number; maxDev: number; cell: number }
+  /** "Borrar tudo menos…" sobre texto fora da região: contraste local e laplaciano saída/fonte por linha de texto */
+  invertText?: { boxes: number; byStrength: { strength: number; lines: { c: number; lap: number }[] }[]; centerMaxDiff: number }
   solid?: { pixels: number; wrong: number; sample: number[] }
   ellipse?: { cornerDiff: number; centerDetail: { ref: number; fx: number } }
   invert?: { centerMaxDiff: number; cornerDetail: { ref: number; fx: number } }
@@ -162,11 +166,17 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const noise = join(dir, 'ruido.png')
   await gen(['-f', 'lavfi', '-i', 'nullsrc=s=1920x1080,format=gray,geq=lum=random(1)*255', '-frames:v', '1', '-update', '1', noise], 'editor: ruído')
   const aNoise = assetFromInfo('a_noise', noise, statSync(noise), await probe(noise))
+  // texto branco de ~47 px de altura (Consolas 72) fora da faixa central: legibilidade com "Borrar tudo menos…"
+  const textPng = join(dir, 'texto.png')
+  const font = "fontfile='C\\:/Windows/Fonts/consola.ttf'"
+  const line = (text: string, x: number, y: number): string => `drawtext=${font}:text='${text}':fontsize=72:fontcolor=white:x=${x}:y=${y}`
+  await gen(['-f', 'lavfi', '-i', 'color=c=0x1e293b:s=1920x1080', '-vf', `${line('CPF 123.456.789-00', 200, 200)},${line('Senha 4821', 1100, 820)}`, '-frames:v', '1', '-update', '1', textPng], 'editor: texto')
+  const aText = assetFromInfo('a_text', textPng, statSync(textPng), await probe(textPng))
   const fxBase = createEmptyProject('Teste de efeitos', { width: 1920, height: 1080, fps: 30, background: '#000000' })
   const fxProject: Project = {
     ...fxBase,
     id: EFFECTS_PROJECT_ID,
-    assets: [aVideo, aNoise, aRed],
+    assets: [aVideo, aNoise, aRed, aText],
     tracks: [track('t_video', 'Vídeo', { ...createMediaItem(aVideo, 0, 'video'), durationUs: 3_000_000 })]
   }
   rmSync(projects.dirOf(EFFECTS_PROJECT_ID), { recursive: true, force: true })
@@ -235,6 +245,16 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(fx?.outsideMaxDiff !== undefined && fx.outsideMaxDiff <= 2, `fora das regiões + feather: idêntico ao quadro sem efeito (diferença máx. ${fx?.outsideMaxDiff})`, failures)
   const pz = fx?.pixelate
   check(!!pz && pz.blocks >= 20 && pz.maxDev <= 3 && pz.changedMaxDiff > 50, `pixelização: blocos uniformes (${pz?.blocks} blocos de ${pz?.cell?.toFixed(1)} px, desvio máx. ${pz?.maxDev}; região alterada, dif. máx. ${pz?.changedMaxDiff})`, failures)
+  const pm = fx?.pixelateMean
+  check(!!pm && pm.blocks >= 20 && pm.maxErr <= 2 && pm.maxDev <= 3, `pixelização = média do bloco (ruído em movimento, 2 quadros): ${pm?.blocks} blocos de ${pm?.cell?.toFixed(1)} px, erro máx. ${pm?.maxErr} da média da fonte (±2), desvio interno ${pm?.maxDev}`, failures)
+  const itx = fx?.invertText
+  const legible = (s: number): { c: number; lap: number }[] | undefined => itx?.byStrength.find((b) => b.strength === s)?.lines
+  console.log(`invertido sobre texto (contraste local / laplaciano, saída ÷ fonte): ${JSON.stringify(itx?.byStrength)}`)
+  for (const s of [80, 50]) {
+    const ls = legible(s)
+    check(!!ls && ls.length === 2 && ls.every((l) => l.c < 0.15 && l.lap < 0.2), `"Borrar tudo menos…" a ${s}${s === 80 ? ' (preset)' : ' (piso do aviso)'}: texto de 47 px fora da região ilegível (contraste ${ls?.map((l) => l.c.toFixed(3))} < 0,15; laplaciano ${ls?.map((l) => l.lap.toFixed(4))} < 0,2)`, failures)
+  }
+  check(!!itx && itx.centerMaxDiff <= 2, `"Borrar tudo menos…": miolo da região intocado (dif. ${itx?.centerMaxDiff})`, failures)
   const so = fx?.solid
   check(!!so && so.pixels > 10_000 && so.wrong === 0, `tarja #123456 feather 0: todos os pixels da região exatos (${so?.wrong} errados de ${so?.pixels}; amostra ${so?.sample})`, failures)
   const el = fx?.ellipse
