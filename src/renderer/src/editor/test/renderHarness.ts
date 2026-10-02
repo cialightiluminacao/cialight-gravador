@@ -6,6 +6,7 @@ import { AudioClient } from '../engine/audio/AudioClient'
 import { PlaybackController } from '../engine/PlaybackController'
 import { useEditorStore } from '../state/editorStore'
 import { createEditorEngine } from '../ui/editorEngine'
+import { effectsCheck } from './effectsHarness'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -81,6 +82,7 @@ export async function runRenderHarness(projectId: string): Promise<void> {
     report.playback = await playbackCheck(client, project)
     client.dispose()
     report.watchdog = await watchdogCheck(project)
+    report.effects = await effectsCheck()
     ok = true
   } catch (e) {
     errors.push(e instanceof Error ? (e.stack ?? e.message) : String(e))

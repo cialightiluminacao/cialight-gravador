@@ -3,9 +3,9 @@ import { createHash } from 'crypto'
 import { execFile } from 'child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
+import type { Asset, EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import type { ExportOptions } from '@shared/types'
-import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
+import { createEffectItem, createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset, deleteRange, updateItem } from '@shared/editor/ops'
 import { clampPip, pipPixelRect, pipRectAt } from '@shared/compositor/pipMath'
 import { untaggedFamily } from '@shared/editor/sourceColor'
@@ -42,6 +42,12 @@ const BT601 = ['-colorspace', 'smpte170m', '-color_primaries', 'smpte170m', '-co
 const COLOR_601 = 'p-editor-export-cor-601'
 const COLOR_UNTAGGED = 'p-editor-export-cor-sem-marcacao'
 const COLOR_UNTAGGED_SD = 'p-editor-export-cor-sem-marcacao-sd'
+// efeitos (F2): projeto 1920×1080 (ruído + blur + tarja) exportado em 1280×720
+const EFFECTS_ID = 'p-editor-export-efeitos'
+const FX_BLOCK = 16
+const FX_T_US = 1_000_000
+const FX_TARJA = [0x12, 0x34, 0x56]
+const FX_SOLID = { x: 0.72, y: 0.5, w: 0.3, h: 0.4 }
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
 
@@ -57,6 +63,7 @@ interface HarnessReport {
   missingMedia?: { preflight: { assetId: string; status: string }[]; export: ExportOut }
   color?: Record<string, { export: ExportOut; frame: unknown }>
   v1Composed?: { path?: string; error?: string }
+  effects?: { export?: ExportOut; previewBlockVar?: number[]; error?: string }
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
 }
 
@@ -83,6 +90,28 @@ async function frameRgb(file: string, tSec: number, out: string, crop?: { x: num
 async function frameRgbAs(file: string, tSec: number, out: string, matrix: 'bt601' | 'bt709', range: 'tv' | 'pc'): Promise<Uint8Array> {
   await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', tSec.toFixed(3), '-i', file, '-frames:v', '1', '-vf', `scale=in_color_matrix=${matrix}:in_range=${range}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', out], { label: 'teste: quadro' })
   return new Uint8Array(readFileSync(out))
+}
+
+/** Variância de luma por bloco b×b (blocos inteiros, linha a linha) de uma imagem RGB24. */
+function blockVar(d: Uint8Array, w: number, h: number, b: number): number[] {
+  const out: number[] = []
+  for (let by = 0; by + b <= h; by += b) {
+    for (let bx = 0; bx + b <= w; bx += b) {
+      let s = 0
+      let s2 = 0
+      for (let y = by; y < by + b; y++) {
+        for (let x = bx; x < bx + b; x++) {
+          const i = (y * w + x) * 3
+          const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+          s += l
+          s2 += l * l
+        }
+      }
+      const n = b * b
+      out.push(s2 / n - (s / n) ** 2)
+    }
+  }
+  return out
 }
 
 /** PSNR (dB) entre duas imagens RGB24 do mesmo tamanho. */
@@ -166,6 +195,23 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     projects.create(cp)
   }
 
+  // efeitos: ruído 1920×1080 em células de 4 px (detalhe em todo bloco: a máscara de baixa variância é exatamente
+  // a área borrada/tarjada; ruído por pixel esgota os bits do H.264 a 8 Mbps e suja a tarja) + blur (preset
+  // padrão) + tarja #123456 sem feather
+  const noise = join(dir, 'ruido.png')
+  await gen(['-f', 'lavfi', '-i', 'nullsrc=s=480x270,format=gray,geq=lum=random(1)*255,scale=1920:1080:flags=neighbor', '-frames:v', '1', '-update', '1', noise], 'editor-export: ruído')
+  const aNoise = assetFromInfo('a_noise', noise, statSync(noise), await probe(noise))
+  const noiseItem: MediaItem = { ...createMediaItem(aNoise, 0, 'video'), durationUs: 2_000_000 }
+  const blurFx: EffectItem = createEffectItem('blur', 0, 2_000_000, { x: 0.3, y: 0.5, w: 0.3, h: 0.4 })
+  const solidFx: EffectItem = { ...createEffectItem('solid', 0, 2_000_000, FX_SOLID), color: '#123456', feather: 0 }
+  const vt = (id: string, item: MediaItem | EffectItem): Track => ({ id, kind: 'video', name: id, muted: false, hidden: false, locked: false, volume: 1, items: [item] })
+  const fxp: Project = {
+    ...addAsset({ ...createEmptyProject('Efeitos', { width: 1920, height: 1080, fps: FPS, background: '#000000' }), id: EFFECTS_ID }, aNoise),
+    tracks: [vt('t_ruido', noiseItem), vt('t_blur', blurFx), vt('t_tarja', solidFx)]
+  }
+  rmSync(projects.dirOf(EFFECTS_ID), { recursive: true, force: true })
+  projects.create(fxp)
+
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
   const session = await makeSyntheticSession(sessions, SESSION_ID)
@@ -180,7 +226,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD] }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK } }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -276,6 +322,47 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     const rule = `${untaggedFamily(sw, sh)}/tv`
     console.log(`${id}: PSNR da saída × fonte em cada interpretação ${JSON.stringify(interp)}; padrão do ffmpeg ${ffDefault} dB`)
     check(interp[rule] > 30, `${id} (${sw}×${sh}): saída = fonte lida pela regra (${rule}: ${interp[rule]} dB > 30; Chromium sem ajuste: ${cs.matrix}/${cs.fullRange ? 'pc' : 'tv'}; ${JSON.stringify(interp)})`, failures)
+  }
+
+  // ---- efeitos: projeto 1080p exportado em 720p × preview reduzido ----
+  const fx = r.effects
+  const fxOut = fx?.export?.path
+  check(!!fxOut && existsSync(fxOut) && !!fx?.previewBlockVar, `efeitos: projeto 1920×1080 exportado em ${W}×${H} (${fxOut ?? fx?.export?.error ?? fx?.error})`, failures)
+  if (fxOut && existsSync(fxOut) && fx?.previewBlockVar) {
+    const vs = (await probeFile(fxOut)).streams.find((s) => s.type === 'video')
+    check(vs?.width === W && vs?.height === H, `efeitos: saída ${W}×${H} (${vs?.width}×${vs?.height})`, failures)
+    const img = await frameRgb(fxOut, FX_T_US / 1e6, join(dir, 'efeitos-saida.rgb'))
+    // tarja: centro de cada bloco 16×16 (macrobloco) inteiro dentro da região, ±3 por canal após o H.264
+    let blocks = 0
+    let worst = 0
+    let worstPx: number[] = []
+    for (let by = Math.ceil(((FX_SOLID.y - FX_SOLID.h / 2) * H) / FX_BLOCK); (by + 1) * FX_BLOCK <= (FX_SOLID.y + FX_SOLID.h / 2) * H; by++) {
+      for (let bx = Math.ceil(((FX_SOLID.x - FX_SOLID.w / 2) * W) / FX_BLOCK); (bx + 1) * FX_BLOCK <= (FX_SOLID.x + FX_SOLID.w / 2) * W; bx++) {
+        const i = ((by * FX_BLOCK + FX_BLOCK / 2) * W + bx * FX_BLOCK + FX_BLOCK / 2) * 3
+        const px = [img[i], img[i + 1], img[i + 2]]
+        const d = Math.max(...px.map((v, c) => Math.abs(v - FX_TARJA[c])))
+        blocks++
+        if (d >= worst) {
+          worst = d
+          worstPx = px
+        }
+      }
+    }
+    check(blocks > 100 && worst <= 3, `efeitos: tarja com a cor exata na exportação (${blocks} blocos, pior desvio ${worst} em ${worstPx}; esperado 18,52,86 ± 3)`, failures)
+    // região borrada no mesmo lugar: blocos de baixa variância (ruído: milhares; borrado/tarja: ~0), exportação × preview
+    const exportVar = blockVar(img, W, H, FX_BLOCK)
+    const pv = fx.previewBlockVar
+    const LOW = 300
+    let inter = 0
+    let union = 0
+    for (let k = 0; k < Math.min(pv.length, exportVar.length); k++) {
+      const a = pv[k] < LOW
+      const b = exportVar[k] < LOW
+      if (a && b) inter++
+      if (a || b) union++
+    }
+    const iou = union ? inter / union : 0
+    check(pv.length === exportVar.length && union > 100 && iou >= 0.9, `efeitos: área borrada/tarjada no mesmo lugar (IoU ${iou.toFixed(3)} ≥ 0,9; ${inter}/${union} blocos de ${FX_BLOCK}×${FX_BLOCK})`, failures)
   }
 
   // ---- preview intocado durante a exportação ----

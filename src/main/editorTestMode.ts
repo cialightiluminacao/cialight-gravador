@@ -17,6 +17,8 @@ import { loadPage, preloadPath } from './windows/recorderWindow'
 // Não grava settings.json (o app instalado divide a pasta userData): o teste confere o hash.
 
 const PROJECT_ID = 'p-editor-render-test'
+// projeto do passe de efeitos (F2): o harness monta as variantes em memória (mesmos assets)
+const EFFECTS_PROJECT_ID = 'p-editor-effects-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -32,12 +34,30 @@ interface HarnessReport {
   seek?: Rendered
   videoDiff?: number
   burst?: string[]
+  effects?: EffectsReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
     clockAdvanceUs?: number; wallAdvanceUs?: number; playheadUs?: number; playing?: boolean; pausedPlaying?: boolean; audioErrors?: string[]
     seek?: { error?: string; seekToUs?: number; clockAfterUs?: number | null; playing?: boolean; scheduledAfter?: { fromUs: number; startS: number }[]; seekCtxS?: number; badSchedules?: number }
   }
+}
+
+type Stats = { n: number; median: number; p95: number; max: number }
+interface EffectsReport {
+  error?: string
+  /** energia de detalhe (média de ΔL² entre vizinhos) na região: original × com efeito */
+  blurDetail?: { ref: number; fx: number }
+  /** maior diferença por canal fora das regiões (+ feather + 2 px) com efeitos × sem */
+  outsideMaxDiff?: number
+  pixelate?: { blocks: number; maxDev: number; changedMaxDiff: number; cell: number }
+  solid?: { pixels: number; wrong: number; sample: number[] }
+  ellipse?: { cornerDiff: number; centerDetail: { ref: number; fx: number } }
+  invert?: { centerMaxDiff: number; cornerDetail: { ref: number; fx: number } }
+  halfOutside?: { detail: { ref: number; fx: number }; edgeMean: number; refBandMean: number; outsideMaxDiff: number }
+  keyframe?: { centroidX: number; centroidX1s: number; maskPixels: number }
+  track?: { insideLayer: number[]; outsideLayerDiff: number }
+  bench?: { renderer?: string; noFx: Stats; fx3: Stats; fx3Frame: Stats; error?: string }
 }
 
 function check(cond: boolean, msg: string, failures: string[]): void {
@@ -133,9 +153,24 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(PROJECT_ID), { recursive: true, force: true })
   projects.create(project)
 
+  // efeitos (F2): testsrc2 1080p + imagem de ruído (quadro estático com detalhe em todo pixel, para o centro
+  // de massa da área borrada) + PNG vermelho (escopo `track`)
+  const noise = join(dir, 'ruido.png')
+  await gen(['-f', 'lavfi', '-i', 'nullsrc=s=1920x1080,format=gray,geq=lum=random(1)*255', '-frames:v', '1', '-update', '1', noise], 'editor: ruído')
+  const aNoise = assetFromInfo('a_noise', noise, statSync(noise), await probe(noise))
+  const fxBase = createEmptyProject('Teste de efeitos', { width: 1920, height: 1080, fps: 30, background: '#000000' })
+  const fxProject: Project = {
+    ...fxBase,
+    id: EFFECTS_PROJECT_ID,
+    assets: [aVideo, aNoise, aRed],
+    tracks: [track('t_video', 'Vídeo', { ...createMediaItem(aVideo, 0, 'video'), durationUs: 3_000_000 })]
+  }
+  rmSync(projects.dirOf(EFFECTS_PROJECT_ID), { recursive: true, force: true })
+  projects.create(fxProject)
+
   const win = new BrowserWindow({ width: 800, height: 600, show: false, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
   const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 60 s'] } }), 60_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 120 s'] } }), 120_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
       clearTimeout(timer)
       resolve(r)
@@ -188,6 +223,31 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   console.log(`seek durante a reprodução: ${JSON.stringify(sk)}`)
   check(!!sk && !sk.error && sk.playing === true && sk.clockAfterUs != null && sk.seekToUs != null && sk.clockAfterUs >= sk.seekToUs && sk.clockAfterUs < sk.seekToUs + 700_000, `seek tocando: relógio continua do novo ponto (${sk?.clockAfterUs} a partir de ${sk?.seekToUs}) ${sk?.error ?? ''}`, failures)
   check(!!sk && (sk.scheduledAfter?.length ?? 0) > 0 && sk.badSchedules === 0, `seek tocando: nenhum nó do ponto antigo agendado depois do seek (${sk?.scheduledAfter?.length} agendados, ${sk?.badSchedules} inválidos)`, failures)
+  const fx = r.effects
+  console.log(`efeitos: ${JSON.stringify(fx)}`)
+  check(!!fx && !fx.error, `efeitos: harness sem erro (${fx?.error ?? ''})`, failures)
+  const bl = fx?.blurDetail
+  check(!!bl && bl.ref > 0 && bl.fx < 0.15 * bl.ref, `blur: energia de detalhe (ΔL²) na região < 15 % da original (${bl?.fx.toFixed(1)} de ${bl?.ref.toFixed(1)})`, failures)
+  check(fx?.outsideMaxDiff !== undefined && fx.outsideMaxDiff <= 2, `fora das regiões + feather: idêntico ao quadro sem efeito (diferença máx. ${fx?.outsideMaxDiff})`, failures)
+  const pz = fx?.pixelate
+  check(!!pz && pz.blocks >= 20 && pz.maxDev <= 3 && pz.changedMaxDiff > 50, `pixelização: blocos uniformes (${pz?.blocks} blocos de ${pz?.cell?.toFixed(1)} px, desvio máx. ${pz?.maxDev}; região alterada, dif. máx. ${pz?.changedMaxDiff})`, failures)
+  const so = fx?.solid
+  check(!!so && so.pixels > 10_000 && so.wrong === 0, `tarja #123456 feather 0: todos os pixels da região exatos (${so?.wrong} errados de ${so?.pixels}; amostra ${so?.sample})`, failures)
+  const el = fx?.ellipse
+  check(!!el && el.cornerDiff <= 2 && el.centerDetail.fx < 0.15 * el.centerDetail.ref, `elipse rotacionada 30°: canto da caixa fora da elipse inalterado (dif. ${el?.cornerDiff}), centro borrado (${el?.centerDetail.fx.toFixed(1)} de ${el?.centerDetail.ref.toFixed(1)})`, failures)
+  const iv = fx?.invert
+  check(!!iv && iv.centerMaxDiff <= 2 && iv.cornerDetail.fx < 0.15 * iv.cornerDetail.ref, `invertido: centro inalterado (dif. ${iv?.centerMaxDiff}), canto borrado (${iv?.cornerDetail.fx.toFixed(1)} de ${iv?.cornerDetail.ref.toFixed(1)})`, failures)
+  const ho = fx?.halfOutside
+  check(!!ho && ho.detail.fx < 0.15 * ho.detail.ref && Math.abs(ho.edgeMean - ho.refBandMean) < 20 && ho.outsideMaxDiff <= 2, `região meio fora do quadro: parte visível borrada (${ho?.detail.fx.toFixed(1)} de ${ho?.detail.ref.toFixed(1)}), borda sem artefato (luma ${ho?.edgeMean.toFixed(1)} × ${ho?.refBandMean.toFixed(1)}), fora inalterado (${ho?.outsideMaxDiff})`, failures)
+  const kf = fx?.keyframe
+  check(!!kf && Math.abs(kf.centroidX - 0.5) <= 0.02 && kf.maskPixels > 10_000, `keyframe region.x 0,2→0,8 (1–3 s): centro de massa em 2 s = ${kf?.centroidX.toFixed(3)} (±0,02 de 0,5; em 1 s ${kf?.centroidX1s.toFixed(3)})`, failures)
+  const tk = fx?.track
+  const isTarja = (p: number[] | undefined): boolean => !!p && p[0] === 0x12 && p[1] === 0x34 && p[2] === 0x56
+  check(isTarja(tk?.insideLayer) && tk!.outsideLayerDiff <= 2, `escopo track: só a camada logo abaixo recebe a tarja (${tk?.insideLayer}; vídeo fora da camada inalterado, dif. ${tk?.outsideLayerDiff})`, failures)
+  const bn = fx?.bench
+  console.log(`desempenho (${bn?.renderer}): sem efeito ${JSON.stringify(bn?.noFx)} ms; 3 blurs fortes ${JSON.stringify(bn?.fx3)} ms (quadro inteiro ${JSON.stringify(bn?.fx3Frame)})`)
+  check(!!bn && !bn.error && bn.fx3.n > 0 && bn.fx3.median < 12, `desempenho: 1080p com 3 blurs fortes < 12 ms/quadro (compositor + GPU: mediana ${bn?.fx3.median} ms, p95 ${bn?.fx3.p95} ms) ${bn?.error ?? ''}`, failures)
+
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)
   const wdBefore = wd?.before as Rgba | undefined

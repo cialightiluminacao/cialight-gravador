@@ -1,0 +1,225 @@
+// Passe de efeitos de privacidade do compositor (blur gaussiano, pixelização, tarja sólida), WebGL2.
+// Opera sobre um alvo W×H (o FBO de acumulação ou o auxiliar de uma camada isolada): copia a área afetada
+// (caixa da região + margem do kernel/bloco) para um snapshot, processa só essa área (scissor) e reescreve
+// o alvo com a máscara da região (retângulo/elipse rotacionado, borda suave, invertida = quadro inteiro).
+// Blur: redução 2/4/8× alinhada ao quadro → gaussiano H e V (σ = raio/2) → ampliação bilinear na composição.
+// Tamanhos por effectsMath (proporcionais à altura de saída): mesma aparência no preview e na exportação.
+// Recursos por tamanho de alvo, reaproveitados entre quadros; liberados ao mudar o tamanho e no dispose.
+import * as twgl from 'twgl.js'
+import type { EffectLayer } from '@shared/editor/resolve'
+import { parseColor } from './color'
+import { blurRadiusPx, downsampleFactor, gaussianWeights, pixelBlockPx, featherPx, regionScissor, type PxRect } from './effectsMath'
+import { BLUR_MAX_TAPS, FS_APPLY, FS_BLUR, FS_COPY, FS_DOWN, VS_FULL } from './shaders'
+
+const MODE = { blur: 0, pixelate: 1, solid: 2 } as const
+// raio do blur abaixo disso (px de saída): sem efeito visível, o passe não roda
+const MIN_BLUR_PX = 0.5
+
+interface Sized {
+  w: number
+  h: number
+  /** Acumulado das camadas (destino do quadro antes de ir ao canvas). */
+  accum: twgl.FramebufferInfo
+  /** Camada isolada (efeito de escopo `track`), transparente. */
+  aux: twgl.FramebufferInfo
+  /** Cópia do que está abaixo do efeito (só a área afetada é atualizada). */
+  snapshot: WebGLTexture
+  /** Pares ping-pong do blur por fator de redução (tamanho ⌈W/ds⌉×⌈H/ds⌉). */
+  blur: Map<number, [twgl.FramebufferInfo, twgl.FramebufferInfo]>
+}
+
+export class EffectPass {
+  private readonly copy: twgl.ProgramInfo
+  private readonly down: twgl.ProgramInfo
+  private readonly blurProg: twgl.ProgramInfo
+  private readonly apply: twgl.ProgramInfo
+  private sized: Sized | null = null
+  private readonly weights = new Float32Array(BLUR_MAX_TAPS + 1)
+
+  constructor(private readonly gl: WebGL2RenderingContext, private readonly quad: twgl.BufferInfo) {
+    this.copy = twgl.createProgramInfo(gl, [VS_FULL, FS_COPY])
+    this.down = twgl.createProgramInfo(gl, [VS_FULL, FS_DOWN])
+    this.blurProg = twgl.createProgramInfo(gl, [VS_FULL, FS_BLUR])
+    this.apply = twgl.createProgramInfo(gl, [VS_FULL, FS_APPLY])
+  }
+
+  /** FBOs de acumulação e auxiliar do tamanho W×H (recriados só quando o tamanho muda). */
+  targets(W: number, H: number): { accum: twgl.FramebufferInfo; aux: twgl.FramebufferInfo } {
+    const s = this.ensure(W, H)
+    return { accum: s.accum, aux: s.aux }
+  }
+
+  /** Compõe o alvo `src` (premultiplicado) sobre o framebuffer ligado (blend já configurado pelo chamador). */
+  composite(src: twgl.FramebufferInfo): void {
+    this.pass(this.copy, { u_tex: src.attachments[0] as WebGLTexture })
+  }
+
+  /** Aplica o efeito sobre o conteúdo atual de `target` (W×H). Deixa o blend desligado e o scissor desligado. */
+  applyEffect(target: twgl.FramebufferInfo, fx: EffectLayer, W: number, H: number): void {
+    const gl = this.gl
+    const s = this.ensure(W, H)
+    const area: PxRect = fx.invert ? { x: 0, y: 0, w: W, h: H } : regionScissor(fx.region, fx.feather, W, H)
+    if (area.w <= 0 || area.h <= 0) return
+    const radius = fx.effect === 'blur' ? blurRadiusPx(fx.strength, H) : 0
+    if (fx.effect === 'blur' && radius < MIN_BLUR_PX) return
+    gl.disable(gl.BLEND)
+    gl.enable(gl.SCISSOR_TEST)
+
+    let fxTex: WebGLTexture = s.snapshot
+    let fxScale: [number, number] = [1 / W, 1 / H]
+    let copyRect: PxRect
+    if (fx.effect === 'blur') {
+      const ds = downsampleFactor(radius)
+      const w = gaussianWeights(radius / ds, BLUR_MAX_TAPS)
+      this.weights.fill(0)
+      this.weights.set(w)
+      const n = w.length - 1
+      const [a, b] = this.blurPair(s, ds)
+      const dw = a.width
+      const dh = a.height
+      // área em texels da escala reduzida; cada passe anterior cobre a área do seguinte + o alcance do kernel
+      const e = n + 2
+      const vRect = grow(toGrid(area, ds), 1, dw, dh)
+      const hRect = grow(vRect, e, dw, dh)
+      const dRect = grow(vRect, 2 * e, dw, dh)
+      copyRect = clampRect({ x: dRect.x * ds, y: dRect.y * ds, w: dRect.w * ds, h: dRect.h * ds }, W, H)
+      this.snap(target, s.snapshot, copyRect)
+      twgl.bindFramebufferInfo(gl, a)
+      this.scissor(dRect)
+      this.pass(this.down, { u_src: s.snapshot, u_srcSize: [W, H], u_ds: ds })
+      twgl.bindFramebufferInfo(gl, b)
+      this.scissor(hRect)
+      this.pass(this.blurProg, { u_tex: a.attachments[0], u_dir: [1, 0], u_n: n, u_w: this.weights })
+      twgl.bindFramebufferInfo(gl, a)
+      this.scissor(vRect)
+      this.pass(this.blurProg, { u_tex: b.attachments[0], u_dir: [0, 1], u_n: n, u_w: this.weights })
+      fxTex = a.attachments[0] as WebGLTexture
+      fxScale = [1 / (ds * dw), 1 / (ds * dh)]
+    } else {
+      // pixelização: blocos que cruzam a borda da área amostram até um bloco além dela
+      const margin = fx.effect === 'pixelate' ? Math.ceil(pixelBlockPx(fx.strength, H)) + 2 : 0
+      copyRect = clampRect({ x: area.x - margin, y: area.y - margin, w: area.w + 2 * margin, h: area.h + 2 * margin }, W, H)
+      this.snap(target, s.snapshot, copyRect)
+    }
+
+    const th = (fx.region.rotation * Math.PI) / 180
+    twgl.bindFramebufferInfo(gl, target)
+    this.scissor(area)
+    this.pass(this.apply, {
+      u_src: s.snapshot,
+      u_fx: fxTex,
+      u_fxScale: fxScale,
+      u_frame: [W, H],
+      u_mode: MODE[fx.effect],
+      u_cell: pixelBlockPx(fx.strength, H),
+      u_color: parseColor(fx.color).slice(0, 3),
+      u_center: [fx.region.x * W, fx.region.y * H],
+      u_half: [(Math.abs(fx.region.w) * W) / 2, (Math.abs(fx.region.h) * H) / 2],
+      u_rot: [Math.cos(th), Math.sin(th)],
+      u_shape: fx.region.shape === 'ellipse' ? 1 : 0,
+      u_feather: featherPx(fx.region, fx.feather, W, H),
+      u_invert: fx.invert ? 1 : 0
+    })
+    gl.disable(gl.SCISSOR_TEST)
+  }
+
+  /** Libera programas, FBOs e texturas. */
+  dispose(): void {
+    const gl = this.gl
+    this.freeSized()
+    for (const p of [this.copy, this.down, this.blurProg, this.apply]) gl.deleteProgram(p.program)
+  }
+
+  // ---- internos ----
+
+  private ensure(W: number, H: number): Sized {
+    if (this.sized && this.sized.w === W && this.sized.h === H) return this.sized
+    this.freeSized()
+    const gl = this.gl
+    this.sized = {
+      w: W,
+      h: H,
+      accum: this.makeFbo(W, H),
+      aux: this.makeFbo(W, H),
+      snapshot: twgl.createTexture(gl, { internalFormat: gl.RGBA8, format: gl.RGBA, type: gl.UNSIGNED_BYTE, min: gl.LINEAR, mag: gl.LINEAR, wrap: gl.CLAMP_TO_EDGE, width: W, height: H }),
+      blur: new Map()
+    }
+    return this.sized
+  }
+
+  private blurPair(s: Sized, ds: number): [twgl.FramebufferInfo, twgl.FramebufferInfo] {
+    let pair = s.blur.get(ds)
+    if (!pair) {
+      const w = Math.ceil(s.w / ds)
+      const h = Math.ceil(s.h / ds)
+      pair = [this.makeFbo(w, h), this.makeFbo(w, h)]
+      s.blur.set(ds, pair)
+    }
+    return pair
+  }
+
+  private makeFbo(w: number, h: number): twgl.FramebufferInfo {
+    const gl = this.gl
+    return twgl.createFramebufferInfo(gl, [{ internalFormat: gl.RGBA8, format: gl.RGBA, type: gl.UNSIGNED_BYTE, min: gl.LINEAR, mag: gl.LINEAR, wrap: gl.CLAMP_TO_EDGE }], w, h)
+  }
+
+  private freeFbo(f: twgl.FramebufferInfo): void {
+    const gl = this.gl
+    gl.deleteFramebuffer(f.framebuffer)
+    for (const a of f.attachments) gl.deleteTexture(a as WebGLTexture)
+  }
+
+  private freeSized(): void {
+    const s = this.sized
+    if (!s) return
+    this.freeFbo(s.accum)
+    this.freeFbo(s.aux)
+    this.gl.deleteTexture(s.snapshot)
+    for (const [a, b] of s.blur.values()) {
+      this.freeFbo(a)
+      this.freeFbo(b)
+    }
+    this.sized = null
+  }
+
+  /** Copia `r` do alvo para a mesma posição do snapshot. */
+  private snap(target: twgl.FramebufferInfo, snapshot: WebGLTexture, r: PxRect): void {
+    const gl = this.gl
+    if (r.w <= 0 || r.h <= 0) return
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.framebuffer)
+    gl.bindTexture(gl.TEXTURE_2D, snapshot)
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, r.x, r.y, r.w, r.h)
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
+  }
+
+  private scissor(r: PxRect): void {
+    this.gl.scissor(r.x, r.y, r.w, r.h)
+  }
+
+  private pass(prog: twgl.ProgramInfo, uniforms: Record<string, unknown>): void {
+    const gl = this.gl
+    gl.useProgram(prog.program)
+    twgl.setBuffersAndAttributes(gl, prog, this.quad)
+    twgl.setUniforms(prog, uniforms)
+    twgl.drawBufferInfo(gl, this.quad)
+  }
+}
+
+/** Caixa em px → caixa em texels da grade reduzida (ds×), cobrindo-a inteira. */
+function toGrid(r: PxRect, ds: number): PxRect {
+  const x0 = Math.floor(r.x / ds)
+  const y0 = Math.floor(r.y / ds)
+  return { x: x0, y: y0, w: Math.ceil((r.x + r.w) / ds) - x0, h: Math.ceil((r.y + r.h) / ds) - y0 }
+}
+
+function grow(r: PxRect, by: number, W: number, H: number): PxRect {
+  return clampRect({ x: r.x - by, y: r.y - by, w: r.w + 2 * by, h: r.h + 2 * by }, W, H)
+}
+
+function clampRect(r: PxRect, W: number, H: number): PxRect {
+  const x0 = Math.max(0, r.x)
+  const y0 = Math.max(0, r.y)
+  const x1 = Math.min(W, r.x + r.w)
+  const y1 = Math.min(H, r.y + r.h)
+  return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) }
+}

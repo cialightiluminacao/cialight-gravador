@@ -1,0 +1,251 @@
+import { createEffectItem, createMediaItem, type EffectPresetId, type EffectRegionInit } from '@shared/editor/factory'
+import type { EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
+import { RenderClient } from '../engine/RenderClient'
+import { mediaUrlsFor } from '../engine/mediaUrls'
+import { pixelBlockPx, regionScissor } from '../engine/compositor/effectsMath'
+
+// Cenários de pixel do passe de efeitos (F2) para o teste de render (CIALIGHT_TEST=editor-render).
+// Projeto base p-editor-effects-test (testsrc2 1080p + ruído + PNG vermelho, criado pelo main); as variantes
+// com efeitos são montadas aqui em memória (mesmos assets, mesmas URLs) e comparadas com o quadro sem efeito.
+
+export const EFFECTS_PROJECT_ID = 'p-editor-effects-test'
+const W = 1920
+const H = 1080
+const DUR = 3_000_000
+
+type Region = { x: number; y: number; w: number; h: number; rotation: number }
+type Img = Uint8Array
+
+function fxTrack(id: string, item: EffectItem | MediaItem): Track {
+  return { id, kind: 'video', name: id, muted: false, hidden: false, locked: false, volume: 1, items: [item] }
+}
+
+function effect(preset: EffectPresetId, region: EffectRegionInit, over: Partial<EffectItem> = {}, durationUs = DUR): EffectItem {
+  return { ...createEffectItem(preset, 0, durationUs, region), ...over }
+}
+
+const regionOf = (e: EffectItem): Region => ({ x: e.region.x.value, y: e.region.y.value, w: e.region.w.value, h: e.region.h.value, rotation: e.region.rotation.value })
+
+const luma = (d: Img, i: number): number => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+
+/** Caixa (px, origem em cima à esquerda) da região + feather + `pad`, como o compositor a recorta. */
+function boxTopDown(r: Region, feather: number, pad: number): { x0: number; y0: number; x1: number; y1: number } {
+  const s = regionScissor(r, feather, W, H)
+  return { x0: Math.max(0, s.x - pad), x1: Math.min(W, s.x + s.w + pad), y0: Math.max(0, H - (s.y + s.h) - pad), y1: Math.min(H, H - s.y + pad) }
+}
+
+/**
+ * Energia de detalhe: média de ΔL² entre vizinhos (horizontal + vertical) em [x0,x1)×[y0,y1). Mede o que o
+ * blur remove mesmo no testsrc2 (barras chapadas com bordas duras): a borda espalhada pelo blur tem ΔL² ~1/raio
+ * do original, enquanto a variância de luma da região quase não muda.
+ */
+export function detailEnergy(d: Img, x0: number, y0: number, x1: number, y1: number, width = W): number {
+  let s = 0
+  let n = 0
+  for (let y = y0; y < y1 - 1; y++) {
+    for (let x = x0; x < x1 - 1; x++) {
+      const i = (y * width + x) * 4
+      const l = luma(d, i)
+      s += (l - luma(d, i + 4)) ** 2 + (l - luma(d, i + width * 4)) ** 2
+      n++
+    }
+  }
+  return n ? s / n : 0
+}
+
+/** Maior diferença por canal entre a e b em [x0,x1)×[y0,y1), pulando pixels para os quais `skip` é verdadeiro. */
+function maxDiff(a: Img, b: Img, x0: number, y0: number, x1: number, y1: number, skip?: (x: number, y: number) => boolean): number {
+  let m = 0
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      if (skip?.(x, y)) continue
+      const i = (y * W + x) * 4
+      for (let c = 0; c < 3; c++) m = Math.max(m, Math.abs(a[i + c] - b[i + c]))
+    }
+  }
+  return m
+}
+
+function meanLuma(d: Img, x0: number, y0: number, x1: number, y1: number): number {
+  let s = 0
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) s += luma(d, (y * W + x) * 4)
+  return s / Math.max(1, (x1 - x0) * (y1 - y0))
+}
+
+/** Centro de massa (x normalizado) dos pixels cuja luma difere mais que `thr` entre a e b. */
+function diffCentroidX(a: Img, b: Img, thr: number): { cx: number; n: number } {
+  let sx = 0
+  let n = 0
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4
+      if (Math.abs(luma(a, i) - luma(b, i)) > thr) {
+        sx += x + 0.5
+        n++
+      }
+    }
+  }
+  return { cx: n ? sx / n / W : NaN, n }
+}
+
+/** Nome da GPU (WebGL2 desta página: o worker usa o mesmo adaptador). */
+function rendererName(): string {
+  const gl = document.createElement('canvas').getContext('webgl2')
+  if (!gl) return '?'
+  const ext = gl.getExtension('WEBGL_debug_renderer_info')
+  return String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER))
+}
+
+function stats(xs: number[]): { n: number; median: number; p95: number; max: number } {
+  const s = [...xs].sort((a, b) => a - b)
+  const r = (v: number): number => Math.round(v * 100) / 100
+  return { n: s.length, median: r(s[Math.floor(s.length / 2)] ?? 0), p95: r(s[Math.min(s.length - 1, Math.floor(s.length * 0.95))] ?? 0), max: r(s[s.length - 1] ?? 0) }
+}
+
+export async function effectsCheck(): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {}
+  const canvas = document.createElement('canvas')
+  canvas.width = W
+  canvas.height = H
+  canvas.style.width = '480px'
+  document.body.appendChild(canvas)
+  const client = new RenderClient(canvas, { width: W, height: H, dpr: 1 })
+  try {
+    await client.ready
+    const base = await window.api.project.load(EFFECTS_PROJECT_ID)
+    const withTracks = (...tracks: Track[]): Project => ({ ...base, tracks: [...base.tracks, ...tracks] })
+    const frame = async (p: Project, tUs: number): Promise<Img> => {
+      client.setProject(p, mediaUrlsFor(p, 'preview'), true)
+      const r = await client.requestFrame(tUs, false)
+      if (r.t !== 'rendered') throw new Error(`quadro ${tUs}: ${JSON.stringify(r)}`)
+      return client.readPixels(0, 0, W, H)
+    }
+
+    // ---- 4 efeitos em quadrantes (t = 1 s) ----
+    const blur = effect('blur', { x: 0.25, y: 0.25, w: 0.3, h: 0.3 })
+    const pix = effect('pixelate', { x: 0.75, y: 0.25, w: 0.3, h: 0.3 })
+    const solid = effect('solid', { x: 0.25, y: 0.75, w: 0.3, h: 0.3 }, { color: '#123456', feather: 0 })
+    const ell = effect('blur', { x: 0.75, y: 0.75, w: 0.3, h: 0.3, rotation: 30, shape: 'ellipse' }, { feather: 0 })
+    const ref = await frame(base, 1_000_000)
+    const quad = await frame(withTracks(fxTrack('t_blur', blur), fxTrack('t_pix', pix), fxTrack('t_solid', solid), fxTrack('t_ell', ell)), 1_000_000)
+
+    const rb = regionOf(blur)
+    const bx = boxTopDown(rb, 0, 0)
+    out.blurDetail = { ref: detailEnergy(ref, bx.x0, bx.y0, bx.x1, bx.y1), fx: detailEnergy(quad, bx.x0, bx.y0, bx.x1, bx.y1) }
+    const boxes = [blur, pix, solid, ell].map((e) => boxTopDown(regionOf(e), e.feather, 2))
+    out.outsideMaxDiff = maxDiff(ref, quad, 0, 0, W, H, (x, y) => boxes.some((b) => x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1))
+
+    // pixelização: grade presa ao quadro (célula pelo centro do pixel), só blocos inteiros dentro da região
+    const cell = pixelBlockPx(pix.strength.value, H)
+    const rp = regionOf(pix)
+    const px0 = (rp.x - rp.w / 2) * W
+    const px1 = (rp.x + rp.w / 2) * W
+    const py0 = (rp.y - rp.h / 2) * H
+    const py1 = (rp.y + rp.h / 2) * H
+    let blocks = 0
+    let maxDev = 0
+    for (let j = Math.ceil(py0 / cell); (j + 1) * cell <= py1; j++) {
+      for (let i = Math.ceil(px0 / cell); (i + 1) * cell <= px1; i++) {
+        blocks++
+        const lo = [255, 255, 255]
+        const hi = [0, 0, 0]
+        for (let y = Math.ceil(j * cell - 0.5); y + 0.5 < (j + 1) * cell; y++) {
+          for (let x = Math.ceil(i * cell - 0.5); x + 0.5 < (i + 1) * cell; x++) {
+            const k = (y * W + x) * 4
+            for (let c = 0; c < 3; c++) {
+              lo[c] = Math.min(lo[c], quad[k + c])
+              hi[c] = Math.max(hi[c], quad[k + c])
+            }
+          }
+        }
+        maxDev = Math.max(maxDev, ...hi.map((h, c) => h - lo[c]))
+      }
+    }
+    out.pixelate = { blocks, maxDev, changedMaxDiff: maxDiff(ref, quad, Math.ceil(px0), Math.ceil(py0), Math.floor(px1), Math.floor(py1)), cell }
+
+    // tarja: todo pixel com centro dentro da região tem a cor exata
+    const rs = regionOf(solid)
+    let pixels = 0
+    let wrong = 0
+    for (let y = 0; y < H; y++) {
+      if (y + 0.5 <= (rs.y - rs.h / 2) * H || y + 0.5 >= (rs.y + rs.h / 2) * H) continue
+      for (let x = 0; x < W; x++) {
+        if (x + 0.5 <= (rs.x - rs.w / 2) * W || x + 0.5 >= (rs.x + rs.w / 2) * W) continue
+        const k = (y * W + x) * 4
+        pixels++
+        if (quad[k] !== 0x12 || quad[k + 1] !== 0x34 || quad[k + 2] !== 0x56) wrong++
+      }
+    }
+    const sk = (Math.round(rs.y * H) * W + Math.round(rs.x * W)) * 4
+    out.solid = { pixels, wrong, sample: [quad[sk], quad[sk + 1], quad[sk + 2]] }
+
+    // elipse rotacionada: o canto da caixa fica fora da elipse; o centro é borrado
+    const re = regionOf(ell)
+    const eb = boxTopDown(re, 0, 0)
+    const cx = Math.round(re.x * W)
+    const cy = Math.round(re.y * H)
+    out.ellipse = {
+      cornerDiff: maxDiff(ref, quad, eb.x0, eb.y0, eb.x0 + 4, eb.y0 + 4),
+      centerDetail: { ref: detailEnergy(ref, cx - 80, cy - 80, cx + 80, cy + 80), fx: detailEnergy(quad, cx - 80, cy - 80, cx + 80, cy + 80) }
+    }
+
+    // ---- invertido: borra tudo menos a região ----
+    const inv = effect('blur', { x: 0.5, y: 0.5, w: 0.3, h: 0.3 }, { invert: true, feather: 0 })
+    const invImg = await frame(withTracks(fxTrack('t_inv', inv)), 1_000_000)
+    out.invert = {
+      centerMaxDiff: maxDiff(ref, invImg, W / 2 - 100, H / 2 - 60, W / 2 + 100, H / 2 + 60),
+      cornerDetail: { ref: detailEnergy(ref, 0, 0, 320, 240), fx: detailEnergy(invImg, 0, 0, 320, 240) }
+    }
+
+    // ---- região meio fora do quadro (x + w/2 > 1): clamp de amostragem, sem borda preta ----
+    const half = effect('blur', { x: 0.95, y: 0.5, w: 0.3, h: 0.4 }, { feather: 0 })
+    const halfImg = await frame(withTracks(fxTrack('t_half', half)), 1_000_000)
+    const hx0 = Math.ceil(0.8 * W)
+    const hy0 = Math.ceil(0.3 * H)
+    const hy1 = Math.floor(0.7 * H)
+    const hb = boxTopDown(regionOf(half), 0, 2)
+    out.halfOutside = {
+      detail: { ref: detailEnergy(ref, hx0, hy0, W, hy1), fx: detailEnergy(halfImg, hx0, hy0, W, hy1) },
+      edgeMean: meanLuma(halfImg, W - 4, hy0, W, hy1),
+      refBandMean: meanLuma(ref, W - 52, hy0, W, hy1),
+      outsideMaxDiff: maxDiff(ref, halfImg, 0, 0, W, H, (x, y) => x >= hb.x0 && y >= hb.y0 && y < hb.y1)
+    }
+
+    // ---- keyframe region.x 0,2 → 0,8 entre 1 s e 3 s, sobre ruído (detalhe em todo pixel) ----
+    const noiseAsset = base.assets.find((a) => a.id === 'a_noise')!
+    const noiseItem = { ...createMediaItem(noiseAsset, 0, 'video'), durationUs: 4_000_000 }
+    const moving = effect('blur', { x: 0.2, y: 0.5, w: 0.2, h: 0.3 }, {}, 4_000_000)
+    moving.region = { ...moving.region, x: { value: 0.2, keys: [{ tUs: 1_000_000, value: 0.2, ease: 'linear' }, { tUs: 3_000_000, value: 0.8, ease: 'linear' }] } }
+    const noiseOnly: Project = { ...base, tracks: [fxTrack('t_noise', noiseItem)] }
+    const noiseRef = await frame(noiseOnly, 2_000_000)
+    const withMoving: Project = { ...noiseOnly, tracks: [...noiseOnly.tracks, fxTrack('t_move', moving)] }
+    const at2 = diffCentroidX(noiseRef, await frame(withMoving, 2_000_000), 24)
+    const at1 = diffCentroidX(noiseRef, await frame(withMoving, 1_000_000), 24)
+    out.keyframe = { centroidX: at2.cx, centroidX1s: at1.cx, maskPixels: at2.n }
+
+    // ---- escopo track: tarja só na camada logo abaixo (imagem vermelha), não no vídeo do fundo ----
+    const redAsset = base.assets.find((a) => a.id === 'a_red')!
+    const red = { ...createMediaItem(redAsset, 0, 'video'), durationUs: DUR }
+    const redItem: MediaItem = { ...red, visual: { ...red.visual!, transform: { ...red.visual!.transform, scale: { value: 0.25 } } } }
+    const scoped = effect('solid', { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, { color: '#123456', feather: 0, scope: 'track' })
+    const trackImg = await frame(withTracks(fxTrack('t_red', redItem), fxTrack('t_scoped', scoped)), 1_000_000)
+    const ck = ((H / 2) * W + W / 2) * 4
+    // vídeo entre a borda da camada (270 px de lado) e a borda da região
+    out.track = { insideLayer: [trackImg[ck], trackImg[ck + 1], trackImg[ck + 2]], outsideLayerDiff: maxDiff(ref, trackImg, Math.round(0.3 * W), Math.round(0.3 * H), Math.round(0.4 * W), Math.round(0.7 * H)) }
+
+    // ---- desempenho: 1080p, reprodução sequencial, sem efeito × 3 blurs fortes (intensidade 100) ----
+    client.setProject(base, mediaUrlsFor(base, 'preview'), true)
+    const b0 = await client.testBench(0, 60, 30)
+    const strong = (x: number, y: number): EffectItem => effect('blur', { x, y, w: 0.3, h: 0.3 }, { strength: { value: 100 } })
+    const p3 = withTracks(fxTrack('t_b1', strong(0.25, 0.3)), fxTrack('t_b2', strong(0.6, 0.5)), fxTrack('t_b3', strong(0.8, 0.75)))
+    client.setProject(p3, mediaUrlsFor(p3, 'preview'), true)
+    const b3 = await client.testBench(0, 60, 30)
+    out.bench = { renderer: rendererName(), noFx: stats(b0.drawMs.slice(5)), fx3: stats(b3.drawMs.slice(5)), fx3Frame: stats(b3.frameMs.slice(5)), ...(b0.error || b3.error ? { error: b0.error ?? b3.error } : {}) }
+  } catch (e) {
+    out.error = e instanceof Error ? (e.stack ?? e.message) : String(e)
+  } finally {
+    client.dispose()
+    canvas.remove()
+  }
+  return out
+}

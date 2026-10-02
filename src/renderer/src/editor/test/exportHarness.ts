@@ -20,7 +20,7 @@ declare global {
   }
 }
 
-interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[] }
+interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; effects: { projectId: string; width: number; height: number; tUs: number; block: number } }
 
 export async function runExportHarness(params: Params): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
@@ -80,6 +80,7 @@ export async function runExportHarness(params: Params): Promise<void> {
       color[id] = { export: await exportOnce(base(p, `${id}.mp4`)), frame: await colorDiag(mediaUrlsFor(p, 'export')[p.assets[0].id]?.original) }
     }
     report.color = color
+    report.effects = await effectsParity(params.effects, params.outputDir)
 
     if (!report.previewUntouched) {
       try {
@@ -99,6 +100,71 @@ export async function runExportHarness(params: Params): Promise<void> {
     errors.push(e instanceof Error ? (e.stack ?? e.message) : String(e))
   }
   window.__captureTestSend?.({ ok, report })
+}
+
+/**
+ * Paridade dos efeitos: o projeto de efeitos (quadro do projeto 1920×1080) exportado em outra resolução
+ * (1280×720) × o preview do mesmo quadro (RenderClient 1920×1080) reduzido para a resolução da exportação.
+ * Devolve a variância de luma por bloco (block×block, linha a linha) do preview reduzido; o main calcula a
+ * mesma coisa no quadro decodificado da exportação e compara as máscaras de baixa variância (IoU).
+ */
+async function effectsParity(fx: Params['effects'], outputDir: string): Promise<Record<string, unknown>> {
+  try {
+    const p = await window.api.project.load(fx.projectId)
+    // 12 Mbps: o fundo de ruído é o pior caso do H.264; com menos bits o quantizador desvia a cor dos
+    // macroblocos chapados vizinhos dele (medido: até 4–6 níveis a 8 Mbps)
+    const exported = await exportOnce({
+      project: p, width: fx.width, height: fx.height, fps: p.canvas.fps, fromUs: 0, toUs: projectDurationUs(p),
+      videoBitrate: 12_000_000, audioBitrate: 128_000, outputDir, fileName: 'efeitos.mp4'
+    })
+    const PW = p.canvas.width
+    const PH = p.canvas.height
+    const canvas = document.createElement('canvas')
+    document.body.appendChild(canvas)
+    const client = new RenderClient(canvas, { width: PW, height: PH, dpr: 1 })
+    try {
+      await client.ready
+      client.setProject(p, mediaUrlsFor(p, 'preview'), true)
+      const r = await client.requestFrame(fx.tUs, false)
+      if (r.t !== 'rendered') throw new Error(`preview: ${JSON.stringify(r)}`)
+      const full = await client.readPixels(0, 0, PW, PH)
+      const src = new OffscreenCanvas(PW, PH)
+      src.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(full), PW, PH), 0, 0)
+      const dst = new OffscreenCanvas(fx.width, fx.height)
+      const ctx = dst.getContext('2d')!
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(src, 0, 0, fx.width, fx.height)
+      const small = ctx.getImageData(0, 0, fx.width, fx.height).data
+      return { export: exported, previewBlockVar: blockVariance(small, fx.width, fx.height, fx.block) }
+    } finally {
+      client.dispose()
+      canvas.remove()
+    }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** Variância de luma por bloco b×b (blocos inteiros, linha a linha) de uma imagem RGBA. */
+function blockVariance(d: Uint8ClampedArray, w: number, h: number, b: number): number[] {
+  const out: number[] = []
+  for (let by = 0; by + b <= h; by += b) {
+    for (let bx = 0; bx + b <= w; bx += b) {
+      let s = 0
+      let s2 = 0
+      for (let y = by; y < by + b; y++) {
+        for (let x = bx; x < bx + b; x++) {
+          const i = (y * w + x) * 4
+          const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+          s += l
+          s2 += l * l
+        }
+      }
+      const n = b * b
+      out.push(Math.round(s2 / n - (s / n) ** 2))
+    }
+  }
+  return out
 }
 
 /** colorSpace do VideoFrame decodificado (o que o Chromium assume para a fonte). */

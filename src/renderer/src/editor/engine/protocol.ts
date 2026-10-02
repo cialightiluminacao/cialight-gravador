@@ -36,6 +36,8 @@ export type RenderIn =
   | { t: 'readPixels'; id: number; x: number; y: number; w: number; h: number }
   // testes: trava a thread do worker por `ms` (simula decoder/GPU pendurado para o watchdog)
   | { t: 'testStall'; ms: number }
+  // testes: reprodução sequencial de `frames` quadros a partir de tUs medindo desenho + GPU (sync) por quadro
+  | { t: 'testBench'; id: number; tUs: Us; frames: number; fps: number }
 
 export type RenderOut =
   | { t: 'ready' }
@@ -54,3 +56,5 @@ export type RenderOut =
   | { t: 'exportError'; jobId: string; message: string; cancelled: boolean; beforeFirstPacket: boolean; encoderError: boolean }
   // testes: RGBA linha a linha de cima para baixo
   | { t: 'pixels'; id: number; data: Uint8Array }
+  // testes: drawMs = compositor (desenho + espera da GPU); frameMs = quadro inteiro (decodificação inclusa)
+  | { t: 'bench'; id: number; drawMs: number[]; frameMs: number[]; error?: string }

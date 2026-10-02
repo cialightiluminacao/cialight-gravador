@@ -105,6 +105,9 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
         }
         break
       }
+      case 'testBench':
+        void bench(m)
+        break
       case 'readPixels': {
         const data = compositor ? compositor.readPixels(m.x, m.y, m.w, m.h) : new Uint8Array(0)
         post({ t: 'pixels', id: m.id, data }, [data.buffer])
@@ -170,7 +173,7 @@ async function renderFrame(m: FrameMsg): Promise<void> {
  * antes de retornar; o desenho fica no canvas (preserveDrawingBuffer). `sequential`: reprodução/exportação
  * (iterador por entrada do pool); senão, seek. Devolve os assets ausentes e as entradas [asset, slot] usadas.
  */
-async function composeAt(p: Project, tUs: Us, sequential: boolean): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][] }> {
+async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { drawMs: number }): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][] }> {
   const comp = compositor
   if (!comp || !canvas) throw new Error('render antes de init')
   const W = canvas.width
@@ -234,11 +237,37 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean): Promise<{ mi
         sources.set(layer.itemId, src)
       })
     )
+    const t0 = timing ? performance.now() : 0
     comp.draw(layers, sources, p.canvas.background, { meta, annotations: drawAnnotations, selectionOutline: selection.map((itemId) => ({ itemId })) })
+    if (timing) {
+      comp.finish()
+      timing.drawMs = performance.now() - t0
+    }
   } finally {
     for (const f of frames) f.close()
   }
   return { missing, missingAnnotations, used }
+}
+
+/** Teste de desempenho: quadros sequenciais (como na reprodução), com o tempo do compositor medido com sync da GPU. */
+async function bench(m: Extract<RenderIn, { t: 'testBench' }>): Promise<void> {
+  const drawMs: number[] = []
+  const frameMs: number[] = []
+  try {
+    const p = project
+    if (!p) throw new Error('bench antes de project')
+    for (let n = 0; n < m.frames; n++) {
+      const t0 = performance.now()
+      const timing = { drawMs: 0 }
+      await composeAt(p, m.tUs + frameToUs(n, m.fps), true, timing)
+      frameMs.push(performance.now() - t0)
+      drawMs.push(timing.drawMs)
+    }
+    pool.releaseAll()
+    post({ t: 'bench', id: m.id, drawMs, frameMs })
+  } catch (err) {
+    post({ t: 'bench', id: m.id, drawMs, frameMs, error: errMsg(err) })
+  }
 }
 
 /**

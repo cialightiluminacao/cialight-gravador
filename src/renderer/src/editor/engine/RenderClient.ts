@@ -130,6 +130,19 @@ export class RenderClient {
     })
   }
 
+  /** Testes: `frames` quadros sequenciais a partir de tUs com o tempo do compositor (desenho + GPU) por quadro. */
+  testBench(tUs: Us, frames: number, fps: number): Promise<Extract<RenderOut, { t: 'bench' }>> {
+    const id = ++this.pixelId
+    return new Promise((resolve) => {
+      const off = this.onMessage((m) => {
+        if (m.t !== 'bench' || m.id !== id) return
+        off()
+        resolve(m)
+      })
+      this.send({ t: 'testBench', id, tUs, frames, fps })
+    })
+  }
+
   /** Testes: trava o worker por `ms` (simula decoder/GPU pendurado para o watchdog). */
   testStall(ms: number): void {
     this.send({ t: 'testStall', ms })
