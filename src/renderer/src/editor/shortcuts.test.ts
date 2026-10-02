@@ -10,7 +10,8 @@ describe('shortcutFor', () => {
     expect(shortcutFor(key('K'))).toBe('pause')
     expect(shortcutFor(key('l'))).toBe('shuttleForward')
     expect(shortcutFor(key('Z', { shiftKey: true }))).toBe('zoomFit')
-    expect(shortcutFor(key('z'))).toBeNull()
+    expect(shortcutFor(key('z'))).toBe('zoomTool') // Z: ferramenta Zoom do visualizador; Shift+Z continua sendo ajustar a timeline
+    expect(shortcutFor(key('z', { altKey: true }))).toBeNull()
     expect(shortcutFor(key('ArrowLeft'))).toBe('prevFrame')
     expect(shortcutFor(key('ArrowRight', { shiftKey: true }))).toBe('fwd1s')
     expect(shortcutFor(key('Home'))).toBe('home')

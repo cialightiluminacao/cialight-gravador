@@ -9,8 +9,9 @@ import { createEditorEngine } from '../ui/editorEngine'
 import { effectsCheck } from './effectsHarness'
 import { stretchCheck } from './stretchHarness'
 import { speedCheck } from './speedHarness'
+import { zoomCheck } from './zoomHarness'
 
-// Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>:
+// Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>?out=<pasta>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
 // main, que valida (editorTestMode.ts).
 
@@ -23,7 +24,7 @@ declare global {
 const W = 1920
 const H = 1080
 
-export async function runRenderHarness(projectId: string): Promise<void> {
+export async function runRenderHarness(projectId: string, outDir: string | null = null): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
   const errors = report.errors as string[]
   let ok = false
@@ -86,6 +87,7 @@ export async function runRenderHarness(projectId: string): Promise<void> {
     client.dispose()
     report.watchdog = await watchdogCheck(project)
     report.effects = await effectsCheck()
+    report.zoom = await zoomCheck(outDir)
     // por último: decodificação 1080p contínua (a CPU desta máquina estrangula depois de alguns segundos de carga)
     report.speed = await speedCheck()
     ok = true

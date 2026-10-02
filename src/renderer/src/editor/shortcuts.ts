@@ -33,6 +33,7 @@ export type ShortcutAction =
   | 'toggleSnap'
   | 'deselect'
   | 'drawRegion' // B: ferramenta "Desenhar região" do visualizador (Ctrl+B continua sendo dividir)
+  | 'zoomTool' // Z: ferramenta "Zoom" do visualizador (Shift+Z continua sendo ajustar a timeline; Ctrl+Z desfazer)
   | 'toggleKeyframe' // Alt+K (K sozinho é pausa)
   | 'prevKeyframe' // [
   | 'nextKeyframe' // ]
@@ -80,6 +81,7 @@ export const SHORTCUT_LABELS: Partial<Record<ShortcutAction, string>> = {
   zoomOut: '-',
   zoomFit: 'Shift+Z',
   drawRegion: 'B',
+  zoomTool: 'Z',
   toggleKeyframe: 'Alt+K',
   prevKeyframe: '[',
   nextKeyframe: ']',
@@ -165,7 +167,7 @@ export function shortcutFor(e: KeyLike, held: HeldKeys = {}): ShortcutAction | n
     case 'e':
       return e.shiftKey ? 'toggleEnabled' : null
     case 'z':
-      return e.shiftKey ? 'zoomFit' : null
+      return e.shiftKey ? 'zoomFit' : 'zoomTool'
     case '+':
     case '=':
       return 'zoomIn'

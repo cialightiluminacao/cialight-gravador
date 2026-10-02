@@ -26,6 +26,8 @@ const STRETCH_PROJECT_ID = 'p-editor-stretch-test'
 const SPEED_PROJECT_ID = 'p-editor-speed-test'
 // paridade do reverso numa fonte SD sem marcação de cor
 const SPEED_SD_PROJECT_ID = 'p-editor-speed-sd-test'
+// zoom/pan (F4): PNG escuro com um quadrado vermelho de 12 px em (1300, 350); o harness aplica o zoom (zoomHarness.ts)
+const ZOOM_PROJECT_ID = 'p-editor-zoom-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -44,6 +46,7 @@ interface HarnessReport {
   effects?: EffectsReport
   stretch?: StretchReport
   speed?: SpeedReport
+  zoom?: ZoomReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -87,6 +90,29 @@ interface SpeedReport {
   paritySd?: Parity
 }
 interface Parity { maxDiff: number; meanDiff: number; neighborMeanDiff: number; markers: number[]; error?: string }
+type RedBlob = { cx: number; cy: number; n: number; w: number; h: number }
+interface ZoomScenario { before: RedBlob | null; after: RedBlob | null; mid: RedBlob | null; error?: string }
+interface ZoomReport { error?: string; full?: ZoomScenario; cropped?: ZoomScenario; exportPath?: string; exportError?: string }
+
+/** Centro de massa (px, centro do pixel) e caixa dos pixels vermelhos (mesmo limiar do zoomHarness). */
+function redBlob(d: Uint8Array, w: number, h: number, stride: number): RedBlob | null {
+  let sx = 0
+  let sy = 0
+  let n = 0
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * stride
+      if (d[i] < 150 || d[i + 1] > 90 || d[i + 2] > 90) continue
+      sx += x + 0.5
+      sy += y + 0.5
+      n++
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y)
+    }
+  }
+  return n ? { cx: sx / n, cy: sy / n, n, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null
+}
+
 interface StretchReport {
   error?: string
   rows?: { speed: number; hz: number; seam: number; rms: number; durationUs: number; audibleUs: number; errors: string[] }[]
@@ -237,6 +263,13 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const sdProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Paridade SD', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: SPEED_SD_PROJECT_ID }, aSd), aSd.id, 0).project
   rmSync(projects.dirOf(SPEED_SD_PROJECT_ID), { recursive: true, force: true })
   projects.create(sdProject)
+  // zoom: fundo escuro + quadrado vermelho 12×12 centrado em (1300, 350) + caixa verde (detalhe que não é o alvo)
+  const zoomPng = join(dir, 'zoom-alvo.png')
+  await gen(['-f', 'lavfi', '-i', 'color=c=0x203040:s=1920x1080', '-vf', 'drawbox=x=1294:y=344:w=12:h=12:color=red:t=fill,drawbox=x=300:y=700:w=200:h=120:color=0x40a060:t=fill', '-frames:v', '1', '-update', '1', zoomPng], 'editor: alvo do zoom')
+  const aZoom = assetFromInfo('a_zoom', zoomPng, statSync(zoomPng), await probe(zoomPng))
+  const zoomProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Zoom', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: ZOOM_PROJECT_ID }, aZoom), aZoom.id, 0).project
+  rmSync(projects.dirOf(ZOOM_PROJECT_ID), { recursive: true, force: true })
+  projects.create(zoomProject)
 
   // janela visível sem foco (fora da barra de tarefas): oculta, o Chromium derruba o requestAnimationFrame para ~2/s
   // depois de umas dezenas de segundos, e a reprodução do editor anda por rAF
@@ -252,8 +285,21 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    loadPage(win, `index.html#editor-test/${PROJECT_ID}`)
+    loadPage(win, `index.html#editor-test/${PROJECT_ID}?out=${encodeURIComponent(dir)}`)
   })
+  // paridade do zoom: quadro do instante final (1,5 s) da exportação, lido antes de fechar a janela (sem janelas, o
+  // app encerra enquanto o ffmpeg roda)
+  let zoomExported: RedBlob | null = null
+  const zoomExport = result.report.zoom?.exportPath
+  if (zoomExport) {
+    try {
+      const raw = join(dir, 'zoom-fim.rgb')
+      await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', '1.500', '-i', zoomExport, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do zoom' })
+      zoomExported = redBlob(new Uint8Array(readFileSync(raw)), 1920, 1080, 3)
+    } catch (e) {
+      result.report.zoom!.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
   win.destroy()
 
   const r = result.report
@@ -387,6 +433,20 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!pd && !pd.error && pd.maxDiff <= 2 && pd.neighborMeanDiff > 1, `reverso SD 640×480 sem marcação (BT.601 pela regra): cópia na GPU = seek (dif. máx. ${pd?.maxDiff}, média ${pd?.meanDiff}; contra o vizinho: média ${pd?.neighborMeanDiff}) ${pd?.error ?? ''}`, failures)
   const pc = sp2?.pcm2x
   check(!!pc && !pc.error && Math.abs(pc.hz - 1000) / 1000 <= 0.02 && pc.rms > 0.2, `shuttle 2×: áudio esticado com o tom da fonte — ${pc?.hz} Hz (1 kHz ±2 %; reamostrado daria 2 kHz), RMS ${pc?.rms} ${pc?.error ?? ''}`, failures)
+
+  const zr = r.zoom
+  console.log(`zoom: ${JSON.stringify(zr)}`)
+  check(!!zr && !zr.error, `zoom: harness sem erro (${zr?.error ?? ''})`, failures)
+  const at = (b: RedBlob | null | undefined): string => (b ? `(${b.cx.toFixed(2)}, ${b.cy.toFixed(2)})` : '—')
+  for (const [tag, sc] of [['tela cheia', zr?.full], ['cortado, a 70 % e deslocado', zr?.cropped]] as const) {
+    const b = sc?.before, a = sc?.after
+    check(!!a && !!b && !sc?.error && Math.abs(a.cx - 960) <= 2 && Math.abs(a.cy - 540) <= 2, `zoom 2× (${tag}): o centro do alvo ${at(b)} vai para o centro do quadro no instante final ${at(a)} ±2 px ${sc?.error ?? ''}`, failures)
+    const k = a && b ? Math.sqrt(a.n / b.n) : 0
+    check(k >= 1.75 && k <= 2.25, `zoom 2× (${tag}): o quadrado dobra de lado (√área ${k.toFixed(2)}×; ${b?.w}→${a?.w} px)`, failures)
+  }
+  const pv = zr?.full?.after
+  const ex = zoomExported
+  check(!!ex && !!pv && Math.abs(ex.cx - 960) <= 2 && Math.abs(ex.cy - 540) <= 2 && Math.abs(ex.cx - pv.cx) <= 2 && Math.abs(ex.cy - pv.cy) <= 2 && Math.abs(Math.sqrt(ex.n / pv.n) - 1) <= 0.15, `zoom: exportação = preview — quadro final exportado: centro do alvo ${at(ex)}, ${ex?.w}×${ex?.h} px (preview ${at(pv)}, ${pv?.w}×${pv?.h}) ±2 px ${zr?.exportError ?? ''}`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

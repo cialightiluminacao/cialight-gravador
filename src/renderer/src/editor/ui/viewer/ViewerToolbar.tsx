@@ -1,12 +1,13 @@
-import { Circle, Droplets, Grid3x3, RectangleHorizontal, Square, SquareDashed } from 'lucide-react'
+import { Circle, Droplets, Grid3x3, RectangleHorizontal, Square, SquareDashed, ZoomIn } from 'lucide-react'
 import { Tip } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
 import { SHORTCUT_LABELS } from '../../shortcuts'
 import { useViewerTool, type DrawEffect, type DrawShape } from '../../state/viewerTool'
+import { ZoomSettingsButton } from './ZoomTool'
 
 // Barra do visualizador (vertical, na margem esquerda do palco — o Viewer reserva essa margem para
 // ela nunca cobrir o quadro): ferramenta "Desenhar região" (B) e, com ela ligada, o tipo do efeito
-// (Blur, Pixelizar, Tarja) e a forma (Retângulo, Elipse).
+// (Blur, Pixelizar, Tarja) e a forma (Retângulo, Elipse); ferramenta "Zoom" (Z) e, com ela ligada, as opções.
 
 export const TOOLBAR_GUTTER = 48
 
@@ -43,6 +44,7 @@ export function ViewerToolbar(): React.JSX.Element {
   const drawing = useViewerTool((s) => s.drawing)
   const effect = useViewerTool((s) => s.effect)
   const shape = useViewerTool((s) => s.shape)
+  const zooming = useViewerTool((s) => s.zooming)
   const tool = useViewerTool.getState()
   return (
     <div data-viewer-toolbar role="toolbar" aria-orientation="vertical" aria-label="Ferramentas do visualizador" className="absolute left-2 top-2 z-10 flex flex-col items-center gap-1 rounded-xl border border-border bg-surface/90 p-1 shadow-lg backdrop-blur">
@@ -65,6 +67,11 @@ export function ViewerToolbar(): React.JSX.Element {
           ))}
         </>
       ) : null}
+      <div className="my-0.5 h-px w-6 bg-border-strong" />
+      <ToolButton tone="tool" label={zooming ? 'Sair do Zoom' : 'Zoom (arraste no quadro o enquadramento-alvo)'} shortcut={SHORTCUT_LABELS.zoomTool} pressed={zooming} onClick={() => tool.setZooming(!zooming)}>
+        <ZoomIn className="h-4 w-4" />
+      </ToolButton>
+      {zooming ? <ZoomSettingsButton /> : null}
     </div>
   )
 }

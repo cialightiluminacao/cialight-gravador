@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ZoomRect } from '@shared/editor/zoom'
 import { cn } from '@/lib/cn'
 import { useEditorStore } from '../state/editorStore'
 import { usePausedPlayhead } from '../state/pausedPlayhead'
@@ -9,11 +10,13 @@ import { effectBoxes, hitTest, hitTestRegions, itemBoxes, type Guides, type Pt }
 import { EffectRegionHandles, RegionOutline, selectedRegion, startRegionDraw, startRegionGesture } from './viewer/EffectRegionHandles'
 import { editableMedia, ItemTransformHandles, startItemTransform, type GestureCtx } from './viewer/ItemTransformHandles'
 import { cancelViewerGesture } from './viewer/viewerGesture'
+import { startZoomDraw, ZoomRectPreview } from './viewer/ZoomTool'
 
 // Manipulação direta no visualizador: clique seleciona (Ctrl/Shift alterna) — regiões de efeito
 // primeiro (ficam sempre "por cima" para seleção), senão a mídia abaixo —, arrastar move; alças do
 // selecionado (mídia: viewer/ItemTransformHandles; efeito: viewer/EffectRegionHandles). Com a
-// ferramenta "Desenhar região" (B) ligada, arrastar no quadro cria um efeito. Guias do quadro durante
+// ferramenta "Desenhar região" (B) ligada, arrastar no quadro cria um efeito; com a ferramenta "Zoom" (Z), o
+// arraste desenha o enquadramento-alvo do clipe sob o cursor (viewer/ZoomTool). Guias do quadro durante
 // os gestos; cada gesto é uma transação (viewer/viewerGesture). Soltar um efeito da biblioteca o cria no
 // playhead com a região centrada no ponto solto.
 
@@ -26,6 +29,8 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
   const selection = useEditorStore((s) => s.selection)
   const playing = useEditorStore((s) => s.playing)
   const drawing = useViewerTool((s) => s.drawing)
+  const zooming = useViewerTool((s) => s.zooming)
+  const [zoomRect, setZoomRect] = useState<ZoomRect | null>(null)
   const [guides, setGuides] = useState<Guides>(NO_GUIDES)
   const [dropHover, setDropHover] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -39,14 +44,15 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
     () => () => {
       cancelViewerGesture()
       useViewerTool.getState().setDrawing(false)
+      useViewerTool.getState().setZooming(false)
     },
     []
   )
   // seleção ou ferramenta mudou sem o ponteiro andar: o cursor de mover pode ter ficado velho
-  useEffect(() => clearHover(), [selection, drawing, playheadUs])
+  useEffect(() => clearHover(), [selection, drawing, zooming, playheadUs])
   if (!project) return null
   const selId = selection.length === 1 && !playing ? selection[0] : null
-  const selectedMedia = selId && !drawing ? boxes.find((b) => b.itemId === selId && editableMedia(project, b.itemId)) : undefined
+  const selectedMedia = selId && !drawing && !zooming ? boxes.find((b) => b.itemId === selId && editableMedia(project, b.itemId)) : undefined
   const selectedFx = selId ? selectedRegion(project, selId, playheadUs) : null
 
   const ctx: GestureCtx = {
@@ -63,6 +69,11 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
     if (drawing) {
       if (useEditorStore.getState().playing) onPause()
       startRegionDraw(e, ctx)
+      return
+    }
+    if (zooming) {
+      if (useEditorStore.getState().playing) onPause()
+      startZoomDraw(e, ctx, setZoomRect)
       return
     }
     const pt = ctx.toCanvas(e)
@@ -114,7 +125,7 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
     <div
       ref={rootRef}
       data-viewer-overlay
-      className={cn('absolute inset-0', drawing && 'cursor-crosshair', dropHover && 'ring-2 ring-inset ring-accent/70')}
+      className={cn('absolute inset-0', (drawing || zooming) && 'cursor-crosshair', dropHover && 'ring-2 ring-inset ring-accent/70')}
       style={{ width, height }}
       onPointerDown={onBackgroundDown}
       onPointerMove={onHover}
@@ -136,13 +147,14 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
       {guides.h.map((y) => (
         <div key={`h${y}`} data-guide="h" className="pointer-events-none absolute inset-x-0 h-px bg-accent/80" style={{ top: `calc(${y * 100}% - ${y}px)` }} />
       ))}
-      {regions.filter((b) => b.itemId !== selId).map((b) => (
+      {regions.filter((b) => b.itemId !== selId || zooming).map((b) => (
         <RegionOutline key={b.itemId} box={b} k={scale} />
       ))}
       {selectedMedia ? <ItemTransformHandles box={selectedMedia} k={scale} onGesture={(e, box, g) => startItemTransform(e, box, g, ctx)} /> : null}
-      {selectedFx && !playing ? (
+      {selectedFx && !playing && !zooming ? (
         <EffectRegionHandles box={selectedFx.box} k={scale} locked={selectedFx.locked} inactive={selectedFx.inactive} keyed={selectedFx.keyed} drawing={drawing} onGesture={(e, g) => startRegionGesture(e, selectedFx.box.itemId, g, ctx)} />
       ) : null}
+      {zoomRect ? <ZoomRectPreview rect={zoomRect} k={scale} W={project.canvas.width} H={project.canvas.height} /> : null}
     </div>
   )
 }

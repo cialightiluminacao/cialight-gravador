@@ -317,6 +317,11 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
       tool.setDrawing(!tool.drawing)
       return true
     }
+    case 'zoomTool': {
+      const tool = useViewerTool.getState()
+      tool.setZooming(!tool.zooming)
+      return true
+    }
     case 'toggleKeyframe': toggleKeyframeAtPlayhead(); return true
     case 'prevKeyframe': jumpToKeyframe(playback, -1); return true
     case 'nextKeyframe': jumpToKeyframe(playback, 1); return true
@@ -326,6 +331,7 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
       if (s.txBase) s.cancelTx()
       else if (useKeyframeSelection.getState().sel) useKeyframeSelection.getState().set(null) // Esc primeiro solta o losango
       else if (useViewerTool.getState().drawing) useViewerTool.getState().setDrawing(false) // Esc primeiro sai da ferramenta
+      else if (useViewerTool.getState().zooming) useViewerTool.getState().setZooming(false)
       else s.select([])
       return true
   }

@@ -1,14 +1,19 @@
-import { RotateCcw } from 'lucide-react'
+import { ArrowDownLeft, ArrowDownRight, ArrowUpLeft, ArrowUpRight, RotateCcw } from 'lucide-react'
 import { defaultVisual } from '@shared/editor/factory'
 import type { MediaItem, VisualProps } from '@shared/editor/project'
+import { applyKenBurns, type ZoomCorner } from '@shared/editor/zoom'
 import { Segmented, Tip, Toggle } from '@/components/ui/primitives'
+import { useEditorStore } from '../../state/editorStore'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
+import { warnLinkedEffects } from '../viewer/ZoomTool'
 import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
 
 // Inspetor de vídeo do item de mídia: transformação (animável: ◇ liga o keyframe no playhead; com keys,
-// editar grava no key do playhead; corte e raio também são animáveis — editados no playhead), corte, ajuste, forma/borda (PiP), espelhar e fades.
+// editar grava no key do playhead; corte e raio também são animáveis — editados no playhead), Ken Burns (preset de
+// zoom lento 1 → 1,15 com pan diagonal ao longo do clipe; substitui a animação de posição/escala), corte, ajuste,
+// forma/borda (PiP), espelhar e fades.
 
 type TKey = keyof VisualProps['transform']
 type V = MediaItem & { visual: VisualProps }
@@ -18,6 +23,17 @@ const FIT_OPTIONS: { value: VisualProps['fit']; label: string; title: string }[]
   { value: 'cover', label: 'Cobrir', title: 'Preenche o quadro cortando o excesso' },
   { value: 'fill', label: 'Esticar', title: 'Estica para o tamanho do quadro' }
 ]
+const KEN_BURNS: { corner: ZoomCorner; label: string; icon: React.ReactNode }[] = [
+  { corner: 'tl', label: 'Aproximar indo para cima e à esquerda', icon: <ArrowUpLeft className="h-3.5 w-3.5" /> },
+  { corner: 'tr', label: 'Aproximar indo para cima e à direita', icon: <ArrowUpRight className="h-3.5 w-3.5" /> },
+  { corner: 'bl', label: 'Aproximar indo para baixo e à esquerda', icon: <ArrowDownLeft className="h-3.5 w-3.5" /> },
+  { corner: 'br', label: 'Aproximar indo para baixo e à direita', icon: <ArrowDownRight className="h-3.5 w-3.5" /> }
+]
+
+function kenBurns(itemId: string, corner: ZoomCorner): void {
+  if (useEditorStore.getState().apply((p) => applyKenBurns(p, itemId, corner))) warnLinkedEffects(itemId)
+}
+
 const SHAPE_OPTIONS: { value: NonNullable<VisualProps['shape']>; label: string }[] = [
   { value: 'rect', label: 'Retângulo' },
   { value: 'rounded', label: 'Arredondado' },
@@ -54,6 +70,20 @@ export function VideoPanel({ item }: { item: V }): React.JSX.Element {
         <NumberField label="Escala" value={animAt(t.scale, local) * 100} min={1} max={1000} precision={0} step={0.5} unit="%" onChange={(n) => setT('scale', n / 100)} trailing={<KeyframeButton item={item} path="transform.scale" label="Escala" />} />
         <NumberField label="Rotação" value={animAt(t.rotation, local)} min={-360} max={360} precision={1} step={0.5} unit="°" onChange={(n) => setT('rotation', n)} trailing={<KeyframeButton item={item} path="transform.rotation" label="Rotação" />} />
         <NumberField label="Opacidade" value={animAt(t.opacity, local) * 100} min={0} max={100} precision={0} step={0.5} unit="%" onChange={(n) => setT('opacity', n / 100)} trailing={<KeyframeButton item={item} path="transform.opacity" label="Opacidade" />} />
+      </PanelSection>
+
+      <PanelSection title="Ken Burns">
+        <FieldRow label="Direção">
+          <div className="flex gap-1" role="group" aria-label="Ken Burns">
+            {KEN_BURNS.map((o) => (
+              <Tip key={o.corner} content={`${o.label} (zoom lento 100 → 115 % ao longo do clipe; substitui a animação de posição e escala)`}>
+                <button type="button" aria-label={`Ken Burns: ${o.label}`} onClick={() => kenBurns(id, o.corner)} className="flex h-7 w-8 items-center justify-center rounded-md border border-border-strong bg-surface-2 text-fg-2 hover:bg-surface-3 hover:text-fg">
+                  {o.icon}
+                </button>
+              </Tip>
+            ))}
+          </div>
+        </FieldRow>
       </PanelSection>
 
       <PanelSection title="Corte">
