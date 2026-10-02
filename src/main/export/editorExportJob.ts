@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, promises as fsp, renameSync, rmSync, statSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { numberedName, sanitizeFileName } from '@shared/filenames'
 import { runFfmpeg } from './ffmpegRunner'
 import { log } from '../log'
@@ -69,6 +69,12 @@ async function defaultFreeBytes(dir: string): Promise<number> {
 
 const fmtMB = (b: number): string => `${Math.ceil(b / 1048576).toLocaleString('pt-BR')} MB`
 
+/** Chave de comparação de caminhos (absoluto normalizado; sem caixa no Windows). */
+function outputKey(p: string): string {
+  const r = resolve(p)
+  return process.platform === 'win32' ? r.toLowerCase() : r
+}
+
 /** Nome final saneado e com extensão .mp4. */
 export function editorExportFileName(fileName: string): string {
   let name = sanitizeFileName(fileName.trim())
@@ -80,6 +86,8 @@ export function editorExportFileName(fileName: string): string {
 export class EditorExportJobs {
   private readonly jobs = new Map<string, Job>()
   private seq = 0
+  /** Saídas concluídas nesta sessão (chave normalizada): só ao lado delas o main grava o .srt. */
+  private readonly completed = new Set<string>()
   private readonly freeBytes: (dir: string) => Promise<number>
 
   constructor(deps: EditorExportDeps = {}) {
@@ -118,6 +126,11 @@ export class EditorExportJobs {
     }
     log.info(`exportação do editor ${id}: ${part}`)
     return { jobId: id, path: join(outputDir, name) }
+  }
+
+  /** `path` é o arquivo final de uma exportação concluída nesta sessão (não um caminho qualquer vindo do renderer)? */
+  isCompletedOutput(path: string): boolean {
+    return typeof path === 'string' && path !== '' && this.completed.has(outputKey(path))
   }
 
   async write(jobId: string, data: Uint8Array, position: number): Promise<void> {
@@ -176,6 +189,7 @@ export class EditorExportJobs {
         return { path: out, size, oversize: true }
       }
       job.createdOut = null // concluída: a saída é do usuário
+      this.completed.add(outputKey(out))
       return { path: out, size }
     } catch (e) {
       if (!existedBefore && existsSync(out)) job.createdOut = out
@@ -206,6 +220,7 @@ export class EditorExportJobs {
         safeRm(out)
         return { path: out, size, oversize: true }
       }
+      this.completed.add(outputKey(out))
       return { path: out, size, warning: 'O arquivo foi salvo sem a otimização para reprodução on-line (faststart): o passo final falhou, mas o vídeo está completo.' }
     } catch (e) {
       log.warn(`exportação do editor ${job.id}: não foi possível manter o arquivo sem faststart`, e)

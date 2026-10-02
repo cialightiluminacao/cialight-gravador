@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { basename, extname, join } from 'path'
-import { renameSync, rmSync, statSync } from 'fs'
+import { promises as fsp, renameSync, rmSync, statSync } from 'fs'
 import { IPC, type GeneratedExt, type GeneratedMeta, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
 import { getSettings, outputDir, rawDir, setSettings } from './settings/settingsStore'
@@ -30,6 +30,8 @@ import { runFfmpeg } from './export/ffmpegRunner'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
 import { EditorExportJobs } from './export/editorExportJob'
+import { decodeSrtBytes, encodeSrtFile, srtBesidePath } from './captions/srtFiles'
+import { sanitizeFileName } from '@shared/filenames'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
@@ -444,6 +446,48 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     })
   })
   ipcMain.handle(IPC.editorExport.cancel, (_e, jobId: string) => editorExports.cancel(jobId))
+  // ---- legendas (SRT) ----
+  // QA (só fora do pacote, com CIALIGHT_QA): CIALIGHT_QA_SRT_OPEN/CIALIGHT_QA_SRT_SAVE trocam os diálogos por caminhos
+  // fixos de teste (test-out/) — o resto (leitura com detecção de codificação, gravação com BOM) é o caminho real
+  const qaSrt = (k: 'CIALIGHT_QA_SRT_OPEN' | 'CIALIGHT_QA_SRT_SAVE'): string | undefined => (!app.isPackaged && process.env.CIALIGHT_QA ? process.env[k] || undefined : undefined)
+  const SRT_MAX_BYTES = 20 * 1024 * 1024
+  ipcMain.handle(IPC.captions.openSrt, async (e) => {
+    let file = qaSrt('CIALIGHT_QA_SRT_OPEN')
+    if (!file) {
+      const w = BrowserWindow.fromWebContents(e.sender) ?? undefined
+      const opts: Electron.OpenDialogOptions = { title: 'Importar legendas (SRT)', properties: ['openFile'], filters: [{ name: 'Legendas SRT', extensions: ['srt'] }] }
+      const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
+      if (r.canceled || !r.filePaths[0]) return null
+      file = r.filePaths[0]
+    }
+    const st = await fsp.stat(file)
+    if (st.size > SRT_MAX_BYTES) throw new Error('O arquivo é grande demais para ser um SRT (mais de 20 MB).')
+    return { text: decodeSrtBytes(new Uint8Array(await fsp.readFile(file))), name: basename(file) }
+  })
+  ipcMain.handle(IPC.captions.saveSrt, async (e, text: string, defaultName: string) => {
+    if (typeof text !== 'string') throw new Error('conteúdo inválido')
+    let file = qaSrt('CIALIGHT_QA_SRT_SAVE')
+    if (!file) {
+      let name = sanitizeFileName(String(defaultName ?? '').trim()) || 'Legendas'
+      if (!/\.srt$/i.test(name)) name = `${name}.srt`
+      const w = BrowserWindow.fromWebContents(e.sender) ?? undefined
+      const opts: Electron.SaveDialogOptions = { title: 'Exportar legendas (SRT)', defaultPath: join(outputDir(), name), filters: [{ name: 'Legendas SRT', extensions: ['srt'] }] }
+      const r = w ? await dialog.showSaveDialog(w, opts) : await dialog.showSaveDialog(opts)
+      if (r.canceled || !r.filePath) return null
+      file = r.filePath
+    }
+    await fsp.writeFile(file, encodeSrtFile(text))
+    return file
+  })
+  ipcMain.handle(IPC.captions.writeSrtBeside, async (_e, videoPath: string, text: string) => {
+    if (typeof text !== 'string') throw new Error('conteúdo inválido')
+    // só ao lado de um vídeo que esta sessão acabou de exportar (nunca um caminho arbitrário vindo do renderer)
+    if (!editorExports.isCompletedOutput(videoPath)) throw new Error('O arquivo .srt só pode ser gravado ao lado de um vídeo exportado agora.')
+    const file = srtBesidePath(videoPath)
+    await fsp.writeFile(file, encodeSrtFile(text))
+    return file
+  })
+
   // saindo no meio de uma exportação/remux: interrompe, apaga os parciais e só então sai
   app.on('will-quit', (e) => {
     if (!editorExports.busy) return

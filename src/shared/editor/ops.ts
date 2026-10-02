@@ -11,6 +11,7 @@ import { frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
 import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, ShapeItem, TextItem, TextStyle, Track, TrackKind, TransitionKind, Us } from './project'
 import { canTransition, DEFAULT_TRANSITION_US, maxTransitionUs, MIN_TRANSITION_US, transitionPairOk } from './transitions'
+import type { Cue } from './srt'
 
 export { getAnim, type AnimPath } from './animPaths'
 
@@ -2125,7 +2126,10 @@ export function addCaption(p: Project, atUs: Us, text: string, opts?: { duration
   const dist = (i: Item): number => (i.startUs > at ? i.startUs - at : at - end(i))
   const near = t.items.filter((i): i is TextItem => i.type === 'text').reduce<TextItem | null>((b, i) => (!b || dist(i) < dist(b) ? i : b), null)
   const item = createTextItem('caption', at, { text, durationUs: dur })
-  if (near) item.style = structuredClone(near.style)
+  if (near) {
+    item.style = structuredClone(near.style)
+    item.visual.transform.y = structuredClone(near.visual.transform.y)
+  }
   const project = edit(r.project, (d) => {
     mustTrack(d, r.trackId).items.push(item)
     finalize(d)
@@ -2145,4 +2149,132 @@ export function setCaptionStyle(p: Project, patch: Partial<TextStyle>): Project 
   return edit(p, (d) => {
     for (const it of mustTrack(d, t.id).items) if (it.type === 'text') it.style = styles.get(it.id)!
   })
+}
+
+/** Estilo e posição vertical comuns das legendas (os da primeira legenda; sem legendas, os do modelo 'caption'). */
+function commonCaption(t: Track | undefined): { style: TextStyle; y: Anim<number> } {
+  const first = t?.items.find((i): i is TextItem => i.type === 'text')
+  if (first) return { style: first.style, y: first.visual.transform.y }
+  const base = createTextItem('caption', 0)
+  return { style: base.style, y: base.visual.transform.y }
+}
+
+const fmtS = (us: Us): string => `${(us / 1e6).toLocaleString('pt-BR', { minimumFractionDigits: 3, maximumFractionDigits: 3 })} s`
+
+/**
+ * Importa legendas (cues de um SRT) para a faixa de legendas (criada se preciso), num único passo de desfazer.
+ * `replace` limpa a faixa antes; `append` mantém as existentes e encaixa as novas nos vãos (cue que colide é
+ * encurtada; sem espaço ≥ MIN_ITEM_US, descartada — com aviso). `offsetUs` desloca todas; o que ficar antes de 0 é
+ * cortado. Estilo e posição vertical = os comuns atuais das legendas (ou os do modelo). Faixa bloqueada → EditError.
+ */
+export function importCaptions(p: Project, cues: readonly Cue[], opts: { mode: 'replace' | 'append'; offsetUs?: Us }): { project: Project; count: number; warnings: string[] } {
+  const existing = p.tracks.find(isCaptionsTrack)
+  if (existing) assertUnlocked(existing)
+  const warnings: string[] = []
+  const off = Math.round(opts.offsetUs ?? 0)
+  const { style, y } = commonCaption(existing)
+  // ocupado: as legendas que ficam (append), em ordem; as novas entram depois de `lastEnd`
+  const keep = opts.mode === 'append' && existing ? existing.items : []
+  const sorted = cues.map((c, i) => ({ c, i })).sort((a, b) => a.c.startUs - b.c.startUs || a.i - b.i)
+  const add: TextItem[] = []
+  let j = 0
+  let lastEnd = 0
+  for (const { c, i } of sorted) {
+    const label = `Legenda ${i + 1} (${fmtS(Math.max(0, c.startUs + off))})`
+    let s = Math.round(c.startUs) + off
+    let e = Math.round(c.endUs) + off
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= Math.max(0, s)) {
+      warnings.push(`${label}: fica antes do início do vídeo — descartada`)
+      continue
+    }
+    let changed = false
+    if (s < 0) {
+      s = 0
+      changed = true
+    }
+    if (s < lastEnd) {
+      s = lastEnd
+      changed = true
+    }
+    // pula as existentes que terminam antes; empurra o início para depois das que o cobrem
+    while (j < keep.length && end(keep[j]) <= s) j++
+    while (j < keep.length && keep[j].startUs <= s) {
+      s = Math.max(s, end(keep[j]))
+      changed = true
+      j++
+    }
+    if (j < keep.length && keep[j].startUs < e) {
+      e = keep[j].startUs
+      changed = true
+    }
+    if (e - s < MIN_ITEM_US) {
+      warnings.push(`${label}: ${changed ? 'sem espaço entre as legendas existentes' : 'curta demais'} — descartada`)
+      continue
+    }
+    if (changed) warnings.push(`${label}: colidia com outra legenda — ajustada para ${fmtS(s)}–${fmtS(e)}`)
+    const item = createTextItem('caption', s, { text: c.text, durationUs: e - s })
+    item.style = structuredClone(style)
+    item.visual.transform.y = structuredClone(y)
+    add.push(item)
+    lastEnd = e
+  }
+  const project = edit(p, (d) => {
+    let t = d.tracks.find(isCaptionsTrack)
+    if (!t) t = mustTrack(d, createTrack(d, 'video', aboveLastVideo(d), freeTrackName(d, 'Legendas'), 'captions'))
+    t.items = opts.mode === 'replace' ? add : [...t.items, ...add]
+    finalize(d)
+  })
+  return { project, count: add.length, warnings }
+}
+
+/** Legendas habilitadas da faixa de legendas, em ordem (para exportar SRT). */
+export function captionCues(p: Project): Cue[] {
+  const t = p.tracks.find(isCaptionsTrack)
+  if (!t) return []
+  return t.items
+    .filter((i): i is TextItem => i.type === 'text' && i.enabled !== false)
+    .map((i) => ({ startUs: i.startUs, endUs: end(i), text: i.text }))
+    .sort((a, b) => a.startUs - b.startUs)
+}
+
+/**
+ * Novo início e fim (µs) de uma legenda (lista de legendas). Fim ≤ início + MIN_ITEM_US ou início < 0 → 'invalid';
+ * sobrepor outra legenda → 'overlap'. Sem mudança: o mesmo projeto.
+ */
+export function setCaptionTimes(p: Project, itemId: string, startUs: Us, endUs: Us): Project {
+  const f = mustFind(p, itemId)
+  if (!isCaptionsTrack(f.track)) throw new EditError('invalid', 'Este item não é uma legenda')
+  assertUnlocked(f.track)
+  const s = Math.round(startUs), e = Math.round(endUs)
+  if (!Number.isFinite(s) || !Number.isFinite(e) || s < 0) throw new EditError('invalid', 'Tempo de legenda inválido')
+  if (e - s < MIN_ITEM_US) throw new EditError('invalid', 'O fim da legenda precisa ser depois do início')
+  if (s === f.item.startUs && e === end(f.item)) return p
+  const other = f.track.items.find((i) => i.id !== itemId && i.startUs < e && end(i) > s)
+  if (other) throw new EditError('overlap', `A legenda sobreporia a ${other.startUs < f.item.startUs ? 'anterior' : 'seguinte'}`)
+  return edit(p, (d) => {
+    const it = mustFind(d, itemId).item
+    it.startUs = s
+    it.durationUs = e - s
+    finalize(d)
+  })
+}
+
+/** Posição vertical (centro, 0–1) de TODAS as legendas, num passo. Sem legendas: o mesmo projeto. */
+export function setCaptionPosition(p: Project, y: number): Project {
+  const t = p.tracks.find(isCaptionsTrack)
+  if (!t || !t.items.some((i) => i.type === 'text')) return p
+  assertUnlocked(t)
+  const v = clamp(y, 0, 1)
+  return edit(p, (d) => {
+    for (const it of mustTrack(d, t.id).items) if (it.type === 'text') it.visual.transform.y = { value: v }
+  })
+}
+
+/**
+ * Cópia do projeto com a faixa de legendas escondida (exportação sem "queimar" as legendas). Não é uma edição: não
+ * entra no histórico. A faixa de legendas é sempre a de vídeo do topo — escondê-la não muda o que os efeitos cobrem.
+ */
+export function withCaptionsHidden(p: Project): Project {
+  if (!p.tracks.some((t) => isCaptionsTrack(t) && !t.hidden)) return p
+  return { ...p, tracks: p.tracks.map((t) => (isCaptionsTrack(t) ? { ...t, hidden: true } : t)) }
 }

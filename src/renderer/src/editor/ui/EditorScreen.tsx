@@ -250,7 +250,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       {/* até o projeto desta tela estar no store, nada é editável (numa troca, o anterior ainda pode estar lá) */}
       {loaded ? <TopBar onBack={() => void back()} onExport={() => setExportOpen(true)} /> : <div className="h-12 shrink-0 border-b border-border bg-surface/70" />}
       <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)_320px]">
-        {loaded ? <MediaBin projectId={projectId} /> : <div className="border-r border-border bg-surface/60" />}
+        {loaded ? <MediaBin projectId={projectId} playback={engine?.playback ?? null} /> : <div className="border-r border-border bg-surface/60" />}
         <Viewer engine={loaded ? engine : null} />
         {loaded ? <Inspector playback={engine?.playback ?? null} /> : <div className="border-l border-border bg-surface/60" />}
       </div>

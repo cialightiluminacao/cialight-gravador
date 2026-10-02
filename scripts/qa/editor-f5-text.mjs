@@ -246,7 +246,7 @@ async function main() {
       await T.tab('Transições')
       const trans = T.all('[data-transition-kind]').map((c) => c.getAttribute('aria-label').split('.')[0])
       return { tabs, text, shapes, sec, trans }`)
-    check('abas: Mídia, Áudio, Gravações, Efeitos, Texto, Transições', JSON.stringify(r.tabs) === JSON.stringify(['Mídia', 'Áudio', 'Gravações', 'Efeitos', 'Texto', 'Transições']), r.tabs)
+    check('abas: Mídia, Áudio, Gravações, Efeitos, Texto, Transições, Legendas', JSON.stringify(r.tabs) === JSON.stringify(['Mídia', 'Áudio', 'Gravações', 'Efeitos', 'Texto', 'Transições', 'Legendas']), r.tabs)
     check('cartões de texto: Título, Subtítulo, Terço inferior, Legenda, Citação, Contagem', JSON.stringify(r.text) === JSON.stringify(['Título', 'Subtítulo', 'Terço inferior', 'Legenda', 'Citação', 'Contagem']), r.text)
     check('cartões de forma: Retângulo, Elipse, Seta, Destaque, Holofote; seções Textos/Formas', JSON.stringify(r.shapes) === JSON.stringify(['Retângulo', 'Elipse', 'Seta', 'Destaque', 'Holofote']) && JSON.stringify(r.sec) === JSON.stringify(['Textos', 'Formas']), r)
     check('11 transições com nome pt-BR', JSON.stringify(r.trans) === JSON.stringify(['Dissolver', 'Mergulho no preto', 'Mergulho no branco', 'Deslizar ←', 'Deslizar →', 'Deslizar ↑', 'Deslizar ↓', 'Cortina ←', 'Cortina →', 'Zoom', 'Desfoque']), r.trans)

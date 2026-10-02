@@ -4,7 +4,11 @@
 // depois de gravar); no fim o main remuxa com faststart. Falha do CODIFICADOR de hardware antes do 1º pacote →
 // nova tentativa com `prefer-software` (outras falhas mostram a causa real). Tamanho-alvo: saída acima do alvo
 // é refeita uma vez com bitrate × (alvo/obtido) × 0,97 ("Ajustando tamanho…"). Uma exportação por vez.
+// Legendas: sem "queimar", a faixa de legendas sai escondida (o preview continua mostrando); com ".srt ao lado", o
+// SRT do trecho exportado é gravado junto do arquivo FINAL (nome numerado) só depois da exportação concluir.
 import { planAudio } from '@shared/editor/audioPlan'
+import { captionCues, withCaptionsHidden } from '@shared/editor/ops'
+import { cuesForRange, serializeSrt } from '@shared/editor/srt'
 import type { Project, Us } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
@@ -31,6 +35,8 @@ export interface EditorExportRequest {
   targetBytes?: number
   /** Testes: simula a falha do encoder de hardware (exercita a nova tentativa em software). */
   simulateHwFailure?: boolean
+  /** Legendas: desenhar no vídeo (padrão: sim) e/ou gravar `<nome>.srt` ao lado do arquivo final (padrão: não). */
+  captions?: { burn: boolean; srtBeside: boolean }
 }
 
 export interface EditorExportProgress {
@@ -58,6 +64,8 @@ export interface EditorExportResult {
   passes: number
   /** Avisos para a tela de concluído (mídia de áudio que falhou, alvo de tamanho não atingido). */
   warnings: string[]
+  /** .srt gravado ao lado do vídeo (captions.srtBeside). */
+  srtPath?: string
 }
 
 export { EditorExportCancelled }
@@ -80,10 +88,11 @@ export function editorExportRunning(): boolean {
 
 type OnProgress = (p: EditorExportProgress) => void
 
-export async function runEditorExport(req: EditorExportRequest, opts: { onProgress?: OnProgress; signal?: AbortSignal } = {}): Promise<EditorExportResult> {
+export async function runEditorExport(input: EditorExportRequest, opts: { onProgress?: OnProgress; signal?: AbortSignal } = {}): Promise<EditorExportResult> {
   if (running) throw new Error('Já existe uma exportação em andamento')
   running = true
   const api = window.api
+  const req = input.captions && !input.captions.burn ? { ...input, project: withCaptionsHidden(input.project) } : input
   const signal = opts.signal ?? new AbortController().signal
   const durationUs = req.toUs - req.fromUs
   try {
@@ -115,11 +124,27 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
       }
       if (out.warning) warnings.add(out.warning)
       if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}. Ele pode não ser aceito pelo WhatsApp.`)
+      const srtPath = input.captions?.srtBeside ? await writeSrtBeside(input, out.path, warnings) : undefined
       opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 100, speed: null, etaS: null })
-      return { path: out.path, size: out.size, videoCodec: enc.videoCodec, audioCodec: enc.audioCodec, hardware: hw, fellBackToSoftware: fellBack, passes: pass, warnings: [...warnings] }
+      return { path: out.path, size: out.size, videoCodec: enc.videoCodec, audioCodec: enc.audioCodec, hardware: hw, fellBackToSoftware: fellBack, passes: pass, warnings: [...warnings], ...(srtPath ? { srtPath } : {}) }
     }
   } finally {
     running = false
+  }
+}
+
+/** SRT do trecho exportado ao lado do vídeo final; falha ou nada para gravar vira aviso (o vídeo já está pronto). */
+async function writeSrtBeside(req: EditorExportRequest, videoPath: string, warnings: Set<string>): Promise<string | undefined> {
+  const cues = cuesForRange(captionCues(req.project), req.fromUs, req.toUs)
+  if (!cues.length) {
+    warnings.add('Nenhuma legenda no trecho exportado: o arquivo .srt não foi gravado.')
+    return undefined
+  }
+  try {
+    return await window.api.captions.writeSrtBeside(videoPath, serializeSrt(cues))
+  } catch (e) {
+    warnings.add(`Não foi possível gravar o arquivo .srt ao lado do vídeo (${ipcErrorMessage(e)}).`)
+    return undefined
   }
 }
 

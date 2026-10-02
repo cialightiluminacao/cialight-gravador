@@ -303,6 +303,17 @@ export interface IpcApi {
     /** Progresso do remux (0–1) do job em finalização. */
     onFinalizeProgress(cb: (p: { jobId: string; fraction: number }) => void): Unsubscribe
   }
+  /**
+   * Legendas (SRT). `openSrt`: diálogo de abrir (*.srt) e o texto do arquivo (BOM UTF-8/UTF-16; sem BOM, UTF-8 se
+   * válido, senão Windows-1252); null se cancelado. `saveSrt`: diálogo de salvar, grava UTF-8 com BOM; caminho ou null.
+   * `writeSrtBeside`: grava `<mesmo nome>.srt` ao lado do vídeo — só aceita o arquivo final de uma exportação do
+   * editor concluída nesta sessão (o caminho devolvido pela exportação, que pode ser numerado); devolve o caminho.
+   */
+  captions: {
+    openSrt(): Promise<{ text: string; name: string } | null>
+    saveSrt(text: string, defaultName: string): Promise<string | null>
+    writeSrtBeside(videoPath: string, text: string): Promise<string>
+  }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
     barUpdate(state: BarState): void
@@ -419,6 +430,7 @@ export const IPC = {
     cancel: 'editorExport:cancel',
     finalizeProgress: 'editorExport:finalizeProgress'
   },
+  captions: { openSrt: 'captions:openSrt', saveSrt: 'captions:saveSrt', writeSrtBeside: 'captions:writeSrtBeside' },
   recording: {
     setPhase: 'recording:setPhase',
     barUpdate: 'recording:barUpdate',

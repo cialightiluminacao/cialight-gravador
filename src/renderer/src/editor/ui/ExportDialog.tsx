@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAlert, Upload, X } from 'lucide-react'
+import { Captions, CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAlert, Upload, X } from 'lucide-react'
+import { toast } from 'sonner'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
-import { contentEndUs, findItem } from '@shared/editor/ops'
+import { captionCues, contentEndUs, findItem } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
 import { planAudio } from '@shared/editor/audioPlan'
 import { audioProcessIssues } from './audioProcessing'
@@ -31,6 +32,8 @@ type Phase =
 const formatMbps = (bps: number): string => `${(bps / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} Mbps`
 const ISSUE_LABEL: Record<ExportMediaIssue['status'], string> = { missing: 'ausente', processing: 'ainda processando', error: 'com erro' }
 const EFFECT_LABEL = { blur: 'Blur', pixelate: 'Pixelizar', solid: 'Tarja' } as const
+/** Última escolha das legendas (só nesta sessão do app): queimar ligado e .srt desligado por padrão. */
+let captionChoice = { burn: true, srtBeside: false }
 
 export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { open: boolean; onOpenChange: (open: boolean) => void; onBeforeExport: () => void; onSeek: (us: number) => void }): React.JSX.Element | null {
   const project = useEditorStore((s) => s.project)
@@ -44,6 +47,11 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const [rangeMode, setRangeMode] = useState<'all' | 'inout'>('all')
   const [fileName, setFileName] = useState('')
   const [folder, setFolder] = useState<string | null>(null)
+  const [captions, setCaptionsState] = useState(captionChoice)
+  const setCaptions = (patch: Partial<typeof captionChoice>): void => {
+    captionChoice = { ...captionChoice, ...patch }
+    setCaptionsState(captionChoice)
+  }
   const abortRef = useRef<AbortController | null>(null)
 
   // fim do conteúdo (sem efeitos e itens desativados): um efeito depois da mídia não estica "Tudo" com preto
@@ -56,6 +64,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     setPhase({ kind: 'form' })
     setFileName(`${fileNameFromTitle(project.name) || 'Vídeo'}.mp4`)
     setRangeMode(hasInOut(contentEndUs(project), useEditorStore.getState().inUs, useEditorStore.getState().outUs) ? 'inout' : 'all')
+    setCaptionsState(captionChoice)
   }, [open])
 
   // diálogo desmontado (editor fechado) no meio da exportação: cancela
@@ -75,6 +84,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
   const issues = durationUs > 0 ? exportMediaIssues(project, range.fromUs, range.toUs) : []
   const privacy = durationUs > 0 ? privacyWarnings(project, range.fromUs, range.toUs) : []
+  // legendas habilitadas (o projeto tem legendas: mostra "Queimar no vídeo" / "Salvar arquivo .srt ao lado")
+  const hasCaptions = captionCues(project).length > 0
   // "Revisar": seleciona o efeito, leva o playhead ao instante do aviso (o mais fraco, o início da mídia por
   // cima…, sempre dentro do intervalo) e fecha o diálogo
   const review = (w: PrivacyWarning): void => {
@@ -120,11 +131,13 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
           outputDir: targetFolder,
           fileName: name,
           estimateBytes: estimate,
-          ...(preset === 'whatsapp' ? { targetBytes: WHATSAPP_TARGET_MB * 1024 * 1024 } : {})
+          ...(preset === 'whatsapp' ? { targetBytes: WHATSAPP_TARGET_MB * 1024 * 1024 } : {}),
+          ...(captionCues(snapshot).length ? { captions } : {})
         },
         { signal: ac.signal, onProgress: (progress) => setPhase((p) => (p.kind === 'running' ? { ...p, progress } : p)) }
       )
       setPhase({ kind: 'done', result })
+      if (result.srtPath) toast.success('Legendas salvas ao lado do vídeo', { description: result.srtPath })
     } catch (e) {
       if (e instanceof EditorExportCancelled) setPhase({ kind: 'form' })
       else setPhase({ kind: 'error', message: ipcErrorMessage(e) })
@@ -245,6 +258,22 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               </div>
             ) : null}
 
+            {hasCaptions ? (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5" role="group" aria-label="Legendas" data-export-captions="">
+                <span className="flex items-center gap-1.5 text-[12px] font-medium text-fg-2">
+                  <Captions className="h-3.5 w-3.5" /> Legendas
+                </span>
+                <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-fg">
+                  <input type="checkbox" className="h-3.5 w-3.5 accent-accent" checked={captions.burn} onChange={(e) => setCaptions({ burn: e.target.checked })} data-caption-burn="" />
+                  Queimar no vídeo
+                </label>
+                <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-fg">
+                  <input type="checkbox" className="h-3.5 w-3.5 accent-accent" checked={captions.srtBeside} onChange={(e) => setCaptions({ srtBeside: e.target.checked })} data-caption-srt="" />
+                  Salvar arquivo .srt ao lado
+                </label>
+              </div>
+            ) : null}
+
             {privacy.length ? <PrivacySection warnings={privacy} onReview={review} /> : null}
 
             <div className="flex justify-end gap-2">
@@ -275,6 +304,11 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                   {phase.result.fellBackToSoftware ? ' · codificado em software (o encoder de hardware falhou)' : ''}
                   {phase.result.passes > 1 ? ' · refeito para caber no tamanho-alvo' : ''}
                 </span>
+                {phase.result.srtPath ? (
+                  <span className="block truncate text-[11px] text-muted" title={phase.result.srtPath} data-export-srt="">
+                    Legendas: {phase.result.srtPath.split(/[\\/]/).pop()}
+                  </span>
+                ) : null}
               </span>
             </div>
             {phase.result.warnings.length ? (

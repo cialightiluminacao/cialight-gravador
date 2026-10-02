@@ -45,6 +45,27 @@ describe('EditorExportJobs', () => {
     expect(runFfmpeg.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
   })
 
+  it('isCompletedOutput: só o arquivo de uma exportação concluída (nem o previsto, nem o cortado pelo alvo, nem outro)', async () => {
+    const jobs = new EditorExportJobs(plenty)
+    const a = await jobs.open(dir, 'a.mp4')
+    expect(jobs.isCompletedOutput(a.path)).toBe(false) // em andamento
+    await jobs.write(a.jobId, new Uint8Array([1, 2, 3]), 0)
+    const r = await jobs.finalize(a.jobId)
+    expect(jobs.isCompletedOutput(r.path)).toBe(true)
+    expect(jobs.isCompletedOutput(r.path.toUpperCase())).toBe(process.platform === 'win32')
+    expect(jobs.isCompletedOutput(join(dir, 'sub', '..', 'a.mp4'))).toBe(true)
+    expect(jobs.isCompletedOutput(join(dir, 'b.mp4'))).toBe(false)
+    expect(jobs.isCompletedOutput('')).toBe(false)
+    const big = await jobs.open(dir, 'grande.mp4')
+    await jobs.write(big.jobId, new Uint8Array(100), 0)
+    const o = await jobs.finalize(big.jobId, { maxBytes: 10 })
+    expect(o.oversize).toBe(true)
+    expect(jobs.isCompletedOutput(o.path)).toBe(false)
+    const c = await jobs.open(dir, 'cancelada.mp4')
+    await jobs.cancel(c.jobId)
+    expect(jobs.isCompletedOutput(c.path)).toBe(false)
+  })
+
   it('nunca sobrescreve: nome ocupado ganha " (2)", " (3)"', async () => {
     writeFileSync(join(dir, 'x.mp4'), 'antigo')
     writeFileSync(join(dir, 'x (2).mp4'), 'antigo')

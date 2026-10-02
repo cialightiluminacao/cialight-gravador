@@ -6,7 +6,8 @@ import { join } from 'path'
 import type { Asset, EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import type { ExportOptions } from '@shared/types'
 import { createEffectItem, createEmptyProject, createMediaItem } from '@shared/editor/factory'
-import { addAsset, addMediaFromAsset, deleteRange, setSpeed, updateItem } from '@shared/editor/ops'
+import { addAsset, addCaption, addMediaFromAsset, captionCues, deleteRange, setCaptionStyle, setSpeed, updateItem } from '@shared/editor/ops'
+import { serializeSrt } from '@shared/editor/srt'
 import { dominantHz, toneAmplitude } from '@shared/audio/pcmAnalysis'
 import { AUDIO_MIX_DEFAULTS } from '@shared/editor/audioPlan'
 import { speechFromFile, type SpeechInterval } from '@shared/editor/speech'
@@ -71,6 +72,13 @@ const DUCKING_ID = 'p-editor-export-ducking'
 const DUCK_HZ = 220
 const DUCK_WIN = 2400 // 50 ms: 11 ciclos de 220 Hz e 50 de 1 kHz (Goertzel sem vazamento da voz)
 const DUCK_HOP = 480 // 10 ms
+// legendas (F5): fundo cinza 4 s + 3 legendas com fundo magenta opaco (caixa fácil de achar no quadro): queimar (caixa
+// presente no meio da 1ª legenda), sem queimar + .srt ao lado (caixa ausente; .srt = o esperado, texto exato) e a mesma
+// exportação de novo (nome numerado: o .srt acompanha o " (2)")
+const CAPTIONS_ID = 'p-editor-export-legendas'
+const CAP_BOX = '#ff00ff'
+const CAP_TEXTS = ['Primeira legenda', 'Segunda — com acentuação', 'Terceira\nem duas linhas']
+const CAP_T_S = 1.0 // meio da 1ª legenda [0,5; 1,5)
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
 
@@ -95,6 +103,10 @@ interface HarnessReport {
   ducking?: ExportOut
   duckingPreview?: { levelsDb?: number[]; error?: string }
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
+  captionsBurn?: ExportOut & { srtPath?: string }
+  captionsSrt?: ExportOut & { srtPath?: string }
+  captionsSrtAgain?: ExportOut & { srtPath?: string }
+  captionsArbitrary?: { rejected: boolean; error?: string }
 }
 
 interface LevelSpan { n: number; min: number; max: number }
@@ -354,6 +366,18 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   projects.create({ ...createEmptyProject('Ducking', { width: W, height: H, fps: FPS, background: '#000000' }), id: DUCKING_ID, assets: [aDuckVoice, aDuckMusic], tracks: [at('t_voz', 'Voz', 'voice', aDuckVoice), at('t_mus', 'Música', 'music', aDuckMusic)] })
   const duckSpeech = speechFromFile(await buildSpeech(duckVoice, projects.filePath(DUCKING_ID, 'cache/a_dvoz.speech.json'), 10_000_000))
 
+  // legendas: fundo cinza + 3 legendas (fundo magenta opaco)
+  const gray = join(dir, 'cinza.mp4')
+  await gen(['-f', 'lavfi', '-i', `color=c=gray:s=${W}x${H}:rate=${FPS}`, '-t', '4', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', ...BT709, gray], 'editor-export: cinza')
+  const aGray: Asset = { ...assetFromInfo('a_cinza', gray, statSync(gray), await probe(gray)), status: 'ready' }
+  let capProject = addMediaFromAsset(addAsset({ ...createEmptyProject('Legendas', { width: W, height: H, fps: FPS, background: '#000000' }), id: CAPTIONS_ID }, aGray), aGray.id, 0).project
+  CAP_TEXTS.forEach((t, i) => {
+    capProject = addCaption(capProject, 500_000 + i * 1_000_000, t, { durationUs: 1_000_000 }).project
+  })
+  capProject = setCaptionStyle(capProject, { background: CAP_BOX })
+  rmSync(projects.dirOf(CAPTIONS_ID), { recursive: true, force: true })
+  projects.create(capProject)
+
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
   const session = await makeSyntheticSession(sessions, SESSION_ID)
@@ -368,7 +392,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, denoiseProjectId: DENOISE_ID, duckingProjectId: DUCKING_ID, duckingHz: DUCK_HZ, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, denoiseProjectId: DENOISE_ID, duckingProjectId: DUCKING_ID, duckingHz: DUCK_HZ, captionsProjectId: CAPTIONS_ID, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -632,6 +656,53 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     const fv = await frameRgb(v1Out, tMs / 1000, join(dir, 'pip-v1.rgb'), crop)
     const p = psnr(fe, fv)
     check(p > 28, `paridade: centro da PiP em 3 s ≈ v1 (PSNR ${p.toFixed(1)} dB > 28; recorte ${JSON.stringify(crop)})`, failures)
+  }
+
+  // ---- legendas: queimar × .srt ao lado (nome numerado) ----
+  {
+    // faixa horizontal na altura das legendas (centro em 0,88·H), 40 px de altura: pixels magenta = caixa da legenda
+    const strip = { x: 0, y: Math.round(0.88 * H) - 20, w: W, h: 40 }
+    const magenta = async (file: string, name: string): Promise<number> => {
+      const px = await frameRgb(file, CAP_T_S, join(dir, name), strip)
+      let n = 0
+      for (let i = 0; i < px.length; i += 3) if (px[i] > 180 && px[i + 1] < 90 && px[i + 2] > 180) n++
+      return n
+    }
+    const expected = serializeSrt(captionCues(capProject))
+    const readSrt = (p: string): { bom: boolean; text: string } => {
+      const b = readFileSync(p)
+      const bom = b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf
+      return { bom, text: b.subarray(bom ? 3 : 0).toString('utf8') }
+    }
+    const srtOf = (p: string): string => p.replace(/\.mp4$/i, '.srt')
+    const burn = r.captionsBurn
+    check(!!burn?.path && existsSync(burn.path) && !burn.srtPath, `legendas queimadas: exportado sem .srt (${burn?.path ?? burn?.error})`, failures)
+    if (burn?.path && existsSync(burn.path)) {
+      const n = await magenta(burn.path, 'q-legenda-queimada.rgb')
+      check(n > 2000, `legendas queimadas: caixa magenta da 1ª legenda presente em ${CAP_T_S} s (${n} px)`, failures)
+      check(!existsSync(srtOf(burn.path)), 'legendas queimadas: nenhum .srt ao lado', failures)
+    }
+    const srt = r.captionsSrt
+    check(!!srt?.path && existsSync(srt.path) && srt.path.endsWith('legendas-sem.mp4'), `sem queimar + .srt: exportado (${srt?.path ?? srt?.error})`, failures)
+    if (srt?.path && existsSync(srt.path)) {
+      const n = await magenta(srt.path, 'q-legenda-sem.rgb')
+      check(n === 0, `sem queimar: caixa da legenda ausente em ${CAP_T_S} s (${n} px magenta)`, failures)
+      const want = srtOf(srt.path)
+      check(srt.srtPath === want && existsSync(want), `.srt ao lado: ${srt.srtPath}`, failures)
+      if (existsSync(want)) {
+        const got = readSrt(want)
+        check(got.bom, '.srt em UTF-8 com BOM', failures)
+        check(got.text === expected, `.srt com o conteúdo esperado (texto exato): ${JSON.stringify(got.text)}`, failures)
+      }
+    }
+    const again = r.captionsSrtAgain
+    check(!!again?.path && again.path.endsWith('legendas-sem (2).mp4'), `mesmo nome de novo → "legendas-sem (2).mp4" (${again?.path ?? again?.error})`, failures)
+    if (again?.path) {
+      const want = srtOf(again.path)
+      check(again.srtPath === want && want.endsWith('legendas-sem (2).srt') && existsSync(want), `o .srt acompanha o nome numerado (${again.srtPath})`, failures)
+      if (existsSync(want)) check(readSrt(want).text === expected, '.srt do nome numerado com o conteúdo esperado', failures)
+    }
+    check(!!r.captionsArbitrary?.rejected && !existsSync(join(exportsDir, 'arbitrario.srt')), `writeSrtBeside recusa um caminho que não é de uma exportação concluída (${JSON.stringify(r.captionsArbitrary)})`, failures)
   }
 
   check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)

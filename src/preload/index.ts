@@ -110,6 +110,11 @@ const api: IpcApi = {
     cancel: (jobId) => ipcRenderer.invoke(IPC.editorExport.cancel, jobId),
     onFinalizeProgress: (cb) => on(IPC.editorExport.finalizeProgress, cb)
   },
+  captions: {
+    openSrt: () => ipcRenderer.invoke(IPC.captions.openSrt),
+    saveSrt: (text, defaultName) => ipcRenderer.invoke(IPC.captions.saveSrt, text, defaultName),
+    writeSrtBeside: (videoPath, text) => ipcRenderer.invoke(IPC.captions.writeSrtBeside, videoPath, text)
+  },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),
     barUpdate: (state) => ipcRenderer.send(IPC.recording.barUpdate, state),
