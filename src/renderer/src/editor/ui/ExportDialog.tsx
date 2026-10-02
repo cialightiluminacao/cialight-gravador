@@ -238,7 +238,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
       } else if (format === 'audio') {
         done = { kind: 'format', result: await runAudioExport({ ...common, fromUs: range.fromUs, toUs: range.toUs, format: audioFormat, estimateBytes: audioEstimate }, opts) }
       } else {
-        done = { kind: 'format', result: await exportStill({ ...common, tUs: useEditorStore.getState().playheadUs }) }
+        done = { kind: 'format', result: await exportStill({ ...common, tUs: useEditorStore.getState().playheadUs }, { signal: ac.signal }) }
       }
       setPhase({ kind: 'done', done })
     } catch (e) {

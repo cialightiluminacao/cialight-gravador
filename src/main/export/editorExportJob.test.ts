@@ -13,7 +13,7 @@ const runFfmpeg = vi.fn(async (args: string[], opts: Opts) => {
 })
 vi.mock('./ffmpegRunner', () => ({ runFfmpeg: (args: string[], opts: Opts) => runFfmpeg(args, opts) }))
 
-const { EditorExportJobs, editorExportFileName, FREE_SPACE_FACTOR } = await import('./editorExportJob')
+const { EditorExportJobs, editorExportFileName, ExportCancelledError, FREE_SPACE_FACTOR, PIPE_MAX_INFLIGHT } = await import('./editorExportJob')
 
 let dir: string
 const plenty = { freeBytes: async () => 1e15 }
@@ -303,6 +303,50 @@ describe('EditorExportJobs — saídas por pipe (GIF / só áudio)', () => {
     await expect(jobs.pipeFinish(jobId)).rejects.toThrow(/código 1/)
     expect(readdirSync(dir)).toEqual([])
     expect(jobs.busy).toBe(false)
+  })
+
+  it('contrapressão no main: mais de 2 gravações em voo no job é recusado (memória limitada)', async () => {
+    const pending: (() => void)[] = []
+    const slow = (args: string[]) => ({ ...fakePipe(args), write: vi.fn(() => new Promise<void>((r) => pending.push(r))) })
+    const jobs = new EditorExportJobs({ ...plenty, openPipe: slow })
+    const { jobId } = await jobs.openPipe(dir, 'g', gifSpec)
+    const a = jobs.pipeWrite(jobId, new Uint8Array(32))
+    const b = jobs.pipeWrite(jobId, new Uint8Array(32))
+    await expect(jobs.pipeWrite(jobId, new Uint8Array(32))).rejects.toThrow(/gravações demais em andamento.*máximo 2/)
+    expect(PIPE_MAX_INFLIGHT).toBe(2)
+    pending.shift()!()
+    await a
+    // com uma liberada, cabe outra
+    const c = jobs.pipeWrite(jobId, new Uint8Array(32))
+    for (const r of pending.splice(0)) r()
+    await Promise.all([b, c])
+    await jobs.cancel(jobId)
+  })
+
+  it('só a janela dona grava, finaliza e o quadro guarda a dona', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId } = await jobs.openPipe(dir, 'a', wavSpec, 7)
+    await expect(jobs.pipeWrite(jobId, new Uint8Array([1]), 8)).rejects.toThrow('exportação de outra janela')
+    await expect(jobs.pipeFinish(jobId, { owner: 8 })).rejects.toThrow('exportação de outra janela')
+    expect(jobs.busy).toBe(true)
+    await jobs.pipeWrite(jobId, new Uint8Array([1]), 7)
+    await expect(jobs.pipeFinish(jobId, { owner: 7 })).resolves.toMatchObject({ size: 1 })
+  })
+
+  it('cancelado: chamadas atrasadas e a finalização interrompida viram ExportCancelledError (não erro)', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId } = await jobs.openPipe(dir, 'a', wavSpec)
+    await jobs.cancel(jobId)
+    await expect(jobs.pipeWrite(jobId, new Uint8Array([1]))).rejects.toBeInstanceOf(ExportCancelledError)
+    await expect(jobs.pipeFinish(jobId)).rejects.toBeInstanceOf(ExportCancelledError)
+    await expect(jobs.pipeWrite('edx-desconhecido', new Uint8Array([1]))).rejects.toThrow('exportação não encontrada')
+  })
+
+  it('duas aberturas simultâneas: só uma passa (a reserva é feita junto com a última checagem)', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const r = await Promise.allSettled([jobs.openPipe(dir, 'a', wavSpec, 0, 10), jobs.openPipe(dir, 'b', wavSpec, 0, 10), jobs.writeStill(dir, 'c', new Uint8Array([1]))])
+    expect(r.filter((x) => x.status === 'fulfilled')).toHaveLength(1)
+    expect(r.filter((x) => x.status === 'rejected').map((x) => String((x as PromiseRejectedResult).reason))).toEqual([expect.stringMatching(/em andamento/), expect.stringMatching(/em andamento/)])
   })
 
   it('pedido inválido é recusado no main', async () => {

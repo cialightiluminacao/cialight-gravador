@@ -15,7 +15,7 @@ import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { FramesJobSpec, RenderOut } from '../engine/protocol'
 import { missingMediaWarnings } from './exportPlan'
 import { audioBlocks, audioOnlyBlocker, audioPipeSpec, gifPipeSpec, type AudioFormat } from './formatPlan'
-import { EditorExportCancelled, settleOrCancel } from './finalize'
+import { EditorExportCancelled, isCancelledReply, settleOrCancel } from './finalize'
 import { withExportLock } from './exportLock'
 import type { EditorExportProgress } from './editorExport'
 import { ipcErrorMessage } from '@/lib/ipcError'
@@ -172,7 +172,13 @@ export function pipeFrames(
           writes = writes
             .then(() => api.pipeWrite(jobId, data))
             .then(
-              () => {
+              (reply) => {
+                // o main já cancelou o job (janela/saída): cancelamento, não erro
+                if (isCancelledReply(reply)) {
+                  render.exportCancel(jobId)
+                  finish({ ok: false, error: new EditorExportCancelled() })
+                  return
+                }
                 render.chunkAck(jobId, seq)
                 const now = performance.now()
                 if (!first) first = { t: now, frame: seq }
@@ -267,7 +273,7 @@ export function runAudioExport(req: AudioExportRequest, opts: RunOpts = {}): Pro
             if (!block || block.pcm.length !== blocks[k].frames * 2) throw new Error(`Falha ao mixar o áudio em ${((blocks[k].fromUs - req.fromUs) / 1e6).toFixed(1)} s.`)
             next = k + 1 < blocks.length ? audio.render(blocks[k + 1].fromUs, blocks[k + 1].frames) : null
             const pcm = block.pcm
-            await abortable(api.pipeWrite(id, new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)), signal)
+            if (isCancelledReply(await abortable(api.pipeWrite(id, new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)), signal))) throw new EditorExportCancelled()
             const elapsedS = (performance.now() - t0) / 1000
             const doneS = ((k + 1) / blocks.length) * durS
             const speed = elapsedS > 0.3 ? doneS / elapsedS : null
@@ -283,17 +289,49 @@ export function runAudioExport(req: AudioExportRequest, opts: RunOpts = {}): Pro
   })
 }
 
+/** Cliente de render que o quadro PNG usa (RenderClient; os testes injetam um falso). */
+export interface StillClient {
+  readonly ready: Promise<void>
+  setProject(project: Project, mediaUrls: ReturnType<typeof mediaUrlsFor>, useProxy: boolean): void
+  exportStill(tUs: Us): Promise<Extract<RenderOut, { t: 'still' }>>
+  dispose(): void
+}
+
+export interface StillOpts {
+  signal?: AbortSignal
+  /** Prazo do render do quadro (padrão STILL_TIMEOUT_MS): decoder/GPU pendurado não prende a exportação. */
+  timeoutMs?: number
+  client?: (width: number, height: number) => StillClient
+}
+
+/** Prazo do quadro PNG. */
+export const STILL_TIMEOUT_MS = 30_000
+
+const defaultStillClient = (width: number, height: number): StillClient => new RenderClient(new OffscreenCanvas(width, height), { width, height, dpr: 1 })
+
+/** Rejeita se `p` não resolver em `ms` (o timer é sempre limpo). */
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([p, new Promise<T>((_, reject) => (timer = setTimeout(() => reject(new Error(message)), ms)))]).finally(() => clearTimeout(timer))
+}
+
 /**
  * Quadro em `tUs` como PNG no tamanho do projeto, renderizado numa instância própria (sem contorno de seleção):
- * os mesmos pixels do preview. Devolve os bytes do PNG e os avisos de mídia indisponível.
+ * os mesmos pixels do preview. Cancelável (signal) e com prazo (timeoutMs); a instância é sempre descartada.
  */
-export async function renderStill(project: Project, tUs: Us): Promise<{ png: Uint8Array; warnings: string[] }> {
+export async function renderStill(project: Project, tUs: Us, opts: StillOpts = {}): Promise<{ png: Uint8Array; warnings: string[] }> {
+  const signal = opts.signal ?? new AbortController().signal
+  if (signal.aborted) throw new EditorExportCancelled()
+  const timeoutMs = opts.timeoutMs ?? STILL_TIMEOUT_MS
   const { width, height } = project.canvas
-  const render = new RenderClient(new OffscreenCanvas(width, height), { width, height, dpr: 1 })
-  try {
+  const render = (opts.client ?? defaultStillClient)(width, height)
+  const work = async (): Promise<Extract<RenderOut, { t: 'still' }>> => {
     await render.ready
     render.setProject(project, mediaUrlsFor(project, 'export'), false)
-    const r = await render.exportStill(tUs)
+    return render.exportStill(tUs)
+  }
+  try {
+    const r = await abortable(withTimeout(work(), timeoutMs, `O quadro não ficou pronto em ${Math.max(1, Math.round(timeoutMs / 1000))} s (o render parou de responder). Tente de novo.`), signal)
     if (!r.png) throw new Error(`Não foi possível gerar o quadro (${r.error ?? 'erro desconhecido'}).`)
     const ann = r.missingAnnotations.length ? ['As anotações não puderam ser lidas e ficaram de fora.'] : []
     return { png: new Uint8Array(r.png), warnings: [...missingMediaWarnings(project, r.missing.map((assetId) => ({ assetId, frames: 1 }))), ...ann] }
@@ -302,12 +340,12 @@ export async function renderStill(project: Project, tUs: Us): Promise<{ png: Uin
   }
 }
 
-/** Quadro PNG gravado na pasta (nunca sobrescreve). */
-export function exportStill(req: StillExportRequest): Promise<FormatExportResult> {
+/** Quadro PNG gravado na pasta (nunca sobrescreve). Cancelar/prazo estourado: nada é gravado; a trava sempre é solta. */
+export function exportStill(req: StillExportRequest, opts: StillOpts = {}): Promise<FormatExportResult> {
   return withExportLock(async () => {
-    const { png, warnings } = await renderStill(req.project, req.tUs)
+    const { png, warnings } = await renderStill(req.project, req.tUs, opts)
+    if (opts.signal?.aborted) throw new EditorExportCancelled()
     const out = await window.api.editorExport.writeStill(req.outputDir, req.fileName, png)
     return { kind: 'png', path: out.path, size: out.size, width: req.project.canvas.width, height: req.project.canvas.height, warnings }
   })
 }
-

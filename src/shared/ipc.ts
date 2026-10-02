@@ -310,15 +310,16 @@ export interface IpcApi {
    */
   editorExport: {
     open(outputDir: string, fileName: string, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
-    write(jobId: string, data: Uint8Array, position: number): Promise<void>
+    write(jobId: string, data: Uint8Array, position: number): Promise<void | { cancelled: true }>
     close(jobId: string): Promise<void>
-    finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string }>
+    finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string } | { cancelled: true }>
     cancel(jobId: string): Promise<void>
     /** Progresso do remux (0–1) do job em finalização (MP4: faststart; pipe: paleta do GIF). */
     onFinalizeProgress(cb: (p: { jobId: string; fraction: number }) => void): Unsubscribe
     openPipe(outputDir: string, fileName: string, spec: PipeSpec, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
-    pipeWrite(jobId: string, data: Uint8Array): Promise<void>
-    pipeFinish(jobId: string): Promise<{ path: string; size: number; warning?: string }>
+    /** { cancelled: true }: o job já tinha sido cancelado (cancelamento esperado, não erro). */
+    pipeWrite(jobId: string, data: Uint8Array): Promise<void | { cancelled: true }>
+    pipeFinish(jobId: string): Promise<{ path: string; size: number; warning?: string } | { cancelled: true }>
     writeStill(outputDir: string, fileName: string, png: Uint8Array): Promise<{ path: string; size: number }>
   }
   recording: {

@@ -10,14 +10,17 @@ export class EditorExportCancelled extends Error {
 }
 
 type Api = Pick<IpcApi['editorExport'], 'finalize' | 'cancel'>
-export type Finalized = Awaited<ReturnType<Api['finalize']>>
+export type Finalized = Exclude<Awaited<ReturnType<Api['finalize']>>, { cancelled: true }>
 
 /**
  * Roda a etapa final `run`. Já cancelado (a codificação acabou depois do pedido) → `cancel` (apaga o parcial)
  * sem rodar; cancelado durante → `cancel` (o main interrompe o ffmpeg e apaga parcial/saída). Ambos lançam
  * EditorExportCancelled.
  */
-export async function settleOrCancel<T>(run: () => Promise<T>, cancel: () => Promise<void>, signal: AbortSignal): Promise<T> {
+/** Resposta do main para uma chamada a um job já cancelado (cancelamento esperado, não erro). */
+export const isCancelledReply = (r: unknown): r is { cancelled: true } => typeof r === 'object' && r !== null && (r as { cancelled?: unknown }).cancelled === true
+
+export async function settleOrCancel<T>(run: () => Promise<T | { cancelled: true }>, cancel: () => Promise<void>, signal: AbortSignal): Promise<T> {
   const cancelJob = (): Promise<void> => cancel().catch(() => {})
   if (signal.aborted) {
     await cancelJob()
@@ -32,7 +35,9 @@ export async function settleOrCancel<T>(run: () => Promise<T>, cancel: () => Pro
       throw new EditorExportCancelled()
     }
     try {
-      return await run()
+      const r = await run()
+      if (isCancelledReply(r)) throw new EditorExportCancelled()
+      return r
     } catch (e) {
       if (signal.aborted) throw new EditorExportCancelled()
       throw e

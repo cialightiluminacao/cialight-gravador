@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { EditorExportCancelled, finalizeOrCancel } from './finalize'
+import { EditorExportCancelled, finalizeOrCancel, settleOrCancel } from './finalize'
 
 const fakeApi = (finalize: () => Promise<{ path: string; size: number }>) => ({ finalize: vi.fn(finalize), cancel: vi.fn(async () => {}) })
 
@@ -27,5 +27,8 @@ describe('finalizeOrCancel', () => {
     expect(api.cancel).toHaveBeenCalledWith('j')
     fail(new Error('cancelado'))
     await expect(p).rejects.toBeInstanceOf(EditorExportCancelled)
+  })
+  it('o main responde { cancelled: true } (job cancelado pela janela/saída): vira EditorExportCancelled, não erro', async () => {
+    await expect(settleOrCancel(async () => ({ cancelled: true as const }), async () => {}, new AbortController().signal)).rejects.toBeInstanceOf(EditorExportCancelled)
   })
 })

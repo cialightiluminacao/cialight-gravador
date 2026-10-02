@@ -49,6 +49,11 @@ const TONE2 = [2.7, 3.8] as const
 // Medido: GIF 0,04 × PNG 0,09 (blur) e 0,06 × 0,17 (invertido) — a paleta não pontilha o degradê liso a ponto de
 // devolver detalhe; o ruído de fora mede ~21 400. Margem de 1 nível² para variação de paleta/pontilhado.
 const BLUR_GIF_MARGIN = 1
+// marcador de ORIENTAÇÃO: tarja #a05030 fora do centro (terço de cima, à esquerda); o espelho vertical dela (y = 0,85)
+// é ruído/borrado. Um GIF de cabeça para baixo (readPixels sem desvirar) põe a cor no lugar errado e falha.
+// Bordas em pixels inteiros a 480×270 (x 96–192, y 27–54) e a 1920×1080.
+const MARKER = { x: 0.3, y: 0.15, w: 0.2, h: 0.1 }
+const MARKER_RGB = [0xa0, 0x50, 0x30]
 
 type Region = { x: number; y: number; w: number; h: number }
 interface FileOut { path?: string; size?: number; error?: string; warnings?: string[]; frames?: number; width?: number; height?: number }
@@ -143,6 +148,7 @@ async function buildProject(dir: string, projects: ProjectStore): Promise<void> 
   const blur: EffectItem = createEffectItem('blur', 0, 3_000_000, FX_BLUR)
   const inverted: EffectItem = { ...createEffectItem('blur', 3_000_000, 3_000_000, FX_BLUR), invert: true }
   const solid: EffectItem = { ...createEffectItem('solid', 0, 6_000_000, FX_SOLID), color: '#123456', feather: 0 }
+  const marker: EffectItem = { ...createEffectItem('solid', 0, 6_000_000, MARKER), color: '#a05030', feather: 0 }
   let p: Project = { ...createEmptyProject('Formatos', { width: W, height: H, fps: FPS, background: '#203040' }), id: PROJECT_ID }
   for (const a of [aNoise, a440, a660, a1k]) p = addAsset(p, a)
   p = {
@@ -152,6 +158,7 @@ async function buildProject(dir: string, projects: ProjectStore): Promise<void> 
       vt('t_blur', blur),
       vt('t_invertido', inverted),
       vt('t_tarja', solid),
+      vt('t_marcador', marker),
       at('t_440', audioItem(a440, 0, 2_500_000)),
       at('t_660', audioItem(a660, 3_500_000, 2_500_000)),
       at('t_mudo', audioItem(a1k, 0, 6_000_000), true)
@@ -206,22 +213,48 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
 
     const frames = await gifFrames(gif, join(dir, 'gif-quadros.rgb'))
     check(frames.length === 48, `GIF: 48 quadros decodificados (${frames.length})`, failures)
-    // tarja: centro de cada célula 8×8 a 4 px da borda da região, em TODO quadro: ±8 (quantização da paleta)
-    const sb = pxRegion(FX_SOLID, GIF_W, GIF_H, 4)
-    let worst = { d: 0, k: -1, px: [] as number[] }
-    let samples = 0
-    frames.forEach((f, k) => {
-      for (let y = sb.y; y < sb.y + sb.h; y += 4) {
-        for (let x = sb.x; x < sb.x + sb.w; x += 4) {
+    // tarja e marcador: TODO pixel inteiramente coberto pela região (a borda da tarja cai no meio de um pixel a
+    // 480 px — x 273,6 e 417,6 —, e esse pixel é uma mistura de cobertura, não a cor), em TODO quadro: ±8 (paleta)
+    const covered = (r: Region): Region => {
+      const x0 = Math.ceil((r.x - r.w / 2) * GIF_W - 1e-6)
+      const y0 = Math.ceil((r.y - r.h / 2) * GIF_H - 1e-6)
+      const x1 = Math.floor((r.x + r.w / 2) * GIF_W + 1e-6)
+      const y1 = Math.floor((r.y + r.h / 2) * GIF_H + 1e-6)
+      return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+    const colourCheck = (r: Region, rgb: number[]): { worst: number; k: number; at: number[]; px: number[]; pixels: number } => {
+      const c = covered(r)
+      const out = { worst: 0, k: -1, at: [] as number[], px: [] as number[], pixels: 0 }
+      frames.forEach((f, k) => {
+        for (let y = c.y; y < c.y + c.h; y++) {
+          for (let x = c.x; x < c.x + c.w; x++) {
+            const i = (y * GIF_W + x) * 3
+            const d = Math.max(Math.abs(f[i] - rgb[0]), Math.abs(f[i + 1] - rgb[1]), Math.abs(f[i + 2] - rgb[2]))
+            out.pixels++
+            if (d > out.worst || out.k < 0) Object.assign(out, { worst: Math.max(d, out.worst), k, at: [x, y], px: [f[i], f[i + 1], f[i + 2]] })
+          }
+        }
+      })
+      return out
+    }
+    const tj = colourCheck(FX_SOLID, FX_TARJA)
+    const tc = covered(FX_SOLID)
+    check(tj.pixels === 48 * tc.w * tc.h && tj.worst <= 8, `GIF: tarja ±8 de #123456 em TODO pixel coberto (${tc.w}×${tc.h}) de todo quadro (${tj.pixels} px; pior desvio ${tj.worst} no quadro ${tj.k} em ${tj.at}: ${tj.px})`, failures)
+    // orientação: o marcador está em cima (y 27–54) e NÃO no espelho vertical (y 216–243)
+    const mk = colourCheck(MARKER, MARKER_RGB)
+    const mc = covered(MARKER)
+    const mirror = covered({ ...MARKER, y: 1 - MARKER.y })
+    let mirrorHits = 0
+    frames.forEach((f) => {
+      for (let y = mirror.y; y < mirror.y + mirror.h; y++) {
+        for (let x = mirror.x; x < mirror.x + mirror.w; x++) {
           const i = (y * GIF_W + x) * 3
-          const px = [f[i], f[i + 1], f[i + 2]]
-          const d = Math.max(...px.map((v, c) => Math.abs(v - FX_TARJA[c])))
-          samples++
-          if (d > worst.d || worst.k < 0) worst = { d: Math.max(d, worst.d), k, px }
+          if (Math.max(Math.abs(f[i] - MARKER_RGB[0]), Math.abs(f[i + 1] - MARKER_RGB[1]), Math.abs(f[i + 2] - MARKER_RGB[2])) <= 8) mirrorHits++
         }
       }
     })
-    check(samples > 48 * 100 && worst.d <= 8, `GIF: tarja ±8 de #123456 em todo quadro (${samples} amostras; pior desvio ${worst.d} no quadro ${worst.k}: ${worst.px})`, failures)
+    check(mc.w === 96 && mc.h === 27 && mk.worst <= 8, `GIF: orientação — marcador #a05030 no terço de cima (x ${mc.x}–${mc.x + mc.w}, y ${mc.y}–${mc.y + mc.h}) em todo pixel de todo quadro (pior desvio ${mk.worst} no quadro ${mk.k}: ${mk.px})`, failures)
+    check(mirrorHits === 0, `GIF: orientação — nenhum pixel da cor do marcador no espelho vertical (y ${mirror.y}–${mirror.y + mirror.h}): ${mirrorHits} (de cabeça para baixo daria ${48 * mc.w * mc.h})`, failures)
 
     // blur (quadros 0–23 = 1,0–2,9 s): miolo borrado a 6 px da borda do feather (proporcional à altura: 24 px a 720p)
     const inset = Math.round((24 * GIF_H) / 720)

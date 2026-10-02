@@ -29,7 +29,7 @@ import { buildReviewAssets } from './export/reviewAssets'
 import { runFfmpeg } from './export/ffmpegRunner'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
-import { EditorExportJobs } from './export/editorExportJob'
+import { EditorExportJobs, ExportCancelledError } from './export/editorExportJob'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
@@ -437,27 +437,45 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     ownExport(e.sender)
     return editorExports.openPipe(outputDir, fileName, spec, e.sender.id, Math.max(0, Number(opts?.estimateBytes) || 0))
   })
-  ipcMain.handle(IPC.editorExport.pipeWrite, (_e, jobId: string, data: Uint8Array) => editorExports.pipeWrite(jobId, data))
+  /** Cancelamento esperado (usuário, janela fechada, saída): resposta { cancelled: true } e log de cancelamento, não erro. */
+  const cancelAware = async <T>(jobId: string, p: Promise<T>): Promise<T | { cancelled: true }> => {
+    try {
+      return await p
+    } catch (e) {
+      if (!(e instanceof ExportCancelledError)) throw e
+      log.info(`exportação do editor ${jobId}: chamada depois do cancelamento (cancelada)`)
+      return { cancelled: true }
+    }
+  }
+  // só a janela dona do job grava/finaliza (a mesma posse do open/cancel)
+  ipcMain.handle(IPC.editorExport.pipeWrite, (e, jobId: string, data: Uint8Array) => cancelAware(jobId, editorExports.pipeWrite(jobId, data, e.sender.id)))
   ipcMain.handle(IPC.editorExport.pipeFinish, (e, jobId: string) => {
     const wc = e.sender
-    return editorExports.pipeFinish(jobId, {
-      onProgress: (fraction) => {
-        if (!wc.isDestroyed()) wc.send(IPC.editorExport.finalizeProgress, { jobId, fraction })
-      }
-    })
+    return cancelAware(
+      jobId,
+      editorExports.pipeFinish(jobId, {
+        owner: wc.id,
+        onProgress: (fraction) => {
+          if (!wc.isDestroyed()) wc.send(IPC.editorExport.finalizeProgress, { jobId, fraction })
+        }
+      })
+    )
   })
-  ipcMain.handle(IPC.editorExport.writeStill, (_e, outputDir: string, fileName: string, png: Uint8Array) => editorExports.writeStill(outputDir, fileName, png))
-  ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => editorExports.write(jobId, data, position))
+  ipcMain.handle(IPC.editorExport.writeStill, (e, outputDir: string, fileName: string, png: Uint8Array) => {
+    ownExport(e.sender)
+    return editorExports.writeStill(outputDir, fileName, png, e.sender.id)
+  })
+  ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => cancelAware(jobId, editorExports.write(jobId, data, position)))
   ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))
   ipcMain.handle(IPC.editorExport.finalize, (e, jobId: string, opts?: { durationUs?: number; maxBytes?: number }) => {
     const wc = e.sender
-    return editorExports.finalize(jobId, {
+    return cancelAware(jobId, editorExports.finalize(jobId, {
       durationUs: opts?.durationUs,
       maxBytes: opts?.maxBytes,
       onProgress: (fraction) => {
         if (!wc.isDestroyed()) wc.send(IPC.editorExport.finalizeProgress, { jobId, fraction })
       }
-    })
+    }))
   })
   ipcMain.handle(IPC.editorExport.cancel, (_e, jobId: string) => editorExports.cancel(jobId))
   // saindo no meio de uma exportação/remux: interrompe, apaga os parciais e só então sai
