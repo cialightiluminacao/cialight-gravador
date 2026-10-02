@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parseProject, toDiskProject, validateProject } from './schema'
 import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
-import type { Asset, MediaItem, Project, TextItem } from './project'
+import type { Asset, MediaItem, PresetAnim, Project, TextItem } from './project'
 import { resolveFrame } from './resolve'
 import { planAudio } from './audioPlan'
 import fixture from './__fixtures__/v13-project.json'
@@ -189,7 +189,7 @@ describe('animações de entrada/saída (F4): presets novos e curva', () => {
     if (animOut) json.tracks[0].items[0].visual.animOut = animOut
     return json
   }
-  it('girar, bater e desfoque com curva: round-trip; preset desconhecido lança', () => {
+  it('girar, quicar e desfoque com curva: round-trip; preset desconhecido lança', () => {
     for (const preset of ['zoom', 'pop', 'rotate', 'bounce', 'blur']) {
       const json = withAnims({ preset, durationUs: 500_000, ease: { bezier: [0.34, 1.56, 0.64, 1] } }, { preset, durationUs: 300_000, ease: 'inOut' })
       const p = parseProject(json)
@@ -199,8 +199,41 @@ describe('animações de entrada/saída (F4): presets novos e curva', () => {
     expect(() => parseProject(withAnims({ preset: 'spin', durationUs: 1 }))).toThrow()
     expect(() => parseProject(withAnims({ preset: 'zoom', durationUs: 1, ease: { bezier: [2, 0, 0.5, 1] } }))).toThrow()
   })
-  it('a v1.3 abre zoom/pop (descarta a curva) e recusa os presets novos', () => {
-    expect(parseProjectV13(withAnims({ preset: 'pop', durationUs: 1, ease: 'linear' })).success).toBe(true)
-    for (const preset of ['rotate', 'bounce', 'blur']) expect(parseProjectV13(withAnims({ preset, durationUs: 1 })).success).toBe(false)
+  it('segurar não vale como curva de animação', () => {
+    expect(() => parseProject(withAnims({ preset: 'zoom', durationUs: 1, ease: 'hold' }))).toThrow(/animIn/)
+  })
+  /** Projeto com o vídeo animado (entrada e saída), em memória. */
+  const animated = (animIn: PresetAnim, animOut?: PresetAnim): Project => {
+    const m = createMediaItem(asset, 0, 'video') as MediaItem
+    m.visual = { ...m.visual!, animIn, ...(animOut ? { animOut } : {}) }
+    return withItems([m])
+  }
+  const diskOf = (p: Project) => JSON.parse(JSON.stringify(toDiskProject(p)))
+  it.each([['rotate', 'fade'], ['blur', 'fade'], ['bounce', 'slideD']] as const)('%s no disco: a v1.3 lê %s (presetV14 guarda o real); o parse novo volta ao mesmo projeto', (preset, v13) => {
+    const p = animated({ preset, durationUs: 400_000, ease: 'inOut' }, { preset, durationUs: 300_000 })
+    const disk = diskOf(p)
+    expect(disk.tracks[0].items[0].visual.animIn).toEqual({ preset: v13, presetV14: preset, durationUs: 400_000, ease: 'inOut' })
+    expect(disk.tracks[0].items[0].visual.animOut).toEqual({ preset: v13, presetV14: preset, durationUs: 300_000 })
+    expect(parseProject(disk)).toEqual(p)
+    // a v1.3 abre e, regravando (o zod dela descarta presetV14 e a curva), o projeto fica com o equivalente dela
+    const v = parseProjectV13(disk)
+    expect(v.success).toBe(true)
+    const back = parseProject(JSON.parse(JSON.stringify(v.data)))
+    expect((back.tracks[0].items[0] as MediaItem).visual!.animIn).toEqual({ preset: v13, durationUs: 400_000 })
+    expect((back.tracks[0].items[0] as MediaItem).visual!.animOut).toEqual({ preset: v13, durationUs: 300_000 })
+  })
+  it('presets que a v1.3 conhece vão como estão (sem presetV14); texto e forma também mapeiam', () => {
+    const p = animated({ preset: 'pop', durationUs: 1, ease: 'linear' }, { preset: 'slideL', durationUs: 1 })
+    const disk = diskOf(p)
+    expect(disk.tracks[0].items[0].visual.animIn).toEqual({ preset: 'pop', durationUs: 1, ease: 'linear' })
+    expect(parseProjectV13(disk).success).toBe(true)
+    expect(parseProject(disk)).toEqual(p)
+    const t = parseProject(fixture)
+    const text = t.tracks[2].items[0] as TextItem
+    text.visual = { ...text.visual, animIn: { preset: 'bounce', durationUs: 500_000 } }
+    const td = diskOf(t)
+    expect(td.tracks[2].items[0].visual.animIn).toEqual({ preset: 'slideD', presetV14: 'bounce', durationUs: 500_000 })
+    expect(parseProjectV13(td).success).toBe(true)
+    expect(parseProject(td)).toEqual(t)
   })
 })

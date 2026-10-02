@@ -164,7 +164,7 @@ describe('resolveFrame: propriedades animáveis da F4', () => {
 })
 
 describe('visualStateAt: animações de entrada/saída (F4)', () => {
-  type Ease = import('./project').Ease
+  type Ease = import('./project').PresetEase
   type Preset = import('./project').AnimPreset
   const D = 10 * S
   /** Estado em p ∈ [0,1] da entrada de 1 s (local = p s). */
@@ -207,7 +207,7 @@ describe('visualStateAt: animações de entrada/saída (F4)', () => {
     expect([0, 0.5, 1].map((p) => inAt('rotate', p, 'linear').rect.rotation)).toEqual([-15, -7.5, 0])
     expect([0, 0.5, 1].map((p) => inAt('rotate', p, 'linear').opacity)).toEqual([0, 1, 1])
   })
-  it('bater: desliza de baixo, passa do ponto (overshoot) e volta', () => {
+  it('quicar: desliza de baixo, passa do ponto (overshoot) e volta', () => {
     const cy = (p: number) => inAt('bounce', p).rect.cy
     expect(cy(0)).toBeCloseTo(1.5, 12)
     // recuo (easeOutBack, c = 1,70158): no meio já passou 8,8 % do quadro acima da posição final

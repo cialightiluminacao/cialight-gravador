@@ -38,11 +38,13 @@ export interface Asset {
 }
 export const ANIM_PRESETS = ['fade', 'slideL', 'slideR', 'slideU', 'slideD', 'zoom', 'pop', 'rotate', 'bounce', 'blur'] as const
 export type AnimPreset = (typeof ANIM_PRESETS)[number]
+/** Curva do progresso de uma animação de entrada/saída: as do keyframe menos 'segurar' (sem sentido num preset). */
+export type PresetEase = Exclude<Ease, 'hold'>
 /**
  * Animação de entrada/saída: preset, duração e curva do progresso (ausente = a padrão do preset, PRESET_EASE em
- * resolve.ts: fade linear e deslizar suavizando a saída como até a v1.3; bater linear; os outros suavizando a saída).
+ * resolve.ts: fade linear e deslizar suavizando a saída como até a v1.3; quicar linear; os outros suavizando a saída).
  */
-export interface PresetAnim { preset: AnimPreset; durationUs: Us; ease?: Ease }
+export interface PresetAnim { preset: AnimPreset; durationUs: Us; ease?: PresetEase }
 export interface Transform { x: Anim<number>; y: Anim<number>; scale: Anim<number>; rotation: Anim<number>; opacity: Anim<number> }
 export interface VisualProps {
   transform: Transform

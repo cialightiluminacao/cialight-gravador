@@ -52,12 +52,12 @@ const animated = (...as: Anim<number>[]): boolean => as.some((a) => (a.keys?.len
 /** A região do efeito tem keys (x, y, w, h ou rotação)? */
 export const regionAnimated = (fx: EffectItem): boolean => animated(fx.region.x, fx.region.y, fx.region.w, fx.region.h, fx.region.rotation)
 
-/** O preset de entrada/saída mexe na geometria do clipe (deslizar, zoom, pop, girar, bater)? Fade e desfoque não. */
+/** O preset de entrada/saída mexe na geometria do clipe (deslizar, zoom, pop, girar, quicar)? Fade e desfoque não. */
 export const presetMoves = (preset: AnimPreset): boolean => preset !== 'fade' && preset !== 'blur'
 
 /**
  * O clipe move o conteúdo no quadro: x/y/escala/rotação ou corte com keys, ou animação de entrada/saída com geometria
- * (deslizar, zoom, pop, girar, bater — visualStateAt); fade e desfoque não movem.
+ * (deslizar, zoom, pop, girar, quicar — visualStateAt); fade e desfoque não movem.
  */
 export function clipMoves(m: MediaItem): boolean {
   const v = m.visual

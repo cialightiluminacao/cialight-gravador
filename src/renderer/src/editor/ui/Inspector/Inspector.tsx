@@ -100,7 +100,7 @@ function ItemPanels({ project, item, trackKind, locked }: { project: Project; it
       <div className="border-b border-border px-3 py-2">
         <Timing item={item} fps={project.canvas.fps} />
       </div>
-      {visual ? <TabsContent value="video">{<VideoPanel item={visual} />}</TabsContent> : null}
+      {visual ? <TabsContent value="video">{<VideoPanel item={visual} locked={locked} />}</TabsContent> : null}
       {audioItem ? <TabsContent value="audio">{<AudioPanel item={audioItem} />}</TabsContent> : null}
       <TabsContent value="speed">
         <SpeedPanel item={item} />

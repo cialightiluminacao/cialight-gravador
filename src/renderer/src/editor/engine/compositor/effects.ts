@@ -137,21 +137,20 @@ export class EffectPass {
   }
 
   /**
-   * Desfoque gaussiano de raio `radius` px no alvo inteiro (W×H, camada isolada e transparente; preset de animação
-   * 'blur'): o mesmo caminho do blur dos efeitos (redução, H e V, ampliação bilinear), com máscara 1 no quadro todo.
-   * Deixa o blend e o scissor desligados.
+   * Desfoque gaussiano de raio `radius` px na área `area` do alvo (W×H, camada isolada e transparente; preset de
+   * animação 'blur' — effectsMath.layerBlurRect: a caixa da camada + o alcance do blur): o mesmo caminho do blur dos
+   * efeitos (redução, H e V, ampliação bilinear), com máscara 1 na área. Deixa o blend e o scissor desligados.
    */
-  blurLayer(target: twgl.FramebufferInfo, radius: number, W: number, H: number): void {
-    if (radius < MIN_BLUR_PX) return
+  blurLayer(target: twgl.FramebufferInfo, radius: number, W: number, H: number, area: PxRect): void {
+    if (radius < MIN_BLUR_PX || area.w <= 0 || area.h <= 0) return
     const gl = this.gl
     const s = this.ensure(W, H)
-    const area: PxRect = { x: 0, y: 0, w: W, h: H }
     gl.disable(gl.BLEND)
     gl.enable(gl.SCISSOR_TEST)
     const b = this.blurArea(s, target, area, radius, W, H)
     twgl.bindFramebufferInfo(gl, target)
     this.scissor(area)
-    // região = o quadro inteiro + 1 px, sem borda suave: máscara 1 em todo pixel
+    // região = o quadro inteiro + 1 px, sem borda suave: máscara 1 em todo pixel da área (o scissor limita)
     this.pass(this.apply, {
       u_src: s.snapshot, u_fx: b.tex, u_fxScale: b.scale, u_frame: [W, H], u_mode: MODE.blur, u_q: 512, u_color: [0, 0, 0],
       u_center: [W / 2, H / 2], u_half: [W / 2 + 1, H / 2 + 1], u_rot: [1, 0], u_shape: 0, u_feather: 0, u_invert: 0

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { blurRadiusPx, downsampleFactor, effectBlurRadiusPx, effectPixelBlockPx, featherPx, gaussianWeights, pixelBlockPx, pixelCellQ, REGION_BLUR_K, regionDistPx, regionScissor } from './effectsMath'
+import { blurRadiusPx, downsampleFactor, effectBlurRadiusPx, effectPixelBlockPx, featherPx, gaussianWeights, pixelBlockPx, pixelCellQ, REGION_BLUR_K, regionDistPx, regionScissor, layerBlurRect } from './effectsMath'
 
 describe('blurRadiusPx', () => {
   it('0–100 → 0…4 % da altura de saída; 60 em 1080p ≈ 26 px', () => {
@@ -211,5 +211,15 @@ describe('pixelCellQ (bloco da pixelização em 1/256 px)', () => {
     expect(pixelCellQ(1)).toBe(512)
     const q = pixelCellQ(56.7)
     for (let i = 0; i < 1920; i++) expect(Math.floor(((2 * i + 1) * 128) / q)).toBe(Math.floor((i + 0.5) / (q / 256)))
+  })
+})
+
+describe('layerBlurRect', () => {
+  it('caixa dos cantos + 1,5 × raio + 2 células da redução, presa ao quadro', () => {
+    // raio 10 → redução 2×: folga 15 + 4 = 19
+    expect(layerBlurRect([[100, 200], [300, 200], [300, 260], [100, 260]], 10, 1920, 1080)).toEqual({ x: 81, y: 181, w: 238, h: 98 })
+    // perto da borda e fora do quadro: presa
+    expect(layerBlurRect([[-50, -50], [40, 30]], 30, 1920, 1080)).toEqual({ x: 0, y: 0, w: 40 + 45 + 8, h: 30 + 45 + 8 })
+    expect(layerBlurRect([[3000, 3000], [3100, 3100]], 10, 1920, 1080)).toMatchObject({ w: 0, h: 0 })
   })
 })

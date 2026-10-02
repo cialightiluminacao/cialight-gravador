@@ -9,7 +9,8 @@ import { effectBound, type AnnotationsLayer, type EffectLayer, type Layer, type 
 import { parseColor } from './color'
 import { EffectPass } from './effects'
 import { createGl, createTexture, sourceSize, uploadTexture } from './gl'
-import { layerMatrix, type Mat3, type Rotation } from './matrix'
+import { applyMat3, layerMatrix, type Mat3, type Rotation } from './matrix'
+import { layerBlurRect } from './effectsMath'
 import { FS_MEDIA, FS_SOLID, VS_QUAD } from './shaders'
 
 /** Geometria da fonte: dimensões antes da rotação e rotação horária a aplicar. */
@@ -117,8 +118,14 @@ export class Compositor {
         gl.clearColor(0, 0, 0, 0)
         gl.clear(gl.COLOR_BUFFER_BIT)
         this.drawLayer(layer, ctx)
-        if (blur >= MIN_LAYER_BLUR_PX) {
-          this.effects.blurLayer(aux, blur, W, H)
+        const box = blur >= MIN_LAYER_BLUR_PX && layer.kind === 'media' ? ctx.boxes.get(layer.itemId) : undefined
+        if (box) {
+          // só a caixa da camada + o alcance do blur (cantos do quad local em px GL, origem embaixo)
+          const pts = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map(([a, b]): [number, number] => {
+            const [x, y] = applyMat3(box, a, b)
+            return [((x + 1) / 2) * W, ((y + 1) / 2) * H]
+          })
+          this.effects.blurLayer(aux, blur, W, H, layerBlurRect(pts, blur, W, H))
           this.bindTarget(aux)
           gl.enable(gl.BLEND)
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)

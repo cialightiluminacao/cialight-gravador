@@ -1,37 +1,42 @@
 import { easeValue } from '@shared/editor/anim'
-import type { AnimPreset, Ease, PresetAnim, Us } from '@shared/editor/project'
+import type { AnimPreset, PresetAnim, PresetEase, Us } from '@shared/editor/project'
 import { PRESET_BLUR_PX, PRESET_EASE, presetPose } from '@shared/editor/resolve'
+import { CURVE_PRESETS } from './curveMath'
 
 // Painel de animações de entrada/saída (puro): cartões dos presets, prévia em miniatura (keyframes CSS gerados pela
 // mesma conta do resolve, presetPose) e limites de duração.
 
 export type AnimSide = 'in' | 'out' | 'both'
 
-export const PRESET_CARDS: { preset: AnimPreset; label: string; title: string }[] = [
-  { preset: 'fade', label: 'Fade', title: 'Aparece/some pela opacidade' },
-  { preset: 'slideL', label: 'Esquerda', title: 'Desliza pela esquerda do quadro' },
-  { preset: 'slideR', label: 'Direita', title: 'Desliza pela direita do quadro' },
-  { preset: 'slideU', label: 'Cima', title: 'Desliza por cima do quadro' },
-  { preset: 'slideD', label: 'Baixo', title: 'Desliza por baixo do quadro' },
-  { preset: 'zoom', label: 'Zoom', title: 'Cresce de 80 % a 100 % enquanto aparece' },
-  { preset: 'pop', label: 'Pop', title: 'Salta de 60 % a 105 % e assenta em 100 %' },
-  { preset: 'rotate', label: 'Girar', title: 'Gira de −15° até a posição enquanto aparece' },
-  { preset: 'bounce', label: 'Bater', title: 'Sobe por baixo, passa do ponto e volta' },
-  { preset: 'blur', label: 'Desfoque', title: 'Sai do desfoque (20 px) enquanto aparece' }
+/** Cartões: rótulo e a descrição de como o item entra e como sai (a dica muda com a aba). */
+export const PRESET_CARDS: { preset: AnimPreset; label: string; in: string; out: string }[] = [
+  { preset: 'fade', label: 'Fade', in: 'Aparece pela opacidade', out: 'Some pela opacidade' },
+  { preset: 'slideL', label: 'Esquerda', in: 'Entra deslizando pela esquerda do quadro', out: 'Sai deslizando pela esquerda do quadro' },
+  { preset: 'slideR', label: 'Direita', in: 'Entra deslizando pela direita do quadro', out: 'Sai deslizando pela direita do quadro' },
+  { preset: 'slideU', label: 'Cima', in: 'Entra deslizando por cima do quadro', out: 'Sai deslizando por cima do quadro' },
+  { preset: 'slideD', label: 'Baixo', in: 'Entra deslizando por baixo do quadro', out: 'Sai deslizando por baixo do quadro' },
+  { preset: 'zoom', label: 'Zoom', in: 'Cresce de 80 % a 100 % enquanto aparece', out: 'Encolhe de 100 % a 80 % enquanto some' },
+  { preset: 'pop', label: 'Pop', in: 'Salta de 60 % a 105 % e assenta em 100 %', out: 'Cresce a 105 % e encolhe a 60 % enquanto some' },
+  { preset: 'rotate', label: 'Girar', in: 'Gira de −15° até a posição enquanto aparece', out: 'Gira da posição até −15° enquanto some' },
+  { preset: 'bounce', label: 'Quicar', in: 'Sobe por baixo, passa do ponto e volta', out: 'Recua um pouco e desce para fora por baixo' },
+  { preset: 'blur', label: 'Desfoque', in: 'Sai do desfoque (20 px) enquanto aparece', out: 'Desfoca até 20 px enquanto some' }
 ]
 
-/** Curvas do seletor; null = a padrão do preset (sem `ease` gravado). */
-export const EASE_OPTIONS: { id: string; label: string; ease: Ease | null }[] = [
-  { id: 'default', label: 'Padrão do preset', ease: null },
-  { id: 'linear', label: 'Linear', ease: 'linear' },
-  { id: 'in', label: 'Suavizar entrada', ease: 'in' },
-  { id: 'out', label: 'Suavizar saída', ease: 'out' },
-  { id: 'inOut', label: 'Suavizar ambos', ease: 'inOut' },
-  { id: 'overshoot', label: 'Overshoot', ease: { bezier: [0.34, 1.56, 0.64, 1] } }
+/** Dica do cartão na aba: entrada, saída, ou as duas na combinação. */
+export function cardTitle(c: (typeof PRESET_CARDS)[number], side: AnimSide): string {
+  if (side === 'in') return `Entrada: ${c.in.charAt(0).toLowerCase()}${c.in.slice(1)}`
+  if (side === 'out') return `Saída: ${c.out.charAt(0).toLowerCase()}${c.out.slice(1)}`
+  return `Entrada: ${c.in.charAt(0).toLowerCase()}${c.in.slice(1)}. Saída: ${c.out.charAt(0).toLowerCase()}${c.out.slice(1)}`
+}
+
+/** Curvas do seletor: as do editor de curvas (curveMath) menos 'segurar'; null = a padrão da animação (sem `ease` gravado). */
+export const EASE_OPTIONS: { id: string; label: string; ease: PresetEase | null }[] = [
+  { id: 'default', label: 'Padrão da animação', ease: null },
+  ...CURVE_PRESETS.flatMap((c) => (c.ease === 'hold' ? [] : [{ id: c.id, label: c.label, ease: c.ease as PresetEase }]))
 ]
 
 /** Id do seletor para a curva gravada (bezier fora da lista = 'custom'). */
-export function easeOptionId(e: Ease | undefined): string {
+export function easeOptionId(e: PresetEase | undefined): string {
   if (e === undefined) return 'default'
   const hit = EASE_OPTIONS.find((o) => o.ease !== null && JSON.stringify(o.ease) === JSON.stringify(e))
   return hit ? hit.id : 'custom'
@@ -73,7 +78,7 @@ function poseCss(preset: AnimPreset, q: number): string {
  * @keyframes da miniatura do preset (nome `name`): a pose de presetPose ao longo do ciclo — entrada, repouso, saída
  * conforme o lado — com a curva `ease` (ausente = a do preset). Uma amostra a cada 2,5 % nos trechos com movimento.
  */
-export function thumbKeyframes(name: string, preset: AnimPreset, side: AnimSide, ease?: Ease): string {
+export function thumbKeyframes(name: string, preset: AnimPreset, side: AnimSide, ease?: PresetEase): string {
   const e = ease ?? PRESET_EASE[preset]
   const steps = new Map<number, string>()
   const segs = SEGMENTS[side]

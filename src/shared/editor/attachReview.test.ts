@@ -7,7 +7,7 @@ import { createEffectItem, createEmptyProject, createMediaItem } from './factory
 import { attachCandidate, attachEffects, detachEffect, effectsOverClip } from './followTransform'
 import { deleteItems, duplicateItems, findItem, setItemEnabled, updateAsset } from './ops'
 import { privacyWarnings } from './privacy'
-import type { Anim, Asset, Ease, EffectItem, MediaItem, Project, Us } from './project'
+import type { Anim, Asset, Ease, EffectItem, MediaItem, PresetAnim, Project, Us } from './project'
 import { clipFrameAt, effectRegionAt } from './resolve'
 import { parseProject, toDiskProject } from './schema'
 import { applyKenBurns } from './zoom'
@@ -80,13 +80,32 @@ const cases: [string, () => Project][] = [
   ['Ken Burns pelo corte (PiP)', () => attached(applyKenBurns(scene((m, fx) => { m.visual!.transform.scale = { value: 0.4 }; m.visual!.transform.x = { value: 0.75 }; m.visual!.transform.y = { value: 0.7 }; fx.region = { ...fx.region, x: { value: 0.7 }, y: { value: 0.65 }, w: { value: 0.08 }, h: { value: 0.06 } } }), 'm', 'br').project)],
   ['efeito mais longo que o clipe (deslizar na entrada)', () => attached(scene((m, fx) => { m.startUs = 2 * S; m.durationUs = 6 * S; m.visual!.animIn = { preset: 'slideL', durationUs: S }; fx.durationUs = 12 * S }))],
   ['zoom na entrada e pop na saída', () => attached(scene((m) => { m.visual!.animIn = { preset: 'zoom', durationUs: S }; m.visual!.animOut = { preset: 'pop', durationUs: S / 2, ease: 'linear' } }))],
-  ['girar na entrada e bater na saída', () => attached(scene((m) => { m.visual!.animIn = { preset: 'rotate', durationUs: S }; m.visual!.animOut = { preset: 'bounce', durationUs: S } }))]
+  ['girar na entrada e quicar na saída', () => attached(scene((m) => { m.visual!.animIn = { preset: 'rotate', durationUs: S }; m.visual!.animOut = { preset: 'bounce', durationUs: S } }))],
+  ['desfoque na entrada e quicar na saída com curva', () => attached(scene((m) => { m.visual!.animIn = { preset: 'blur', durationUs: S, ease: 'inOut' }; m.visual!.animOut = { preset: 'bounce', durationUs: 2 * S, ease: { bezier: [0.34, 1.56, 0.64, 1] } } }))],
+  // revisão: keys de escala 1 → 3 → 1 dentro da janela de um zoom de entrada (a v1.3 desenha o zoom como fade)
+  ['escala 1 → 3 → 1 dentro do zoom de entrada', () => attached(scene((m) => { m.visual!.animIn = { preset: 'zoom', durationUs: S }; m.visual!.transform.scale = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'inOut' }, { tUs: S / 2, value: 3, ease: 'inOut' }, { tUs: S, value: 1, ease: 'linear' }] } }))],
+  // o mesmo num zoom de entrada longo com curva 'in' (no meio o build novo está a 0,825 × 3; a v1.3, a 3×): a caixa só
+  // contém o que a v1.3 desenha se incluir a geometria dela
+  ['escala 1 → 3 → 1 num zoom de entrada longo (curva entrada)', () => attached(scene((m) => { m.visual!.animIn = { preset: 'zoom', durationUs: 8 * S, ease: 'in' }; m.visual!.transform.scale = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'inOut' }, { tUs: 4 * S, value: 3, ease: 'inOut' }, { tUs: 8 * S, value: 1, ease: 'linear' }] } }))]
 ]
-/** Casos que a v1.3 recusa: keys de corte (Ken Burns em PiP) e presets novos da F4 (girar, bater, desfoque). */
-const v13Refuses = (n: string): boolean => n === 'Ken Burns pelo corte (PiP)' || n === 'girar na entrada e bater na saída'
+/** Casos que a v1.3 recusa: keys de corte (Ken Burns em PiP). Os presets novos vão no disco como o equivalente dela. */
+const v13Refuses = (n: string): boolean => n === 'Ken Burns pelo corte (PiP)'
+
+/**
+ * O projeto como a v1.3 o desenha: o disco lido por ela (sem presetV14 nem curva) e devolvido ao modelo, com zoom e pop
+ * como fade (ela não tem a geometria deles); a âncora e a região do conteúdo do build novo (só a geometria do clipe muda).
+ */
+function asV13Draws(q: Project): Project {
+  const v = parseProjectV13(JSON.parse(JSON.stringify(toDiskProject(q))))
+  if (!v.success) throw new Error('a v1.3 não abre')
+  const m13 = parseProject(JSON.parse(JSON.stringify(v.data))).tracks.flatMap((t) => t.items).find((i) => i.id === 'm') as MediaItem
+  const fade = (a: PresetAnim | undefined): PresetAnim | undefined => (a && (a.preset === 'zoom' || a.preset === 'pop') ? { ...a, preset: 'fade' } : a)
+  const visual = { ...m13.visual!, animIn: fade(m13.visual!.animIn), animOut: fade(m13.visual!.animOut) }
+  return { ...q, tracks: q.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === 'm' ? { ...(i as MediaItem), visual } : i)) })) }
+}
 
 describe('disco: a v1.3 instalada não vaza o conteúdo de um efeito ancorado', () => {
-  it('a v1.3 abre os projetos ancorados sem recursos novos (e recusa o Ken Burns por corte e girar/bater)', () => {
+  it('a v1.3 abre os projetos ancorados (presets novos pelo equivalente dela) e recusa o Ken Burns por corte', () => {
     expect(cases.map(([n, make]) => [n, parseProjectV13(JSON.parse(JSON.stringify(toDiskProject(make())))).success])).toEqual(cases.map(([n]) => [n, !v13Refuses(n)]))
   })
   it.each(cases)('%s: a região gravada para a v1.3 contém a do build novo em todo instante (1/240 s)', (_n, make) => {
@@ -96,6 +115,15 @@ describe('disco: a v1.3 instalada não vaza o conteúdo de um efeito ancorado', 
     expect(box.rotation).toBe(0)
     for (let t = fx.startUs; t < fx.startUs + fx.durationUs; t += Math.round(S / 240)) {
       if (!inside(box, screen(q, t), fx.region.shape)) throw new Error(`fora em ${t}: ${JSON.stringify(screen(q, t))} ⊄ ${JSON.stringify(box)}`)
+    }
+  })
+  it.each(cases.filter(([n]) => !v13Refuses(n)))('%s: com a geometria que a v1.3 desenha, o conteúdo da região também fica na caixa gravada (1/240 s)', (_n, make) => {
+    const q = make()
+    const fx = fxOf(q)
+    const box = v13Region(q)
+    const q13 = asV13Draws(q)
+    for (let t = fx.startUs; t < fx.startUs + fx.durationUs; t += Math.round(S / 240)) {
+      if (!inside(box, screen(q13, t), fx.region.shape)) throw new Error(`v1.3: fora em ${t}: ${JSON.stringify(screen(q13, t))} ⊄ ${JSON.stringify(box)}`)
     }
   })
   it('âncora perdida (clipe apagado): a v1.3 recebe a caixa de reserva; sem caixa, o quadro inteiro', () => {
@@ -373,7 +401,7 @@ describe('animações de entrada/saída: a região ancorada acompanha o conteúd
     ['zoom de entrada (0,8 → 1)', { animIn: { preset: 'zoom' as const, durationUs: S } }],
     ['pop de entrada (0,6 → 1,05 → 1, overshoot)', { animIn: { preset: 'pop' as const, durationUs: S } }],
     ['girar na entrada (−15° → 0)', { animIn: { preset: 'rotate' as const, durationUs: S } }],
-    ['bater na saída (recuo)', { animOut: { preset: 'bounce' as const, durationUs: S } }]
+    ['quicar na saída (recuo)', { animOut: { preset: 'bounce' as const, durationUs: S } }]
   ])('%s: a região desenhada contém o conteúdo exato em todo instante e a caixa de reserva a contém', (_n, anims) => {
     const q = attached(scene((m) => { Object.assign(m.visual!, anims) }))
     const f = fxOf(q).attach!.fallback!

@@ -1,13 +1,14 @@
 import { useState } from 'react'
 import { Ban } from 'lucide-react'
-import type { AnimPreset, Ease, Item, PresetAnim, VisualProps } from '@shared/editor/project'
+import type { AnimPreset, Item, PresetAnim, PresetEase, VisualProps } from '@shared/editor/project'
 import { presetMoves } from '@shared/editor/contentPose'
 import { cn } from '@/lib/cn'
 import { Segmented, Select, Tip } from '@/components/ui/primitives'
+import { useEditorStore } from '../../state/editorStore'
 import { warnLinkedEffects } from '../viewer/ZoomTool'
 import { NumberField } from './NumberField'
 import { FieldRow, PanelSection, editItem, editItemTransient } from './common'
-import { DEFAULT_ANIM_US, EASE_OPTIONS, PRESET_CARDS, THUMB_CYCLE_S, clampAnimUs, easeOptionId, maxAnimUs, sideAnim, thumbKeyframes, type AnimSide } from './animThumbs'
+import { DEFAULT_ANIM_US, EASE_OPTIONS, cardTitle, PRESET_CARDS, THUMB_CYCLE_S, clampAnimUs, easeOptionId, maxAnimUs, sideAnim, thumbKeyframes, type AnimSide } from './animThumbs'
 
 // Animações de entrada/saída de qualquer item visual (mídia; texto e forma na F5): grade de cartões com a prévia em
 // miniatura (CSS, gerada pela conta do resolve), duração e curva. Entrada e saída separadas; "Combinação" grava a
@@ -32,7 +33,7 @@ function setSide(d: VisualItem, side: AnimSide, a: PresetAnim | null): void {
 const sec = (us: number): number => Math.round(us / 10_000) / 100
 
 /** Folha de estilo das miniaturas do lado: uma animação por preset (com a curva escolhida, se houver). */
-function thumbStyles(side: AnimSide, ease: Ease | undefined): string {
+function thumbStyles(side: AnimSide, ease: PresetEase | undefined): string {
   const rules = PRESET_CARDS.map((c) => thumbKeyframes(`anim-thumb-${side}-${c.preset}`, c.preset, side, ease)).join('\n')
   return `${rules}
 [data-anim-card]:hover [data-anim-thumb], [data-anim-card][aria-pressed="true"] [data-anim-thumb] { animation-duration: ${THUMB_CYCLE_S}s; animation-iteration-count: infinite; animation-timing-function: linear; }
@@ -47,6 +48,9 @@ export function AnimPanel({ item, disabled }: { item: VisualItem; disabled?: boo
   const shown = sideAnim(v, side)
   const none = side === 'both' ? !v.animIn && !v.animOut : !shown
   const pick = (preset: AnimPreset | null): void => {
+    // o mesmo cartão de novo (ou "Nenhuma" sem animação): nada a gravar
+    if (preset ? shown?.preset === preset : none) return
+    const before = useEditorStore.getState().project
     editItem<VisualItem>(id, (d) => {
       if (!preset) {
         setSide(d, side, null)
@@ -56,8 +60,10 @@ export function AnimPanel({ item, disabled }: { item: VisualItem; disabled?: boo
       const durationUs = clampAnimUs(base?.durationUs ?? DEFAULT_ANIM_US, d.durationUs, side)
       setSide(d, side, { preset, durationUs, ...(base?.ease !== undefined ? { ease: base.ease } : {}) })
     })
-    // movimento num clipe com efeito de privacidade sem âncora por cima: a mesma oferta do zoom (ancorar ao clipe)
-    if (preset && item.type === 'media' && presetMoves(preset)) warnLinkedEffects(id, 'a animação')
+    // movimento num clipe com efeito de privacidade sem âncora por cima: a mesma oferta do zoom (ancorar ao clipe) — só
+    // se a edição de fato mudou o projeto (mesmo preset de novo, faixa bloqueada: nada a avisar)
+    const changed = useEditorStore.getState().project !== before
+    if (changed && preset && item.type === 'media' && presetMoves(preset)) warnLinkedEffects(id, 'a animação')
   }
   const easeId = shown ? easeOptionId(shown.ease) : 'default'
   const easeOptions = [...EASE_OPTIONS.map((o) => ({ value: o.id, label: o.label })), ...(easeId === 'custom' ? [{ value: 'custom', label: 'Personalizada' }] : [])]
@@ -78,7 +84,7 @@ export function AnimPanel({ item, disabled }: { item: VisualItem; disabled?: boo
         {PRESET_CARDS.map((c) => {
           const on = shown?.preset === c.preset
           return (
-            <Tip key={c.preset} content={c.title}>
+            <Tip key={c.preset} content={cardTitle(c, side)}>
               <button type="button" data-anim-card={c.preset} aria-pressed={on} aria-label={c.label} disabled={disabled} onClick={() => pick(c.preset)} className={cardClass(on)}>
                 <span className="relative block h-[30px] w-full overflow-hidden rounded-[5px] bg-bg-2">
                   <span data-anim-thumb className="absolute inset-0 rounded-[5px] bg-gradient-to-br from-accent-2/80 to-info/70" style={{ animationName: `anim-thumb-${side}-${c.preset}` }} />
@@ -124,7 +130,9 @@ export function AnimPanel({ item, disabled }: { item: VisualItem; disabled?: boo
             />
           </FieldRow>
         </>
-      ) : side === 'both' && (v.animIn || v.animOut) ? (
+      ) : null}
+      {disabled ? <p className="text-[10.5px] leading-relaxed text-warn" data-anim-locked>Faixa bloqueada: desbloqueie para mudar a animação.</p> : null}
+      {!shown && side === 'both' && (v.animIn || v.animOut) ? (
         <p className="text-[10.5px] leading-relaxed text-muted">Entrada e saída diferentes. Escolha uma animação para usar a mesma nos dois lados.</p>
       ) : null}
     </PanelSection>

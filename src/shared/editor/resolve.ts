@@ -4,7 +4,7 @@ import { easeValue, evalAnim } from './anim'
 import { ATTACH_PAD_PX, conservativeRegion, contentToScreen, type ClipFrame, type RegionValues } from './contentPose'
 import { defaultVisual } from './factory'
 import { layerBase } from './layerGeometry'
-import type { Anim, AnimPreset, Asset, Ease, EffectItem, Item, MediaItem, PresetAnim, Project, ShapeItem, TextStyle, Track, TransitionKind, Us, VisualProps } from './project'
+import type { Anim, AnimPreset, Asset, EffectItem, Item, MediaItem, PresetAnim, PresetEase, Project, ShapeItem, TextStyle, Track, TransitionKind, Us, VisualProps } from './project'
 import { frameDurUs } from './time'
 
 export interface Rect { cx: number; cy: number; scale: number; rotation: number }
@@ -66,7 +66,7 @@ export function activeItemsAt(p: Project, tUs: Us): { track: Track; item: Item }
 }
 
 /** Curva padrão do progresso de cada preset (PresetAnim sem `ease`). */
-export const PRESET_EASE: Record<AnimPreset, Ease> = {
+export const PRESET_EASE: Record<AnimPreset, PresetEase> = {
   fade: 'linear', slideL: 'out', slideR: 'out', slideU: 'out', slideD: 'out', zoom: 'out', pop: 'out', rotate: 'out', bounce: 'linear', blur: 'out'
 }
 
@@ -75,7 +75,7 @@ export const PRESET_BLUR_PX = 20
 const ZOOM_FROM = 0.8
 const POP_FROM = 0.6, POP_PEAK = 1.05, POP_PEAK_AT = 0.7
 const ROTATE_FROM = -15
-// recuo do 'bater' (easeOutBack): passa ~10 % do caminho além do ponto e volta
+// recuo do 'quicar' (easeOutBack): passa ~10 % do caminho além do ponto e volta
 const BACK_C1 = 1.70158, BACK_C3 = BACK_C1 + 1
 
 /** Pose de um preset: opacidade e escala multiplicam; dx/dy (fração do quadro), rotação (graus) e desfoque (px) somam. */
@@ -84,7 +84,7 @@ export interface PresetPose { opacity: number; dx: number; dy: number; scale: nu
 /**
  * Pose do preset com `q` = quanto do caminho até o repouso já foi feito (0 = início da entrada / fim da saída,
  * 1 = em repouso; a curva pode passar de [0,1]). Deslizar: de fora do quadro (±1). Zoom/pop/girar/desfoque aparecem
- * na 1ª metade do caminho (opacidade 2q) — no instante 0 a camada é invisível. Bater: desliza de baixo com recuo.
+ * na 1ª metade do caminho (opacidade 2q) — no instante 0 a camada é invisível. Quicar: desliza de baixo com recuo.
  */
 export function presetPose(preset: AnimPreset, q: number): PresetPose {
   const pose: PresetPose = { opacity: 1, dx: 0, dy: 0, scale: 1, rotation: 0, blur: 0 }

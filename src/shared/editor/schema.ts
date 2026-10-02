@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
 import { ANIM_PRESETS, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, EffectItem, EffectRegion, Item, Project, VisualProps } from './project'
+import type { Anim, AnimPreset, EffectItem, EffectRegion, Item, PresetAnim, Project, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
 import { conservativeRegion } from './contentPose'
@@ -24,9 +24,17 @@ const anim = z.object({
  */
 const animOrNumber = z.union([z.number().transform((value) => ({ value })), anim])
 
-// F4: girar, bater e desfoque (a v1.3 recusa o projeto que os usa) e a curva `ease` (a v1.3 a descarta)
+// F4: girar, quicar e desfoque e a curva `ease` (sem 'segurar'). No disco (toDiskProject) os presets que a v1.3 não
+// conhece vão como o equivalente dela (V13_DISK_PRESET) com o real em `presetV14`, que o parse devolve a `preset`;
+// a v1.3 descarta `presetV14` e `ease` e abre o projeto com o equivalente.
 const animPreset = z.enum(ANIM_PRESETS)
-const presetAnim = z.object({ preset: animPreset, durationUs: us, ease: ease.optional() })
+const presetEase = z.union([
+  z.enum(['linear', 'in', 'out', 'inOut']),
+  z.object({ bezier: z.tuple([unit, z.number(), unit, z.number()]) })
+])
+const presetAnim = z
+  .object({ preset: animPreset, durationUs: us, ease: presetEase.optional(), presetV14: animPreset.optional() })
+  .transform(({ presetV14, ...a }) => (presetV14 ? { ...a, preset: presetV14 } : a))
 const transform = z.object({ x: anim, y: anim, scale: anim, rotation: anim, opacity: anim })
 const visual = z.object({
   transform,
@@ -239,7 +247,8 @@ function fromDiskAnchors(p: Project): Project {
  * quadro). A v1.3 instalada não conhece `attach` (o zod dela o descarta) e desenharia esses valores como se fossem do
  * quadro — vazamento. Por isso o disco guarda em `region` uma caixa ESTÁTICA do quadro que cobre tudo o que o build
  * novo desenha ao longo do efeito — conservativeRegion da união da região ancorada enquanto o clipe dura
- * (anchoredUnion) com a caixa de reserva usada fora dele (sem clipe nem caixa: o quadro inteiro; elipse ×√2; sem
+ * (anchoredUnion — com a geometria do build novo e com a que a v1.3 desenha, v13Geometry: presets do disco, zoom/pop
+ * como fade, sem curva) com a caixa de reserva usada fora dele (sem clipe nem caixa: o quadro inteiro; elipse ×√2; sem
  * rotação). Invertido (a região é o buraco nítido): o buraco nulo — a v1.3 esconde o quadro inteiro, nunca um buraco
  * maior que o do build novo. A região do conteúdo vai em `attach.region`; parseProject desfaz a troca e a ida e volta
  * pelo parse novo não perde nada.
@@ -247,11 +256,9 @@ function fromDiskAnchors(p: Project): Project {
 function diskAnchored(p: Project, fx: EffectItem): unknown {
   const at = fx.attach!
   const m = attachedMedia(p, fx)
-  const u = m ? anchoredUnion(p, fx, m) : null
-  const f = at.fallback
-  const box = u && f
-    ? ((x0, y0, x1, y1) => ({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 }))(Math.min(u.x - u.w / 2, f.x - f.w / 2), Math.min(u.y - u.h / 2, f.y - f.h / 2), Math.max(u.x + u.w / 2, f.x + f.w / 2), Math.max(u.y + u.h / 2, f.y + f.h / 2))
-    : (u ?? f ?? null)
+  // a caixa cobre a região com a geometria do build novo E com a que a v1.3 desenha (presets dela, sem curva)
+  const u = m ? boxUnion(anchoredUnion(p, fx, m), m.visual ? anchoredUnion(p, fx, { ...m, visual: v13Geometry(m.visual) }) : null) : null
+  const box = boxUnion(u, at.fallback ?? null)
   const r = conservativeRegion(fx, box)
   return {
     ...fx,
@@ -259,6 +266,32 @@ function diskAnchored(p: Project, fx: EffectItem): unknown {
     attach: { ...at, region: fx.region }
   }
 }
+
+type Box = { x: number; y: number; w: number; h: number }
+/** Caixa que envolve as duas (null = a outra). */
+function boxUnion(a: Box | null, b: Box | null): Box | null {
+  if (!a || !b) return a ?? b
+  const x0 = Math.min(a.x - a.w / 2, b.x - b.w / 2), y0 = Math.min(a.y - a.h / 2, b.y - b.h / 2)
+  const x1 = Math.max(a.x + a.w / 2, b.x + b.w / 2), y1 = Math.max(a.y + a.h / 2, b.y + b.h / 2)
+  return { x: (x0 + x1) / 2, y: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 }
+}
+
+/** Preset gravado no disco para a v1.3: girar e desfoque → fade, quicar → deslizar de baixo; os outros, o próprio. */
+export const V13_DISK_PRESET: Record<AnimPreset, AnimPreset> = {
+  fade: 'fade', slideL: 'slideL', slideR: 'slideR', slideU: 'slideU', slideD: 'slideD', zoom: 'zoom', pop: 'pop', rotate: 'fade', bounce: 'slideD', blur: 'fade'
+}
+/** O que a v1.3 desenha: o preset do disco, com zoom e pop como fade (ela não tem a geometria deles) e sem curva. */
+const v13Drawn = (a: PresetAnim): PresetAnim => {
+  const d = V13_DISK_PRESET[a.preset]
+  return { preset: d === 'zoom' || d === 'pop' ? 'fade' : d, durationUs: a.durationUs }
+}
+/** Propriedades visuais como a v1.3 as desenha (animações de entrada/saída dela). */
+export function v13Geometry(v: VisualProps): VisualProps {
+  const { animIn, animOut, ...rest } = v
+  return { ...rest, ...(animIn ? { animIn: v13Drawn(animIn) } : {}), ...(animOut ? { animOut: v13Drawn(animOut) } : {}) }
+}
+/** Animação no disco: preset que a v1.3 conhece + o real em `presetV14` quando difere. */
+const diskAnim = (a: PresetAnim): unknown => (V13_DISK_PRESET[a.preset] === a.preset ? a : { ...a, preset: V13_DISK_PRESET[a.preset], presetV14: a.preset })
 
 /** Anim sem keys → número (como a v1.3 gravava); com keys fica Anim. */
 const compact = (a: Anim<number>): Anim<number> | number => (a.keys && a.keys.length > 0 ? a : a.value)
@@ -268,7 +301,9 @@ function diskVisual(v: VisualProps): unknown {
     ...v,
     crop: { l: compact(c.l), t: compact(c.t), r: compact(c.r), b: compact(c.b) },
     ...(ad ? { adjust: { brightness: compact(ad.brightness), contrast: compact(ad.contrast), saturation: compact(ad.saturation) } } : {}),
-    ...(v.radius ? { radius: compact(v.radius) } : {})
+    ...(v.radius ? { radius: compact(v.radius) } : {}),
+    ...(v.animIn ? { animIn: diskAnim(v.animIn) } : {}),
+    ...(v.animOut ? { animOut: diskAnim(v.animOut) } : {})
   }
 }
 

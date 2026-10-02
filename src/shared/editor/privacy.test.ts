@@ -187,7 +187,7 @@ describe('privacyWarnings: clipe se move sob efeito vinculado (transformedUnderE
     // desfoque de entrada/saída não move o conteúdo
     expect(tue(scene((m) => { m.visual!.animIn = { preset: 'blur', durationUs: S }; m.visual!.animOut = { preset: 'blur', durationUs: S } }))).toEqual([])
   })
-  it('dispara: animações de entrada/saída com geometria (zoom, pop, girar, bater) com região parada vinculada e não ancorada', () => {
+  it('dispara: animações de entrada/saída com geometria (zoom, pop, girar, quicar) com região parada vinculada e não ancorada', () => {
     const zoom = tue(scene((m) => { m.visual!.animIn = { preset: 'zoom', durationUs: S } }))
     expect(zoom).toEqual([expect.objectContaining({ itemId: 'fx', kind: 'transformedUnderEffect', mediaItemId: 'm' })])
     expect(zoom[0].tUs).toBeLessThan(S)

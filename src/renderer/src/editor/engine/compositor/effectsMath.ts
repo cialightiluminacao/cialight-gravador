@@ -147,3 +147,16 @@ export function regionDistPx(region: RegionGeom & { shape: 'rect' | 'ellipse' },
   const qy = Math.abs(ly) - hy
   return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0)
 }
+
+/**
+ * Área (px inteiros, origem embaixo à esquerda como no GL) que o desfoque de uma camada precisa processar: a caixa dos
+ * cantos dela (`pts`, px GL) + o alcance do blur (3σ = 1,5 × raio, mais 2 células da redução), presa ao quadro.
+ * Fora dela a camada isolada é transparente e continua transparente depois do blur.
+ */
+export function layerBlurRect(pts: [number, number][], radius: number, W: number, H: number): PxRect {
+  const pad = Math.ceil(1.5 * radius) + 2 * downsampleFactor(radius)
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1])
+  const x0 = Math.max(0, Math.floor(Math.min(...xs) - pad)), x1 = Math.min(W, Math.ceil(Math.max(...xs) + pad))
+  const y0 = Math.max(0, Math.floor(Math.min(...ys) - pad)), y1 = Math.min(H, Math.ceil(Math.max(...ys) + pad))
+  return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) }
+}

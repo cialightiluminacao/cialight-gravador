@@ -193,7 +193,7 @@ async function main() {
       const cards = [...T.grid().querySelectorAll('[data-anim-card]')]
       const text = T.section().textContent
       return { n: cards.length, labels: cards.map((c) => c.getAttribute('aria-label')), none: T.card('none').getAttribute('aria-pressed'), tabs: text.includes('Entrada') && text.includes('Saída') && text.includes('Combinação'), anims: T.anims('${v}') }`)
-    check('11 cartões (Nenhuma + 10 presets), Entrada/Saída/Combinação; sem animação → "Nenhuma" marcado', r.n === 11 && r.none === 'true' && r.tabs && !r.anims.in && !r.anims.out && JSON.stringify(r.labels) === JSON.stringify(['Nenhuma', 'Fade', 'Esquerda', 'Direita', 'Cima', 'Baixo', 'Zoom', 'Pop', 'Girar', 'Bater', 'Desfoque']), r)
+    check('11 cartões (Nenhuma + 10 presets), Entrada/Saída/Combinação; sem animação → "Nenhuma" marcado', r.n === 11 && r.none === 'true' && r.tabs && !r.anims.in && !r.anims.out && JSON.stringify(r.labels) === JSON.stringify(['Nenhuma', 'Fade', 'Esquerda', 'Direita', 'Cima', 'Baixo', 'Zoom', 'Pop', 'Girar', 'Quicar', 'Desfoque']), r)
     await shot('f4-anim-01-painel.png')
   }
 
@@ -216,7 +216,7 @@ async function main() {
       if (lin) { lin.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse', pointerId: 1 })); lin.click() }
       await T.wait(300)
       return { opts: opts.map((o) => o.textContent.trim()), anims: T.anims('${v}'), shown: T.section().querySelector('button[role="combobox"]').textContent.trim() }`)
-    check('curva: 6 opções (padrão do preset, linear, suavizar…, overshoot) e "Linear" gravada', c.opts.length === 6 && c.opts[0] === 'Padrão do preset' && c.anims.in?.ease === 'linear' && c.shown === 'Linear', c)
+    check('curva: 6 opções (padrão da animação, linear, suavizar…, overshoot) e "Linear" gravada', c.opts.length === 6 && c.opts[0] === 'Padrão da animação' && c.anims.in?.ease === 'linear' && c.shown === 'Linear', c)
     await ev(`T.grid().scrollIntoView({ block: 'center' }); await T.wait(200); return 1`)
     await shot('f4-anim-02-entrada-pop.png')
     // visualizador: no 1º instante do clipe o pop é invisível (fundo); em repouso o vídeo aparece
@@ -281,6 +281,20 @@ async function main() {
     check('desfazer tira o efeito de teste e as animações', !left.fx && !left.anims.in, left)
   }
 
+  console.log('faixa bloqueada')
+  {
+    const r = await ev(`const tid = T.st().project.tracks.find((t) => t.items.some((i) => i.id === '${v}')).id
+      T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => (t.id === tid ? { ...t, locked: true } : t)) }))
+      ${showPanel}
+      const cards = [...T.grid().querySelectorAll('[data-anim-card]')]
+      const p0 = T.past(); await T.click(T.card('pop')); await T.wait(200)
+      const out = { disabled: cards.every((c) => c.disabled), note: !!T.section().querySelector('[data-anim-locked]'), anims: T.anims('${v}'), past: T.past(), p0, toasts: T.toasts().filter((t) => t.includes('privacidade')).length }
+      await T.undoTo(${past0}); await T.wait(150)
+      return { ...out, unlocked: !T.st().project.tracks.find((t) => t.id === tid).locked }`)
+    check('vídeo em faixa bloqueada: cartões desabilitados, aviso, clique não grava nada', r.disabled && r.note && !r.anims.in && r.past === r.p0 && r.toasts === 0 && r.unlocked, r)
+    await ev(`T.st().select([]); return 1`)
+  }
+
   console.log('mesmo painel num item de texto')
   {
     const r = await ev(`T.st().apply((p) => ({ ...p, tracks: [...p.tracks, { id: 't_qa_text', kind: 'video', name: 'Texto', muted: false, hidden: false, locked: false, volume: 1, items: [{ id: 'i_qa_text', type: 'text', startUs: 0, durationUs: 4e6, text: 'Olá', style: { font: 'Manrope', size: { value: 64 }, weight: 700, color: '#ffffff', align: 'center', lineHeight: 1.2 }, visual: { transform: { x: { value: 0.5 }, y: { value: 0.5 }, scale: { value: 1 }, rotation: { value: 0 }, opacity: { value: 1 } }, crop: { l: { value: 0 }, t: { value: 0 }, r: { value: 0 }, b: { value: 0 } }, fit: 'contain', fadeInUs: 0, fadeOutUs: 0 } }] }] }))
@@ -288,7 +302,7 @@ async function main() {
       T.grid().scrollIntoView({ block: 'center' }); await T.wait(200)
       await T.click(T.card('bounce')); await T.wait(200)
       return { anims: T.anims('i_qa_text'), pressed: T.card('bounce').getAttribute('aria-pressed'), toasts: T.toasts().filter((t) => t.includes('privacidade')).length }`)
-    check('texto: o inspetor mostra o mesmo painel; Bater grava a entrada do texto (sem oferta de âncora)', r.anims.in?.preset === 'bounce' && r.anims.in?.durationUs === 500000 && r.pressed === 'true' && r.toasts === 0, r)
+    check('texto: o inspetor mostra o mesmo painel; Quicar grava a entrada do texto (sem oferta de âncora)', r.anims.in?.preset === 'bounce' && r.anims.in?.durationUs === 500000 && r.pressed === 'true' && r.toasts === 0, r)
     await shot('f4-anim-06-texto.png')
     await ev(`await T.undoTo(${past0}); T.st().select([]); return 1`)
     const left = await ev(`return { text: !!T.items().find((i) => i.id === 'i_qa_text'), anims: T.anims('${v}') }`)

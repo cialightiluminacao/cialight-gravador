@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ANIM_PRESETS } from '@shared/editor/project'
-import { clampAnimUs, easeOptionId, maxAnimUs, PRESET_CARDS, sideAnim, thumbKeyframes } from './animThumbs'
+import { CURVE_PRESETS } from './curveMath'
+import { cardTitle, clampAnimUs, EASE_OPTIONS, easeOptionId, maxAnimUs, PRESET_CARDS, sideAnim, thumbKeyframes } from './animThumbs'
 
 describe('painel de animações', () => {
   it('um cartão por preset do modelo', () => {
@@ -18,6 +19,17 @@ describe('painel de animações', () => {
     expect(both).toContain('0%{opacity:0;transform:translate(0%,0%) scale(1) rotate(0deg);filter:blur(3px)}')
     expect(both).toContain('35%{opacity:1;transform:translate(0%,0%) scale(1) rotate(0deg);filter:blur(0px)}')
     expect(both).toContain('100%{opacity:0;transform:translate(0%,0%) scale(1) rotate(0deg);filter:blur(3px)}')
+  })
+  it('curvas: as do editor de curvas sem "segurar", depois da padrão da animação', () => {
+    expect(EASE_OPTIONS.map((o) => o.label)).toEqual(['Padrão da animação', ...CURVE_PRESETS.filter((c) => c.ease !== 'hold').map((c) => c.label)])
+    expect(EASE_OPTIONS.find((o) => o.id === 'overshoot')!.ease).toEqual(CURVE_PRESETS.find((c) => c.id === 'overshoot')!.ease)
+  })
+  it('dica do cartão pela aba: entrada, saída e as duas na combinação; "Quicar"', () => {
+    const c = PRESET_CARDS.find((x) => x.preset === 'slideL')!
+    expect(cardTitle(c, 'in')).toBe('Entrada: entra deslizando pela esquerda do quadro')
+    expect(cardTitle(c, 'out')).toBe('Saída: sai deslizando pela esquerda do quadro')
+    expect(cardTitle(c, 'both')).toBe('Entrada: entra deslizando pela esquerda do quadro. Saída: sai deslizando pela esquerda do quadro')
+    expect(PRESET_CARDS.find((x) => x.preset === 'bounce')!.label).toBe('Quicar')
   })
   it('curva: id do seletor; bezier fora da lista = personalizada', () => {
     expect(easeOptionId(undefined)).toBe('default')

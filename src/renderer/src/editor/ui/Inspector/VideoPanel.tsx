@@ -40,7 +40,7 @@ const SHAPE_OPTIONS: { value: NonNullable<VisualProps['shape']>; label: string }
   { value: 'circle', label: 'Círculo' }
 ]
 
-export function VideoPanel({ item }: { item: V }): React.JSX.Element {
+export function VideoPanel({ item, locked }: { item: V; locked?: boolean }): React.JSX.Element {
   // tocando, o inspetor não acompanha o playhead (evita re-render a cada quadro)
   const playheadUs = usePausedPlayhead()
   const local = localUs(item, playheadUs)
@@ -119,7 +119,7 @@ export function VideoPanel({ item }: { item: V }): React.JSX.Element {
         </div>
       </PanelSection>
 
-      <AnimPanel item={item} />
+      <AnimPanel item={item} disabled={locked} />
     </>
   )
 }
