@@ -20,6 +20,7 @@ import {
   VideoSampleSource,
   type StreamTargetChunk
 } from 'mediabunny'
+import type { CursorTrackV1 } from '@shared/cursor'
 import { resolveFrame, type AnnotationsLayer } from '@shared/editor/resolve'
 import type { Project, Us } from '@shared/editor/project'
 import { frameToUs } from '@shared/editor/time'
@@ -48,6 +49,8 @@ let canvas: OffscreenCanvas | null = null
 let dpr = 1
 const pool = new DecoderPool()
 let project: Project | null = null
+// trilhas do cursor por id do asset (F6; o cliente manda as que os clipes com cursorFx ligado usam)
+const cursors = new Map<string, CursorTrackV1>()
 let selection: string[] = []
 let pending: FrameMsg | null = null
 let busy = false
@@ -85,6 +88,12 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
         if (!busy) pool.flushRetired()
         break
       }
+      case 'cursorTracks':
+        for (const [id, tr] of Object.entries(m.tracks)) {
+          if (tr) cursors.set(id, tr)
+          else cursors.delete(id)
+        }
+        break
       case 'resize':
         compositor?.resize(m.width * dpr, m.height * dpr)
         break
@@ -178,7 +187,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
   if (!comp || !canvas) throw new Error('render antes de init')
   const W = canvas.width
   const H = canvas.height
-  const layers = resolveFrame(p, tUs)
+  const layers = resolveFrame(p, tUs, cursors)
   const sources = new Map<string, TexImageSource | VideoFrame | null>()
   const meta = new Map<string, SourceMeta>()
   const missing = new Set<string>()

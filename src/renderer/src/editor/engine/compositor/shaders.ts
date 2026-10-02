@@ -94,6 +94,50 @@ void main() {
   o = vec4(rgb * alpha, alpha);
 }`
 
+// Sobreposição do cursor (F6, cursorSprite.ts): quad do elemento (v_a ∈ [0,1]²) levado ao quad local da camada por
+// u_local (v_l) e daí à tela por u_mat (a matriz da camada). A máscara de forma da camada (v_l) recorta o elemento no
+// que a camada mostra (corte, arredondado, círculo).
+export const VS_OVERLAY = `#version 300 es
+in vec2 a_pos;
+uniform mat3 u_mat;
+uniform mat3 u_local;
+out vec2 v_a;
+out vec2 v_l;
+void main() {
+  v_a = a_pos;
+  vec3 l = u_local * vec3(a_pos, 1.0);
+  v_l = l.xy;
+  gl_Position = vec4((u_mat * vec3(l.xy, 1.0)).xy, 0.0, 1.0);
+}`
+
+// u_mode 0: anel do clique — u_ring = (meia caixa, raio) em px da fonte, traço u_stroke px da fonte, cor u_color
+// (não pré-multiplicada); antialias por fwidth (px da tela). u_mode 1: sprite (textura pré-multiplicada).
+export const FS_OVERLAY = `#version 300 es
+precision highp float;
+uniform int u_mode;
+uniform sampler2D u_tex;
+uniform vec4 u_color;
+uniform vec2 u_ring;
+uniform float u_stroke;
+uniform float u_opacity;
+in vec2 v_a;
+in vec2 v_l;
+out vec4 o;
+${SHAPE}
+void main() {
+  float ld = shapeDist(v_l);
+  float cov = coverage(ld, max(fwidth(ld), 1e-4)) * u_opacity;
+  if (u_mode == 0) {
+    vec2 q = (v_a - 0.5) * 2.0 * u_ring.x;
+    float d = abs(length(q) - u_ring.y);
+    float fw = max(fwidth(d), 1e-4);
+    float a = clamp(0.5 - (d - 0.5 * u_stroke) / fw, 0.0, 1.0) * u_color.a * cov;
+    o = vec4(u_color.rgb * a, a);
+  } else {
+    o = texture(u_tex, v_a) * cov;
+  }
+}`
+
 // ---- passe de efeitos (effects.ts) ----
 // Passes de tela cheia: o quad [0,1]² cobre o alvo inteiro e o scissor limita a área processada.
 // Coordenadas por gl_FragCoord (px do alvo, origem embaixo à esquerda); texturas na convenção GL.

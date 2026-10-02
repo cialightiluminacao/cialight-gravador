@@ -1,7 +1,7 @@
 // Tempo da timeline ↔ tempo da trilha do cursor (F6). Pura.
 import { CURSOR_VIDEO_LAG_MS } from '../cursor'
 import type { Asset, MediaItem, Project, Us } from './project'
-import { sourceTimeUs } from './resolve'
+import { sourceTimeUs } from './sourceTime'
 import { frameDurUs } from './time'
 
 const videoAsset = (p: Project, item: MediaItem): Asset | null => {

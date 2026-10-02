@@ -5,7 +5,7 @@ import { join } from 'path'
 import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
-import { laplacianVar, localContrast, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
+import { laplacianVar, localContrast, magentaBlob, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
 import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShots'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
@@ -37,6 +37,9 @@ const AUTO_ZOOM_PROJECT_ID = 'p-editor-autozoom-test'
 // cópia 9:16 pelo IPC project.duplicate (reframeHarness.ts)
 const REFRAME_PROJECT_ID = 'p-editor-reframe-test'
 const REFRAME_COPY_ID = 'p-editor-reframe-copia'
+// realce de cliques e cursor ampliado (F6): o mesmo vídeo do zoom automático; trilha sintética em memória
+// (cursorFxHarness.ts)
+const CURSOR_FX_PROJECT_ID = 'p-editor-cursorfx-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -60,6 +63,7 @@ interface HarnessReport {
   follow?: FollowReport
   anim?: AnimReport
   reframe?: ReframeReport
+  cursorFx?: CursorFxReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -117,6 +121,13 @@ interface ReframeReport {
   error?: string; before?: { red: RedBlob | null; text: PxBox | null }; copy?: { name: string; width: number; height: number; anchored: string[]; warnings: string[] }
   red?: RedBlob | null; textBox?: PxBox; ref?: Legib; preview?: Legib; control?: Legib; exportPath?: string; exportError?: string
   exported?: { width: number; height: number; red: RedBlob | null; legib?: Legib }
+}
+interface RingShot { tUs: number; ring: RedBlob | null; expected: { x: number; y: number } | null }
+interface CursorFxReport {
+  error?: string; identity?: RingShot; zoom?: RingShot; reframed?: RingShot & { width: number; height: number }; afterDuration?: number
+  privacy?: { plain: number; blurred: number }
+  sprite?: { tip: { x: number; y: number } | null; expected: { x: number; y: number } | null; whiteH: number; dark: number }
+  exportPath?: string; exportError?: string
 }
 interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>>; pip?: PipBlurReport }
 type PxRect4 = { x0: number; y0: number; x1: number; y1: number }
@@ -286,6 +297,10 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const autoZoomProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Zoom automático', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: AUTO_ZOOM_PROJECT_ID }, aAutoZoom), aAutoZoom.id, 0).project
   rmSync(projects.dirOf(AUTO_ZOOM_PROJECT_ID), { recursive: true, force: true })
   projects.create(autoZoomProject)
+  const aCursorFx: Asset = { ...assetFromInfo('a_cursorfx', autoZoomMp4, statSync(autoZoomMp4), await probe(autoZoomMp4)), status: 'ready' }
+  const cursorFxProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Realce de cliques', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: CURSOR_FX_PROJECT_ID }, aCursorFx), aCursorFx.id, 0).project
+  rmSync(projects.dirOf(CURSOR_FX_PROJECT_ID), { recursive: true, force: true })
+  projects.create(cursorFxProject)
   // reenquadrar: fundo escuro, quadrado vermelho 24×24 centrado em (1500, 540) e o texto "Senha 4821" (Consolas 72)
   const reframePng = join(dir, 'reenquadrar.png')
   await gen(['-f', 'lavfi', '-i', 'color=c=0x1e293b:s=1920x1080', '-vf', `drawbox=x=1488:y=528:w=24:h=24:color=red:t=fill,${line('Senha 4821', 1320, 760)}`, '-frames:v', '1', '-update', '1', reframePng], 'editor: reenquadrar')
@@ -371,6 +386,18 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       if (rf.textBox && rf.ref && w === 1080 && h === 1920) rf.exported.legib = { c: r4(localContrast(d, w, h, rf.textBox, 4, 3) / rf.ref.c), lap: r4(laplacianVar(d, w, h, rf.textBox, 4, 3) / rf.ref.lap) }
     } catch (e) {
       rf.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
+  // realce de cliques: o anel no quadro de 1,0 s (o do clique) da exportação
+  let ringExported: RedBlob | null = null
+  const cfx = result.report.cursorFx
+  if (cfx?.exportPath) {
+    try {
+      const raw = join(dir, 'realce-cliques.rgb')
+      await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', (29.5 / 30).toFixed(4), '-i', cfx.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do realce de cliques' })
+      ringExported = magentaBlob(new Uint8Array(readFileSync(raw)), 1920, 1080, 3)
+    } catch (e) {
+      cfx.exportError = e instanceof Error ? e.message : String(e)
     }
   }
   win.destroy()
@@ -611,6 +638,27 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(re?.width === 1080 && re.height === 1920, `reenquadrar: exportação em 1080×1920 (${re?.width}×${re?.height}) ${rr?.exportError ?? ''}`, failures)
   check(!!re?.red && Math.abs(re.red.cx - 540) <= 3 && Math.abs(re.red.cy - 960) <= 3, `reenquadrar (exportação): foco no centro — ${at(re?.red ?? null)} ±3 px`, failures)
   check(unreadable(re?.legib), `reenquadrar (exportação): texto sob o blur ilegível (${fmt([re?.legib])})`, failures)
+
+  const cf = r.cursorFx
+  console.log(`realce de cliques / cursor ampliado: ${JSON.stringify(cf)}`)
+  check(!!cf && !cf.error, `realce de cliques: harness sem erro (${cf?.error ?? ''})`, failures)
+  const ringOk = (s: RingShot | undefined): string => {
+    const d = s?.ring && s.expected ? Math.hypot(s.ring.cx - s.expected.x, s.ring.cy - s.expected.y) : Infinity
+    return `${d <= 2 ? '' : 'X '}anel ${at(s?.ring ?? null)} (${s?.ring?.w}×${s?.ring?.h} px, ${s?.ring?.n} px) × esperado (${s?.expected?.x.toFixed(2)}, ${s?.expected?.y.toFixed(2)}): ${d.toFixed(2)} px ≤ 2`
+  }
+  for (const [tag, s] of [['identidade', cf?.identity], ['zoom 2× deslocado', cf?.zoom], ['reenquadrado 9:16', cf?.reframed]] as const) {
+    const msg = ringOk(s)
+    check(!msg.startsWith('X '), `realce de cliques (${tag}): o centro do anel fica no ponto clicado levado pela geometria do clipe — ${msg}`, failures)
+  }
+  check(cf?.reframed?.width === 1080 && cf.reframed.height === 1920, `realce de cliques: o cenário reenquadrado é 1080×1920 (${cf?.reframed?.width}×${cf?.reframed?.height})`, failures)
+  const zr2 = cf?.zoom?.ring, id2 = cf?.identity?.ring
+  check(!!zr2 && !!id2 && Math.abs(zr2.w / id2.w - 2) <= 0.15, `realce de cliques: o anel escala com a camada (zoom 2×: ${id2?.w} → ${zr2?.w} px)`, failures)
+  check(cf?.afterDuration === 0, `realce de cliques: depois de durationMs o anel sumiu (${cf?.afterDuration} pixels magenta)`, failures)
+  check(!!cf?.privacy && cf.privacy.plain > 200 && cf.privacy.blurred <= cf.privacy.plain * 0.02, `realce de cliques (privacidade): um blur sobre o ponto deixa o anel irreconhecível — pixels magenta ${cf?.privacy?.plain} → ${cf?.privacy?.blurred} (≤ 2 %)`, failures)
+  const arrow = cf?.sprite
+  check(!!arrow?.tip && !!arrow.expected && Math.abs(arrow.tip.x - arrow.expected.x) <= 3 && Math.abs(arrow.tip.y - arrow.expected.y) <= 4 && arrow.whiteH >= 22 && arrow.whiteH <= 40 && arrow.dark > 20, `cursor ampliado: ponta da seta em (${arrow?.tip?.x}, ${arrow?.tip?.y}) × ponto do cursor (${arrow?.expected?.x.toFixed(2)}, ${arrow?.expected?.y.toFixed(2)}) (±3/±4 px), seta branca de ${arrow?.whiteH} px de altura (22–40 com escala 1,8), ${arrow?.dark} px de contorno preto`, failures)
+  const ip = cf?.identity?.ring
+  check(!!ringExported && !!ip && Math.hypot(ringExported.cx - ip.cx, ringExported.cy - ip.cy) <= 1.5 && Math.abs(ringExported.w - ip.w) <= 3, `realce de cliques: exportação = preview no quadro do clique — anel exportado ${at(ringExported)} (${ringExported?.w} px; preview ${at(ip ?? null)}, ${ip?.w} px) ±1,5 px ${cf?.exportError ?? ''}`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

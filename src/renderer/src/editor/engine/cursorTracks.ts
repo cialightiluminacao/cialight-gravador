@@ -3,12 +3,42 @@
 // (gravação antiga, modo janela sem o módulo nativo, arquivo apagado) é o caso normal: null, sem aviso.
 import { useEffect, useState } from 'react'
 import type { CursorTrackV1 } from '@shared/cursor'
-import type { Asset } from '@shared/editor/project'
+import type { Asset, Project } from '@shared/editor/project'
 import { useEditorStore } from '../state/editorStore'
 
 /** Gravação cuja trilha o asset usa: só o asset da TELA de uma gravação com `cursor`; senão null. */
 export function cursorSessionOf(asset: Asset | undefined | null): string | null {
   return asset?.cursor && asset.source.type === 'session' && asset.source.stream === 'screen' ? asset.source.sessionId : null
+}
+
+/**
+ * Trilhas que o render (preview/exportação) precisa: id do asset → gravação, para os assets de tela com trilha usados
+ * por algum clipe de VÍDEO com o realce de cliques ou o cursor ampliado ligado (cursorFx em faixa de áudio ou em asset
+ * sem trilha é ignorado).
+ */
+export function cursorTrackNeeds(p: Project): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const t of p.tracks) {
+    if (t.kind !== 'video') continue
+    for (const it of t.items) {
+      if (it.type !== 'media' || !it.cursorFx || (!it.cursorFx.highlight.enabled && !it.cursorFx.cursor.enabled) || out.has(it.assetId)) continue
+      const sessionId = cursorSessionOf(p.assets.find((a) => a.id === it.assetId))
+      if (sessionId) out.set(it.assetId, sessionId)
+    }
+  }
+  return out
+}
+
+/** Carrega as trilhas de cursorTrackNeeds: as que vieram (por id do asset) e os assets cuja trilha não pôde ser lida. */
+export async function loadCursorTracks(p: Project, cache: CursorTrackCache): Promise<{ tracks: Map<string, CursorTrackV1>; failed: string[] }> {
+  const tracks = new Map<string, CursorTrackV1>()
+  const failed: string[] = []
+  for (const [assetId, sessionId] of cursorTrackNeeds(p)) {
+    const t = await cache.load(sessionId)
+    if (t) tracks.set(assetId, t)
+    else failed.push(assetId)
+  }
+  return { tracks, failed }
 }
 
 /** Cache por gravação. Leituras simultâneas compartilham a mesma promessa; null/falha não ficam (tenta de novo depois). */

@@ -1,11 +1,14 @@
 // Resolve o estado do quadro em um instante da timeline: lista de camadas (fundo → topo)
 // consumida pelo compositor (preview e export). Pura, sem DOM/Electron.
 import { easeValue, evalAnim } from './anim'
+import { cursorOverlayAt, type CursorOverlay, type CursorTracks } from './cursorOverlay'
 import { ATTACH_PAD_PX, conservativeRegion, contentToScreen, type ClipFrame, type RegionValues } from './contentPose'
 import { defaultVisual } from './factory'
 import { layerBase } from './layerGeometry'
-import type { Anim, AnimPreset, Asset, EffectItem, Item, MediaItem, PresetAnim, PresetEase, Project, ShapeItem, TextStyle, Track, TransitionKind, Us, VisualProps } from './project'
-import { frameDurUs } from './time'
+import type { Anim, AnimPreset, EffectItem, Item, MediaItem, PresetAnim, PresetEase, Project, ShapeItem, TextStyle, Track, TransitionKind, Us, VisualProps } from './project'
+import { sourceTimeUs } from './sourceTime'
+
+export { sourceTimeUs }
 
 export interface Rect { cx: number; cy: number; scale: number; rotation: number }
 /** Corte e ajuste já avaliados no instante (o modelo guarda Anim). */
@@ -24,6 +27,11 @@ export interface MediaLayer {
   crop: CropValues; fit: VisualProps['fit']
   shape: 'rect' | 'rounded' | 'circle'; radius: number
   border?: { width: number; color: string }; adjust?: AdjustValues; mirror: boolean
+  /**
+   * Realce de cliques e cursor ampliado (F6, cursorOverlay.ts): desenhados pelo compositor no espaço do conteúdo da
+   * camada, junto com ela (abaixo dos efeitos que a afetam). Ausente = nada.
+   */
+  cursor?: CursorOverlay
 }
 export interface AnnotationsLayer { kind: 'annotations'; itemId: string; trackId: string; sessionId: string; sessionMs: number; autoFadeMs: number | null }
 export interface EffectLayer {
@@ -43,17 +51,6 @@ export interface TransitionLayer { kind: 'transition'; transition: TransitionKin
 export type Layer = MediaLayer | AnnotationsLayer | EffectLayer | TextLayer | ShapeLayer | TransitionLayer
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
-
-/** Tempo na fonte (µs) para o instante tUs da timeline. */
-export function sourceTimeUs(item: MediaItem, asset: Asset, tUs: Us): Us {
-  const local = tUs - item.startUs
-  let src: number
-  if (item.freeze) src = item.freeze.atUs
-  else if (item.reverse) src = item.inUs + (item.durationUs - local) * item.speed - frameDurUs(asset.video?.fps || 30)
-  else src = item.inUs + local * item.speed
-  const max = asset.durationUs != null ? Math.max(0, asset.durationUs - 1) : Infinity
-  return Math.round(clamp(src, 0, max))
-}
 
 /** Item ativo em [start, end) de cada faixa (inclui faixas ocultas; resolveFrame filtra). */
 export function activeItemsAt(p: Project, tUs: Us): { track: Track; item: Item }[] {
@@ -236,8 +233,11 @@ export function visualTrackBelow(p: Project, trackId: string): string | null {
   return null
 }
 
-/** Camadas visíveis no instante tUs, da mais ao fundo (faixa 0) à mais ao topo. */
-export function resolveFrame(p: Project, tUs: Us): Layer[] {
+/**
+ * Camadas visíveis no instante tUs, da mais ao fundo (faixa 0) à mais ao topo. `cursors`: trilhas do cursor por id do
+ * asset (entrada lateral, fora do projeto) — com ela, o clipe com cursorFx ligado ganha a sobreposição do cursor.
+ */
+export function resolveFrame(p: Project, tUs: Us, cursors?: CursorTracks): Layer[] {
   const layers: Layer[] = []
   for (const { track, item } of activeItemsAt(p, tUs)) {
     if (track.hidden || item.enabled === false) continue
@@ -249,13 +249,15 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
         if (!asset) break
         const v = item.visual ?? defaultVisual()
         const s = visualStateAt(v, item.durationUs, local)
+        const cursorTrack = item.cursorFx ? cursors?.get(asset.id) : undefined
+        const cursor = cursorTrack ? cursorOverlayAt(p, item, asset, cursorTrack, tUs) : null
         layers.push({
           kind: 'media', itemId: item.id, trackId: track.id, assetId: asset.id,
           srcUs: asset.kind === 'image' ? null : sourceTimeUs(item, asset, tUs),
           rect: s.rect, opacity: s.opacity, crop: cropAt(v.crop, local), fit: v.fit,
           shape: v.shape ?? 'rect', radius: v.radius ? Math.max(0, ev(v.radius, local)) : 0,
           ...(v.border ? { border: v.border } : {}), ...(v.adjust ? { adjust: adjustAt(v.adjust, local) } : {}),
-          mirror: v.mirror ?? false, ...(s.blur > 0 ? { blur: s.blur } : {})
+          mirror: v.mirror ?? false, ...(s.blur > 0 ? { blur: s.blur } : {}), ...(cursor ? { cursor } : {})
         })
         break
       }

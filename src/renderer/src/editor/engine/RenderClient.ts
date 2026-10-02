@@ -2,6 +2,7 @@
 // resolve as promessas. Pedidos coalescidos pelo worker são resolvidos com o quadro posterior que os cobriu.
 // `restart` (watchdog do preview, spec §13) troca o worker travado por um novo num canvas novo — o
 // OffscreenCanvas só pode ser transferido uma vez — e restaura projeto, seleção e tamanho.
+import type { CursorTrackV1 } from '@shared/cursor'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from './mediaUrls'
 import type { ExportJobSpec, RenderIn, RenderOut } from './protocol'
@@ -23,6 +24,8 @@ export class RenderClient {
   private size: { width: number; height: number; dpr: number }
   private project: { project: Project; mediaUrls: MediaUrls; useProxy: boolean } | null = null
   private overlay: { selection: string[]; guides: boolean } | null = null
+  /** Trilhas do cursor já enviadas ao worker (por id do asset). */
+  private cursors = new Map<string, CursorTrackV1>()
   private disposed = false
 
   /**
@@ -85,11 +88,34 @@ export class RenderClient {
     this.spawn(canvas)
     if (this.project) this.send({ t: 'project', ...this.project })
     if (this.overlay) this.send({ t: 'overlay', ...this.overlay })
+    if (this.cursors.size) this.send({ t: 'cursorTracks', tracks: Object.fromEntries(this.cursors) })
   }
 
   setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean): void {
     this.project = { project, mediaUrls, useProxy }
     this.send({ t: 'project', project, mediaUrls, useProxy })
+  }
+
+  /**
+   * Trilhas do cursor (F6) que o worker usa, por id do asset: só as entradas novas/trocadas vão ao worker (uma trilha
+   * de 1 h tem ~200 mil amostras); as que saíram do mapa são removidas lá.
+   */
+  setCursorTracks(tracks: ReadonlyMap<string, CursorTrackV1>): void {
+    const diff: Record<string, CursorTrackV1 | null> = {}
+    let changed = false
+    for (const [id, tr] of tracks) {
+      if (this.cursors.get(id) === tr) continue
+      diff[id] = tr
+      changed = true
+    }
+    for (const id of this.cursors.keys()) {
+      if (tracks.has(id)) continue
+      diff[id] = null
+      changed = true
+    }
+    if (!changed) return
+    this.cursors = new Map(tracks)
+    this.send({ t: 'cursorTracks', tracks: diff })
   }
 
   resize(width: number, height: number): void {

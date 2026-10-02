@@ -4,10 +4,12 @@
 // depois de gravar); no fim o main remuxa com faststart. Falha do CODIFICADOR de hardware antes do 1º pacote →
 // nova tentativa com `prefer-software` (outras falhas mostram a causa real). Tamanho-alvo: saída acima do alvo
 // é refeita uma vez com bitrate × (alvo/obtido) × 0,97 ("Ajustando tamanho…"). Uma exportação por vez.
+import type { CursorTrackV1 } from '@shared/cursor'
 import { planAudio } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
+import { cursorTracks, loadCursorTracks } from '../engine/cursorTracks'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
 import { KEYFRAME_INTERVAL_S, missingMediaWarnings, resizeBitrate } from './exportPlan'
@@ -31,6 +33,11 @@ export interface EditorExportRequest {
   targetBytes?: number
   /** Testes: simula a falha do encoder de hardware (exercita a nova tentativa em software). */
   simulateHwFailure?: boolean
+  /**
+   * Trilhas do cursor (F6) por id do asset, já prontas (testes com trilha sintética). Ausente: lidas como no preview
+   * (cursorTracks, IPC) para os clipes com realce de cliques/cursor ampliado ligado.
+   */
+  cursorTracks?: ReadonlyMap<string, CursorTrackV1>
 }
 
 export interface EditorExportProgress {
@@ -91,9 +98,19 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
     let hw: HwPref = 'prefer-hardware'
     let fellBack = false
     const warnings = new Set<string>()
+    // as mesmas trilhas do cursor do preview (entrada lateral do resolveFrame); a que não carregar vira aviso
+    let cursors = req.cursorTracks
+    if (!cursors) {
+      const loaded = await loadCursorTracks(req.project, cursorTracks)
+      cursors = loaded.tracks
+      for (const id of loaded.failed) {
+        const name = req.project.assets.find((a) => a.id === id)?.name ?? id
+        warnings.add(`A trilha do cursor de “${name}” não pôde ser lida: o realce de cliques e o cursor ampliado saíram sem efeito.`)
+      }
+    }
     for (let pass = 1; ; pass++) {
       const stage = pass === 1 ? 'render' : 'resize'
-      const enc = await encode({ ...req, videoBitrate }, hw, stage, signal, opts.onProgress)
+      const enc = await encode({ ...req, videoBitrate, cursorTracks: cursors }, hw, stage, signal, opts.onProgress)
       hw = enc.hardware
       fellBack ||= enc.fellBack
       for (const w of enc.warnings) warnings.add(w)
@@ -182,6 +199,7 @@ function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, stage: 're
     audioWarnings.add(`Áudio de “${name}” não pôde ser lido e saiu em silêncio (${message}).`)
   })
   render.setProject(req.project, urls, false)
+  if (req.cursorTracks) render.setCursorTracks(req.cursorTracks)
   audio?.setProject(req.project, urls, false)
   const channel = audio ? new MessageChannel() : null
   if (audio && channel) audio.connectPort(channel.port1)

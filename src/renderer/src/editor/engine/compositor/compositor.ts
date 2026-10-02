@@ -2,16 +2,19 @@
 // no canvas inteiro (= quadro do projeto na resolução do canvas). Mesmo código no preview e na exportação.
 // F1: mídia (vídeo/imagem) e anotações. F2: efeitos de privacidade (effects.ts) — com efeito no quadro, as
 // camadas vão para um FBO de acumulação que o efeito lê. F4: desfoque por camada (preset de animação 'blur') — a
-// camada é desenhada isolada no FBO auxiliar, desfocada pelo blur dos efeitos e composta. Texto/forma/transições
-// chegam depois (ignorados).
+// camada é desenhada isolada no FBO auxiliar, desfocada pelo blur dos efeitos e composta. F6: realce de cliques e
+// cursor ampliado (MediaLayer.cursor) desenhados junto com a camada, no espaço do conteúdo dela (cursorSprite.ts) —
+// abaixo dos efeitos que a afetam. Texto/forma/transições chegam depois (ignorados).
 import * as twgl from 'twgl.js'
+import type { CursorOverlay } from '@shared/editor/cursorOverlay'
 import { effectBound, type AnnotationsLayer, type EffectLayer, type Layer, type MediaLayer } from '@shared/editor/resolve'
 import { parseColor } from './color'
 import { EffectPass } from './effects'
+import { CURSOR_ARROW_BOX, CURSOR_ARROW_HOTSPOT, drawArrowSprite, elementMatrix, type OverlaySpace } from './cursorSprite'
 import { createGl, createTexture, sourceSize, uploadTexture } from './gl'
-import { applyMat3, layerMatrix, type Mat3, type Rotation } from './matrix'
+import { applyMat3, layerMatrix, type LayerGeometry, type Mat3, type Rotation } from './matrix'
 import { layerBlurRect } from './effectsMath'
-import { FS_MEDIA, FS_SOLID, VS_QUAD } from './shaders'
+import { FS_MEDIA, FS_OVERLAY, FS_SOLID, VS_OVERLAY, VS_QUAD } from './shaders'
 
 /** Geometria da fonte: dimensões antes da rotação e rotação horária a aplicar. */
 export interface SourceMeta { w: number; h: number; rotation: Rotation }
@@ -38,6 +41,8 @@ const SELECTION_COLOR: [number, number, number, number] = [0.32, 0.6, 1, 1]
 const IDLE_RELEASE_FRAMES = 120
 
 const SHAPE_CODE = { rect: 0, rounded: 1, circle: 2 } as const
+// sprite da seta: px por unidade do desenho (a textura tem mipmaps; seta grande na tela continua nítida)
+const ARROW_SPRITE_RES = 8
 
 interface TexEntry { tex: WebGLTexture; src: unknown }
 
@@ -57,6 +62,8 @@ export class Compositor {
   private readonly gl: WebGL2RenderingContext
   private readonly media: twgl.ProgramInfo
   private readonly solid: twgl.ProgramInfo
+  private readonly overlay: twgl.ProgramInfo
+  private arrowTex: WebGLTexture | null = null
   private readonly quad: twgl.BufferInfo
   private readonly loop: twgl.BufferInfo
   private readonly textures = new Map<string, TexEntry>()
@@ -69,6 +76,7 @@ export class Compositor {
     this.gl = gl
     this.media = twgl.createProgramInfo(gl, [VS_QUAD, FS_MEDIA])
     this.solid = twgl.createProgramInfo(gl, [VS_QUAD, FS_SOLID])
+    this.overlay = twgl.createProgramInfo(gl, [VS_OVERLAY, FS_OVERLAY])
     this.quad = twgl.createBufferInfoFromArrays(gl, { a_pos: { numComponents: 2, data: [0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1] } })
     this.loop = twgl.createBufferInfoFromArrays(gl, { a_pos: { numComponents: 2, data: [0, 0, 1, 0, 1, 1, 0, 1] } })
     this.effects = new EffectPass(gl, this.quad)
@@ -185,6 +193,9 @@ export class Compositor {
     this.textures.clear()
     gl.deleteProgram(this.media.program)
     gl.deleteProgram(this.solid.program)
+    gl.deleteProgram(this.overlay.program)
+    if (this.arrowTex) gl.deleteTexture(this.arrowTex)
+    this.arrowTex = null
     this.effects.dispose()
     for (const b of [this.quad, this.loop]) {
       for (const a of Object.values(b.attribs ?? {})) if (a.buffer) gl.deleteBuffer(a.buffer)
@@ -223,6 +234,7 @@ export class Compositor {
         } else {
           this.drawQuad(this.solid, geom.mat, { u_checker: 1, u_color: [0, 0, 0, 1], u_opacity: layer.opacity, u_mask: 1, ...shape })
         }
+        if (layer.cursor) this.drawCursor(layer, layer.cursor, geom, shape)
         break
       }
       case 'annotations': {
@@ -241,6 +253,54 @@ export class Compositor {
       default:
         break // texto, forma e transições: F2+/F5
     }
+  }
+
+  /**
+   * Anéis dos cliques e a seta do cursor ampliado (F6) por cima da camada, no mesmo alvo (abaixo dos efeitos que a
+   * afetam): cada um é um quad no espaço do conteúdo (cursorSprite.elementMatrix) composto com a matriz da camada,
+   * recortado pela forma da camada e com a opacidade dela.
+   */
+  private drawCursor(layer: MediaLayer, o: CursorOverlay, geom: LayerGeometry, shape: ReturnType<typeof shapeUniforms>): void {
+    const space: OverlaySpace = { uv: geom.uv, mirror: layer.mirror, refW: o.refW, refH: o.refH }
+    const tex = this.arrowTexture()
+    // folga da caixa do anel além do traço: ≥ 1 px da tela para o antialias (px da fonte por px da tela × 2)
+    const srcPerScreen = (o.refW * (geom.uv[2] - geom.uv[0])) / Math.max(1e-6, geom.size[0])
+    const margin = Math.max(2, 2 * srcPerScreen)
+    const color = parseColor(o.color)
+    for (const ring of o.rings) {
+      const half = ring.radiusPx + o.strokePx / 2 + margin
+      this.drawQuad(this.overlay, geom.mat, {
+        u_local: elementMatrix(space, ring.x, ring.y, 2 * half, 2 * half, 0.5, 0.5),
+        u_mode: 0, u_tex: tex, u_color: color, u_ring: [half, ring.radiusPx], u_stroke: o.strokePx, u_opacity: layer.opacity * ring.alpha, ...shape
+      })
+    }
+    const sp = o.sprite
+    if (sp) {
+      this.drawQuad(this.overlay, geom.mat, {
+        u_local: elementMatrix(space, sp.x, sp.y, CURSOR_ARROW_BOX.w * sp.scale, CURSOR_ARROW_BOX.h * sp.scale, CURSOR_ARROW_HOTSPOT.u, CURSOR_ARROW_HOTSPOT.v),
+        u_mode: 1, u_tex: tex, u_color: [0, 0, 0, 0], u_ring: [0, 0], u_stroke: 0, u_opacity: layer.opacity, ...shape
+      })
+    }
+  }
+
+  /** Textura da seta (pré-multiplicada, com mipmaps), criada na 1ª vez. */
+  private arrowTexture(): WebGLTexture {
+    if (this.arrowTex) return this.arrowTex
+    const gl = this.gl
+    const tex = gl.createTexture()
+    if (!tex) throw new Error('falha ao criar a textura do cursor')
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, drawArrowSprite(ARROW_SPRITE_RES))
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+    gl.generateMipmap(gl.TEXTURE_2D)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    this.arrowTex = tex
+    return tex
   }
 
   /** Efeito sobre o alvo; devolve o estado de desenho das camadas (alvo ligado, blend premultiplicado). */

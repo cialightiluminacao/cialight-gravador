@@ -1,5 +1,6 @@
 // Mensagens entre a thread principal (RenderClient) e o render worker. Um único caminho de render
 // para preview e exportação ("preview = export").
+import type { CursorTrackV1 } from '@shared/cursor'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from './mediaUrls'
 
@@ -23,6 +24,8 @@ export interface ExportJobSpec {
 export type RenderIn =
   | { t: 'init'; canvas: OffscreenCanvas; width: number; height: number; dpr: number }
   | { t: 'project'; project: Project; mediaUrls: MediaUrls; useProxy: boolean }
+  // trilhas do cursor por id do asset (entrada lateral do resolveFrame, F6): só as entradas que mudaram; null = remover
+  | { t: 'cursorTracks'; tracks: Record<string, CursorTrackV1 | null> }
   | { t: 'resize'; width: number; height: number }
   | { t: 'frame'; tUs: Us; seq: number; playing: boolean } // pede render do quadro tUs
   | { t: 'overlay'; selection: string[]; guides: boolean } // contorno do selecionado (só preview)
