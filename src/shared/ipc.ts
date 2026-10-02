@@ -323,6 +323,8 @@ export interface IpcApi {
     writeStill(outputDir: string, fileName: string, png: Uint8Array): Promise<{ path: string; size: number }>
     /** "Salvar como" de um .txt (capítulos): UTF-8 sem BOM, CRLF. Devolve o caminho ou null se o usuário cancelou. */
     saveText(defaultPath: string, text: string): Promise<string | null>
+    /** Estado da fila de exportações desta janela (a confirmação de saída conta os itens; a fila não é salva). */
+    setQueueState(state: { running: boolean; pending: number }): Promise<void>
   }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
@@ -443,7 +445,8 @@ export const IPC = {
     pipeWrite: 'editorExport:pipeWrite',
     pipeFinish: 'editorExport:pipeFinish',
     writeStill: 'editorExport:writeStill',
-    saveText: 'editorExport:saveText'
+    saveText: 'editorExport:saveText',
+    setQueueState: 'editorExport:setQueueState'
   },
   recording: {
     setPhase: 'recording:setPhase',

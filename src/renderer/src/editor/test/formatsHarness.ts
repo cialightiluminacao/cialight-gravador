@@ -7,6 +7,10 @@ import { runEditorExport } from '../export/editorExport'
 import { EditorExportCancelled } from '../export/finalize'
 import { exportStill, renderStill, runAudioExport, runGifExport } from '../export/formatExport'
 import { audioEstimateBytes, audioOnlyBlocker, gifDiskBytes, gifSize, stillFileName, type AudioFormat } from '../export/formatPlan'
+import { queueProgress, type QueueItem, type QueueJob } from '../export/exportQueue'
+import { exportQueue } from '../export/exportQueueStore'
+import { useEditorStore } from '../state/editorStore'
+import { effectsPreviewRef } from './exportHarness'
 
 // Teste de integração dos formatos extras (CIALIGHT_TEST=editor-formats), rota index.html#editor-formats-test/<json>:
 // pelo mesmo caminho do diálogo (formatPlan → formatExport) exporta o GIF 480 px / 12 fps do trecho I–O, dois
@@ -14,6 +18,10 @@ import { audioEstimateBytes, audioOnlyBlocker, gifDiskBytes, gifSize, stillFileN
 // invertido), o "só áudio" em wav/mp3/m4a do mesmo trecho e um vídeo pequeno do mesmo trecho (áudio de referência).
 // O PNG é comparado aqui com o preview (RenderClient.readPixels do compositor de preview no mesmo instante); o
 // main valida os arquivos (editorFormatsTestMode.ts).
+// Fila (F7 Task 4): pela fila do app (exportQueue, os executores reais) — vídeo 720p I–O, GIF, wav e outro vídeo
+// com o MESMO nome do primeiro, enfileirados a partir do projeto aberto no store do editor; depois de enfileirar,
+// os efeitos são apagados do projeto do editor (o item tem de exportar o instantâneo, com os efeitos). Depois, uma
+// 2ª fila: o item rodando é cancelado no meio e o seguinte termina.
 
 type Region = { x: number; y: number; w: number; h: number }
 interface Params {
@@ -30,6 +38,11 @@ interface Params {
   /** Regiões normalizadas (centro, largura, altura) da tarja e do blur. */
   solid: Region
   blur: Region
+  /** Fila: pastas, bloco e região "fora" dos oráculos de privacidade (checkEffects). */
+  queueDir: string
+  queueCancelDir: string
+  block: number
+  outside: Region
 }
 
 export async function runFormatsHarness(params: Params): Promise<void> {
@@ -82,6 +95,9 @@ export async function runFormatsHarness(params: Params): Promise<void> {
       blocker: audioOnlyBlocker(mutedProject),
       run: await settle(() => runAudioExport({ project: mutedProject, fromUs: range.fromUs, toUs: range.toUs, format: 'wav', outputDir: params.cancelDir, fileName: 'mudo' }))
     }
+
+    // ---- fila de exportações ----
+    await queueCases(project, range, params, report)
     ok = true
   } catch (e) {
     errors.push(e instanceof Error ? (e.stack ?? e.message) : String(e))
@@ -192,5 +208,88 @@ async function pngCase(project: Project, tUs: number, outputDir: string, params:
     return { file, sha256: await sha256(again.png), bytes: again.png.byteLength, warnings: again.warnings, vsPreview: { maxDiff, diffPixels: diffCount, blurMaxDiff: blurMax, alphaMin, tarja } }
   } catch (e) {
     return { error: e instanceof Error ? (e.stack ?? e.message) : String(e) }
+  }
+}
+
+/** Resolve quando a fila não tem nada rodando nem esperando. */
+function whenQueueIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    if (!exportQueue.active()) return resolve()
+    const off = exportQueue.subscribe(() => {
+      if (exportQueue.active()) return
+      off()
+      resolve()
+    })
+  })
+}
+
+const effectCount = (p: Project): number => p.tracks.reduce((n, t) => n + t.items.filter((i) => i.type === 'effect').length, 0)
+const itemOut = (i: QueueItem): Record<string, unknown> => ({ id: i.id, label: i.label, kind: i.job.kind, state: i.state, path: i.result?.path ?? null, message: i.message, startedAt: i.startedAt, endedAt: i.endedAt })
+
+/**
+ * Fila: 4 itens (vídeo 720p I–O, GIF, wav e um vídeo 360p com o MESMO nome do primeiro) a partir do projeto aberto
+ * no store do editor; os efeitos são apagados do store depois de enfileirar. Registra a ordem, os horários de
+ * início/fim, o máximo de itens rodando juntos (observado a cada mudança) e o progresso global. Depois, uma 2ª fila:
+ * vídeo cancelado no meio (quadro ≥ 10) e um wav que tem de terminar.
+ */
+async function queueCases(project: Project, range: { fromUs: number; toUs: number }, params: Params, report: Record<string, unknown>): Promise<void> {
+  const st = useEditorStore.getState
+  st().open(project)
+  const snap = st().project!
+  const base = (dir: string, fileName: string) => ({ project: snap, outputDir: dir, fileName, fromUs: range.fromUs, toUs: range.toUs })
+  const video = (dir: string, fileName: string, w: number, h: number, bps: number): QueueJob => ({ kind: 'video', request: { ...base(dir, fileName), width: w, height: h, fps: 30, videoBitrate: bps, audioBitrate: 128_000 } })
+  const gif = gifSize(480, snap.canvas)
+  const jobs: QueueJob[] = [
+    video(params.queueDir, 'fila.mp4', 1280, 720, 12_000_000),
+    { kind: 'gif', request: { ...base(params.queueDir, 'fila.gif'), ...gif, fps: 12, estimateBytes: gifDiskBytes(gif.width, gif.height, 12, range.fromUs, range.toUs) } },
+    { kind: 'audio', request: { ...base(params.queueDir, 'fila.wav'), format: 'wav' } },
+    video(params.queueDir, 'fila.mp4', 640, 360, 2_000_000)
+  ]
+  let maxRunning = 0
+  let fractions: number[] = []
+  const off = exportQueue.subscribe(() => {
+    maxRunning = Math.max(maxRunning, exportQueue.items.filter((i) => i.state === 'running').length)
+    const f = queueProgress(exportQueue.items).fraction
+    if (f != null) fractions.push(f)
+  })
+  try {
+    const ids = jobs.map((job, k) => exportQueue.enqueue({ job, label: `item ${k + 1}`, durationUs: range.toUs - range.fromUs, privacy: [] }).id)
+    // editar depois de enfileirar: sem nenhum efeito no projeto do editor (o item exporta o instantâneo)
+    st().apply((p) => ({ ...p, tracks: p.tracks.filter((t) => !t.items.some((i) => i.type === 'effect')) }))
+    const queued = exportQueue.items.find((i) => i.id === ids[0])!
+    report.queueSnapshot = { storeEffects: effectCount(st().project!), itemEffects: effectCount(queued.job.request.project), sameAsSnapshot: queued.job.request.project === snap, frozen: Object.isFrozen(queued.job.request.project) }
+    await whenQueueIdle()
+    const items = ids.map((id) => exportQueue.items.find((i) => i.id === id)!)
+    report.queue = { items: items.map(itemOut), maxRunning, fractionMonotonic: fractions.every((f, i) => i === 0 || f >= fractions[i - 1] - 1e-9), lastFraction: fractions[fractions.length - 1] ?? null }
+    // privacidade do item de vídeo: referência do preview do INSTANTÂNEO no quadro 1 s do arquivo (= I + 1 s)
+    const first = items[0]
+    report.queueEffects = first.result
+      ? { export: first.result, ...(await effectsPreviewRef(snap, range.fromUs + 1_000_000, 1280, 720, { block: params.block, blur: params.blur, outside: params.outside })) }
+      : { error: first.message ?? first.state }
+    exportQueue.clearFinished()
+
+    // 2ª fila: o vídeo rodando é cancelado no meio; o wav seguinte termina
+    maxRunning = 0
+    fractions = []
+    let at: { frame: number; percent: number } | null = null
+    const a = exportQueue.enqueue({ job: video(params.queueCancelDir, 'fila-cancelada.mp4', 1280, 720, 12_000_000), label: 'cancelado', durationUs: range.toUs - range.fromUs, privacy: [] }).id
+    const b = exportQueue.enqueue({ job: { kind: 'audio', request: { ...base(params.queueCancelDir, 'fila-depois.wav'), format: 'wav' } }, label: 'depois', durationUs: range.toUs - range.fromUs, privacy: [] }).id
+    const offCancel = exportQueue.subscribe(() => {
+      const it = exportQueue.items.find((i) => i.id === a)
+      if (!at && it?.state === 'running' && it.progress && it.progress.stage === 'render' && it.progress.frame >= 10) {
+        at = { frame: it.progress.frame, percent: +it.progress.percent.toFixed(1) }
+        exportQueue.cancel(a)
+      }
+    })
+    try {
+      await whenQueueIdle()
+    } finally {
+      offCancel()
+    }
+    report.queueCancel = { at, maxRunning, items: [a, b].map((id) => itemOut(exportQueue.items.find((i) => i.id === id)!)) }
+    exportQueue.clearFinished()
+  } finally {
+    off()
+    st().close()
   }
 }

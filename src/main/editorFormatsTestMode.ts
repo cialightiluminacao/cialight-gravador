@@ -2,7 +2,7 @@ import { BrowserWindow, ipcMain } from 'electron'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import type { Asset, EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import { createEffectItem, createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset } from '@shared/editor/ops'
@@ -13,7 +13,8 @@ import { probe } from './media/probe'
 import { assetFromInfo } from './media/ingest'
 import { isFastStart } from './testFixtures'
 import { loadPage, preloadPath } from './windows/recorderWindow'
-import { check, countFrames, detailEnergy, FX_BLUR, FX_OUTSIDE, FX_SOLID, FX_TARJA, gen, pcmOf, rmsDb, settingsHash, streamInfo } from './editorExportTestMode'
+import { check, checkEffects, countFrames, detailEnergy, FX_BLOCK, FX_BLUR, FX_OUTSIDE, FX_SOLID, FX_TARJA, gen, pcmOf, rmsDb, settingsHash, streamInfo, type EffectsOut } from './editorExportTestMode'
+import { editorExportCounts } from './quitGuard'
 
 // Teste de integração dos formatos extras da exportação do editor (CIALIGHT_TEST=editor-formats,
 // `npm run test:editor-formats`). Projeto 1920×1080: ruído em células de 4 px + blur (0–3 s) + blur INVERTIDO
@@ -25,7 +26,13 @@ import { check, countFrames, detailEnergy, FX_BLUR, FX_OUTSIDE, FX_SOLID, FX_TAR
 //  2. PNG em 1,5 s: 1920×1080, alfa 255, tarja exata (±0), = preview (readPixels do compositor; ≤ 1).
 //  3. Só áudio wav/mp3/m4a: codec, 48 kHz estéreo, duração (wav: amostras exatas), RMS dos tons = áudio da
 //     exportação de vídeo do mesmo trecho (≤ 0,5 dB), silêncio no vão ≤ −60 dB, m4a com faststart.
-//  4. settings.json intocado.
+//  4. Fila (F7 Task 4): 4 itens pela fila do app — vídeo 720p I–O, GIF, wav e um vídeo 360p com o MESMO nome do
+//     1º — todos concluídos e válidos (ffprobe), o repetido numerado "fila (2).mp4", estritamente em sequência
+//     (início de cada um ≥ fim do anterior; nunca 2 rodando), o vídeo com os efeitos do instantâneo (checkEffects:
+//     os efeitos foram apagados do editor depois de enfileirar), o estado da fila no main (confirmação de saída)
+//     visto com 1 rodando + 3 na fila e zerado no fim; 2ª fila com o item rodando cancelado no meio: sem parcial e
+//     o seguinte concluído.
+//  5. settings.json intocado.
 
 const PROJECT_ID = 'p-editor-formats'
 const W = 1920
@@ -72,7 +79,12 @@ interface Report {
   audio?: Record<'wav' | 'mp3' | 'm4a', FileOut>
   video?: FileOut & { audioCodec?: string }
   audioMuted?: { blocker: string | null; run: FileOut }
+  queueSnapshot?: { storeEffects: number; itemEffects: number; sameAsSnapshot: boolean; frozen: boolean }
+  queue?: { items: QueueOut[]; maxRunning: number; fractionMonotonic: boolean; lastFraction: number | null }
+  queueEffects?: EffectsOut
+  queueCancel?: { at: { frame: number; percent: number } | null; maxRunning: number; items: QueueOut[] }
 }
+interface QueueOut { id: string; label: string; kind: string; state: string; path: string | null; message: string | null; startedAt: number | null; endedAt: number | null }
 
 /** Recorte em pixels (par) de uma região normalizada, com `inset` px de margem para dentro. */
 function pxRegion(r: Region, w: number, h: number, inset = 0): Region {
@@ -175,13 +187,22 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
   const exportsDir = join(dir, 'saidas')
   const cancelDir = join(dir, 'cancelado')
   const cancelPaletteDir = join(dir, 'cancelado-paleta')
+  const queueDir = join(dir, 'fila')
+  const queueCancelDir = join(dir, 'fila-cancelada')
   rmSync(dir, { recursive: true, force: true })
-  for (const d of [exportsDir, cancelDir, cancelPaletteDir]) mkdirSync(d, { recursive: true })
+  for (const d of [exportsDir, cancelDir, cancelPaletteDir, queueDir, queueCancelDir]) mkdirSync(d, { recursive: true })
   await buildProject(dir, projects)
 
   const win = new BrowserWindow({ width: 800, height: 600, show: false, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
+  // estado da fila no main (o mesmo que a confirmação de saída lê), amostrado durante o harness
+  const seen = { running: 0, pending: 0 }
+  const poll = setInterval(() => {
+    const c = editorExportCounts()
+    seen.running = Math.max(seen.running, c.running)
+    seen.pending = Math.max(seen.pending, c.pending)
+  }, 20)
   const result = await new Promise<{ ok: boolean; report: Report }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 300 s'] } }), 300_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 480 s'] } }), 480_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: Report }) => {
       clearTimeout(timer)
       resolve(r)
@@ -189,11 +210,13 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = { projectId: PROJECT_ID, outputDir: exportsDir, cancelDir, cancelPaletteDir, inUs: IN_US, outUs: OUT_US, pngUs: PNG_US, pngInvUs: PNG_INV_US, pngBackgroundUs: PNG_BG_US, solid: FX_SOLID, blur: FX_BLUR }
+    const params = { projectId: PROJECT_ID, outputDir: exportsDir, cancelDir, cancelPaletteDir, inUs: IN_US, outUs: OUT_US, pngUs: PNG_US, pngInvUs: PNG_INV_US, pngBackgroundUs: PNG_BG_US, solid: FX_SOLID, blur: FX_BLUR, queueDir, queueCancelDir, block: FX_BLOCK, outside: FX_OUTSIDE }
     loadPage(win, `index.html#editor-formats-test/${encodeURIComponent(JSON.stringify(params))}`)
   })
+  clearInterval(poll)
   const r = result.report
-  console.log(`relatório do harness: ${JSON.stringify(r)}`)
+  // a referência do preview da fila (variância por bloco, RGB do miolo) é grande: fora do log
+  console.log(`relatório do harness: ${JSON.stringify({ ...r, queueEffects: r.queueEffects ? { export: r.queueEffects.export, error: r.queueEffects.error } : undefined })}`)
   check(result.ok && r.errors.length === 0, `harness sem exceção (${JSON.stringify(r.errors)})`, failures)
   check(r.range?.fromUs === IN_US && r.range?.toUs === OUT_US, `trecho I–O = [1 s, 5 s) (${JSON.stringify(r.range)})`, failures)
   const durS = (OUT_US - IN_US) / 1e6
@@ -368,6 +391,41 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
     check(lv.gap <= -60, `só áudio ${fmt}: vão (faixa de 1 kHz muda) em silêncio ≤ −60 dB (${lv.gap} dB)`, failures)
   }
   check(r.audioMuted?.blocker === 'Não há áudio para exportar' && /Não há áudio para exportar/.test(r.audioMuted?.run.error ?? ''), `só áudio sem nada audível: bloqueado (${r.audioMuted?.blocker}) e recusado (${r.audioMuted?.run.error})`, failures)
+
+  // ---------------- 4. Fila ----------------
+  const qs = r.queueSnapshot
+  check(!!qs && qs.storeEffects === 0 && qs.itemEffects === 4 && qs.sameAsSnapshot && qs.frozen, `fila: instantâneo — efeitos apagados do editor depois de enfileirar e o item com os 4 do momento, mesmo objeto, congelado (${JSON.stringify(qs)})`, failures)
+  const q = r.queue
+  const qi = q?.items ?? []
+  check(qi.length === 4 && qi.every((i) => i.state === 'done'), `fila: 4 itens concluídos (${JSON.stringify(qi.map((i) => [i.kind, i.state, i.message]))})`, failures)
+  const names = qi.map((i) => (i.path ? basename(i.path) : null))
+  check(JSON.stringify(names) === JSON.stringify(['fila.mp4', 'fila.gif', 'fila.wav', 'fila (2).mp4']), `fila: nomes na ordem, o repetido numerado sem sobrescrever (${JSON.stringify(names)})`, failures)
+  const ordered = qi.every((i, k) => k === 0 || (i.startedAt != null && qi[k - 1].endedAt != null && i.startedAt >= (qi[k - 1].endedAt ?? Infinity)))
+  check(ordered && q?.maxRunning === 1, `fila: estritamente em sequência, na ordem da fila (início ≥ fim do anterior; máx. rodando juntos ${q?.maxRunning}): ${JSON.stringify(qi.map((i) => [i.startedAt, i.endedAt]))}`, failures)
+  check(!!q?.fractionMonotonic && q.lastFraction === 1, `fila: progresso global crescente até 100 % (último ${q?.lastFraction})`, failures)
+  check(seen.running === 1 && seen.pending === 3, `fila: o main viu 1 rodando + 3 na fila (texto da confirmação de saída) (${JSON.stringify(seen)})`, failures)
+  const after = editorExportCounts()
+  check(after.running === 0 && after.pending === 0, `fila: estado no main zerado no fim (${JSON.stringify(after)})`, failures)
+  const qfiles = existsSync(queueDir) ? readdirSync(queueDir) : []
+  check(qfiles.length === 4 && qfiles.every((f) => !f.endsWith('.part')), `fila: só os 4 arquivos na pasta, sem .part (${qfiles.join(', ')})`, failures)
+  const expectStream: [number, string, number, number][] = [
+    [0, 'h264', 1280, 720],
+    [1, 'gif', GIF_W, GIF_H],
+    [3, 'h264', 640, 360]
+  ]
+  for (const [k, codec, w, h] of expectStream) {
+    const f = qi[k]?.path
+    const st = f && existsSync(f) ? await streamInfo(f) : null
+    check(st?.codec_name === codec && st.width === w && st.height === h, `fila: ${names[k]} válido — ${codec} ${w}×${h} (${JSON.stringify(st)})`, failures)
+  }
+  const wavFile = qi[2]?.path
+  const wavInfo = wavFile && existsSync(wavFile) ? await probeAudio(wavFile) : null
+  check(wavInfo?.codec_name === 'pcm_s16le' && wavInfo.sample_rate === '48000' && wavInfo.channels === 2 && wavInfo.duration_ts === 192_000, `fila: fila.wav válido — PCM 48 kHz estéreo, 192 000 amostras (${JSON.stringify(wavInfo)})`, failures)
+  await checkEffects('fila', 'item de vídeo 720p I–O da fila (instantâneo com efeitos)', r.queueEffects, { w: 1280, h: 720, codec: 'h264' }, dir, failures)
+  const qc = r.queueCancel
+  const cancelLeft = existsSync(queueCancelDir) ? readdirSync(queueCancelDir) : []
+  check(!!qc?.at && qc.items[0]?.state === 'cancelled' && qc.items[1]?.state === 'done' && qc.maxRunning === 1, `fila: item rodando cancelado no meio (${JSON.stringify(qc?.at)}) e o seguinte concluído (${JSON.stringify(qc?.items.map((i) => [i.label, i.state, i.message]))})`, failures)
+  check(cancelLeft.length === 1 && cancelLeft[0] === 'fila-depois.wav', `fila: cancelado sem parcial (.part/.mp4) e o seguinte gravado (${cancelLeft.join(', ') || 'pasta vazia'})`, failures)
 
   check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
   win.destroy()

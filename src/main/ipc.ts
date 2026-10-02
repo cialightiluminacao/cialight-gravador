@@ -34,7 +34,7 @@ import { EditorExportJobs, ExportCancelledError } from './export/editorExportJob
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
-import { setExportBusyCheck } from './quitGuard'
+import { ExportQueueStates, setExportCountsSource } from './quitGuard'
 
 const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'ts']
 const AUDIO_EXT = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
@@ -415,7 +415,10 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
 
   // ---- exportação do editor (arquivo .part → faststart) ----
   const editorExports = new EditorExportJobs()
-  setExportBusyCheck(() => editorExports.busy)
+  // fila de exportações (renderer): estado por janela; a confirmação de saída conta rodando + na fila
+  const queueStates = new ExportQueueStates()
+  setExportCountsSource(() => queueStates.counts(editorExports.busy))
+  const queueOwners = new Set<number>()
   const exportOwners = new Set<number>()
   /** Os jobs são da janela que os abriu: fechada, caída ou recarregada → cancelados (nada de parcial órfão). */
   const ownExport = (wc: Electron.WebContents): void => {
@@ -471,6 +474,21 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     if (typeof defaultPath !== 'string' || typeof text !== 'string' || text.length > 1_000_000) throw new Error('Texto inválido')
     const w = BrowserWindow.fromWebContents(e.sender)
     return saveTextFile({ showSave: (opts) => (w ? dialog.showSaveDialog(w, opts) : dialog.showSaveDialog(opts)) }, defaultPath, text)
+  })
+  ipcMain.handle(IPC.editorExport.setQueueState, (e, state: { running: boolean; pending: number }) => {
+    const wc = e.sender
+    if (!queueOwners.has(wc.id)) {
+      queueOwners.add(wc.id)
+      // janela fechada, caída ou recarregada: a fila dela sumiu junto
+      const drop = (): void => queueStates.drop(wc.id)
+      wc.once('destroyed', () => {
+        drop()
+        queueOwners.delete(wc.id)
+      })
+      wc.on('render-process-gone', drop)
+      wc.on('did-navigate', drop)
+    }
+    queueStates.set(wc.id, state)
   })
   ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => cancelAware(jobId, editorExports.write(jobId, data, position)))
   ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))

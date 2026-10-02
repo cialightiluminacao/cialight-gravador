@@ -192,53 +192,59 @@ async function effectsParity(fx: Params['effects'], outputDir: string, variant: 
       ? { project: p, fromUs: 0, toUs, ...exportRequestFor(variant.settings, toUs), outputDir, fileName: variant.fileName }
       : { project: p, width: fx.width, height: fx.height, fps: p.canvas.fps, fromUs: 0, toUs, videoBitrate: 12_000_000, audioBitrate: 128_000, outputDir, fileName: variant.fileName }
     const exported = await exportOnce(req)
-    const OW = req.width
-    const OH = req.height
-    // miolo da região borrada na saída, longe do feather (24 px a 720p, proporcional à altura)
-    const inset = Math.round((24 * OH) / 720)
-    // recortes pares (o crop do ffmpeg em yuv420p arredonda ímpares e o RGB sairia com outro tamanho)
-    const ev2 = (v: number): number => Math.round(v / 2) * 2
-    const crop = (r: Region, pad: number): Region => ({ x: ev2((r.x - r.w / 2) * OW + pad), y: ev2((r.y - r.h / 2) * OH + pad), w: ev2(r.w * OW - 2 * pad), h: ev2(r.h * OH - 2 * pad) })
-    const blurCrop = crop(fx.blur, inset)
-    const outsideCrop = crop(fx.outside, 0)
-    const PW = p.canvas.width
-    const PH = p.canvas.height
-    const canvas = document.createElement('canvas')
-    document.body.appendChild(canvas)
-    const client = new RenderClient(canvas, { width: PW, height: PH, dpr: 1 })
-    try {
-      await client.ready
-      client.setProject(p, mediaUrlsFor(p, 'preview'), true)
-      const r = await client.requestFrame(fx.tUs, false)
-      if (r.t !== 'rendered') throw new Error(`preview: ${JSON.stringify(r)}`)
-      const full = await client.readPixels(0, 0, PW, PH)
-      const src = new OffscreenCanvas(PW, PH)
-      src.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(full), PW, PH), 0, 0)
-      const dst = new OffscreenCanvas(OW, OH)
-      const ctx = dst.getContext('2d')!
-      ctx.imageSmoothingQuality = 'high'
-      ctx.drawImage(src, 0, 0, OW, OH)
-      const small = ctx.getImageData(0, 0, OW, OH).data
-      // RGB do miolo da região borrada no preview reduzido (o main compara com a exportação por PSNR)
-      const c = blurCrop
-      const blurRgb: number[] = []
-      for (let y = c.y; y < c.y + c.h; y++) for (let x = c.x; x < c.x + c.w; x++) blurRgb.push(small[(y * OW + x) * 4], small[(y * OW + x) * 4 + 1], small[(y * OW + x) * 4 + 2])
-      return {
-        export: exported,
-        width: OW,
-        height: OH,
-        blurCrop,
-        outsideCrop,
-        previewBlockVar: blockVariance(small, OW, OH, fx.block),
-        previewBlurRgb: blurRgb,
-        previewEnergy: { blur: detailEnergy(small, OW, blurCrop), outside: detailEnergy(small, OW, outsideCrop) }
-      }
-    } finally {
-      client.dispose()
-      canvas.remove()
-    }
+    return { export: exported, ...(await effectsPreviewRef(p, fx.tUs, req.width, req.height, fx)) }
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * Referência do preview para os oráculos de privacidade (checkEffects no main): o quadro `tUs` do projeto no
+ * preview (RenderClient no tamanho do projeto) reduzido para OW×OH — variância de luma por bloco, RGB do miolo
+ * borrado e energia de detalhe do miolo e de fora. Também usada pela fila (formatsHarness).
+ */
+export async function effectsPreviewRef(p: Project, tUs: number, OW: number, OH: number, fx: { block: number; blur: Region; outside: Region }): Promise<Record<string, unknown>> {
+  // miolo da região borrada na saída, longe do feather (24 px a 720p, proporcional à altura)
+  const inset = Math.round((24 * OH) / 720)
+  // recortes pares (o crop do ffmpeg em yuv420p arredonda ímpares e o RGB sairia com outro tamanho)
+  const ev2 = (v: number): number => Math.round(v / 2) * 2
+  const crop = (r: Region, pad: number): Region => ({ x: ev2((r.x - r.w / 2) * OW + pad), y: ev2((r.y - r.h / 2) * OH + pad), w: ev2(r.w * OW - 2 * pad), h: ev2(r.h * OH - 2 * pad) })
+  const blurCrop = crop(fx.blur, inset)
+  const outsideCrop = crop(fx.outside, 0)
+  const PW = p.canvas.width
+  const PH = p.canvas.height
+  const canvas = document.createElement('canvas')
+  document.body.appendChild(canvas)
+  const client = new RenderClient(canvas, { width: PW, height: PH, dpr: 1 })
+  try {
+    await client.ready
+    client.setProject(p, mediaUrlsFor(p, 'preview'), true)
+    const r = await client.requestFrame(tUs, false)
+    if (r.t !== 'rendered') throw new Error(`preview: ${JSON.stringify(r)}`)
+    const full = await client.readPixels(0, 0, PW, PH)
+    const src = new OffscreenCanvas(PW, PH)
+    src.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(full), PW, PH), 0, 0)
+    const dst = new OffscreenCanvas(OW, OH)
+    const ctx = dst.getContext('2d')!
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(src, 0, 0, OW, OH)
+    const small = ctx.getImageData(0, 0, OW, OH).data
+    // RGB do miolo da região borrada no preview reduzido (o main compara com a exportação por PSNR)
+    const c = blurCrop
+    const blurRgb: number[] = []
+    for (let y = c.y; y < c.y + c.h; y++) for (let x = c.x; x < c.x + c.w; x++) blurRgb.push(small[(y * OW + x) * 4], small[(y * OW + x) * 4 + 1], small[(y * OW + x) * 4 + 2])
+    return {
+      width: OW,
+      height: OH,
+      blurCrop,
+      outsideCrop,
+      previewBlockVar: blockVariance(small, OW, OH, fx.block),
+      previewBlurRgb: blurRgb,
+      previewEnergy: { blur: detailEnergy(small, OW, blurCrop), outside: detailEnergy(small, OW, outsideCrop) }
+    }
+  } finally {
+    client.dispose()
+    canvas.remove()
   }
 }
 

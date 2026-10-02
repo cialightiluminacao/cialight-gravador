@@ -79,7 +79,7 @@ const LONG_ID = 'p-editor-export-20s'
 const SQUARE_ID = 'p-editor-export-quadrado'
 const F7_TARGET_MB = 3
 
-interface ExportOut { audioBitrate?: number; path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; fellBackFromHevc?: boolean; codec?: string; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
+export interface ExportOut { audioBitrate?: number; path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; fellBackFromHevc?: boolean; codec?: string; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
 type Region = { x: number; y: number; w: number; h: number }
 interface HarnessReport {
   errors: string[]
@@ -252,7 +252,7 @@ export function countFrames(file: string): Promise<number> {
   })
 }
 
-interface EffectsOut { export?: ExportOut; width?: number; height?: number; blurCrop?: Region; outsideCrop?: Region; previewBlockVar?: number[]; previewBlurRgb?: number[]; previewEnergy?: { blur: number; outside: number }; error?: string }
+export interface EffectsOut { export?: ExportOut; width?: number; height?: number; blurCrop?: Region; outsideCrop?: Region; previewBlockVar?: number[]; previewBlurRgb?: number[]; previewEnergy?: { blur: number; outside: number }; error?: string }
 
 /** Energia de detalhe: média de (ΔL)² entre vizinhos (horizontal + vertical) de uma imagem RGB24 w×h. */
 export function detailEnergy(d: Uint8Array, w: number, h: number): number {
@@ -293,7 +293,7 @@ export function streamInfo(file: string): Promise<{ codec_name?: string; codec_t
  * 30; raio ∝ altura), energia de detalhe do miolo borrado < 10 % da do ruído de fora, e o ruído de fora intacto
  * (energia ≥ 50 % da do preview reduzido: nada borrado fora da região).
  */
-async function checkEffects(label: string, what: string, fx: EffectsOut | undefined, expect: { w: number; h: number; codec: 'h264' | 'hevc'; ringTol?: number }, dir: string, failures: string[]): Promise<void> {
+export async function checkEffects(label: string, what: string, fx: EffectsOut | undefined, expect: { w: number; h: number; codec: 'h264' | 'hevc'; ringTol?: number }, dir: string, failures: string[]): Promise<void> {
   const out = fx?.export?.path
   const tag = label.toLowerCase().replace(/[^a-z0-9]+/g, '-')
   check(!!out && existsSync(out) && !!fx?.previewBlockVar, `${label}: projeto 1920×1080 exportado (${what}) (${out ?? fx?.export?.error ?? fx?.error})`, failures)

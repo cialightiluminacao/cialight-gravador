@@ -10,10 +10,11 @@ import { useReframe } from '../state/reframe'
 import { defaultReframeAspect } from './ReframeDialog'
 import { exportCurrentFrame } from './frameExport'
 import { copyProjectChapters } from './chaptersActions'
+import { ExportQueueButton } from './ExportQueuePanel'
 
 // Barra superior do editor: voltar (salva antes), nome editável, desfazer/refazer, estado do
 // autosave, proporção do quadro (só o quadro), "Reenquadrar" (proporção nova com o conteúdo reposicionado),
-// "Quadro" (o quadro do cursor como PNG) e Exportar.
+// "Quadro" (o quadro do cursor como PNG), "Exportações" (a fila, quando há itens) e Exportar.
 
 function useNow(everyMs: number): number {
   const [now, setNow] = useState(() => Date.now())
@@ -140,6 +141,7 @@ export function TopBar({ onBack, onExport }: { onBack: () => void; onExport: () 
             <ListOrdered className="h-3.5 w-3.5" /> Capítulos
           </Button>
         </Tip>
+        <ExportQueueButton />
         <Tip content="Exportar vídeo, GIF ou áudio" shortcut={SHORTCUT_LABELS.export} side="bottom">
           <Button variant="primary" size="sm" className="ml-1.5 h-8 px-3.5" onClick={onExport}>
             <Upload className="h-3.5 w-3.5" /> Exportar

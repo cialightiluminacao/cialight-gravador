@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { ChevronDown, CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, SlidersHorizontal, TriangleAlert, Upload, X } from 'lucide-react'
+import { toast } from 'sonner'
+import { ChevronDown, CircleCheckBig, Copy, FolderOpen, ListPlus, LoaderCircle, ShieldAlert, SlidersHorizontal, TriangleAlert, Upload, X } from 'lucide-react'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
 import { contentEndUs, findItem } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
@@ -16,7 +17,7 @@ import { ipcErrorMessage } from '@/lib/ipcError'
 import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
 import { ChaptersSection } from './ChaptersSection'
 import { useEditorStore } from '../state/editorStore'
-import { EditorExportCancelled, editorExportRunning, runEditorExport, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
+import { EditorExportCancelled, editorExportRunning, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
 import { exportMediaIssues, exportRange, hasInOut, type ExportMediaIssue } from '../export/exportPlan'
 import {
   EXPORT_PRESETS,
@@ -52,7 +53,9 @@ import {
   type AudioFormat,
   type ExportFormat
 } from '../export/formatPlan'
-import { exportStill, runAudioExport, runGifExport, type FormatExportResult } from '../export/formatExport'
+import { exportStill, type FormatExportResult } from '../export/formatExport'
+import type { EnqueueInput, QueueItem } from '../export/exportQueue'
+import { exportQueue, useQueueActive, useQueueItem } from '../export/exportQueueStore'
 import { defaultExportFolder } from './frameExport'
 
 // Diálogo de exportação do editor. Formato: Vídeo, GIF, Quadro (PNG) ou Só áudio.
@@ -63,11 +66,16 @@ import { defaultExportFolder } from './frameExport'
 // formato) e pasta, estimativa e avisos; um bloqueio desativa Exportar com o motivo. Depois: progresso (%,
 // velocidade × tempo real, tempo restante, cancelar) e o resultado (abrir pasta / copiar arquivo). A exportação
 // usa workers próprios: o preview continua vivo (pausado ao começar). Avisos de privacidade com "Revisar".
+// Vídeo, GIF e só áudio passam pela fila de exportações (exportQueue): "Exportar" com a fila parada mostra o
+// progresso aqui (o diálogo pode fechar: a exportação continua e aparece em "Exportações"); com a fila ocupada, entra
+// nela ("Adicionado à fila (posição N)") e o diálogo fecha. "Adicionar à fila" enfileira e mantém o diálogo aberto.
+// Cada item leva um instantâneo do projeto e os avisos de privacidade do momento. O quadro PNG é direto (sem fila).
 
 type Done = { kind: 'video'; result: EditorExportResult } | { kind: 'format'; result: FormatExportResult }
 type Phase =
   | { kind: 'form' }
   | { kind: 'running'; progress: EditorExportProgress | null; cancelling: boolean }
+  | { kind: 'queued'; id: string; cancelling: boolean }
   | { kind: 'done'; done: Done }
   | { kind: 'error'; message: string }
 
@@ -84,6 +92,7 @@ const FORMAT_TITLE: Record<ExportFormat, [string, string]> = {
   audio: ['Exportar áudio', 'Áudio exportado']
 }
 const AUDIO_DONE_LABEL: Record<AudioFormat, string> = { wav: 'WAV · PCM 16 bits', mp3: 'MP3 · 192 kbps', m4a: 'M4A · AAC 192 kbps' }
+const AUDIO_QUEUE_LABEL: Record<AudioFormat, string> = { wav: 'WAV', mp3: 'MP3 192 kbps', m4a: 'M4A (AAC)' }
 const formatExt = (f: ExportFormat, audio: AudioFormat): 'mp4' | 'gif' | 'png' | AudioFormat => (f === 'video' ? 'mp4' : f === 'audio' ? audio : f)
 
 const DEFAULT_PRESET: ExportPresetId = 'youtube1080'
@@ -93,6 +102,19 @@ const CODEC_LABEL: Record<VideoCodecChoice, string> = { h264: 'H.264', hevc: 'HE
 const ISSUE_LABEL: Record<ExportMediaIssue['status'], string> = { missing: 'ausente', processing: 'ainda processando', error: 'com erro' }
 const EFFECT_LABEL = { blur: 'Blur', pixelate: 'Pixelizar', solid: 'Tarja' } as const
 const canvasKey = (c: Project['canvas']): string => `${c.width}x${c.height}@${c.fps}`
+
+/** Aviso de privacidade como texto ("Blur em 0:03 — …"), guardado no item da fila. */
+function privacyLine(p: Project, w: PrivacyWarning): string {
+  const item = findItem(p, w.itemId)?.item
+  const name = item?.type === 'effect' ? (item.name ?? EFFECT_LABEL[item.effect]) : 'Efeito'
+  return `${name} em ${formatClock(w.tUs / 1000, false)} — ${w.message}`
+}
+
+/** Item da fila concluído → tela de concluído do diálogo. */
+function doneOf(it: QueueItem): Done | null {
+  if (!it.result) return null
+  return it.job.kind === 'video' ? { kind: 'video', result: it.result as EditorExportResult } : { kind: 'format', result: it.result as FormatExportResult }
+}
 
 /** Nome padrão do formato: "<projeto>.<ext>"; o quadro leva o instante ("<projeto> - 00m12s.png"). */
 function defaultName(p: Project, f: ExportFormat, audio: AudioFormat, tUs: number): string {
@@ -123,6 +145,9 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const playheadUs = useEditorStore((s) => (open ? s.playheadUs : 0))
   const abortRef = useRef<AbortController | null>(null)
   const ids = useId()
+  // item da fila acompanhado aqui ("Exportar" com a fila parada) e se a fila está ocupada
+  const watched = useQueueItem(phase.kind === 'queued' ? phase.id : null)
+  const queueActive = useQueueActive()
 
   // fim do conteúdo (sem efeitos e itens desativados): um efeito depois da mídia não estica "Tudo" com preto
   const totalUs = project ? contentEndUs(project) : 0
@@ -146,8 +171,19 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     })
   }, [open])
 
-  // diálogo desmontado (editor fechado) no meio da exportação: cancela
+  // diálogo desmontado (editor fechado) no meio do quadro PNG: cancela (a fila segue sozinha)
   useEffect(() => () => abortRef.current?.abort(), [])
+
+  // item acompanhado terminou: concluído/erro aqui; cancelado (ou limpo da fila) volta ao formulário
+  const watchedState = watched?.state
+  useEffect(() => {
+    if (phase.kind !== 'queued') return
+    if (!watched || watched.state === 'cancelled') setPhase({ kind: 'form' })
+    else if (watched.state === 'done') {
+      const done = doneOf(watched)
+      setPhase(done ? { kind: 'done', done } : { kind: 'form' })
+    } else if (watched.state === 'error') setPhase({ kind: 'error', message: watched.message ?? 'Falha desconhecida' })
+  }, [phase.kind, watchedState])
 
   // suporte a HEVC na resolução/fps de saída (cache por w×h@fps no hevcSupport)
   const s = exp?.settings
@@ -203,7 +239,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const name = sanitizeFileName(fileName.trim())
   const running = phase.kind === 'running'
   const codecBlocked = s.codec === 'hevc' && hevcState === 'checking' ? 'Verificando o suporte a HEVC…' : null
-  const formatBlocker = format === 'video' ? (validation.blocker ?? codecBlocked) : format === 'gif' ? gifCheck.blocker : format === 'audio' ? audioBlocker : null
+  const pngBlocker = queueActive ? 'Espere a fila de exportações terminar para exportar o quadro.' : null
+  const formatBlocker = format === 'video' ? (validation.blocker ?? codecBlocked) : format === 'gif' ? gifCheck.blocker : format === 'audio' ? audioBlocker : pngBlocker
   const formatWarnings = format === 'video' ? validation.warnings : format === 'gif' ? gifCheck.warnings : []
   const blocker = formatBlocker ?? (!targetFolder ? 'Escolha a pasta de destino.' : !name ? 'Dê um nome ao arquivo.' : null)
 
@@ -220,28 +257,54 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     setFileName((cur) => (nameTouched ? outputFileName(cur.trim() || fileNameFromTitle(project.name) || 'Vídeo', formatExt(f, audio)) : defaultName(project, f, audio, playheadUs)))
   }
 
+  // pedido da fila: instantâneo do projeto do editor agora (imutável), trecho, nome, pasta, configurações e os
+  // avisos de privacidade deste momento
+  const queueInput = (): EnqueueInput | null => {
+    if (!targetFolder || blocker || isPng) return null
+    const snapshot = useEditorStore.getState().project ?? project
+    const common = { project: snapshot, outputDir: targetFolder, fileName: name, fromUs: range.fromUs, toUs: range.toUs }
+    const presetLabel = format === 'video' ? `${base.label}${customized ? ' (personalizado)' : ''}` : format === 'gif' ? `GIF ${gif.width}×${gif.height}, ${gifOpts.fps} fps` : AUDIO_QUEUE_LABEL[audioFormat]
+    const job: EnqueueInput['job'] =
+      format === 'video'
+        ? { kind: 'video', request: { ...common, ...exportRequestFor(s, durationUs), estimateBytes: estimate } }
+        : format === 'gif'
+          ? { kind: 'gif', request: { ...common, ...gif, fps: gifOpts.fps, estimateBytes: gifDiskBytes(gif.width, gif.height, gifOpts.fps, range.fromUs, range.toUs) } }
+          : { kind: 'audio', request: { ...common, format: audioFormat, estimateBytes: audioEstimate } }
+    const warnings = format === 'audio' ? [] : privacyWarnings(snapshot, range.fromUs, range.toUs)
+    return { job, label: `${name} · ${presetLabel} · ${formatClock(durationUs / 1000, false)}`, durationUs, privacy: warnings.map((w) => privacyLine(snapshot, w)) }
+  }
+
+  /** "Adicionar à fila": enfileira e mantém o diálogo aberto (para enfileirar outra variação). */
+  const addToQueue = (): void => {
+    const input = queueInput()
+    if (!input) return
+    const { position } = exportQueue.enqueue(input)
+    toast.success(`Adicionado à fila (posição ${position})`, { description: input.label })
+  }
+
   const start = async (): Promise<void> => {
-    if (!targetFolder || blocker || editorExportRunning()) return
+    if (!targetFolder || blocker) return
+    if (!isPng) {
+      const input = queueInput()
+      if (!input) return
+      // fila ocupada: entra nela e o diálogo fecha; parada: começa já e o progresso aparece aqui
+      const busy = exportQueue.active()
+      const { id, position } = exportQueue.enqueue(input)
+      if (busy) {
+        toast.success(`Adicionado à fila (posição ${position})`, { description: input.label })
+        onOpenChange(false)
+      } else setPhase({ kind: 'queued', id, cancelling: false })
+      return
+    }
+    if (editorExportRunning()) return
     onBeforeExport()
     const snapshot = useEditorStore.getState().project ?? project
     const ac = new AbortController()
     abortRef.current = ac
     setPhase({ kind: 'running', progress: null, cancelling: false })
-    const opts = { signal: ac.signal, onProgress: (progress: EditorExportProgress) => setPhase((p) => (p.kind === 'running' ? { ...p, progress } : p)) }
-    const common = { project: snapshot, outputDir: targetFolder, fileName: name }
     try {
-      let done: Done
-      if (format === 'video') {
-        done = { kind: 'video', result: await runEditorExport({ ...common, fromUs: range.fromUs, toUs: range.toUs, ...exportRequestFor(s, durationUs), estimateBytes: estimate }, opts) }
-      } else if (format === 'gif') {
-        const estimateBytes = gifDiskBytes(gif.width, gif.height, gifOpts.fps, range.fromUs, range.toUs)
-        done = { kind: 'format', result: await runGifExport({ ...common, ...gif, fps: gifOpts.fps, fromUs: range.fromUs, toUs: range.toUs, estimateBytes }, opts) }
-      } else if (format === 'audio') {
-        done = { kind: 'format', result: await runAudioExport({ ...common, fromUs: range.fromUs, toUs: range.toUs, format: audioFormat, estimateBytes: audioEstimate }, opts) }
-      } else {
-        done = { kind: 'format', result: await exportStill({ ...common, tUs: useEditorStore.getState().playheadUs }, { signal: ac.signal }) }
-      }
-      setPhase({ kind: 'done', done })
+      const result = await exportStill({ project: snapshot, outputDir: targetFolder, fileName: name, tUs: useEditorStore.getState().playheadUs }, { signal: ac.signal })
+      setPhase({ kind: 'done', done: { kind: 'format', result } })
     } catch (e) {
       if (e instanceof EditorExportCancelled) setPhase({ kind: 'form' })
       else setPhase({ kind: 'error', message: ipcErrorMessage(e) })
@@ -251,12 +314,17 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   }
 
   const cancel = (): void => {
+    if (phase.kind === 'queued') {
+      exportQueue.cancel(phase.id)
+      setPhase({ ...phase, cancelling: true })
+      return
+    }
     abortRef.current?.abort()
     setPhase((p) => (p.kind === 'running' ? { ...p, cancelling: true } : p))
   }
 
   const [formTitle, doneTitle] = FORMAT_TITLE[format]
-  const title = phase.kind === 'done' ? doneTitle : phase.kind === 'running' ? 'Exportando…' : phase.kind === 'error' ? 'A exportação falhou' : formTitle
+  const title = phase.kind === 'done' ? doneTitle : phase.kind === 'running' || phase.kind === 'queued' ? 'Exportando…' : phase.kind === 'error' ? 'A exportação falhou' : formTitle
   const label = (id: string): string => `${ids}-${id}`
 
   return (
@@ -577,6 +645,11 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 Cancelar
               </Button>
+              {!isPng ? (
+                <Button variant="secondary" disabled={!!blocker} title={blocker ?? 'Exporta depois das que já estão na fila; o diálogo continua aberto'} onClick={addToQueue} data-export-enqueue="">
+                  <ListPlus className="h-4 w-4" /> Adicionar à fila
+                </Button>
+              ) : null}
               <Button variant={issues.length ? 'secondary' : 'primary'} disabled={!!blocker} title={blocker ?? undefined} onClick={() => void start()} data-export-start="">
                 <Upload className="h-4 w-4" /> {issues.length ? 'Exportar mesmo assim' : 'Exportar'}
               </Button>
@@ -585,6 +658,9 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
         ) : null}
 
         {phase.kind === 'running' ? <RunningView format={format} progress={phase.progress} cancelling={phase.cancelling} onCancel={cancel} /> : null}
+        {phase.kind === 'queued' && (watched?.state === 'running' || watched?.state === 'pending') ? (
+          <RunningView format={watched.job.kind} progress={watched.progress} cancelling={phase.cancelling} onCancel={cancel} onBackground={() => onOpenChange(false)} />
+        ) : null}
 
         {phase.kind === 'done' ? (
           <div className="flex flex-col gap-4">
@@ -759,7 +835,7 @@ function stageLabel(format: ExportFormat, progress: EditorExportProgress | null)
   return `Quadro ${progress.frame} de ${progress.total}`
 }
 
-function RunningView({ format, progress, cancelling, onCancel }: { format: ExportFormat; progress: EditorExportProgress | null; cancelling: boolean; onCancel: () => void }): React.JSX.Element {
+function RunningView({ format, progress, cancelling, onCancel, onBackground }: { format: ExportFormat; progress: EditorExportProgress | null; cancelling: boolean; onCancel: () => void; onBackground?: () => void }): React.JSX.Element {
   const pct = progress?.percent ?? 0
   const finalizing = progress?.stage === 'finalize'
   return (
@@ -776,7 +852,15 @@ function RunningView({ format, progress, cancelling, onCancel }: { format: Expor
         <span>{progress?.speed ? `${progress.speed.toLocaleString('pt-BR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })}× tempo real` : '—'}</span>
         <span>{progress?.etaS != null && !finalizing ? `faltam ${formatClock(progress.etaS * 1000, false)}` : ''}</span>
       </div>
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-2">
+        {onBackground ? (
+          <>
+            <span className="mr-auto text-[11px] text-muted">Pode fechar: a exportação continua em “Exportações”.</span>
+            <Button variant="ghost" onClick={onBackground} data-export-background="">
+              Continuar em segundo plano
+            </Button>
+          </>
+        ) : null}
         <Button variant="secondary" onClick={onCancel} disabled={cancelling}>
           <X className="h-4 w-4" /> Cancelar
         </Button>
