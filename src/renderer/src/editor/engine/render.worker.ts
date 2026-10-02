@@ -111,6 +111,12 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
       case 'testBench':
         void bench(m)
         break
+      case 'memStats':
+        post({ t: 'memStats', id: m.id, stats: compositor?.memoryStats() ?? null })
+        break
+      case 'testTextureBudget':
+        compositor?.setTextureBudget(m.bytes)
+        break
       case 'readPixels': {
         const data = compositor ? compositor.readPixels(m.x, m.y, m.w, m.h) : new Uint8Array(0)
         post({ t: 'pixels', id: m.id, data }, [data.buffer])

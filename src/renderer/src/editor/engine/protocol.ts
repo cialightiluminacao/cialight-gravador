@@ -2,6 +2,7 @@
 // para preview e exportação ("preview = export").
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from './mediaUrls'
+import type { CompositorMemStats } from './compositor/compositor'
 
 export type HwPref = 'prefer-hardware' | 'prefer-software'
 
@@ -60,6 +61,10 @@ export type RenderIn =
   | { t: 'testStall'; ms: number }
   // testes: reprodução sequencial de `frames` quadros a partir de tUs medindo desenho + GPU (sync) por quadro
   | { t: 'testBench'; id: number; tUs: Us; frames: number; fps: number }
+  // memória do compositor (QA/testes): texturas das camadas e do passe de efeitos
+  | { t: 'memStats'; id: number }
+  // testes: orçamento das texturas das camadas (null = o padrão, 512 MiB)
+  | { t: 'testTextureBudget'; bytes: number | null }
 
 export type RenderOut =
   | { t: 'ready' }
@@ -85,3 +90,5 @@ export type RenderOut =
   | { t: 'pixels'; id: number; data: Uint8Array }
   // testes: drawMs = compositor (desenho + espera da GPU); frameMs = quadro inteiro (decodificação inclusa)
   | { t: 'bench'; id: number; drawMs: number[]; frameMs: number[]; error?: string }
+  // stats null: worker sem compositor (antes do init/depois do dispose)
+  | { t: 'memStats'; id: number; stats: CompositorMemStats | null }

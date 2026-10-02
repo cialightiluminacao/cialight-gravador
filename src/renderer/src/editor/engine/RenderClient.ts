@@ -143,6 +143,24 @@ export class RenderClient {
     })
   }
 
+  /** Memória do compositor (QA/testes): texturas das camadas (cache LRU, 512 MiB) e do passe de efeitos. */
+  memStats(): Promise<Extract<RenderOut, { t: 'memStats' }>['stats']> {
+    const id = ++this.pixelId
+    return new Promise((resolve) => {
+      const off = this.onMessage((m) => {
+        if (m.t !== 'memStats' || m.id !== id) return
+        off()
+        resolve(m.stats)
+      })
+      this.send({ t: 'memStats', id })
+    })
+  }
+
+  /** Testes: orçamento das texturas das camadas (null = o padrão); vale a partir do próximo quadro desenhado. */
+  testTextureBudget(bytes: number | null): void {
+    this.send({ t: 'testTextureBudget', bytes })
+  }
+
   /** Testes: trava o worker por `ms` (simula decoder/GPU pendurado para o watchdog). */
   testStall(ms: number): void {
     this.send({ t: 'testStall', ms })
