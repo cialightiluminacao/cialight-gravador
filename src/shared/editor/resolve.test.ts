@@ -87,4 +87,12 @@ describe('resolveFrame', () => {
     const l = resolveFrame(p, 31 * S)[0]
     expect(l).toMatchObject({ kind: 'effect', strength: 8, region: { x: 0.5 } })
   })
+  it('enabled:false some do resolveFrame; reativar volta', () => {
+    const { p: p0 } = base()
+    const r = ops.addEffect(p0, 'blur', S)
+    expect(resolveFrame(r.project, 2 * S).some((l) => l.kind === 'effect')).toBe(true)
+    const off = ops.setItemEnabled(r.project, [r.itemId], false)
+    expect(resolveFrame(off, 2 * S).some((l) => l.kind === 'effect')).toBe(false)
+    expect(resolveFrame(ops.setItemEnabled(off, [r.itemId], true), 2 * S).some((l) => l.kind === 'effect')).toBe(true)
+  })
 })

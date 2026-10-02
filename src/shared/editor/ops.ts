@@ -1,8 +1,9 @@
 import { produce } from 'immer'
-import { sliceKeys } from './anim'
-import { createMediaItem } from './factory'
+import { evalAnim, removeKey, setKey, setValue, sliceKeys } from './anim'
+import { createEffectItem, createMediaItem } from './factory'
+import type { EffectPresetId, EffectRegionInit } from './factory'
 import { newId } from './ids'
-import { itemEndUs } from './time'
+import { frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
 import type { Anim, Asset, Item, MediaItem, Project, Track, TrackKind, Us, VisualProps } from './project'
 
@@ -827,4 +828,129 @@ export function addMarker(p: Project, tUs: Us, label = ''): Project {
     d.markers.push({ id: newId('m_'), tUs: Math.max(0, Math.round(tUs)), label, color: '#f59e0b' })
     d.markers.sort((a, b) => a.tUs - b.tUs)
   })
+}
+
+// ---------------------------------------------------------------- efeitos de privacidade e keyframes
+
+export type AnimPath =
+  | 'transform.x' | 'transform.y' | 'transform.scale' | 'transform.rotation' | 'transform.opacity'
+  | 'region.x' | 'region.y' | 'region.w' | 'region.h' | 'region.rotation'
+  | 'strength' | 'audio.volume'
+
+const ANIM_PATHS: AnimPath[] = [
+  'transform.x', 'transform.y', 'transform.scale', 'transform.rotation', 'transform.opacity',
+  'region.x', 'region.y', 'region.w', 'region.h', 'region.rotation', 'strength', 'audio.volume'
+]
+type RegionKey = 'x' | 'y' | 'w' | 'h' | 'rotation'
+type TransformKey = keyof VisualProps['transform']
+
+/** Animação do item no caminho dado; null se o tipo de item não tem essa propriedade. */
+export function getAnim(item: Item, path: AnimPath): Anim<number> | null {
+  if (path === 'strength') return item.type === 'effect' ? item.strength : null
+  if (path === 'audio.volume') return item.type === 'media' ? item.audio.volume : null
+  if (path.startsWith('region.')) return item.type === 'effect' ? item.region[path.slice(7) as RegionKey] : null
+  const v = item.type === 'media' || item.type === 'text' || item.type === 'shape' ? item.visual : undefined
+  return v ? v.transform[path.slice(10) as TransformKey] : null
+}
+
+/** Grava a animação no item (draft do immer); o caminho já foi validado por getAnim. */
+function assignAnim(item: Item, path: AnimPath, a: Anim<number>): void {
+  if (item.type === 'effect') {
+    if (path === 'strength') item.strength = a
+    else item.region[path.slice(7) as RegionKey] = a
+  } else if (path === 'audio.volume') {
+    if (item.type === 'media') item.audio.volume = a
+  } else if (item.type === 'media' || item.type === 'text' || item.type === 'shape') {
+    if (item.visual) item.visual.transform[path.slice(10) as TransformKey] = a
+  }
+}
+
+function editAnim(p: Project, itemId: string, path: AnimPath, tUs: Us, fn: (a: Anim<number>, localUs: Us) => Anim<number>): Project {
+  const f = mustFind(p, itemId)
+  assertUnlocked(f.track)
+  if (!getAnim(f.item, path)) throw new EditError('invalid', `O item ${itemId} não tem a propriedade ${path}`)
+  const local = tUs - f.item.startUs
+  if (local < 0 || local > f.item.durationUs) throw new EditError('bounds', 'Instante fora do item')
+  return produce(p, (d) => {
+    const it = d.tracks[f.trackIndex].items[f.itemIndex]
+    assignAnim(it, path, fn(getAnim(it, path)!, local))
+  })
+}
+
+/** Grava o valor em tUs (absoluto): sem keys altera o valor base; animado cria/atualiza o key. */
+export function setAnimValue(p: Project, itemId: string, path: AnimPath, tUs: Us, value: number): Project {
+  return editAnim(p, itemId, path, tUs, (a, local) => setValue(a, local, value))
+}
+
+/** Há key a ±meio quadro de tUs → remove; senão adiciona um key com o valor avaliado ali. */
+export function toggleKeyframe(p: Project, itemId: string, path: AnimPath, tUs: Us): Project {
+  const tol = frameDurUs(p.canvas.fps) / 2
+  return editAnim(p, itemId, path, tUs, (a, local) => {
+    const near = (a.keys ?? []).find((k) => Math.abs(k.tUs - local) <= tol)
+    return near ? removeKey(a, near.tUs) : setKey(a, local, evalAnim(a, local))
+  })
+}
+
+/** Próximo (dir 1) ou anterior (dir -1) keyframe, em tempo absoluto, estritamente além de fromUs; null se não houver. */
+export function nextKeyframeUs(p: Project, itemId: string, path: AnimPath | 'any', fromUs: Us, dir: 1 | -1): Us | null {
+  const f = findItem(p, itemId)
+  if (!f) return null
+  let best: Us | null = null
+  for (const pt of path === 'any' ? ANIM_PATHS : [path]) {
+    for (const k of getAnim(f.item, pt)?.keys ?? []) {
+      const t = f.item.startUs + k.tUs
+      if (dir === 1 ? t <= fromUs : t >= fromUs) continue
+      if (best === null || (dir === 1 ? t < best : t > best)) best = t
+    }
+  }
+  return best
+}
+
+/** Ativa/desativa itens (enabled só é gravado quando false). */
+export function setItemEnabled(p: Project, itemIds: string[], enabled: boolean): Project {
+  for (const id of itemIds) assertUnlocked(mustFind(p, id).track)
+  return produce(p, (d) => {
+    for (const id of itemIds) {
+      const it = findItem(d, id)!.item
+      if (enabled) delete it.enabled
+      else it.enabled = false
+    }
+  })
+}
+
+const FX_TRACK = /^Efeitos( \d+)?$/
+
+/**
+ * Cria um efeito de privacidade em atUs. Duração padrão: até o fim do item de vídeo sob o playhead
+ * (faixa mais alta, sem contar efeitos) ou 5 s. Faixa: a explícita; senão uma faixa de vídeo "Efeitos"
+ * acima de todas as demais faixas de vídeo e livre no intervalo; senão cria uma nova no topo.
+ */
+export function addEffect(p: Project, preset: EffectPresetId, atUs: Us, opts?: { durationUs?: Us; trackId?: string; region?: EffectRegionInit }): { project: Project; itemId: string } {
+  let durationUs = opts?.durationUs
+  if (durationUs === undefined) {
+    durationUs = 5_000_000
+    for (let i = p.tracks.length - 1; i >= 0; i--) {
+      const t = p.tracks[i]
+      if (t.kind !== 'video') continue
+      const under = t.items.find((it) => it.type !== 'effect' && it.startUs <= atUs && atUs < end(it))
+      if (under) { durationUs = Math.max(MIN_ITEM_US, end(under) - atUs); break }
+    }
+  }
+  const item = createEffectItem(preset, atUs, durationUs, opts?.region)
+  if (opts?.trackId) {
+    mustTrack(p, opts.trackId)
+    return { project: insertItems(p, opts.trackId, [item], 'overwrite'), itemId: item.id }
+  }
+  const lastMedia = p.tracks.reduce((m, t, i) => (t.kind === 'video' && !FX_TRACK.test(t.name) ? i : m), -1)
+  const free = p.tracks.find((t, i) => t.kind === 'video' && i > lastMedia && FX_TRACK.test(t.name) && !t.locked && isFree(t, atUs, atUs + durationUs))
+  let q = p
+  let trackId = free?.id
+  if (!trackId) {
+    let name = 'Efeitos', n = 2
+    while (p.tracks.some((t) => t.name === name)) name = `Efeitos ${n++}`
+    const r = addTrack(p, 'video', undefined, name)
+    q = r.project
+    trackId = r.trackId
+  }
+  return { project: insertItems(q, trackId, [item], 'overwrite'), itemId: item.id }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseProject, validateProject } from './schema'
-import { createEmptyProject, createMediaItem } from './factory'
+import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
 import type { Asset, Project } from './project'
 
 const asset: Asset = { id: 'a1', name: 'a', kind: 'video', source: { type: 'file', path: 'x', size: 1, mtimeMs: 1 }, durationUs: 2_000_000, status: 'ready' }
@@ -78,5 +78,28 @@ describe('schema', () => {
   it('projeto válido sem mensagens', () => {
     const a = { ...createMediaItem(asset, 0, 'video'), durationUs: 1_000_000 }
     expect(validateProject(withItems([a]))).toEqual([])
+  })
+  it('enabled é opcional: ausente não aparece; false faz round-trip', () => {
+    const fx = createEffectItem('blur', 0, 1_000_000)
+    expect(JSON.stringify(fx)).not.toContain('enabled')
+    const p = createEmptyProject('x')
+    p.tracks[0].items = [{ ...fx, enabled: false }]
+    expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+  })
+  it.each(['blur', 'pixelate', 'solid', 'blurFace', 'blurText', 'blurAllExcept'] as const)('fábrica %s valida no schema', (preset) => {
+    const p = createEmptyProject('x')
+    p.tracks[0].items = [createEffectItem(preset, 0, 1_000_000)]
+    expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+    expect(validateProject(p)).toEqual([])
+  })
+  it('valores dos presets', () => {
+    const f = (id: Parameters<typeof createEffectItem>[0]) => createEffectItem(id, 0, 1_000_000)
+    expect(f('blur')).toMatchObject({ effect: 'blur', strength: { value: 60 }, feather: 0.15, invert: false, region: { shape: 'rect' } })
+    expect(f('pixelate')).toMatchObject({ effect: 'pixelate', strength: { value: 50 } })
+    expect(f('solid')).toMatchObject({ effect: 'solid', color: '#000000', feather: 0, strength: { value: 100 } })
+    expect(f('blurFace')).toMatchObject({ strength: { value: 70 }, feather: 0.3, region: { shape: 'ellipse', x: { value: 0.5 }, y: { value: 0.5 }, w: { value: 0.18 }, h: { value: 0.32 } } })
+    expect(f('blurText')).toMatchObject({ strength: { value: 60 }, region: { shape: 'rect', w: { value: 0.4 }, h: { value: 0.08 } } })
+    expect(f('blurAllExcept')).toMatchObject({ invert: true, strength: { value: 60 }, feather: 0.2, region: { w: { value: 0.5 }, h: { value: 0.5 } } })
+    expect(createEffectItem('blur', 0, 1, { x: 0.2, shape: 'ellipse' }).region).toMatchObject({ shape: 'ellipse', x: { value: 0.2 }, y: { value: 0.5 } })
   })
 })

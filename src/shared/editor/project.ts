@@ -43,7 +43,8 @@ export interface VisualProps {
 export interface AudioProps { enabled: boolean; volume: Anim<number>; fadeInUs: Us; fadeOutUs: Us; preservePitch: boolean; denoise: boolean; normalize: boolean }
 export type TransitionKind = 'crossfade' | 'dipBlack' | 'dipWhite' | 'slideL' | 'slideR' | 'slideU' | 'slideD' | 'wipeL' | 'wipeR' | 'zoomIn' | 'blur'
 export interface Transition { kind: TransitionKind; durationUs: Us }
-export interface ItemBase { id: string; startUs: Us; durationUs: Us; name?: string; linkId?: string }
+/** enabled: ausente = ativo; false = item desativado (não gera camada nem áudio). Só é gravado quando false. */
+export interface ItemBase { id: string; startUs: Us; durationUs: Us; name?: string; linkId?: string; enabled?: boolean }
 export interface MediaItem extends ItemBase {
   type: 'media'; assetId: string; inUs: Us; speed: number; reverse: boolean
   freeze?: { atUs: Us }

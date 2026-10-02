@@ -91,7 +91,7 @@ const ev = (a: Anim<number>, local: Us): number => evalAnim(a, local)
 export function resolveFrame(p: Project, tUs: Us): Layer[] {
   const layers: Layer[] = []
   for (const { track, item } of activeItemsAt(p, tUs)) {
-    if (track.hidden) continue
+    if (track.hidden || item.enabled === false) continue
     const local = tUs - item.startUs
     switch (item.type) {
       case 'media': {

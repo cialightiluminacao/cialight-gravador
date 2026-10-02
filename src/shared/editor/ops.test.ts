@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from './factory'
-import type { Asset, Item, MediaItem, Project } from './project'
+import type { Asset, EffectItem, Item, MediaItem, Project } from './project'
 import * as ops from './ops'
 import { validateProject } from './schema'
 const S = 1_000_000
@@ -266,5 +266,121 @@ describe('ops', () => {
     expect(() => ops.insertItems(p, p.tracks[0].id, [fresh, { ...fresh, startUs: 30 * S }], 'overwrite')).toThrow(ops.EditError)
     expect(ops.updateAsset(p, 'a1', { id: 'x', name: 'n' }).assets[0]).toMatchObject({ id: 'a1', name: 'n' })
     expect(v).toBeDefined()
+  })
+})
+
+describe('efeitos de privacidade', () => {
+  const fxItems = (p: Project, ti: number) => p.tracks[ti].items as EffectItem[]
+  it('addEffect cria faixa "Efeitos" no topo; duração segue o clipe sob o playhead', () => {
+    const { p } = base()
+    const r = ops.addEffect(p, 'blur', 4 * S)
+    const top = r.project.tracks.filter((t) => t.kind === 'video').at(-1)!
+    expect(top.name).toBe('Efeitos')
+    expect(r.project.tracks.indexOf(top)).toBe(1) // acima de "Vídeo 1" e antes do áudio
+    expect(top.items[0]).toMatchObject({ id: r.itemId, type: 'effect', startUs: 4 * S, durationUs: 6 * S })
+    expect(validateProject(r.project)).toEqual([])
+  })
+  it('sem clipe sob o playhead dura 5 s; durationUs explícito vence', () => {
+    const p = createEmptyProject('t')
+    expect(fxItems(ops.addEffect(p, 'pixelate', 3 * S).project, 1)[0].durationUs).toBe(5 * S)
+    expect(fxItems(ops.addEffect(p, 'solid', 0, { durationUs: 2 * S }).project, 1)[0].durationUs).toBe(2 * S)
+  })
+  it('reaproveita a faixa "Efeitos" quando livre; cria "Efeitos 2" quando ocupada', () => {
+    const { p } = base()
+    const a = ops.addEffect(p, 'blur', 0, { durationUs: 2 * S })
+    const b = ops.addEffect(a.project, 'blur', 3 * S, { durationUs: 2 * S })
+    expect(b.project.tracks.filter((t) => t.name === 'Efeitos')).toHaveLength(1)
+    expect(fxItems(b.project, 1)).toHaveLength(2)
+    const c = ops.addEffect(b.project, 'blur', S, { durationUs: 3 * S })
+    expect(c.project.tracks.map((t) => t.name)).toEqual(['Vídeo 1', 'Efeitos', 'Efeitos 2', 'Áudio 1'])
+    expect(fxItems(c.project, 2)).toHaveLength(1)
+  })
+  it('addEffect com trackId explícito e região', () => {
+    const { p } = base()
+    const r = ops.addEffect(p, 'blurFace', S, { trackId: p.tracks[0].id, region: { x: 0.3 } })
+    const fx = r.project.tracks[0].items.find((i) => i.id === r.itemId) as EffectItem
+    expect(fx.region.x.value).toBe(0.3)
+    expect(fx.region.shape).toBe('ellipse')
+  })
+  it('setItemEnabled grava false e omite o campo ao reativar', () => {
+    const p = ops.addEffect(base().p, 'blur', 0).project
+    const id = p.tracks[1].items[0].id
+    const off = ops.setItemEnabled(p, [id], false)
+    expect(off.tracks[1].items[0].enabled).toBe(false)
+    const on = ops.setItemEnabled(off, [id], true)
+    expect('enabled' in on.tracks[1].items[0]).toBe(false)
+    expect(on).toEqual(p)
+  })
+  it('setAnimValue: sem keys muda o base; animado cria key (tempo absoluto → local)', () => {
+    const r = ops.addEffect(base().p, 'blur', 2 * S, { durationUs: 4 * S })
+    const a = ops.setAnimValue(r.project, r.itemId, 'strength', 3 * S, 80)
+    expect(fxItems(a, 1)[0].strength).toEqual({ value: 80 })
+    const k = ops.toggleKeyframe(a, r.itemId, 'strength', 3 * S)
+    const b = ops.setAnimValue(k, r.itemId, 'strength', 4 * S, 20)
+    expect(fxItems(b, 1)[0].strength.keys).toEqual([{ tUs: S, value: 80, ease: 'linear' }, { tUs: 2 * S, value: 20, ease: 'linear' }])
+    expect(() => ops.setAnimValue(r.project, r.itemId, 'transform.x', 3 * S, 1)).toThrow(ops.EditError)
+    expect(() => ops.setAnimValue(r.project, r.itemId, 'strength', 7 * S, 1)).toThrow(ops.EditError)
+  })
+  it('toggleKeyframe adiciona (valor avaliado) e remove em ±meio quadro', () => {
+    const r = ops.addEffect(base().p, 'blur', 0, { durationUs: 4 * S })
+    const half = Math.floor(1e6 / 30 / 2)
+    const a = ops.toggleKeyframe(r.project, r.itemId, 'region.x', S)
+    expect(fxItems(a, 1)[0].region.x.keys).toEqual([{ tUs: S, value: 0.5, ease: 'linear' }])
+    const b = ops.toggleKeyframe(a, r.itemId, 'region.x', S + half) // dentro da tolerância → remove
+    expect(fxItems(b, 1)[0].region.x).toEqual({ value: 0.5 })
+    const c = ops.toggleKeyframe(a, r.itemId, 'region.x', S + half + 2000) // fora → adiciona outro
+    expect(fxItems(c, 1)[0].region.x.keys).toHaveLength(2)
+    const d = ops.setAnimValue(c, r.itemId, 'region.x', 3 * S, 0.9)
+    const e = ops.toggleKeyframe(d, r.itemId, 'region.x', 2 * S)
+    expect(fxItems(e, 1)[0].region.x.keys!.find((k) => k.tUs === 2 * S)).toBeDefined()
+  })
+  it('toggleKeyframe/setAnimValue em mídia (transform e audio.volume)', () => {
+    const { p, v, a } = base()
+    const q = ops.toggleKeyframe(p, v, 'transform.opacity', S)
+    expect(items(q, 0)[0].visual!.transform.opacity.keys).toHaveLength(1)
+    const w = ops.setAnimValue(p, a, 'audio.volume', 0, 0.5)
+    expect(items(w, 1)[0].audio.volume.value).toBe(0.5)
+  })
+  it('nextKeyframeUs nos dois sentidos, por propriedade e com "any"', () => {
+    const r = ops.addEffect(base().p, 'blur', 2 * S, { durationUs: 6 * S })
+    let q = ops.toggleKeyframe(r.project, r.itemId, 'strength', 3 * S) // local 1 s
+    q = ops.toggleKeyframe(q, r.itemId, 'strength', 6 * S) // local 4 s
+    q = ops.toggleKeyframe(q, r.itemId, 'region.x', 5 * S) // local 3 s
+    const n = (path: ops.AnimPath | 'any', from: number, dir: 1 | -1) => ops.nextKeyframeUs(q, r.itemId, path, from, dir)
+    expect(n('strength', 0, 1)).toBe(3 * S)
+    expect(n('strength', 3 * S, 1)).toBe(6 * S)
+    expect(n('strength', 6 * S, 1)).toBeNull()
+    expect(n('strength', 6 * S, -1)).toBe(3 * S)
+    expect(n('strength', 3 * S, -1)).toBeNull()
+    expect(n('any', 3 * S, 1)).toBe(5 * S)
+    expect(n('any', 7 * S, -1)).toBe(6 * S)
+    expect(n('any', 5 * S, -1)).toBe(3 * S)
+    expect(n('region.y', 0, 1)).toBeNull()
+    expect(ops.nextKeyframeUs(q, 'nope', 'any', 0, 1)).toBeNull()
+  })
+  it('getAnim devolve null para propriedade inexistente', () => {
+    const p = ops.addEffect(base().p, 'blur', 0).project
+    const fx = p.tracks[1].items[0] as EffectItem
+    expect(ops.getAnim(fx, 'strength')).toBe(fx.strength)
+    expect(ops.getAnim(fx, 'audio.volume')).toBeNull()
+    expect(ops.getAnim(fx, 'transform.x')).toBeNull()
+  })
+  it('splitAt/trimItem de EffectItem reparte keys de region.* e strength', () => {
+    const r = ops.addEffect(base().p, 'blur', 0, { durationUs: 8 * S })
+    let q = r.project
+    for (const [path, t, val] of [['strength', 0, 20], ['strength', 8 * S, 100], ['region.x', 0, 0.2], ['region.x', 8 * S, 0.8]] as const) {
+      q = ops.toggleKeyframe(q, r.itemId, path, t)
+      q = ops.setAnimValue(q, r.itemId, path, t, val)
+    }
+    const s = ops.splitAt(q, [r.itemId], 4 * S)
+    const [l, rt] = fxItems(s, 1)
+    expect(l.strength.keys!.map((k) => [k.tUs, k.value])).toEqual([[0, 20], [4 * S, 60]])
+    expect(rt.strength.keys!.map((k) => [k.tUs, k.value])).toEqual([[0, 60], [4 * S, 100]])
+    expect(l.region.x.keys!.at(-1)!.tUs).toBe(4 * S); expect(l.region.x.keys!.at(-1)!.value).toBeCloseTo(0.5, 6)
+    expect(rt.region.x.keys![0].tUs).toBe(0); expect(rt.region.x.keys![0].value).toBeCloseTo(0.5, 6)
+    expect(validateProject(s)).toEqual([])
+    const t = ops.trimItem(q, r.itemId, 'end', 4 * S)
+    expect(fxItems(t, 1)[0].strength.keys!.map((k) => [k.tUs, k.value])).toEqual([[0, 20], [4 * S, 60]])
+    expect(validateProject(t)).toEqual([])
   })
 })

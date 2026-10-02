@@ -14,7 +14,7 @@ export function planAudio(p: Project): AudioSegment[] {
   for (const track of p.tracks) {
     if (track.muted) continue
     for (const item of track.items) {
-      if (item.type !== 'media' || !item.audio.enabled || item.freeze) continue
+      if (item.type !== 'media' || item.enabled === false || !item.audio.enabled || item.freeze) continue
       const asset = p.assets.find((a) => a.id === item.assetId)
       if (!asset || asset.kind === 'image' || !asset.audio) continue
       const a = item.audio

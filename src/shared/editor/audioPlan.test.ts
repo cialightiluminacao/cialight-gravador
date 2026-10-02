@@ -45,4 +45,10 @@ describe('planAudio', () => {
     const { p } = base()
     expect(planAudio(p).every((s) => s.itemId !== p.tracks[0].items[0].id)).toBe(true)
   })
+  it('item de mídia com enabled:false não entra no plano', () => {
+    const { p, a } = base()
+    const off = ops.setItemEnabled(p, [a], false)
+    expect(planAudio(off)).toEqual([])
+    expect(planAudio(ops.setItemEnabled(off, [a], true))).toHaveLength(1)
+  })
 })

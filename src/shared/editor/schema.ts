@@ -43,7 +43,7 @@ const transition = z.object({
   kind: z.enum(['crossfade', 'dipBlack', 'dipWhite', 'slideL', 'slideR', 'slideU', 'slideD', 'wipeL', 'wipeR', 'zoomIn', 'blur']),
   durationUs: us
 })
-const itemBase = { id: z.string().min(1), startUs: us, durationUs: us, name: z.string().optional(), linkId: z.string().optional() }
+const itemBase = { id: z.string().min(1), startUs: us, durationUs: us, name: z.string().optional(), linkId: z.string().optional(), enabled: z.boolean().optional() }
 
 const mediaItem = z.object({
   ...itemBase,
