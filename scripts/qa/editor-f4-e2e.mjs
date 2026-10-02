@@ -441,7 +441,13 @@ async function main() {
       const d = document.querySelector('[data-reframe-dialog]'); return { open: !!d, text: d?.textContent ?? '', points: window.__qaEditor.reframe.getState().points['${v}'] ?? [] }`)
     check('painel em 9:16 (1080×1920), Criar cópia, ponto de foco no marcador em 1 s', r0.open && r0.text.includes('1080×1920') && r0.points.length === 1 && near(r0.points[0].x, 1400 / W, 0.003) && near(r0.points[0].y, 540 / H, 0.003), r0)
     await shot('e2e-f4-06-reenquadrar.png')
-    await ev(`await T.click(T.el('[data-reframe-apply]')); return 1`)
+    // o botão fica no rodapé do painel (a nota do zoom o alonga): sem toast por cima e com a prévia pronta
+    // toast parado (o sonner pausa o tempo com a janela sem foco) por cima do rodapé do painel: fecha pelo X
+    await ev(`for (const b of document.querySelectorAll('[data-sonner-toast] [data-close-button]')) b.click()
+      for (let i = 0; i < 60 && T.toasts().length; i++) await T.wait(250)
+      for (let i = 0; i < 100 && document.querySelector('[data-reframe-pending]'); i++) await T.wait(50)
+      T.el('[data-reframe-apply]').scrollIntoView({ block: 'nearest' }); await T.wait(100)
+      await T.click(T.el('[data-reframe-apply]')); return 1`)
     let c = null
     for (let i = 0; i < 60; i++) {
       c = await ev(`const p = window.__qaEditor?.store.getState()?.project; return p ? { id: p.id, name: p.name, w: p.canvas.width, h: p.canvas.height } : null`)

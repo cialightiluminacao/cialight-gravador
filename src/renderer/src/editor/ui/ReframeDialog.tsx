@@ -206,7 +206,7 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
                 {target && hasZoomKeys(target) ? (
                   <p data-reframe-zoom-note="" className="flex gap-2 rounded-xl border border-border bg-bg-2 px-3 py-2 text-[11px] leading-snug text-fg-2">
                     <ZoomIn className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
-                    <span>Este clipe tem zoom: durante o zoom, o enquadramento segue o alvo dele (o detalhe ampliado continua no quadro); os pontos de foco valem fora do zoom.</span>
+                    <span>Este clipe tem zoom: durante ele, o alvo do zoom fica no centro; os pontos valem fora dele.</span>
                   </p>
                 ) : null}
                 {groups.length ? (
