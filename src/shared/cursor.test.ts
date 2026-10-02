@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CursorTrackSchema, dipToPhysical, hwndFromSourceId, normalizeContain, normalizeToFrame, parseCursorTrack, physicalDisplays, type CursorTrackV1, type DisplayGeometry } from './cursor'
+import { CURSOR_MAX_DEVIATION_PX, CURSOR_VIDEO_LAG_MS, CursorTrackSchema, clicksBetween, cursorAt, dipToPhysical, hwndFromSourceId, normalizeContain, normalizeToFrame, parseCursorTrack, physicalDisplays, type CursorTrackV1, type DisplayGeometry } from './cursor'
 
 const track = (over: Partial<CursorTrackV1> = {}): CursorTrackV1 => ({
   version: 1,
@@ -170,3 +170,117 @@ describe('normalizeContain (caixa do encoder no modo janela)', () => {
     expect(Number.isFinite(n.x) && Number.isFinite(n.y)).toBe(true)
   })
 })
+
+describe('cursorAt (posição no instante, O(log n))', () => {
+  const tr = (samples: CursorTrackV1['samples'], clicks: CursorTrackV1['clicks'] = []): CursorTrackV1 => ({ version: 1, width: 1000, height: 500, samples, clicks })
+  const lin = tr([
+    { tMs: 100, x: 0.1, y: 0.2 },
+    { tMs: 200, x: 0.3, y: 0.6 },
+    { tMs: 400, x: 0.3, y: 0.6 }
+  ])
+
+  it('interpola linearmente entre amostras', () => {
+    expect(cursorAt(lin, 100)).toEqual({ x: 0.1, y: 0.2 })
+    const m = cursorAt(lin, 150)!
+    expect(m.x).toBeCloseTo(0.2, 12)
+    expect(m.y).toBeCloseTo(0.4, 12)
+    expect(cursorAt(lin, 300)).toEqual({ x: 0.3, y: 0.6 })
+    const f = cursorAt(lin, 125.5)! // tempo fracionário (cursorTimeMs não arredonda)
+    expect(f.x).toBeCloseTo(0.1 + 0.2 * 0.255, 12)
+  })
+
+  it('antes da 1ª amostra: null; depois da última: fica na última; trilha vazia: null', () => {
+    expect(cursorAt(lin, 99.9)).toBeNull()
+    expect(cursorAt(lin, -80)).toBeNull()
+    expect(cursorAt(lin, 10_000)).toEqual({ x: 0.3, y: 0.6 })
+    expect(cursorAt(tr([]), 0)).toBeNull()
+    expect(cursorAt(tr([{ tMs: 5, x: 0.4, y: 0.4 }]), 5)).toEqual({ x: 0.4, y: 0.4 })
+  })
+
+  it('suavização 0 (ou ausente) = posição bruta', () => {
+    for (const t of [100, 133, 250, 399]) expect(cursorAt(lin, t, 0)).toEqual(cursorAt(lin, t))
+  })
+
+  it('suavização reduz o tremor sem se afastar mais que CURSOR_MAX_DEVIATION_PX da posição bruta (denso, com pico de 1 amostra)', () => {
+    // trilha de 60 Hz: deriva lenta + tremor de ±3 px + um pico de 1 amostra de 60 px + um salto de 300 px
+    let seed = 7
+    const rnd = (): number => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648)
+    const W = 1920, H = 1080
+    const samples: CursorTrackV1['samples'] = []
+    for (let i = 0; i < 600; i++) {
+      const tMs = Math.round(i * 16.67)
+      let px = 400 + i * 0.8 + (rnd() - 0.5) * 6
+      let py = 300 + Math.sin(i / 20) * 40 + (rnd() - 0.5) * 6
+      if (i === 200) { px += 60; py -= 60 } // pico
+      if (i >= 400) px += 300 // salto
+      samples.push({ tMs, x: px / W, y: py / H })
+    }
+    const track = { version: 1 as const, width: W, height: H, samples, clicks: [] }
+    let maxDev = 0
+    let roughRaw = 0, roughSmooth = 0
+    let prevRaw: { x: number; y: number } | null = null, prevSm: { x: number; y: number } | null = null
+    for (const s of [0.25, 0.5, 1]) {
+      for (let t = 0; t <= samples[samples.length - 1].tMs + 50; t += 1000 / 240) {
+        const raw = cursorAt(track, t)!
+        const sm = cursorAt(track, t, s)!
+        maxDev = Math.max(maxDev, Math.hypot((sm.x - raw.x) * W, (sm.y - raw.y) * H))
+        if (s === 1 && t > 50 && t < 3000) {
+          if (prevRaw && prevSm) {
+            roughRaw += Math.hypot((raw.x - prevRaw.x) * W, (raw.y - prevRaw.y) * H)
+            roughSmooth += Math.hypot((sm.x - prevSm.x) * W, (sm.y - prevSm.y) * H)
+          }
+          prevRaw = raw
+          prevSm = sm
+        }
+      }
+    }
+    expect(maxDev).toBeLessThanOrEqual(CURSOR_MAX_DEVIATION_PX + 1e-9)
+    expect(maxDev).toBeGreaterThan(1) // a suavização age de fato
+    expect(roughSmooth).toBeLessThan(roughRaw * 0.9) // caminho percorrido menor = menos tremor
+  })
+
+  it('desempenho: 10 000 consultas aleatórias em 216 000 amostras (1 h a 60 Hz) < 20 ms', () => {
+    const n = 216_000
+    const samples: CursorTrackV1['samples'] = new Array(n)
+    for (let i = 0; i < n; i++) samples[i] = { tMs: Math.round(i * 16.667), x: (i % 1000) / 1000, y: (i % 777) / 777 }
+    const track = { version: 1 as const, width: 1920, height: 1080, samples, clicks: [] }
+    const last = samples[n - 1].tMs
+    const ts = Array.from({ length: 10_000 }, (_, i) => ((i * 7919) % 10_000) / 10_000 * last)
+    for (let i = 0; i < 200; i++) cursorAt(track, ts[i], 0.5) // aquece o JIT
+    // melhor de 5 rodadas: a suíte inteira roda em paralelo e uma rodada isolada pode pegar a CPU ocupada
+    let ms = Infinity
+    let acc = 0
+    for (let round = 0; round < 5; round++) {
+      const t0 = performance.now()
+      for (const t of ts) acc += cursorAt(track, t, 0.5)!.x
+      ms = Math.min(ms, performance.now() - t0)
+    }
+    expect(acc).toBeGreaterThan(0)
+    expect(ms).toBeLessThan(20)
+  })
+})
+
+describe('clicksBetween ([t0, t1), busca binária)', () => {
+  const clicks: CursorTrackV1['clicks'] = [
+    { tMs: 100, x: 0.1, y: 0.1, button: 'left' },
+    { tMs: 200, x: 0.2, y: 0.2, button: 'right' },
+    { tMs: 200, x: 0.25, y: 0.2, button: 'left' },
+    { tMs: 300, x: 0.3, y: 0.3, button: 'middle' }
+  ]
+  const tr: CursorTrackV1 = { version: 1, width: 100, height: 100, samples: [], clicks }
+  it('inclui t0 e exclui t1', () => {
+    expect(clicksBetween(tr, 100, 200).map((c) => c.tMs)).toEqual([100])
+    expect(clicksBetween(tr, 100, 200.0001).map((c) => c.x)).toEqual([0.1, 0.2, 0.25])
+    expect(clicksBetween(tr, 200, 300).map((c) => c.button)).toEqual(['right', 'left'])
+    expect(clicksBetween(tr, 0, 1e9)).toHaveLength(4)
+    expect(clicksBetween(tr, 301, 400)).toEqual([])
+    expect(clicksBetween(tr, 300, 300)).toEqual([])
+    expect(clicksBetween(tr, 250, 150)).toEqual([])
+  })
+  it('cliques fora de ordem no arquivo ainda saem certos (ordenados por tempo)', () => {
+    const t2: CursorTrackV1 = { ...tr, clicks: [clicks[3], clicks[0], clicks[1]] }
+    expect(clicksBetween(t2, 0, 250).map((c) => c.tMs)).toEqual([100, 200])
+  })
+})
+
+it('CURSOR_VIDEO_LAG_MS = 80 (ruling R11)', () => expect(CURSOR_VIDEO_LAG_MS).toBe(80))

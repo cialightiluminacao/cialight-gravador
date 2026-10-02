@@ -26,6 +26,7 @@ import { destroyBar } from './windows/barWindow'
 import { log } from './log'
 import { runIntegrationTest } from './testMode'
 import { createQaEditorFixture } from './qaEditorFixture'
+import { sessionCursorRef, sessionDirFor } from './cursor/cursorTrackFile'
 import { confirmQuit, createQuitGuard, isEditorExportBusy, setAppQuitGuard, type QuitReason } from './quitGuard'
 
 // Bootstrap do processo principal.
@@ -112,7 +113,12 @@ if (!gotLock) {
         }
       },
       // impressão digital da fonte do áudio processado dos assets de gravação
-      sessionMediaFile: (id) => store.filePath(id, 'rec.mp4')
+      sessionMediaFile: (id) => store.filePath(id, 'rec.mp4'),
+      // trilha do cursor (F6): devolve `cursor` ao asset da tela que o perdeu (a v1.3 descarta o campo ao regravar)
+      sessionCursorRef: (id) => {
+        const dir = sessionDirFor((s) => store.dirOf(s), id)
+        return dir ? sessionCursorRef(dir) : null
+      }
     })
     installFileProtocol(store, projects)
     installDisplayMediaHandler()

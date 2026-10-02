@@ -25,6 +25,11 @@ export interface ProjectStoreDeps {
   sessionMediaExists?: (sessionId: string) => boolean
   /** Caminho do rec.mp4 da gravação (impressão digital da fonte dos assets de sessão). Ausente = não confere. */
   sessionMediaFile?: (sessionId: string) => string
+  /**
+   * Trilha do cursor da gravação (F6): CURSOR_FILE se a pasta tem cursor.json válido, senão null. Usada ao abrir para
+   * devolver `cursor` ao asset da tela que o perdeu (a v1.3 descarta o campo ao regravar). Ausente = não confere.
+   */
+  sessionCursorRef?: (sessionId: string) => string | null
 }
 
 export type AssetVariant = 'original' | 'proxy' | 'intermediate'
@@ -227,7 +232,16 @@ export class ProjectStore {
       const { processedAudio: _, ...rest } = a
       return keep.length ? { ...rest, processedAudio: Object.fromEntries(keep) } : rest
     }
-    const assets = p.assets.map((a) => withProcessed(withStatus(a)))
+    // trilha do cursor: só a tela de gravação presente e SEM o campo é conferida (lê o arquivo); com ele, nada a ler
+    const cursorRef = this.deps.sessionCursorRef
+    const withCursor = (a: Asset): Asset => {
+      if (!cursorRef || a.cursor !== undefined || a.status === 'missing' || a.source.type !== 'session' || a.source.stream !== 'screen') return a
+      const ref = cursorRef(a.source.sessionId)
+      if (!ref) return a
+      changed = true
+      return { ...a, cursor: ref }
+    }
+    const assets = p.assets.map((a) => withCursor(withProcessed(withStatus(a))))
     return changed ? { ...p, assets } : p
   }
 

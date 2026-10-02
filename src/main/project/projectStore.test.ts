@@ -148,6 +148,37 @@ describe('ProjectStore', () => {
     expect(s2.withMediaStatus(r)).toBe(r)
   })
 
+  it('withMediaStatus restaura `cursor` do asset da tela de gravação com cursor.json (a v1.3 o descarta ao regravar)', () => {
+    const asked: string[] = []
+    const s2 = new ProjectStore({
+      projectsRoot: () => root, trash: async () => {}, sessionMediaExists: (id) => id !== 'apagada',
+      sessionCursorRef: (id) => (asked.push(id), id === 'com' || id === 'apagada' ? 'cursor.json' : null)
+    })
+    const base = { name: 'x', kind: 'video' as const, durationUs: 1, status: 'ready' as const }
+    const p: Project = {
+      ...mk('p-c', '2026-10-01T10:00:00.000Z'),
+      assets: [
+        { ...base, id: 'tela', source: { type: 'session', sessionId: 'com', stream: 'screen' } },
+        { ...base, id: 'cam', source: { type: 'session', sessionId: 'com', stream: 'webcam' } },
+        { ...base, id: 'semTrilha', source: { type: 'session', sessionId: 'sem', stream: 'screen' } },
+        { ...base, id: 'jaTem', source: { type: 'session', sessionId: 'com2', stream: 'screen' }, cursor: 'cursor.json' },
+        { ...base, id: 'sumiu', source: { type: 'session', sessionId: 'apagada', stream: 'screen' } },
+        { ...base, id: 'arq', source: { type: 'file', path: join(root, 'x.mp4'), size: 1, mtimeMs: 1 } }
+      ]
+    }
+    const r = s2.withMediaStatus(p)
+    expect(r.assets.map((a) => [a.id, a.cursor])).toEqual([['tela', 'cursor.json'], ['cam', undefined], ['semTrilha', undefined], ['jaTem', 'cursor.json'], ['sumiu', undefined], ['arq', undefined]])
+    expect('cursor' in r.assets[2]).toBe(false)
+    // só lê a trilha de quem precisa (tela sem o campo, gravação presente): nada de ler 1 h de cursor a cada abertura
+    expect(asked.sort()).toEqual(['com', 'sem'])
+    asked.length = 0
+    const again = s2.withMediaStatus(r)
+    expect(again.assets.map((a) => a.cursor)).toEqual(r.assets.map((a) => a.cursor))
+    // sem a dependência (testes antigos, outros chamadores): nada muda
+    const sessionOnly = { ...p, assets: p.assets.filter((a) => a.source.type === 'session') }
+    expect(new ProjectStore({ projectsRoot: () => root, trash: async () => {} }).withMediaStatus(sessionOnly)).toBe(sessionOnly)
+  })
+
   it('removeProcessedAudio apaga só os arquivos do asset, um a um (falha num não impede os outros)', () => {
     const p0 = mk('p-a', '2026-10-01T10:00:00.000Z')
     store.create(p0)

@@ -122,7 +122,8 @@ const api: IpcApi = {
     pause: () => ipcRenderer.send(IPC.cursor.pause),
     resume: () => ipcRenderer.send(IPC.cursor.resume),
     stop: (sessionId) => ipcRenderer.invoke(IPC.cursor.stop, sessionId),
-    discard: (sessionId) => ipcRenderer.send(IPC.cursor.discard, sessionId)
+    discard: (sessionId) => ipcRenderer.send(IPC.cursor.discard, sessionId),
+    readCursorTrack: (sessionId) => ipcRenderer.invoke(IPC.cursor.readTrack, sessionId)
   },
   overlay: {
     setMode: (payload) => ipcRenderer.invoke(IPC.overlay.setMode, payload),

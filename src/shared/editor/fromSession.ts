@@ -3,8 +3,9 @@
 import type { PipKeyframe, Session } from '../types'
 import { PIP_EASE_MS } from '../compositor/pipMath'
 import { defaultAudio, defaultVisual } from './factory'
-import { MIN_ITEM_US } from './project'
-import type { Anim, Asset, Keyframe, MediaItem, Project, SessionStream, Track, TrackKind, Us, VisualProps } from './project'
+import { CURSOR_FILE } from '../cursor'
+import { DEFAULT_CURSOR_FX, MIN_ITEM_US } from './project'
+import type { Anim, Asset, CursorFx, Keyframe, MediaItem, Project, SessionStream, Track, TrackKind, Us, VisualProps } from './project'
 import { msToUs, secToUs } from './time'
 
 // Webcam sem dimensões registradas na sessão: assume 1280×720.
@@ -122,25 +123,37 @@ function sessionTotalUs(session: Session): Us {
 
 const STREAM_NAMES: Record<SessionStream, string> = { screen: 'Tela', webcam: 'Webcam', mic: 'Microfone', system: 'Áudio do sistema' }
 
+/** Cópia nova dos padrões (o modelo nunca compartilha o objeto DEFAULT_CURSOR_FX). */
+const defaultCursorFx = (): CursorFx => ({ highlight: { ...DEFAULT_CURSOR_FX.highlight }, cursor: { ...DEFAULT_CURSOR_FX.cursor } })
+
 /**
  * Assets de uma gravação (tela + webcam/microfone/sistema quando gravados), com id `<idPrefix>-<fonte>`.
  * `label` (opcional) prefixa os nomes ("Gravação 18/08 — Tela"); sem ele, só o nome da fonte.
+ * `hasCursor`: a pasta da gravação tem um cursor.json válido (quem chama verifica; aqui fica puro) → o asset da tela
+ * ganha `cursor`. Sem ele (ou false), a saída é a de antes da F6.
  */
-export function sessionAssets(session: Session, idPrefix: string, label?: string): Asset[] {
+export function sessionAssets(session: Session, idPrefix: string, label?: string, opts: { hasCursor?: boolean } = {}): Asset[] {
   const total = sessionTotalUs(session)
   const streams: SessionStream[] = ['screen']
   if (session.webcam && session.tracks.webcam !== undefined) streams.push('webcam')
   if (session.tracks.mic !== undefined) streams.push('mic')
   if (session.tracks.system !== undefined) streams.push('system')
-  return streams.map((s) => sessionAsset(session, idPrefix, s, label ? `${label} — ${STREAM_NAMES[s]}` : STREAM_NAMES[s], total))
+  return streams.map((s) => {
+    const a = sessionAsset(session, idPrefix, s, label ? `${label} — ${STREAM_NAMES[s]}` : STREAM_NAMES[s], total)
+    return s === 'screen' && opts.hasCursor ? { ...a, cursor: CURSOR_FILE } : a
+  })
 }
 
-/** annotationsAutoFadeMs: sumiço automático das anotações (settings.annotations.autoFadeSec·1000 da v1) ou null. */
-export function projectFromSession(session: Session, opts: { projectId: string; name: string; now: string; annotationsAutoFadeMs?: number | null }): Project {
+/**
+ * annotationsAutoFadeMs: sumiço automático das anotações (settings.annotations.autoFadeSec·1000 da v1) ou null.
+ * hasCursor: a gravação tem cursor.json válido (verificado por quem chama) → asset da tela com `cursor` e o clipe da
+ * tela com os efeitos de cursor no padrão (DEFAULT_CURSOR_FX, desligados). Sem ele, a saída é a de antes da F6.
+ */
+export function projectFromSession(session: Session, opts: { projectId: string; name: string; now: string; annotationsAutoFadeMs?: number | null; hasCursor?: boolean }): Project {
   const { projectId } = opts
   const total = sessionTotalUs(session)
   const linkId = `${projectId}-link`
-  const assets = sessionAssets(session, projectId)
+  const assets = sessionAssets(session, projectId, undefined, { hasCursor: opts.hasCursor })
   const hasWebcam = assets.some((a) => a.id === `${projectId}-webcam`)
   const hasMic = assets.some((a) => a.id === `${projectId}-mic`)
   const hasSystem = assets.some((a) => a.id === `${projectId}-system`)
@@ -156,7 +169,8 @@ export function projectFromSession(session: Session, opts: { projectId: string; 
     id: `${projectId}-t-${id}`, kind, name, muted: false, hidden: false, locked: false, volume: 1, ...(role ? { role } : {}), items
   })
 
-  const tracks: Track[] = [track('screen', 'video', STREAM_NAMES.screen, [mediaItem('screen', 'video', undefined, linkId)])]
+  const screenItem = mediaItem('screen', 'video', undefined, linkId)
+  const tracks: Track[] = [track('screen', 'video', STREAM_NAMES.screen, [opts.hasCursor ? { ...screenItem, cursorFx: defaultCursorFx() } : screenItem])]
   // Sem keyframes de PiP a v1 não desenha a webcam: não há onde posicioná-la, então não cria a faixa.
   if (hasWebcam && session.pip.length > 0) {
     tracks.push(track('webcam', 'video', STREAM_NAMES.webcam, [mediaItem('webcam', 'video', webcamVisual(session, session.pip, total))]))

@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { pipRectAt } from '../compositor/pipMath'
 import type { PipKeyframe, Session } from '../types'
 import { projectFromSession, sessionAssets, sessionRefs } from './fromSession'
-import type { Asset } from './project'
+import { CURSOR_FILE } from '../cursor'
+import { detachAudio, duplicateItems, splitAt } from './ops'
+import { DEFAULT_CURSOR_FX } from './project'
+import type { Asset, MediaItem } from './project'
 import { resolveFrame } from './resolve'
 import type { MediaLayer } from './resolve'
 import { validateProject } from './schema'
@@ -161,5 +164,52 @@ describe('sessionRefs', () => {
     const q = { ...p, originSessionId: 'origem', assets: [...p.assets, ...extra] }
     expect(sessionRefs(q).sort()).toEqual(['2026-08-18T14-32-05', 'origem', 'outra'])
     expect(sessionRefs({ ...q, originSessionId: undefined, assets: [], tracks: [] })).toEqual([])
+  })
+})
+
+describe('trilha do cursor (F6)', () => {
+  it('sem cursor.json: saída idêntica à de antes (sem campo novo)', () => {
+    for (const s of [base, full]) {
+      const a = projectFromSession(s, opts)
+      expect(projectFromSession(s, { ...opts, hasCursor: false })).toEqual(a)
+      expect(JSON.stringify(a)).not.toMatch(/cursor/)
+    }
+  })
+  it('com cursor.json: asset da tela com `cursor` e o clipe da tela com DEFAULT_CURSOR_FX (só ele)', () => {
+    const p = projectFromSession(full, { ...opts, hasCursor: true })
+    const without = projectFromSession(full, opts)
+    expect(p.assets.find((a) => a.id === 'p1-screen')!.cursor).toBe(CURSOR_FILE)
+    expect(p.assets.filter((a) => a.cursor)).toHaveLength(1)
+    const screenItem = p.tracks[0].items[0] as MediaItem
+    expect(screenItem.cursorFx).toEqual(DEFAULT_CURSOR_FX)
+    expect(screenItem.cursorFx).not.toBe(DEFAULT_CURSOR_FX) // cópia: o padrão nunca é compartilhado com o modelo
+    expect(p.tracks.slice(1).every((t) => t.items.every((i) => !('cursorFx' in i)))).toBe(true)
+    // o resto é igual
+    const strip = (q: typeof p): unknown => JSON.parse(JSON.stringify(q, (k, v) => (k === 'cursor' || k === 'cursorFx' ? undefined : v)))
+    expect(strip(p)).toEqual(strip(without))
+    expect(validateProject(p)).toEqual([])
+    expect(sessionAssets(full, 'r', undefined, { hasCursor: true })[0].cursor).toBe(CURSOR_FILE)
+    expect(sessionAssets(full, 'r')[0].cursor).toBeUndefined()
+  })
+  it('dividir, duplicar e separar o áudio: os pedaços de vídeo mantêm o cursorFx; o áudio separado não o leva', () => {
+    const p = projectFromSession(full, { ...opts, hasCursor: true })
+    const fx = { ...DEFAULT_CURSOR_FX, highlight: { ...DEFAULT_CURSOR_FX.highlight, enabled: true } }
+    const p1 = { ...p, tracks: p.tracks.map((t, i) => (i === 0 ? { ...t, items: [{ ...(t.items[0] as MediaItem), cursorFx: fx }] } : t)) }
+    const split = splitAt(p1, ['p1-screen-item'], 4_000_000)
+    const halves = split.tracks[0].items as MediaItem[]
+    expect(halves).toHaveLength(2)
+    expect(halves.every((h) => JSON.stringify(h.cursorFx) === JSON.stringify(fx))).toBe(true)
+    const dup = duplicateItems(p1, ['p1-screen-item'])
+    const copies = dup.itemIds.map((id) => dup.project.tracks.flatMap((t) => t.items).find((i) => i.id === id)!).filter((i) => i.type === 'media' && i.assetId === 'p1-screen') as MediaItem[]
+    expect(copies.length).toBe(1)
+    expect(copies[0].cursorFx).toEqual(fx)
+    const noMic = projectFromSession({ ...base, systemAudio: false } as Session, { ...opts, hasCursor: true })
+    // a tela da sessão base não tem áudio: monta um asset com áudio para poder separar
+    noMic.assets = noMic.assets.map((a) => (a.id === 'p1-screen' ? { ...a, audio: { channels: 2, sampleRate: 48000, codec: 'aac' } } : a))
+    const det = detachAudio(noMic, 'p1-screen-item')
+    const audioItems = det.tracks.filter((t) => t.kind === 'audio').flatMap((t) => t.items) as MediaItem[]
+    expect(audioItems).toHaveLength(1)
+    expect('cursorFx' in audioItems[0]).toBe(false)
+    expect((det.tracks[0].items[0] as MediaItem).cursorFx).toEqual(DEFAULT_CURSOR_FX)
   })
 })

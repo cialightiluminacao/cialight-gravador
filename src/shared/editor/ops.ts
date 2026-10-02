@@ -1127,7 +1127,7 @@ export function detachAudio(p: Project, itemId: string): Project {
   if (!it.audio.enabled || !asset?.audio) throw new EditError('invalid', 'O item não tem áudio para separar')
   assertUnlocked(f.track)
   const linkId = it.linkId ?? newId('l_')
-  const audioItem: MediaItem = { ...omit(it, 'visual', 'transitionIn'), id: newId('i_'), linkId, audio: { ...it.audio, enabled: true } }
+  const audioItem: MediaItem = { ...omit(it, 'visual', 'transitionIn', 'cursorFx'), id: newId('i_'), linkId, audio: { ...it.audio, enabled: true } }
   return edit(p, (d) => {
     const target = d.tracks.find((t) => t.kind === 'audio' && !t.locked && isFree(t, it.startUs, end(it)))
     const trackId = target ? target.id : createTrack(d, 'audio')

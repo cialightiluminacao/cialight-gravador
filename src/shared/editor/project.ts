@@ -34,6 +34,12 @@ export interface Asset {
    * impressão tira a chave e o editor reprocessa.
    */
   processedAudio?: Record<string, string>
+  /**
+   * Trilha do cursor (F6): nome do cursor.json DENTRO da pasta da gravação do asset (só assets de sessão da tela;
+   * o arquivo fica na sessão, ao lado do rec.mp4). Presente só se o arquivo existe e é válido (preenchido na
+   * ingestão e restaurado ao abrir o projeto). Lido por IPC (cursor.readTrack).
+   */
+  cursor?: string
   status: 'ready' | 'processing' | 'missing' | 'error'; error?: string
 }
 export const ANIM_PRESETS = ['fade', 'slideL', 'slideR', 'slideU', 'slideD', 'zoom', 'pop', 'rotate', 'bounce', 'blur'] as const
@@ -67,10 +73,33 @@ export type TransitionKind = 'crossfade' | 'dipBlack' | 'dipWhite' | 'slideL' | 
 export interface Transition { kind: TransitionKind; durationUs: Us }
 /** enabled: ausente = ativo; false = item desativado (não gera camada nem áudio). Só é gravado quando false. */
 export interface ItemBase { id: string; startUs: Us; durationUs: Us; name?: string; linkId?: string; enabled?: boolean }
+/**
+ * Efeitos de cursor do clipe da TELA de uma gravação com cursor.json (F6): destaque dos cliques (anel) e cursor
+ * ampliado/suavizado, desenhados pelo compositor. Campo opcional da mídia (não um tipo de item novo: a v1.3 recusa
+ * tipos desconhecidos e descarta campos desconhecidos — ruling R2). Tamanhos em px da FONTE gravada.
+ */
+export interface CursorFx {
+  highlight: { enabled: boolean; color: string; sizePx: number; durationMs: number }
+  cursor: { enabled: boolean; scale: number; smoothing: number }
+}
+/** Limites de CursorFx (schema e validateProject). */
+export const CURSOR_FX_LIMITS = {
+  sizePx: { min: 8, max: 120 },
+  durationMs: { min: 150, max: 1500 },
+  scale: { min: 1, max: 4 },
+  smoothing: { min: 0, max: 1 }
+} as const
+/** Padrão: tudo desligado (opt-in; o vídeo sai como antes até o usuário ligar). */
+export const DEFAULT_CURSOR_FX: CursorFx = {
+  highlight: { enabled: false, color: '#ffd400', sizePx: 28, durationMs: 450 },
+  cursor: { enabled: false, scale: 1.8, smoothing: 0.5 }
+}
 export interface MediaItem extends ItemBase {
   type: 'media'; assetId: string; inUs: Us; speed: number; reverse: boolean
   freeze?: { atUs: Us }
   audio: AudioProps; visual?: VisualProps; transitionIn?: Transition
+  /** Só no clipe da tela de uma gravação com trilha do cursor (asset.cursor). */
+  cursorFx?: CursorFx
 }
 export interface TextStyle { font: string; size: Anim<number>; weight: number; color: string; background?: string; stroke?: { width: number; color: string }; shadow?: boolean; align: 'left' | 'center' | 'right'; lineHeight: number }
 export interface TextItem extends ItemBase { type: 'text'; text: string; style: TextStyle; visual: VisualProps; transitionIn?: Transition }

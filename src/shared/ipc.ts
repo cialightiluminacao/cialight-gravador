@@ -17,6 +17,7 @@ import type {
 } from './types'
 
 import type { Asset, Project, Us } from './editor/project'
+import type { CursorTrackV1 } from './cursor'
 
 export type Unsubscribe = () => void
 
@@ -329,6 +330,11 @@ export interface IpcApi {
     resume(): void
     stop(sessionId: string): Promise<boolean>
     discard(sessionId: string): void
+    /**
+     * Editor: trilha validada do cursor.json da gravação (só dentro da pasta da sessão — o id é validado, nenhum
+     * caminho vem do renderer); null sem trilha ou inválida. Use pelo cache/hook useCursorTrack.
+     */
+    readCursorTrack(sessionId: string): Promise<CursorTrackV1 | null>
   }
   overlay: {
     setMode(payload: OverlayModePayload): Promise<void>
@@ -445,7 +451,7 @@ export const IPC = {
     command: 'recording:command',
     recover: 'recording:recover'
   },
-  cursor: { begin: 'cursor:begin', pause: 'cursor:pause', resume: 'cursor:resume', stop: 'cursor:stop', discard: 'cursor:discard' },
+  cursor: { begin: 'cursor:begin', pause: 'cursor:pause', resume: 'cursor:resume', stop: 'cursor:stop', discard: 'cursor:discard', readTrack: 'cursor:readTrack' },
   overlay: {
     setMode: 'overlay:setMode',
     mode: 'overlay:mode',
