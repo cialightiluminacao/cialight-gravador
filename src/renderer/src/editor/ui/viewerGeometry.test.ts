@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { attachEffects } from '@shared/editor/followTransform'
-import { addAsset, addEffect, insertItems, setAnimValue, setItemEnabled, toggleKeyframe, updateItem, updateTrack } from '@shared/editor/ops'
+import { EditError, addAsset, addEffect, insertItems, setAnimValue, setItemEnabled, toggleKeyframe, updateItem, updateTrack } from '@shared/editor/ops'
 import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/project'
-import { cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionBoxOf, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, type RegionBox } from './viewerGeometry'
+import { cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionBoxOf, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, writeRegionValues, type RegionBox } from './viewerGeometry'
 
 const asset = (id: string, w: number, h: number): Asset => ({ id, name: id, kind: 'video', source: { type: 'generated', file: `${id}.mp4` }, durationUs: 5_000_000, status: 'ready', video: { width: w, height: h, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: 1_000_000 } })
 
@@ -211,9 +211,17 @@ describe('viewerGeometry — regiões de efeito', () => {
     const q = writeRegion(p, a.itemId, 1_000_000, from, { x: from.x + 0.1 })
     expect(fx(q).region.x.value).toBeCloseTo(0.35, 9)
     expect(fx(q).region.w.value).toBeCloseTo(0.2, 9)
-    // âncora perdida (clipe desativado): não edita
+    // âncora perdida (clipe desativado): EditError (vira toast no editor), nunca um "não fez nada" silencioso
     const lost = setItemEnabled(p, [full], false)
-    expect(writeRegion(lost, a.itemId, 1_000_000, from, { x: 0.9 })).toBe(lost)
+    expect(() => writeRegion(lost, a.itemId, 1_000_000, from, { x: 0.9 })).toThrow(/Clipe da âncora indisponível/)
+    expect(() => writeRegionValues(lost, a.itemId, 1_000_000, { x: 0.5 })).toThrow(EditError)
+    // "Ajustar ao quadro inteiro" ancorado: a imagem inteira da fonte (no espaço do conteúdo); com o zoom 2× a região na
+    // tela passa a cobrir a camada inteira (2× o quadro, + a folga)
+    const whole = writeRegionValues(p, a.itemId, 1_000_000, { x: 0.5, y: 0.5, w: 1, h: 1, rotation: 0 })
+    expect(fx(whole).region).toMatchObject({ x: { value: 0.5 }, y: { value: 0.5 }, w: { value: 1 }, h: { value: 1 } })
+    const b = regionBoxOf(whole, fx(whole), 1_000_000)
+    expect(b).toMatchObject({ cx: 960, cy: 540 })
+    expect(b.w).toBeCloseTo(2 * 1920 + 2, 6)
   })
 
   it('keyframeAt: losango só com key de região a ±meio quadro', () => {

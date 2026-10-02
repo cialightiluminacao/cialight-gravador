@@ -3,7 +3,7 @@
 // regiões dos efeitos de privacidade (desenhar, mover, redimensionar, guias do quadro).
 import { evalAnim } from '@shared/editor/anim'
 import { screenToContent } from '@shared/editor/contentPose'
-import { findItem, setAnimValue } from '@shared/editor/ops'
+import { EditError, findItem, setAnimValue } from '@shared/editor/ops'
 import { attachedMedia, clipFrameAt, effectRegionAt, resolveFrame } from '@shared/editor/resolve'
 import type { EffectItem, Project, Us } from '@shared/editor/project'
 import { layerMatrix, type Rotation } from '../engine/compositor/matrix'
@@ -263,26 +263,10 @@ const REGION_KEYS = ['x', 'y', 'w', 'h', 'rotation'] as const
 export type RegionValues = Record<(typeof REGION_KEYS)[number], number>
 
 /**
- * Grava em tUs (absoluto) só as propriedades da região que mudaram em relação a `from` (valores do QUADRO): propriedade
- * animada ganha/atualiza o key no playhead; sem keys muda o valor fixo (setAnimValue). Efeito ancorado: a mudança é
- * levada ao espaço do conteúdo do clipe nesse instante (screenToContent de `from` e do novo, somando a diferença ao
- * valor guardado — a folga de 1 px da tela não se acumula); âncora perdida → não edita.
+ * Grava em tUs (absoluto) as propriedades da região que diferem de `base` (valores GUARDADOS — do conteúdo, no
+ * ancorado): propriedade animada ganha/atualiza o key no playhead; sem keys muda o valor fixo (setAnimValue).
  */
-export function writeRegion(p: Project, itemId: string, tUs: Us, from: RegionValues, next: Partial<RegionValues>): Project {
-  const fx = findItem(p, itemId)?.item
-  let base: RegionValues = from
-  let target: Partial<RegionValues> = next
-  if (fx?.type === 'effect' && fx.attach) {
-    const m = attachedMedia(p, fx)
-    const cf = m && clipFrameAt(p, m, tUs)
-    if (!cf) return p
-    const shape = fx.region.shape
-    const c0 = screenToContent(cf, from, shape)
-    const c1 = screenToContent(cf, { ...from, ...next }, shape)
-    const local = tUs - fx.startUs
-    base = Object.fromEntries(REGION_KEYS.map((k) => [k, evalAnim(fx.region[k], local)])) as RegionValues
-    target = Object.fromEntries(REGION_KEYS.map((k) => [k, base[k] + c1[k] - c0[k]]))
-  }
+function writeStored(p: Project, itemId: string, tUs: Us, base: RegionValues, target: Partial<RegionValues>): Project {
   let q = p
   for (const k of REGION_KEYS) {
     const v = target[k]
@@ -290,6 +274,50 @@ export function writeRegion(p: Project, itemId: string, tUs: Us, from: RegionVal
     q = setAnimValue(q, itemId, `region.${k}`, tUs, v)
   }
   return q
+}
+
+/** Valores guardados da região (o que está nas anims; no ancorado, espaço do conteúdo) no instante tUs (absoluto). */
+function storedAt(fx: EffectItem, tUs: Us): RegionValues {
+  const local = tUs - fx.startUs
+  return Object.fromEntries(REGION_KEYS.map((k) => [k, evalAnim(fx.region[k], local)])) as RegionValues
+}
+
+/** Âncora sem clipe (apagado/desativado): a região não se edita — o erro vira toast no editor (apply). */
+function assertAnchorAvailable(p: Project, fx: EffectItem): void {
+  if (fx.attach && !attachedMedia(p, fx)) throw new EditError('invalid', 'Clipe da âncora indisponível: desligue a âncora no inspetor para editar a região')
+}
+
+/**
+ * Grava os valores GUARDADOS da região (no ancorado: espaço do conteúdo — p.ex. a imagem inteira da fonte é
+ * { x: ½, y: ½, w: 1, h: 1, rotação 0 }) que mudaram em relação ao instante tUs. Âncora perdida → EditError.
+ */
+export function writeRegionValues(p: Project, itemId: string, tUs: Us, next: Partial<RegionValues>): Project {
+  const fx = findItem(p, itemId)?.item
+  if (fx?.type !== 'effect') return p
+  assertAnchorAvailable(p, fx)
+  return writeStored(p, itemId, tUs, storedAt(fx, tUs), next)
+}
+
+/**
+ * Grava em tUs (absoluto) só as propriedades da região que mudaram em relação a `from` (valores do QUADRO): propriedade
+ * animada ganha/atualiza o key no playhead; sem keys muda o valor fixo (setAnimValue). Efeito ancorado: a mudança é
+ * levada ao espaço do conteúdo do clipe nesse instante (screenToContent de `from` e do novo, somando a diferença ao
+ * valor guardado — a folga de 1 px da tela não se acumula). Âncora perdida, ou instante fora do clipe (onde a região é
+ * a caixa parada) → EditError (toast).
+ */
+export function writeRegion(p: Project, itemId: string, tUs: Us, from: RegionValues, next: Partial<RegionValues>): Project {
+  const fx = findItem(p, itemId)?.item
+  if (fx?.type !== 'effect') return p
+  if (!fx.attach) return writeStored(p, itemId, tUs, from, next)
+  assertAnchorAvailable(p, fx)
+  const m = attachedMedia(p, fx)!
+  const cf = tUs >= m.startUs && tUs < m.startUs + m.durationUs ? clipFrameAt(p, m, tUs) : null
+  if (!cf) throw new EditError('invalid', 'Neste instante o clipe da âncora não aparece: mova o playhead para dentro dele para editar a região')
+  const shape = fx.region.shape
+  const c0 = screenToContent(cf, from, shape)
+  const c1 = screenToContent(cf, { ...from, ...next }, shape)
+  const base = storedAt(fx, tUs)
+  return writeStored(p, itemId, tUs, base, Object.fromEntries(REGION_KEYS.map((k) => [k, base[k] + c1[k] - c0[k]])))
 }
 
 /** Há key de região (x, y, w, h ou rotação) a ±tolUs do instante local. */

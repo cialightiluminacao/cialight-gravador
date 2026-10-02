@@ -270,8 +270,9 @@ async function main() {
   {
     const r = await ev(`T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === '${v}' ? { ...i, enabled: false } : i)) })) }))
       await T.settle(); T.st().select(['${fx}']); await T.settle(); await T.wait(300); __fl.attachRow()?.scrollIntoView({ block: 'center' })
-      return { warnings: __fl.warnings(), text: __fl.attachRow()?.textContent }`)
-    check('clipe desativado: aviso attachLost e a chave diz "clipe apagado ou desativado"', r.warnings.some((w) => w.includes('estava ancorado')) && r.text.includes('apagado ou desativado'), r)
+      const inputs = [...__fl.attachRow().parentElement.querySelectorAll('input')]
+      return { warnings: __fl.warnings(), text: __fl.attachRow()?.textContent, note: document.querySelector('[data-anchor-unavailable]')?.textContent, inputs: inputs.length, disabled: inputs.every((i) => i.disabled) }`)
+    check('clipe desativado: aviso attachLost, chave "clipe apagado ou desativado", campos da região desativados e a nota "Clipe da âncora indisponível"', r.warnings.some((w) => w.includes('estava ancorado')) && r.text.includes('apagado ou desativado') && r.inputs >= 5 && r.disabled && !!r.note && r.note.startsWith('Clipe da âncora indisponível'), r)
     await shot('f4-follow-07-ancora-perdida.png')
     // desfaz: desativar, ancorar, zoom, efeito desenhado
     await ev(`await T.key('Escape'); for (let k = 0; k < 4; k++) await T.key('z', { ctrlKey: true }); await T.wait(200); return 1`)

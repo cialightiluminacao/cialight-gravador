@@ -6,7 +6,7 @@ import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
 import { attachedMedia, clipFrameAt, effectRegionAt, visualTrackBelow } from './resolve'
 
-export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget' | 'unlinkedOverEdited' | 'transformedUnderEffect' | 'unlinkedOverMoving' | 'attachLost'
+export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget' | 'unlinkedOverEdited' | 'transformedUnderEffect' | 'unlinkedOverMoving' | 'attachLost' | 'attachBeyondClip'
 /**
  * `tUs`: instante (absoluto, dentro do intervalo) que "Revisar" mostra — o mais fraco, o início da sobreposição…
  * `mediaItemId` (transformedUnderEffect, unlinkedOverMoving): o clipe que se move — o alvo de "Ajustar efeitos ao
@@ -34,7 +34,8 @@ const MSG = {
   unlinkedOverEdited: 'Efeito não vinculado sobre um trecho invertido — confira se ainda cobre o conteúdo',
   transformedUnderEffect: 'O clipe se move (zoom, pan ou animação) e a região deste efeito não acompanha: o conteúdo pode sair de baixo dela',
   unlinkedOverMoving: 'Clipe não vinculado que se move sob este efeito: a região não acompanha o conteúdo dele',
-  attachLost: 'O clipe ao qual este efeito estava ancorado foi apagado ou desativado: a região ficou parada onde estava'
+  attachLost: 'O clipe ao qual este efeito estava ancorado foi apagado ou desativado: a região ficou parada onde estava',
+  attachBeyondClip: 'O efeito vai além do clipe da âncora: fora dele a região fica parada numa caixa que cobre todo o movimento — confira o que fica por baixo'
 } as const
 
 /**
@@ -210,6 +211,11 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
       // âncora perdida: o clipe foi apagado ou desativado — a região ficou parada na caixa de reserva
       const own = it.attach ? attachedMedia(p, it) : null
       if (it.attach && !own) out.push({ itemId: it.id, kind: 'attachLost', message: MSG.attachLost, tUs: from })
+      // efeito ancorado que vai além do clipe: fora dele a região é a caixa parada que cobre o movimento todo
+      if (own) {
+        const beyond = from < own.startUs ? from : Math.max(from, itemEndUs(own))
+        if (beyond < Math.min(e, hi)) out.push({ itemId: it.id, kind: 'attachBeyondClip', message: MSG.attachBeyondClip, tUs: beyond })
+      }
       // clipes que se movem sob a região sem que ela os acompanhe (F4). O ancorado acompanha o próprio clipe por
       // construção; qualquer outro clipe que se move, cruza o efeito no tempo e encosta na região é conferido: do grupo
       // de vínculo do efeito (qualquer faixa) → transformedUnderEffect ("Ancorar ao clipe"); fora dele, nas faixas que o

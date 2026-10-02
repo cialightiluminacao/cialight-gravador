@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { toast } from 'sonner'
+import { refreshAttachments, withDeferredFallbacks } from '@shared/editor/attachment'
 import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
 import { withProcessedAudio } from '@shared/editor/audioProcess'
@@ -111,8 +112,10 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     const { history, txBase } = get()
     if (!history.present) return false
     let next: Project
+    // dentro de transação, as edições transitórias não recalculam as caixas de reserva das âncoras (o commit recalcula)
+    const deferred = !!opts?.transient && !!txBase
     try {
-      next = fn(history.present)
+      next = deferred ? withDeferredFallbacks(() => fn(history.present!)) : fn(history.present)
     } catch (e) {
       if (e instanceof EditError) {
         toast.error(e.message)
@@ -127,8 +130,8 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       set({ ...derive({ ...history, present: next }) })
       return true
     }
-    // commit real (se houver transação aberta, ela é encerrada com este estado)
-    const h = commit(txBase ? { ...history, present: txBase } : history, touch(next), HISTORY_LIMIT)
+    // commit real (se houver transação aberta, ela é encerrada com este estado; caixas das âncoras em dia)
+    const h = commit(txBase ? { ...history, present: txBase } : history, touch(txBase ? refreshAttachments(next, txBase) : next), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
     return true
   },
@@ -189,7 +192,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       set({ txBase: null })
       return
     }
-    const h = commit({ ...history, present: txBase }, touch(history.present), HISTORY_LIMIT)
+    const h = commit({ ...history, present: txBase }, touch(refreshAttachments(history.present, txBase)), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
   },
 

@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('sonner', () => ({ toast: { error: vi.fn() } }))
 
 import { toast } from 'sonner'
-import { createEmptyProject } from '@shared/editor/factory'
-import { EditError, addMarker } from '@shared/editor/ops'
-import type { Asset, Project } from '@shared/editor/project'
+import { createEffectItem, createEmptyProject, createMediaItem } from '@shared/editor/factory'
+import { attachEffects } from '@shared/editor/followTransform'
+import { EditError, addMarker, findItem, updateItem } from '@shared/editor/ops'
+import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/project'
 import { flushAutosave, startAutosave, useEditorStore } from './editorStore'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
@@ -62,6 +63,26 @@ describe('editorStore', () => {
     st().undo()
     expect(st().project).toBe(p0)
     expect(st().canUndo).toBe(false)
+  })
+
+  it('âncoras: edições transitórias não recalculam a caixa de reserva; o commit da transação recalcula', () => {
+    const vid = { id: 'v', name: 'v', kind: 'video', source: { type: 'file', path: 'C:/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 10_000_000, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: 1_000_000 }, status: 'ready' } as Asset
+    const p = base()
+    p.assets = [vid]
+    const m = { ...createMediaItem(vid, 0, 'video'), id: 'm', linkId: 'l' } as MediaItem
+    const fx = { ...createEffectItem('blur', 0, 10_000_000, { x: 0.3, y: 0.3, w: 0.1, h: 0.1 }), id: 'fx', linkId: 'l' } as EffectItem
+    p.tracks = [{ ...p.tracks[0], items: [m] }, { id: 'tf', kind: 'video', name: 'Efeitos', role: 'effects', muted: false, hidden: false, locked: false, volume: 1, items: [fx] }]
+    st().open(attachEffects(p, 'm', ['fx']))
+    const fb = (): unknown => (findItem(st().project!, 'fx')!.item as EffectItem).attach!.fallback
+    const f0 = fb()
+    st().begin()
+    for (const s of [1.5, 2, 3]) st().apply((q) => updateItem<MediaItem>(q, 'm', (d) => { d.visual!.transform.scale = { value: s } }), { transient: true })
+    expect(fb()).toBe(f0)
+    st().commitTx()
+    expect(fb()).not.toEqual(f0)
+    // a caixa do commit é a mesma de uma edição direta
+    const direct = updateItem<MediaItem>(attachEffects(p, 'm', ['fx']), 'm', (d) => { d.visual!.transform.scale = { value: 3 } })
+    expect(fb()).toEqual((findItem(direct, 'fx')!.item as EffectItem).attach!.fallback)
   })
 
   it('commitTx sem mudanças não cria entrada', () => {

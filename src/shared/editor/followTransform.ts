@@ -6,7 +6,7 @@
 // densa (quadros a ≥ 60 fps, keys do efeito e do clipe, bordas das animações) simplificada por Douglas–Peucker com
 // keys lineares — nenhuma amostra se afasta mais que FIT_TOL do quadro (FIT_TOL_DEG na rotação).
 import { insertKeyExact } from './anim'
-import { regionTouchesOver } from './attachment'
+import { anchoredUnion, regionTouchesOver } from './attachment'
 import { screenToContent, type ClipFrame, type RegionValues } from './contentPose'
 import { EditError, findItem, linkItems, updateItem } from './ops'
 import type { Anim, Ease, EffectItem, EffectRegion, Keyframe, MediaItem, Project, Us } from './project'
@@ -25,6 +25,7 @@ const CHANNELS: readonly Channel[] = ['x', 'y', 'w', 'h', 'rotation']
 function mustMedia(p: Project, mediaItemId: string): MediaItem {
   const f = findItem(p, mediaItemId)
   if (!f || f.item.type !== 'media' || f.track.kind !== 'video' || !f.item.visual) throw new EditError('invalid', 'Os efeitos só se ancoram a clipes de vídeo ou imagem')
+  if (f.item.enabled === false) throw new EditError('invalid', 'O clipe está desativado: ative-o para ancorar efeitos nele')
   return f.item
 }
 
@@ -97,10 +98,13 @@ export function attachEffects(p: Project, mediaItemId: string, effectIds: readon
     m = mustMedia(q, mediaItemId)
   }
   for (const id of todo) {
-    const region = toContentRegion(q, mustEffect(q, id), m)
+    const fx = mustEffect(q, id)
+    const region = toContentRegion(q, fx, m)
+    // a caixa de reserva já nasce com a âncora (edições transitórias adiam o recálculo; o resolve nunca fica sem ela)
+    const fallback = anchoredUnion(q, { ...fx, region, attach: { mediaItemId: m.id } }, m)
     q = updateItem<EffectItem>(q, id, (d) => {
       d.region = region
-      d.attach = { mediaItemId: m.id }
+      d.attach = { mediaItemId: m.id, ...(fallback ? { fallback } : {}) }
     })
   }
   return q
@@ -202,7 +206,7 @@ export function detachEffect(p: Project, effectId: string): Project {
 
 /**
  * Efeitos sobre o clipe (cruzam o tempo dele e a região encosta na camada em algum instante — regionTouchesOver) que
- * ainda não estão ancorados nele: `linked` = do grupo de vínculo do clipe; `unlinked` = sem mídia no grupo deles e que
+ * não estão ancorados (nem a ele nem a outro clipe): `linked` = do grupo de vínculo do clipe; `unlinked` = sem mídia no grupo deles e que
  * agem sobre o clipe (faixa acima dele; escopo `track`: com ele na faixa-alvo).
  */
 export function effectsOverClip(p: Project, mediaItemId: string): { linked: string[]; unlinked: string[] } {
@@ -212,7 +216,8 @@ export function effectsOverClip(p: Project, mediaItemId: string): { linked: stri
   const linked: string[] = [], unlinked: string[] = []
   p.tracks.forEach((t, ti) => {
     for (const fx of t.items) {
-      if (fx.type !== 'effect' || fx.attach?.mediaItemId === m.id) continue
+      // já ancorado (a este ou a outro clipe): a oferta nunca troca a âncora
+      if (fx.type !== 'effect' || fx.attach) continue
       const a = Math.max(m.startUs, fx.startUs), b = Math.min(itemEndUs(m), itemEndUs(fx))
       if (a >= b) continue
       const inGroup = !!m.linkId && fx.linkId === m.linkId
@@ -230,8 +235,8 @@ export function effectsOverClip(p: Project, mediaItemId: string): { linked: stri
 }
 
 /**
- * Clipe a que o inspetor do efeito oferece ancorar: o ancorado (mesmo perdido: null) ou, sem âncora, o clipe de vídeo
- * do grupo de vínculo que mais cruza o tempo do efeito.
+ * Clipe a que o inspetor do efeito oferece ancorar: o ancorado (perdido — apagado/desativado: null) ou, sem âncora, o
+ * clipe de vídeo ATIVO do grupo de vínculo que mais cruza o tempo do efeito.
  */
 export function attachCandidate(p: Project, effectId: string): MediaItem | null {
   const fx = mustEffect(p, effectId)
@@ -241,7 +246,7 @@ export function attachCandidate(p: Project, effectId: string): MediaItem | null 
   for (const t of p.tracks) {
     if (t.kind !== 'video') continue
     for (const m of t.items) {
-      if (m.type !== 'media' || !m.visual || m.linkId !== fx.linkId) continue
+      if (m.type !== 'media' || !m.visual || m.enabled === false || m.linkId !== fx.linkId) continue
       const o = Math.min(itemEndUs(m), itemEndUs(fx)) - Math.max(m.startUs, fx.startUs)
       if (o > bo) { best = m; bo = o }
     }

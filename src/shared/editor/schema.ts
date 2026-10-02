@@ -1,7 +1,9 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
 import { MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, Item, Project, VisualProps } from './project'
+import type { Anim, EffectItem, EffectRegion, Item, Project, VisualProps } from './project'
+import { anchoredUnion } from './attachment'
+import { attachedMedia } from './resolve'
 import { itemAnimEntries, type AnimPath } from './animPaths'
 
 const us = z.number().int()
@@ -94,18 +96,21 @@ const shapeItem = z.object({
   strokeWidth: z.number(),
   visual
 })
+const effectRegion = z.object({ shape: z.enum(['rect', 'ellipse']), x: anim, y: anim, w: anim, h: anim, rotation: anim })
 const effectItem = z.object({
   ...itemBase,
   type: z.literal('effect'),
   effect: z.enum(['blur', 'pixelate', 'solid']),
-  region: z.object({ shape: z.enum(['rect', 'ellipse']), x: anim, y: anim, w: anim, h: anim, rotation: anim }),
+  region: effectRegion,
   strength: anim,
   feather: z.number(),
   color: z.string(),
   invert: z.boolean(),
   scope: z.enum(['below', 'track']),
   targetTrackId: z.string().optional(),
-  attach: z.object({ mediaItemId: z.string(), fallback: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional() }).optional()
+  // no disco a região do ancorado (espaço do conteúdo) fica em attach.region e `region` é a caixa estática do quadro
+  // (toDiskProject); parseProject a devolve a `region`
+  attach: z.object({ mediaItemId: z.string(), fallback: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional(), region: effectRegion.optional() }).optional()
 })
 const annotationsItem = z.object({ ...itemBase, type: z.literal('annotations'), sessionId: z.string(), inUs: us, autoFadeMs: z.number().nonnegative().nullable().optional() })
 const item = z.discriminatedUnion('type', [mediaItem, textItem, shapeItem, effectItem, annotationsItem])
@@ -207,7 +212,48 @@ export function parseProject(json: unknown): Project {
     const msg = r.error.issues.map((i) => `${i.path.join('.') || '(raiz)'}: ${i.message}`).join('; ')
     throw new Error(`Projeto inválido: ${msg}`)
   }
-  return r.data
+  return fromDiskAnchors(r.data as Project)
+}
+
+/** Efeito ancorado lido do disco: a região do conteúdo (attach.region) volta a `region` (o modelo em memória). */
+function fromDiskAnchors(p: Project): Project {
+  const anchored = (it: Item): it is EffectItem & { attach: { region?: EffectRegion } } => it.type === 'effect' && !!(it.attach as { region?: EffectRegion } | undefined)?.region
+  if (!p.tracks.some((t) => t.items.some(anchored))) return p
+  return {
+    ...p,
+    tracks: p.tracks.map((t) => ({
+      ...t,
+      items: t.items.map((it) => {
+        if (!anchored(it)) return it
+        const { region, ...attach } = it.attach
+        return { ...it, region: region!, attach }
+      })
+    }))
+  }
+}
+
+/**
+ * Efeito ancorado no disco. Em memória, `region` está no espaço do conteúdo do clipe (resolve.effectRegionAt a leva ao
+ * quadro). A v1.3 instalada não conhece `attach` (o zod dela o descarta) e desenharia esses valores como se fossem do
+ * quadro — vazamento. Por isso o disco guarda em `region` uma caixa ESTÁTICA do quadro que cobre tudo o que o build
+ * novo desenha ao longo do efeito (a união da região ancorada enquanto o clipe dura, anchoredUnion, com a caixa de
+ * reserva usada fora dele; sem clipe nem caixa: o quadro inteiro; elipse ×√2; sem rotação) e a região do conteúdo em
+ * `attach.region`. parseProject desfaz a troca; a ida e volta pelo parse novo não perde nada.
+ */
+function diskAnchored(p: Project, fx: EffectItem): unknown {
+  const at = fx.attach!
+  const m = attachedMedia(p, fx)
+  const u = m ? anchoredUnion(p, fx, m) : null
+  const f = at.fallback
+  const box = u && f
+    ? ((x0, y0, x1, y1) => ({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 }))(Math.min(u.x - u.w / 2, f.x - f.w / 2), Math.min(u.y - u.h / 2, f.y - f.h / 2), Math.max(u.x + u.w / 2, f.x + f.w / 2), Math.max(u.y + u.h / 2, f.y + f.h / 2))
+    : (u ?? f ?? { x: 0.5, y: 0.5, w: 1, h: 1 })
+  const k = fx.region.shape === 'ellipse' ? Math.SQRT2 : 1
+  return {
+    ...fx,
+    region: { shape: fx.region.shape, x: { value: box.x }, y: { value: box.y }, w: { value: box.w * k }, h: { value: box.h * k }, rotation: { value: 0 } },
+    attach: { ...at, region: fx.region }
+  }
 }
 
 /** Anim sem keys → número (como a v1.3 gravava); com keys fica Anim. */
@@ -226,7 +272,7 @@ function diskVisual(v: VisualProps): unknown {
  * Forma gravada no disco (project.json e versões): as propriedades que viraram animáveis na F4 (corte, ajuste, raio,
  * tamanho do texto) voltam a número quando não têm keys. Assim a v1.3 instalada — que divide a pasta de projetos e
  * recusa (e trocaria por uma versão antiga) o que o schema dela não aceita — continua abrindo todo projeto que não usa
- * keys nessas propriedades. parseProject aceita as duas formas. Não muda o projeto recebido.
+ * keys nessas propriedades. parseProject aceita as duas formas. Efeito ancorado: diskAnchored. Não muda o projeto recebido.
  */
 export function toDiskProject(p: Project): unknown {
   const item = (it: Item): unknown => {
@@ -237,6 +283,8 @@ export function toDiskProject(p: Project): unknown {
         return { ...it, style: { ...it.style, size: compact(it.style.size) }, visual: diskVisual(it.visual) }
       case 'shape':
         return { ...it, visual: diskVisual(it.visual) }
+      case 'effect':
+        return it.attach ? diskAnchored(p, it) : it
       default:
         return it
     }

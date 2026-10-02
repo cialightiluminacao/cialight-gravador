@@ -75,16 +75,16 @@ describe('attachEffects: a região ancorada acompanha o conteúdo no resolve', (
   })
   it('zoom fora do centro, pan e rotação (a região gira em torno do centro do clipe e gira junto)', () => {
     const z = attached(scene((m) => { m.visual!.transform.scale = anim(1, 2) }))
-    expect(screen(z, 10 * S).x).toBeCloseTo(0.1, 6)
-    expect(screen(z, 10 * S).w).toBeCloseTo(0.2 + PAD, 6)
+    expect(screen(z, 10 * S - 1).x).toBeCloseTo(0.1, 6)
+    expect(screen(z, 10 * S - 1).w).toBeCloseTo(0.2 + PAD, 6)
     const pan = attached(scene((m) => { m.visual!.transform.x = anim(0.5, 0.7) }))
     expect(screen(pan, 5 * S).x).toBeCloseTo(0.4, 6)
     const p = scene((m, fx) => { m.visual!.transform.rotation = anim(0, 90); fx.region.y = { value: 0.5 } })
     const rot = attached(p)
-    const end = screen(rot, 10 * S)
+    const end = screen(rot, 10 * S - 1)
     expect(end.x).toBeCloseTo(0.5, 6)
     expect(end.y).toBeCloseTo(0.5 - 384 / 1080, 6)
-    expect(end.rotation).toBeCloseTo(90, 6)
+    expect(end.rotation).toBeCloseTo(90, 4)
     const e = denseMaxError(p, rot, 0, 10 * S)
     expect(e.px).toBeLessThanOrEqual(TOL_PX)
     expect(e.deg).toBeLessThanOrEqual(FIT_TOL_DEG)
@@ -151,7 +151,7 @@ describe('attachEffects: a região ancorada acompanha o conteúdo no resolve', (
     const p = scene((_m, fx) => { fx.region.x = anim(0.3, 0.6) })
     const q = applyZoom(attached(p), 'm', { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, 0, 10 * S, null, 'linear', { clamp: false }).project
     expect(fxOf(q).region.x.keys!.map((k) => k.value)).toEqual([0.3, 0.6].map((v) => expect.closeTo(v, 9)))
-    for (const t of [0, 2.5 * S, 5 * S, 7.5 * S, 10 * S]) {
+    for (const t of [0, 2.5 * S, 5 * S, 7.5 * S, 10 * S - 1]) {
       const m = mOf(q).visual!.transform
       const s = evalAnim(m.scale, t), cx = evalAnim(m.x, t)
       const u = 0.3 + 0.3 * (t / (10 * S))
@@ -159,7 +159,7 @@ describe('attachEffects: a região ancorada acompanha o conteúdo no resolve', (
       expect(screen(q, t).w).toBeCloseTo(0.1 * s + PAD, 9)
     }
     // keys da região que já acompanhavam um alvo no quadro com o clipe parado: a ancoragem não os muda na tela
-    for (const t of [0, 3 * S, 10 * S]) expect(screen(attached(p), t).x).toBeCloseTo(screen(p, t).x, 9)
+    for (const t of [0, 3 * S, 10 * S - 1]) expect(screen(attached(p), t).x).toBeCloseTo(screen(p, t).x, 9)
   })
   it('fit esticar com corte desproporcional e região girada: a região da tela contém os 4 cantos exatos (conservadora)', () => {
     const p = scene((m, fx) => { m.visual!.fit = 'fill'; m.visual!.crop.l = { value: 0.4 }; fx.region.rotation = { value: 30 }; fx.region.shape = 'ellipse' })

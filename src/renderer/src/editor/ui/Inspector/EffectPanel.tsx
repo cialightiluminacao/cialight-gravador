@@ -10,7 +10,7 @@ import { itemEndUs } from '@shared/editor/time'
 import { Segmented, Toggle } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
-import { writeRegion } from '../viewerGeometry'
+import { writeRegion, writeRegionValues } from '../viewerGeometry'
 import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs } from './common'
@@ -56,12 +56,15 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
   const enabled = item.enabled !== false
   // ancora no clipe que se move (followTransform); solto: entra no grupo do clipe antes
   const followMotion = (kind: PrivacyWarningKind, mediaItemId: string): void => {
-    const ok = apply((p) => (kind === 'unlinkedOverMoving' ? attachEffects(p, mediaItemId, [id]) : attachEffects(p, mediaItemId, [id])))
+    const ok = apply((p) => attachEffects(p, mediaItemId, [id]))
     if (ok) toast.success(kind === 'unlinkedOverMoving' ? 'Vinculado e ancorado ao clipe' : 'Efeito ancorado ao clipe')
   }
   // clipe da âncora (ou o que o efeito pode ancorar: o do grupo de vínculo); âncora perdida = clipe apagado/desativado
   const candidate = useMemo(() => attachCandidate(project, id), [project, id])
   const lost = !!item.attach && !candidate
+  // âncora perdida: os valores guardados são do conteúdo de um clipe que não existe mais — nada a editar na região
+  const regionLocked = locked || lost
+  const kfRegion = (path: AnimPath, label: string): React.JSX.Element => <KeyframeButton item={item} path={path} label={label} disabled={regionLocked} />
   const clipName = candidate ? (candidate.name ?? project.assets.find((a) => a.id === candidate.assetId)?.name ?? 'clipe') : ''
   const kf = (path: AnimPath, label: string): React.JSX.Element => <KeyframeButton item={item} path={path} label={label} disabled={locked} />
   // faixa bloqueada: nenhum controle edita
@@ -82,7 +85,7 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
                   type="button"
                   disabled={locked}
                   data-follow-motion={w.kind}
-                  className="mt-1.5 flex h-6 w-full items-center justify-center gap-1.5 rounded-md border border-warn/40 bg-warn/10 text-[10.5px] font-medium text-warn hover:bg-warn/20 disabled:opacity-40"
+                  className="mt-1.5 flex h-6 w-full items-center justify-center gap-1.5 rounded-md border border-warn/40 bg-warn/10 text-[10.5px] font-medium text-warn outline-none hover:bg-warn/20 focus-visible:ring-2 focus-visible:ring-warn focus-visible:ring-offset-1 focus-visible:ring-offset-surface-2 disabled:opacity-40"
                   onClick={() => followMotion(w.kind, w.mediaItemId!)}
                 >
                   <Move className="h-3 w-3" />
@@ -135,18 +138,21 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
               />
             </div>
             {item.attach && !lost ? <p className="text-[10.5px] leading-snug text-muted">Posição e tamanho relativos à imagem do clipe: zoom, pan, corte e rotação dele são acompanhados.</p> : null}
+            {lost ? <p className="text-[10.5px] leading-snug text-warn" data-anchor-unavailable="">Clipe da âncora indisponível: a região ficou parada na caixa que cobria o movimento. Desligue a âncora para editá-la.</p> : null}
           </div>
         ) : null}
-        <NumberField label="Posição X" value={values.x * 100} precision={1} step={0.1} unit="%" disabled={locked} onChange={(n) => setAnim('region.x', n / 100)} title="Centro da região (horizontal)" trailing={kf('region.x', 'Posição X')} />
-        <NumberField label="Posição Y" value={values.y * 100} precision={1} step={0.1} unit="%" disabled={locked} onChange={(n) => setAnim('region.y', n / 100)} title="Centro da região (vertical)" trailing={kf('region.y', 'Posição Y')} />
-        <NumberField label="Largura" value={values.w * 100} min={1} max={400} precision={1} step={0.1} unit="%" disabled={locked} onChange={(n) => setAnim('region.w', n / 100)} trailing={kf('region.w', 'Largura')} />
-        <NumberField label="Altura" value={values.h * 100} min={1} max={400} precision={1} step={0.1} unit="%" disabled={locked} onChange={(n) => setAnim('region.h', n / 100)} trailing={kf('region.h', 'Altura')} />
-        <NumberField label="Rotação" value={values.rotation} min={-360} max={360} precision={1} step={0.5} unit="°" disabled={locked} onChange={(n) => setAnim('region.rotation', n)} trailing={kf('region.rotation', 'Rotação')} />
+        <NumberField label="Posição X" value={values.x * 100} precision={1} step={0.1} unit="%" disabled={regionLocked} onChange={(n) => setAnim('region.x', n / 100)} title="Centro da região (horizontal)" trailing={kfRegion('region.x', 'Posição X')} />
+        <NumberField label="Posição Y" value={values.y * 100} precision={1} step={0.1} unit="%" disabled={regionLocked} onChange={(n) => setAnim('region.y', n / 100)} title="Centro da região (vertical)" trailing={kfRegion('region.y', 'Posição Y')} />
+        <NumberField label="Largura" value={values.w * 100} min={1} max={400} precision={1} step={0.1} unit="%" disabled={regionLocked} onChange={(n) => setAnim('region.w', n / 100)} trailing={kfRegion('region.w', 'Largura')} />
+        <NumberField label="Altura" value={values.h * 100} min={1} max={400} precision={1} step={0.1} unit="%" disabled={regionLocked} onChange={(n) => setAnim('region.h', n / 100)} trailing={kfRegion('region.h', 'Altura')} />
+        <NumberField label="Rotação" value={values.rotation} min={-360} max={360} precision={1} step={0.5} unit="°" disabled={regionLocked} onChange={(n) => setAnim('region.rotation', n)} trailing={kfRegion('region.rotation', 'Rotação')} />
         <button
           type="button"
-          disabled={locked}
+          disabled={regionLocked}
+          title={item.attach ? 'A região cobre a imagem inteira do clipe da âncora' : 'A região cobre o quadro inteiro'}
           className="mt-1 flex h-7 w-full items-center justify-center gap-1.5 rounded-md border border-border bg-bg-2 text-[11px] font-medium text-fg-2 hover:border-border-strong hover:text-fg disabled:opacity-40"
-          onClick={() => apply((p) => writeRegion(p, id, tUs, effectRegionAt(p, findItem(p, id)!.item as EffectItem, tUs), FULL_FRAME))}
+          // ancorado: a imagem inteira da fonte no espaço do conteúdo (centro ½, tamanho 1); senão, o quadro inteiro
+          onClick={() => apply((p) => (item.attach ? writeRegionValues(p, id, tUs, FULL_FRAME) : writeRegion(p, id, tUs, effectRegionAt(p, findItem(p, id)!.item as EffectItem, tUs), FULL_FRAME)))}
         >
           <Maximize className="h-3 w-3" /> Ajustar ao quadro inteiro
         </button>

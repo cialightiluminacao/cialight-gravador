@@ -1346,6 +1346,15 @@ export function freezeFrameAt(p: Project, itemId: string, atUs: Us, durationUs: 
     }
     makeRoom(d, at, D, f.track.id)
     mustTrack(d, f.track.id).items.push(piece)
+    // efeito ancorado que cruza o ponto: dividido nele — o pedaço do congelado ancora no pedaço congelado (mesmo grupo;
+    // maintainAttachments), com a região parada no valor do instante (a pose do congelado é a do clipe naquele instante)
+    const place = (t: Track, it: Item): void => {
+      if (it.type !== 'effect' || !it.attach || at - it.startUs < MIN_ITEM_US || end(it) - at < MIN_ITEM_US) {
+        t.items.push(it)
+        return
+      }
+      t.items.push(sliceItem(it, it.startUs, at, true), { ...sliceItem(it, at, end(it), true), id: newId('i_') })
+    }
     for (const h of held) {
       const it = h.item
       // grupo dividido pelo makeRoom (mídia dos dois lados): como no splitInPlace/relinkAcross, a parte da sobreposição
@@ -1354,11 +1363,12 @@ export function freezeFrameAt(p: Project, itemId: string, atUs: Us, durationUs: 
       const rightLink = mediaTrack ? mustTrack(d, mediaTrack).items.find((x) => x.startUs === at + D && x.type !== 'effect')?.linkId : undefined
       const cut = at + D
       if (!rightLink || rightLink === it.linkId || end(it) - cut < MIN_ITEM_US) {
-        h.track.items.push(it)
+        place(h.track, it)
         continue
       }
       // corte como o do splitInPlace: fades, animações e transição do lado do corte saem dos dois pedaços
-      h.track.items.push(sliceItem(it, it.startUs, cut, true), { ...sliceItem(it, cut, end(it), true), id: newId('i_'), linkId: rightLink })
+      place(h.track, sliceItem(it, it.startUs, cut, true))
+      h.track.items.push({ ...sliceItem(it, cut, end(it), true), id: newId('i_'), linkId: rightLink })
     }
     finalize(d)
   })
