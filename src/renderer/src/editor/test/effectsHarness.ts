@@ -2,6 +2,7 @@ import { createEffectItem, createMediaItem, type EffectPresetId, type EffectRegi
 import type { EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
+import { brightBox as brightBoxPx, laplacianVar, localContrast as localContrastPx, type PxBox } from '@shared/testing/pixels'
 import { effectPixelBlockPx, featherPx, pixelCellQ, regionDistPx, regionScissor } from '../engine/compositor/effectsMath'
 
 // Cenários de pixel do passe de efeitos (F2) para o teste de render (CIALIGHT_TEST=editor-render).
@@ -108,51 +109,11 @@ function fullBlocks(r: Region, cell: number): [number, number][][] {
   return out
 }
 
-interface Box { x0: number; y0: number; x1: number; y1: number }
+type Box = PxBox
 
-/** Caixa dos pixels claros (texto branco, luma > 128) entre as linhas y0 e y1. */
-function brightBox(d: Img, y0: number, y1: number): Box | null {
-  let b: Box | null = null
-  for (let y = y0; y < y1; y++) {
-    for (let x = 0; x < W; x++) {
-      if (luma(d, (y * W + x) * 4) <= 128) continue
-      b = b ? { x0: Math.min(b.x0, x), y0: Math.min(b.y0, y), x1: Math.max(b.x1, x), y1: Math.max(b.y1, y) } : { x0: x, y0: y, x1: x, y1: y }
-    }
-  }
-  return b
-}
-
-/** Contraste local da linha de texto (como o E2E F2): caixa 3×3 na luma e p99 − p1 dentro da caixa + 4 px. */
-function localContrast(d: Img, b: Box, pad = 4): number {
-  const vals: number[] = []
-  for (let y = Math.max(1, b.y0 - pad); y <= Math.min(H - 2, b.y1 + pad); y++) {
-    for (let x = Math.max(1, b.x0 - pad); x <= Math.min(W - 2, b.x1 + pad); x++) {
-      let s = 0
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += luma(d, ((y + dy) * W + x + dx) * 4)
-      vals.push(s / 9)
-    }
-  }
-  vals.sort((p, q) => p - q)
-  const at = (q: number): number => vals[Math.min(vals.length - 1, Math.floor(q * (vals.length - 1)))]
-  return at(0.99) - at(0.01)
-}
-
-/** Variância do laplaciano (4 vizinhos) da luma na caixa + 4 px (como o E2E F2). */
-function lapVar(d: Img, b: Box, pad = 4): number {
-  let n = 0
-  let s = 0
-  let s2 = 0
-  const L = (x: number, y: number): number => luma(d, (y * W + x) * 4)
-  for (let y = Math.max(1, b.y0 - pad); y <= Math.min(H - 2, b.y1 + pad); y++) {
-    for (let x = Math.max(1, b.x0 - pad); x <= Math.min(W - 2, b.x1 + pad); x++) {
-      const l = 4 * L(x, y) - L(x - 1, y) - L(x + 1, y) - L(x, y - 1) - L(x, y + 1)
-      n++
-      s += l
-      s2 += l * l
-    }
-  }
-  return s2 / n - (s / n) ** 2
-}
+const brightBox = (d: Img, y0: number, y1: number): Box | null => brightBoxPx(d, W, y0, y1)
+const localContrast = (d: Img, b: Box): number => localContrastPx(d, W, H, b)
+const lapVar = (d: Img, b: Box): number => laplacianVar(d, W, H, b)
 
 /** Nome da GPU (WebGL2 desta página: o worker usa o mesmo adaptador). */
 function rendererName(): string {

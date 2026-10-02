@@ -1,7 +1,9 @@
 import { useMemo } from 'react'
-import { Maximize, ShieldAlert } from 'lucide-react'
+import { Maximize, Move, ShieldAlert } from 'lucide-react'
+import { toast } from 'sonner'
+import { fitEffectsToMotion, linkAndFitEffect } from '@shared/editor/followTransform'
 import { convertEffects, scopeTargetTrack, setAnimValue, setEffectScope, setItemEnabled, type AnimPath } from '@shared/editor/ops'
-import { privacyWarnings } from '@shared/editor/privacy'
+import { privacyWarnings, type PrivacyWarningKind } from '@shared/editor/privacy'
 import type { EffectItem, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
 import { Segmented, Toggle } from '@/components/ui/primitives'
@@ -15,7 +17,8 @@ import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient
 // Inspetor do efeito de privacidade: tipo, forma, intensidade (ou cor da tarja), borda suave, inverter,
 // escopo e a região (posição, tamanho, rotação). Intensidade e região são animáveis (KeyframeButton);
 // editar grava como no visualizador (setAnimValue no playhead: com keys cria/atualiza o key, sem keys
-// muda o valor fixo). Avisos de privacidade do trecho do efeito aparecem no topo.
+// muda o valor fixo). Avisos de privacidade do trecho do efeito aparecem no topo; o de clipe que se move traz
+// "Ajustar efeito ao movimento" (vinculado) ou "Vincular e ajustar" (solto).
 
 const TYPE_OPTIONS: { value: EffectItem['effect']; label: string }[] = [
   { value: 'blur', label: 'Blur' },
@@ -49,6 +52,11 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
   const values = { x: animAt(r.x, local), y: animAt(r.y, local), w: animAt(r.w, local), h: animAt(r.h, local), rotation: animAt(r.rotation, local) }
   const warnings = useMemo(() => privacyWarnings(project, item.startUs, itemEndUs(item)).filter((w) => w.itemId === id), [project, item, id])
   const enabled = item.enabled !== false
+  // a região passa a acompanhar o clipe que se move (followTransform); solto: entra no grupo do clipe antes
+  const followMotion = (kind: PrivacyWarningKind, mediaItemId: string): void => {
+    const ok = apply((p) => (kind === 'unlinkedOverMoving' ? linkAndFitEffect(p, id, mediaItemId) : fitEffectsToMotion(p, mediaItemId, [id])))
+    if (ok) toast.success(kind === 'unlinkedOverMoving' ? 'Vinculado e ajustado ao movimento do clipe' : 'Efeito ajustado ao movimento do clipe')
+  }
   const kf = (path: AnimPath, label: string): React.JSX.Element => <KeyframeButton item={item} path={path} label={label} disabled={locked} />
   // faixa bloqueada: nenhum controle edita
   const lock = <T extends { value: string }>(opts: T[]): (T & { disabled?: boolean })[] => (locked ? opts.map((o) => ({ ...o, disabled: true })) : opts)
@@ -58,10 +66,24 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
       {warnings.length ? (
         <div className="space-y-1 border-b border-border px-3 py-2" data-privacy-warnings="">
           {warnings.map((w) => (
-            <p key={w.kind} className="flex items-start gap-1.5 rounded-md bg-warn/10 px-2 py-1.5 text-[10.5px] leading-snug text-warn">
-              <ShieldAlert className="mt-px h-3 w-3 shrink-0" />
-              {w.message}
-            </p>
+            <div key={w.kind} className="rounded-md bg-warn/10 px-2 py-1.5 text-[10.5px] leading-snug text-warn">
+              <p className="flex items-start gap-1.5">
+                <ShieldAlert className="mt-px h-3 w-3 shrink-0" />
+                {w.message}
+              </p>
+              {w.mediaItemId && (w.kind === 'transformedUnderEffect' || w.kind === 'unlinkedOverMoving') ? (
+                <button
+                  type="button"
+                  disabled={locked}
+                  data-follow-motion={w.kind}
+                  className="mt-1.5 flex h-6 w-full items-center justify-center gap-1.5 rounded-md border border-warn/40 bg-warn/10 text-[10.5px] font-medium text-warn hover:bg-warn/20 disabled:opacity-40"
+                  onClick={() => followMotion(w.kind, w.mediaItemId!)}
+                >
+                  <Move className="h-3 w-3" />
+                  {w.kind === 'transformedUnderEffect' ? 'Ajustar efeito ao movimento' : 'Vincular e ajustar'}
+                </button>
+              ) : null}
+            </div>
           ))}
         </div>
       ) : null}

@@ -5,7 +5,7 @@ import { join } from 'path'
 import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
-import { redBlob, type RedBlob } from '@shared/testing/pixels'
+import { laplacianVar, localContrast, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -48,6 +48,7 @@ interface HarnessReport {
   stretch?: StretchReport
   speed?: SpeedReport
   zoom?: ZoomReport
+  follow?: FollowReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -93,6 +94,9 @@ interface SpeedReport {
 interface Parity { maxDiff: number; meanDiff: number; neighborMeanDiff: number; markers: number[]; error?: string }
 interface ZoomScenario { before: RedBlob | null; after: RedBlob | null; mid: RedBlob | null; error?: string }
 interface ZoomReport { error?: string; full?: ZoomScenario; cropped?: ZoomScenario; exportPath?: string; exportError?: string }
+type Legib = { c: number; lap: number }
+interface FollowInstant { frame: number; tUs: number; box: PxBox; ref: Legib; preview: Legib; unadjusted: Legib; exported?: Legib }
+interface FollowReport { error?: string; instants?: FollowInstant[]; keys?: number; exportPath?: string; exportError?: string }
 
 interface StretchReport {
   error?: string
@@ -281,6 +285,23 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       result.report.zoom!.exportError = e instanceof Error ? e.message : String(e)
     }
   }
+  // "Ajustar efeitos ao movimento": legibilidade do texto nos mesmos quadros da exportação (contraste e laplaciano ÷
+  // os do quadro sem efeito que o harness mediu no preview, na mesma caixa)
+  const follow = result.report.follow
+  if (follow?.exportPath && follow.instants) {
+    try {
+      for (const ins of follow.instants) {
+        const raw = join(dir, `follow-${ins.frame}.rgb`)
+        // meio quadro antes: o ffmpeg entrega o 1º quadro com pts ≥ -ss, o próprio quadro `frame`
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', ((ins.frame - 0.5) / 30).toFixed(4), '-i', follow.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do ajuste ao movimento' })
+        const d = new Uint8Array(readFileSync(raw))
+        const r4 = (v: number): number => Math.round(v * 1e4) / 1e4
+        ins.exported = { c: r4(localContrast(d, 1920, 1080, ins.box, 4, 3) / ins.ref.c), lap: r4(laplacianVar(d, 1920, 1080, ins.box, 4, 3) / ins.ref.lap) }
+      }
+    } catch (e) {
+      follow.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
   win.destroy()
 
   const r = result.report
@@ -428,6 +449,16 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const pv = zr?.full?.after
   const ex = zoomExported
   check(!!ex && !!pv && Math.abs(ex.cx - 960) <= 2 && Math.abs(ex.cy - 540) <= 2 && Math.abs(ex.cx - pv.cx) <= 2 && Math.abs(ex.cy - pv.cy) <= 2 && Math.abs(Math.sqrt(ex.n / pv.n) - 1) <= 0.15, `zoom: exportação = preview — quadro final exportado: centro do alvo ${at(ex)}, ${ex?.w}×${ex?.h} px (preview ${at(pv)}, ${pv?.w}×${pv?.h}) ±2 px ${zr?.exportError ?? ''}`, failures)
+
+  const fl = r.follow
+  console.log(`ajuste ao movimento: ${JSON.stringify(fl)}`)
+  check(!!fl && !fl.error && (fl.instants?.length ?? 0) >= 5, `ajuste ao movimento: harness sem erro, ${fl?.instants?.length ?? 0} instantes (${fl?.error ?? ''})`, failures)
+  const fmt = (ls: Legib[]): string => ls.map((l) => `${l.c.toFixed(3)}/${l.lap.toFixed(3)}`).join(' ')
+  const ins = fl?.instants ?? []
+  const unreadable = (l: Legib | undefined): boolean => !!l && l.c < 0.15 && l.lap < 0.2
+  check(ins.length >= 5 && ins.every((i) => unreadable(i.preview)), `ajuste ao movimento (preview): blur vinculado + zoom 2× ajustado → texto ilegível em todos os ${ins.length} instantes (contraste/laplaciano ${fmt(ins.map((i) => i.preview))}; < 0,15 / < 0,2)`, failures)
+  check(ins.length >= 5 && ins.every((i) => unreadable(i.exported)), `ajuste ao movimento (exportação): texto ilegível em todos os ${ins.length} quadros exportados (${fmt(ins.map((i) => i.exported ?? { c: NaN, lap: NaN }))}) ${fl?.exportError ?? ''}`, failures)
+  check(ins.some((i) => i.unadjusted.c >= 0.15), `ajuste ao movimento (controle): sem o ajuste o texto fica legível em algum instante do zoom (contraste ${ins.map((i) => i.unadjusted.c.toFixed(3)).join(' ')})`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

@@ -10,6 +10,7 @@ import { effectsCheck } from './effectsHarness'
 import { stretchCheck } from './stretchHarness'
 import { speedCheck } from './speedHarness'
 import { zoomCheck } from './zoomHarness'
+import { followCheck } from './followHarness'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>?out=<pasta>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -88,6 +89,7 @@ export async function runRenderHarness(projectId: string, outDir: string | null 
     report.watchdog = await watchdogCheck(project)
     report.effects = await effectsCheck()
     report.zoom = await zoomCheck(outDir)
+    report.follow = await followCheck(outDir)
     // por último: decodificação 1080p contínua (a CPU desta máquina estrangula depois de alguns segundos de carga)
     report.speed = await speedCheck()
     ok = true
