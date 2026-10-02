@@ -20,6 +20,16 @@ import type { Asset, Project, Us } from './editor/project'
 
 export type Unsubscribe = () => void
 
+/**
+ * Saída "bytes → stdin do ffmpeg" da exportação do editor. O renderer descreve O QUE quer; o main valida e
+ * monta os argumentos do ffmpeg (o renderer nunca passa argumentos crus).
+ * gif: quadros RGBA width×height (linha a linha, de cima para baixo) a `fps`, em loop infinito.
+ * audio: PCM float 32 intercalado, estéreo 48 kHz; kbps só para mp3/m4a (padrão 192).
+ */
+export type PipeSpec =
+  | { kind: 'gif'; width: number; height: number; fps: number; loop: true }
+  | { kind: 'audio'; format: 'wav' | 'mp3' | 'm4a'; sampleRate: 48000; channels: 2; kbps?: number }
+
 export interface ProjectSummary {
   id: string
   name: string
@@ -293,6 +303,10 @@ export interface IpcApi {
    * com `estimateBytes`, exige estimativa × 2,1 livres), `write` grava bytes por posição, `close` fecha,
    * `finalize` fecha + remuxa com faststart no nome final (apaga o .part; com `maxBytes`, saída maior é
    * apagada e volta `oversize`) e `cancel` apaga o parcial (interrompendo o remux, se houver). Uma por vez.
+   * Formatos por pipe (GIF, só áudio): `openPipe` abre o ffmpeg lendo bytes crus (PipeSpec validado no main),
+   * `pipeWrite` resolve quando o ffmpeg aceitou os bytes (contrapressão: espere cada um), `pipeFinish` termina
+   * (GIF: paleta; progresso em onFinalizeProgress) e `cancel` mata o ffmpeg e apaga parcial e temporários.
+   * `writeStill` grava um PNG (atômico, nunca sobrescreve).
    */
   editorExport: {
     open(outputDir: string, fileName: string, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
@@ -300,8 +314,12 @@ export interface IpcApi {
     close(jobId: string): Promise<void>
     finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string }>
     cancel(jobId: string): Promise<void>
-    /** Progresso do remux (0–1) do job em finalização. */
+    /** Progresso do remux (0–1) do job em finalização (MP4: faststart; pipe: paleta do GIF). */
     onFinalizeProgress(cb: (p: { jobId: string; fraction: number }) => void): Unsubscribe
+    openPipe(outputDir: string, fileName: string, spec: PipeSpec, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
+    pipeWrite(jobId: string, data: Uint8Array): Promise<void>
+    pipeFinish(jobId: string): Promise<{ path: string; size: number; warning?: string }>
+    writeStill(outputDir: string, fileName: string, png: Uint8Array): Promise<{ path: string; size: number }>
   }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
@@ -417,7 +435,11 @@ export const IPC = {
     close: 'editorExport:close',
     finalize: 'editorExport:finalize',
     cancel: 'editorExport:cancel',
-    finalizeProgress: 'editorExport:finalizeProgress'
+    finalizeProgress: 'editorExport:finalizeProgress',
+    openPipe: 'editorExport:openPipe',
+    pipeWrite: 'editorExport:pipeWrite',
+    pipeFinish: 'editorExport:pipeFinish',
+    writeStill: 'editorExport:writeStill'
   },
   recording: {
     setPhase: 'recording:setPhase',

@@ -14,6 +14,10 @@ describe('padrões de .part', () => {
     expect(isExportPart('Meu vídeo.mp4')).toBe(false)
     expect(isExportPart('x.part-1-2.mp4')).toBe(false)
   })
+  it('exportação do editor em outros formatos (F7): GIF e seus temporários, PNG e áudio', () => {
+    for (const n of ['Clipe.gif.part', 'Clipe.gif.ffv1.part', 'Clipe.gif.palette.part', 'Projeto - 00m12s.png.part', 'Trilha.wav.part', 'Trilha.MP3.part', 'Trilha.m4a.part']) expect(isExportPart(n)).toBe(true)
+    for (const n of ['Clipe.gif', 'notas.txt.part', 'Clipe.part', 'Trilha.wav']) expect(isExportPart(n)).toBe(false)
+  })
 })
 
 describe('sweepStaleParts', () => {

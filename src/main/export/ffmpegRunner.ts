@@ -1,4 +1,4 @@
-import { spawn, execFile } from 'child_process'
+import { spawn, execFile, type ChildProcess } from 'child_process'
 import { ffmpegPath, ffprobePath } from './ffmpegPath'
 import { log } from '../log'
 
@@ -47,62 +47,79 @@ export function parseProgressLines(lines: string[]): FfmpegProgress | null {
   return { outTimeUs, frame, speed, fps }
 }
 
+/** Mata o ffmpeg e a árvore de filhos (alguns encoders abrem processos próprios). */
+export function killTree(child: Pick<ChildProcess, 'pid' | 'kill'>): void {
+  try {
+    execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {})
+  } catch {
+    child.kill()
+  }
+}
+
+/** Leitor do stdout com `-progress pipe:1`: blocos que terminam em "progress=continue|end". */
+export function progressReader(onProgress?: (p: FfmpegProgress) => void): (d: Buffer) => void {
+  let buf = ''
+  return (d) => {
+    buf += d.toString('utf8')
+    let idx: number
+    while ((idx = buf.indexOf('progress=')) >= 0) {
+      const end = buf.indexOf('\n', idx)
+      if (end < 0) break
+      const block = buf.slice(0, end)
+      buf = buf.slice(end + 1)
+      const p = parseProgressLines(block.split(/\r?\n/))
+      if (p && onProgress) onProgress(p)
+    }
+  }
+}
+
+/** Últimas 60 linhas não vazias do stderr. */
+export function stderrTail(): { push: (d: Buffer) => void; text: () => string } {
+  const lines: string[] = []
+  return {
+    push: (d) => {
+      for (const line of d.toString('utf8').split(/\r?\n/)) {
+        if (!line.trim()) continue
+        lines.push(line)
+        if (lines.length > 60) lines.shift()
+      }
+    },
+    text: () => lines.join('\n')
+  }
+}
+
 export function runFfmpeg(args: string[], opts: { onProgress?: (p: FfmpegProgress) => void; signal?: AbortSignal; cwd?: string; label?: string } = {}): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const bin = ffmpegPath()
     log.info(`ffmpeg${opts.label ? ` [${opts.label}]` : ''}: ${args.join(' ')}`)
     const child = spawn(bin, args, { cwd: opts.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     let cancelled = false
-    const stderrLines: string[] = []
-    let stdoutBuf = ''
+    const tail = stderrTail()
 
     const onAbort = (): void => {
       cancelled = true
-      try {
-        // mata a árvore (ffmpeg pode ter filhos em alguns encoders)
-        execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {})
-      } catch {
-        child.kill()
-      }
+      killTree(child)
     }
     if (opts.signal) {
       if (opts.signal.aborted) onAbort()
       else opts.signal.addEventListener('abort', onAbort, { once: true })
     }
 
-    child.stdout.on('data', (d: Buffer) => {
-      stdoutBuf += d.toString('utf8')
-      // blocos terminam com "progress=continue|end"
-      let idx: number
-      while ((idx = stdoutBuf.indexOf('progress=')) >= 0) {
-        const end = stdoutBuf.indexOf('\n', idx)
-        if (end < 0) break
-        const block = stdoutBuf.slice(0, end)
-        stdoutBuf = stdoutBuf.slice(end + 1)
-        const p = parseProgressLines(block.split(/\r?\n/))
-        if (p && opts.onProgress) opts.onProgress(p)
-      }
-    })
-    child.stderr.on('data', (d: Buffer) => {
-      for (const line of d.toString('utf8').split(/\r?\n/)) {
-        if (!line.trim()) continue
-        stderrLines.push(line)
-        if (stderrLines.length > 60) stderrLines.shift()
-      }
-    })
+    child.stdout.on('data', progressReader(opts.onProgress))
+    child.stderr.on('data', tail.push)
     child.on('error', (e) => {
       opts.signal?.removeEventListener('abort', onAbort)
       reject(new FfmpegError(`não foi possível iniciar o ffmpeg: ${e.message}`, '', -1))
     })
     child.on('close', (code) => {
       opts.signal?.removeEventListener('abort', onAbort)
-      const tail = stderrLines.join('\n')
+      const text = tail.text()
       if (cancelled) {
-        resolve({ code: code ?? -1, stderrTail: tail, cancelled: true })
+        resolve({ code: code ?? -1, stderrTail: text, cancelled: true })
         return
       }
-      if (code === 0) resolve({ code: 0, stderrTail: tail, cancelled: false })
-      else reject(new FfmpegError(`ffmpeg saiu com código ${code}`, tail, code ?? -1))
+      if (code === 0) resolve({ code: 0, stderrTail: text, cancelled: false })
+      else reject(new FfmpegError(`ffmpeg saiu com código ${code}`, text, code ?? -1))
     })
   })
 }

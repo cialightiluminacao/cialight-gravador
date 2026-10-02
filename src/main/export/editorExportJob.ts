@@ -1,7 +1,10 @@
 import { existsSync, mkdirSync, promises as fsp, renameSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import { numberedName, sanitizeFileName } from '@shared/filenames'
+import type { PipeSpec } from '@shared/ipc'
 import { runFfmpeg } from './ffmpegRunner'
+import { openFfmpegPipe, type FfmpegPipe } from './ffmpegPipe'
+import { audioPipeArgs, gifCapturePipeArgs, gifPaletteArgs, gifPaletteUseArgs, pipeExtension, validatePipeSpec } from './pipeSpec'
 import { log } from '../log'
 
 // Arquivo de saída da exportação do editor (main). O render worker gera o MP4 (mdat antes do moov) e o
@@ -9,10 +12,26 @@ import { log } from '../log'
 // remuxa com `ffmpeg -c copy -movflags +faststart` para o nome final e apaga o .part; se o remux falhar (não
 // cancelado), o .part — um MP4 válido, só sem faststart — vira o arquivo final com um aviso: o render não se
 // perde. `cancel` apaga o parcial — e, no meio do remux, interrompe o ffmpeg e apaga a saída deste job.
-// Nunca sobrescreve: nome ocupado ganha " (2)", " (3)"… Uma exportação por vez.
+// Nunca sobrescreve: nome ocupado ganha " (2)", " (3)"… Uma exportação por vez (MP4, pipe ou quadro).
+//
+// Saídas por pipe (`openPipe`: GIF e só áudio): o renderer manda bytes crus (quadros RGBA / PCM f32) que vão
+// para o stdin do ffmpeg (ffmpegPipe, com contrapressão); o main valida o pedido (PipeSpec) e monta os
+// argumentos. GIF: passada 1 → FFV1 temporário `<nome>.gif.ffv1.part`; `pipeFinish` gera a paleta
+// (`<nome>.gif.palette.part`) e aplica → `<nome>.gif.part` → nome final. Os temporários ficam ao lado do .part
+// (a limpeza de .part antigos os alcança) e são apagados sempre — fim, falha ou cancelamento.
+// `writeStill` (quadro PNG): `.part` e rename, atômico.
 
 /** Espaço livre exigido = estimativa × isto (o .part e a cópia do remux coexistem no fim). */
 export const FREE_SPACE_FACTOR = 2.1
+
+interface PipeState {
+  spec: PipeSpec
+  ff: FfmpegPipe
+  /** Bytes aceitos pelo ffmpeg (GIF: quadros × w·h·4). */
+  bytes: number
+  /** Temporários deste job (apagados no fim, na falha e no cancelamento). */
+  temps: string[]
+}
 
 interface Job {
   id: string
@@ -29,6 +48,8 @@ interface Job {
   remux: { abort: AbortController; done: Promise<void> } | null
   /** Saída criada por este job (só ela pode ser apagada num cancelamento/falha). */
   createdOut: string | null
+  /** Saída por pipe (GIF / só áudio). */
+  pipe?: PipeState
 }
 
 export interface EditorExportOpened {
@@ -49,7 +70,13 @@ export interface EditorExportFinalized {
 export interface EditorExportDeps {
   /** Bytes livres no volume de `dir`. */
   freeBytes?: (dir: string) => Promise<number>
+  /** ffmpeg alimentado pelo stdin (testes injetam um falso). */
+  openPipe?: (args: string[], opts: { label?: string }) => FfmpegPipe
 }
+
+/** Extensões de saída da exportação do editor (o formato decide). */
+export type EditorExportExt = 'mp4' | 'gif' | 'png' | 'wav' | 'mp3' | 'm4a'
+const MEDIA_EXT = /\.(mp4|mov|m4v|mkv|webm|gif|png|mp3|wav|m4a)$/i
 
 const isTaken = (dir: string) => (name: string): boolean => existsSync(join(dir, name)) || existsSync(join(dir, `${name}.part`))
 
@@ -69,21 +96,26 @@ async function defaultFreeBytes(dir: string): Promise<number> {
 
 const fmtMB = (b: number): string => `${Math.ceil(b / 1048576).toLocaleString('pt-BR')} MB`
 
-/** Nome final saneado e com extensão .mp4. */
-export function editorExportFileName(fileName: string): string {
+/** Nome final saneado e com a extensão do formato (uma extensão de mídia diferente digitada é trocada). */
+export function editorExportFileName(fileName: string, ext: EditorExportExt = 'mp4'): string {
+  const hasExt = (n: string): boolean => n.toLowerCase().endsWith(`.${ext}`) && n.length > ext.length + 1
   let name = sanitizeFileName(fileName.trim())
+  if (hasExt(name)) return name
+  name = name.replace(MEDIA_EXT, '').trim()
+  if (hasExt(name)) return name
   if (!name) name = 'Vídeo'
-  if (!/\.mp4$/i.test(name)) name = sanitizeFileName(`${name}.mp4`)
-  return name
+  return sanitizeFileName(`${name}.${ext}`)
 }
 
 export class EditorExportJobs {
   private readonly jobs = new Map<string, Job>()
   private seq = 0
   private readonly freeBytes: (dir: string) => Promise<number>
+  private readonly openFfmpegPipe: (args: string[], opts: { label?: string }) => FfmpegPipe
 
   constructor(deps: EditorExportDeps = {}) {
     this.freeBytes = deps.freeBytes ?? defaultFreeBytes
+    this.openFfmpegPipe = deps.openPipe ?? ((args, opts) => openFfmpegPipe(args, opts))
   }
 
   get busy(): boolean {
@@ -95,15 +127,7 @@ export class EditorExportJobs {
    * estimateBytes: tamanho estimado; exige estimate × FREE_SPACE_FACTOR livres na pasta.
    */
   async open(outputDir: string, fileName: string, owner = 0, estimateBytes = 0): Promise<EditorExportOpened> {
-    if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
-    if (!outputDir) throw new Error('Pasta de destino não definida')
-    mkdirSync(outputDir, { recursive: true })
-    if (estimateBytes > 0) {
-      const need = estimateBytes * FREE_SPACE_FACTOR
-      const free = await this.freeBytes(outputDir)
-      if (free < need) throw new Error(`Espaço insuficiente na pasta de destino: são necessários cerca de ${fmtMB(need)} livres (há ${fmtMB(free)}). Libere espaço ou escolha outra pasta.`)
-    }
-    if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
+    await this.precheck(outputDir, estimateBytes)
     const requested = editorExportFileName(fileName)
     const name = numberedName(requested, isTaken(outputDir))
     const part = join(outputDir, `${name}.part`)
@@ -195,6 +219,128 @@ export class EditorExportJobs {
     }
   }
 
+  /** Pasta definida, nenhuma exportação em andamento e espaço livre (estimativa × FREE_SPACE_FACTOR). */
+  private async precheck(outputDir: string, estimateBytes: number): Promise<void> {
+    if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
+    if (!outputDir) throw new Error('Pasta de destino não definida')
+    mkdirSync(outputDir, { recursive: true })
+    if (estimateBytes > 0) {
+      const need = estimateBytes * FREE_SPACE_FACTOR
+      const free = await this.freeBytes(outputDir)
+      if (free < need) throw new Error(`Espaço insuficiente na pasta de destino: são necessários cerca de ${fmtMB(need)} livres (há ${fmtMB(free)}). Libere espaço ou escolha outra pasta.`)
+    }
+    if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
+  }
+
+  /** Nome livre no fim (ocupado enquanto exportava: o próximo número, sem contar o próprio .part). */
+  private finalName(job: Job): string {
+    return numberedName(job.requested, (n) => existsSync(join(job.dir, n)) || (n !== job.name && existsSync(join(job.dir, `${n}.part`))))
+  }
+
+  /**
+   * Saída por pipe (GIF / só áudio): valida o pedido, reserva o nome e abre o ffmpeg lendo o stdin.
+   * estimateBytes: espaço que a exportação ocupa (GIF: inclui o temporário sem perdas).
+   */
+  async openPipe(outputDir: string, fileName: string, rawSpec: unknown, owner = 0, estimateBytes = 0): Promise<EditorExportOpened> {
+    const spec = validatePipeSpec(rawSpec)
+    await this.precheck(outputDir, estimateBytes)
+    const requested = editorExportFileName(fileName, pipeExtension(spec))
+    const name = numberedName(requested, isTaken(outputDir))
+    const part = join(outputDir, `${name}.part`)
+    const id = `edx-${Date.now()}-${++this.seq}`
+    const temps = spec.kind === 'gif' ? [join(outputDir, `${name}.ffv1.part`), join(outputDir, `${name}.palette.part`)] : []
+    const args = spec.kind === 'gif' ? gifCapturePipeArgs(spec, temps[0]) : audioPipeArgs(spec, part)
+    const ff = this.openFfmpegPipe(args, { label: spec.kind === 'gif' ? 'editor: GIF (quadros)' : `editor: áudio ${spec.format}` })
+    this.jobs.set(id, { id, owner, dir: outputDir, requested, name, part, fh: null, writes: new Set(), remux: null, createdOut: null, pipe: { spec, ff, bytes: 0, temps } })
+    log.info(`exportação do editor ${id} (${spec.kind}): ${part}`)
+    return { jobId: id, path: join(outputDir, name) }
+  }
+
+  /** Bytes para o stdin do ffmpeg; resolve quando ele os aceitou (contrapressão). */
+  async pipeWrite(jobId: string, data: Uint8Array): Promise<void> {
+    const job = this.must(jobId)
+    const pipe = job.pipe
+    if (!pipe) throw new Error('exportação sem pipe')
+    if (job.remux) throw new Error('finalização já em andamento')
+    const p = pipe.ff.write(data)
+    job.writes.add(p)
+    try {
+      await p
+      pipe.bytes += data.byteLength
+    } finally {
+      job.writes.delete(p)
+    }
+  }
+
+  /**
+   * Fecha o stdin e espera o ffmpeg; GIF: paleta + paletteuse (onProgress 0–1 pela duração). Renomeia o .part
+   * para o nome final. Temporários apagados sempre; falha/cancelamento apaga o .part.
+   */
+  async pipeFinish(jobId: string, opts: { onProgress?: (fraction: number) => void } = {}): Promise<EditorExportFinalized> {
+    const job = this.must(jobId)
+    const pipe = job.pipe
+    if (!pipe) throw new Error('exportação sem pipe')
+    if (job.remux) throw new Error('finalização já em andamento')
+    const abort = new AbortController()
+    let release: () => void = () => {}
+    job.remux = { abort, done: new Promise<void>((r) => (release = r)) }
+    abort.signal.addEventListener('abort', () => void pipe.ff.abort())
+    let ok = false
+    try {
+      await Promise.allSettled([...job.writes])
+      const r = await pipe.ff.end()
+      if (r.cancelled || abort.signal.aborted) throw new Error('cancelado')
+      if (pipe.spec.kind === 'gif') {
+        const { width, height, fps } = pipe.spec
+        const frames = Math.floor(pipe.bytes / (width * height * 4))
+        const durationUs = (frames / fps) * 1e6
+        const [lossless, palette] = pipe.temps
+        // paleta: lê o arquivo todo (até 20 %); paletteuse: o resto
+        const span = (from: number, to: number) => (p: { outTimeUs: number }): void => {
+          if (durationUs > 0) opts.onProgress?.(from + (to - from) * Math.min(1, Math.max(0, p.outTimeUs / durationUs)))
+        }
+        const p1 = await runFfmpeg(gifPaletteArgs(lossless, palette), { label: 'editor: GIF (paleta)', signal: abort.signal, onProgress: span(0, 0.2) })
+        if (p1.cancelled || abort.signal.aborted) throw new Error('cancelado')
+        const p2 = await runFfmpeg(gifPaletteUseArgs(lossless, palette, job.part), { label: 'editor: GIF', signal: abort.signal, onProgress: span(0.2, 1) })
+        if (p2.cancelled || abort.signal.aborted) throw new Error('cancelado')
+      }
+      const out = join(job.dir, this.finalName(job))
+      renameSync(job.part, out)
+      const size = statSync(out).size
+      opts.onProgress?.(1)
+      ok = true
+      return { path: out, size }
+    } finally {
+      for (const t of pipe.temps) safeRm(t)
+      if (!ok) safeRm(job.part)
+      this.jobs.delete(jobId)
+      job.remux = null
+      release()
+    }
+  }
+
+  /** Quadro PNG: grava `<nome>.png.part` e renomeia para um nome livre (nunca sobrescreve). */
+  async writeStill(outputDir: string, fileName: string, png: Uint8Array): Promise<{ path: string; size: number }> {
+    await this.precheck(outputDir, png.byteLength)
+    const requested = editorExportFileName(fileName, 'png')
+    const name = numberedName(requested, isTaken(outputDir))
+    const part = join(outputDir, `${name}.part`)
+    const id = `edx-${Date.now()}-${++this.seq}`
+    const job: Job = { id, owner: 0, dir: outputDir, requested, name, part, fh: null, writes: new Set(), remux: null, createdOut: null }
+    this.jobs.set(id, job)
+    try {
+      await fsp.writeFile(part, png)
+      const out = join(outputDir, this.finalName(job))
+      renameSync(part, out)
+      return { path: out, size: statSync(out).size }
+    } catch (e) {
+      safeRm(part)
+      throw e
+    } finally {
+      this.jobs.delete(id)
+    }
+  }
+
   /** Renomeia o .part para um nome livre (nunca sobrescreve); null se não deu. */
   private keepPart(job: Job, maxBytes: number | undefined): EditorExportFinalized | null {
     try {
@@ -221,6 +367,10 @@ export class EditorExportJobs {
       const { abort, done } = job.remux
       abort.abort()
       await done
+    }
+    if (job.pipe) {
+      await job.pipe.ff.abort()
+      for (const t of job.pipe.temps) safeRm(t)
     }
     await this.closeHandle(job)
     safeRm(job.part)

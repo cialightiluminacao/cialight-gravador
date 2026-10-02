@@ -416,10 +416,9 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   const editorExports = new EditorExportJobs()
   setExportBusyCheck(() => editorExports.busy)
   const exportOwners = new Set<number>()
-  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string, opts?: { estimateBytes?: number }) => {
-    const wc = e.sender
+  /** Os jobs são da janela que os abriu: fechada, caída ou recarregada → cancelados (nada de parcial órfão). */
+  const ownExport = (wc: Electron.WebContents): void => {
     if (!exportOwners.has(wc.id)) {
-      // janela fechada, renderer caído ou recarregado: o parcial não fica órfão
       exportOwners.add(wc.id)
       const drop = (): void => void editorExports.cancelOwnedBy(wc.id)
       wc.once('destroyed', () => {
@@ -429,8 +428,25 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       wc.on('render-process-gone', drop)
       wc.on('did-navigate', drop)
     }
-    return editorExports.open(outputDir, fileName, wc.id, Math.max(0, Number(opts?.estimateBytes) || 0))
+  }
+  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string, opts?: { estimateBytes?: number }) => {
+    ownExport(e.sender)
+    return editorExports.open(outputDir, fileName, e.sender.id, Math.max(0, Number(opts?.estimateBytes) || 0))
   })
+  ipcMain.handle(IPC.editorExport.openPipe, (e, outputDir: string, fileName: string, spec: unknown, opts?: { estimateBytes?: number }) => {
+    ownExport(e.sender)
+    return editorExports.openPipe(outputDir, fileName, spec, e.sender.id, Math.max(0, Number(opts?.estimateBytes) || 0))
+  })
+  ipcMain.handle(IPC.editorExport.pipeWrite, (_e, jobId: string, data: Uint8Array) => editorExports.pipeWrite(jobId, data))
+  ipcMain.handle(IPC.editorExport.pipeFinish, (e, jobId: string) => {
+    const wc = e.sender
+    return editorExports.pipeFinish(jobId, {
+      onProgress: (fraction) => {
+        if (!wc.isDestroyed()) wc.send(IPC.editorExport.finalizeProgress, { jobId, fraction })
+      }
+    })
+  })
+  ipcMain.handle(IPC.editorExport.writeStill, (_e, outputDir: string, fileName: string, png: Uint8Array) => editorExports.writeStill(outputDir, fileName, png))
   ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => editorExports.write(jobId, data, position))
   ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))
   ipcMain.handle(IPC.editorExport.finalize, (e, jobId: string, opts?: { durationUs?: number; maxBytes?: number }) => {

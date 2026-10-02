@@ -152,3 +152,182 @@ describe('editorExportFileName', () => {
     expect(editorExportFileName('   ')).toBe('Vídeo.mp4')
   })
 })
+
+describe('editorExportFileName com formato', () => {
+  it('o formato decide a extensão; extensão de mídia errada digitada é trocada', () => {
+    expect(editorExportFileName('Clipe', 'gif')).toBe('Clipe.gif')
+    expect(editorExportFileName('Clipe.mp4', 'gif')).toBe('Clipe.gif')
+    expect(editorExportFileName('Clipe.GIF', 'gif')).toBe('Clipe.GIF')
+    expect(editorExportFileName('Trilha.wav', 'mp3')).toBe('Trilha.mp3')
+    expect(editorExportFileName('Trilha.m4a', 'wav')).toBe('Trilha.wav')
+    expect(editorExportFileName('Quadro.png.mp4', 'png')).toBe('Quadro.png')
+    expect(editorExportFileName('v1.2 final', 'm4a')).toBe('v1.2 final.m4a')
+    expect(editorExportFileName('Vídeo.mov', 'mp4')).toBe('Vídeo.mp4')
+    expect(editorExportFileName('', 'png')).toBe('Vídeo.png')
+  })
+})
+
+/** ffmpeg por pipe falso: guarda os bytes e, no end, grava-os no arquivo de saída (último argumento). */
+function fakePipe(args: string[]) {
+  const chunks: number[] = []
+  let aborted = false
+  return {
+    args,
+    write: vi.fn(async (c: Uint8Array) => {
+      if (aborted) throw new Error('cancelado')
+      chunks.push(...c)
+    }),
+    end: vi.fn(async () => {
+      writeFileSync(args[args.length - 1], Buffer.from(chunks))
+      return { code: 0, stderrTail: '', cancelled: aborted }
+    }),
+    abort: vi.fn(async () => {
+      aborted = true
+    })
+  }
+}
+
+describe('EditorExportJobs — saídas por pipe (GIF / só áudio)', () => {
+  const gifSpec = { kind: 'gif', width: 4, height: 2, fps: 12, loop: true } as const
+  const wavSpec = { kind: 'audio', format: 'wav', sampleRate: 48000, channels: 2 } as const
+  let pipes: ReturnType<typeof fakePipe>[]
+  const deps = () => ({
+    ...plenty,
+    openPipe: (args: string[]) => {
+      const p = fakePipe(args)
+      pipes.push(p)
+      return p
+    }
+  })
+  beforeEach(() => {
+    pipes = []
+  })
+
+  it('só áudio: grava pelo pipe em <nome>.wav.part e finaliza no nome final, sem sobras', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId, path } = await jobs.openPipe(dir, 'Trilha.mp4', wavSpec)
+    expect(path).toBe(join(dir, 'Trilha.wav'))
+    expect(pipes[0].args[pipes[0].args.length - 1]).toBe(join(dir, 'Trilha.wav.part'))
+    expect(pipes[0].args).toEqual(expect.arrayContaining(['-c:a', 'pcm_s16le']))
+    expect(jobs.busy).toBe(true)
+    await jobs.pipeWrite(jobId, new Uint8Array([1, 2]))
+    await jobs.pipeWrite(jobId, new Uint8Array([3]))
+    const r = await jobs.pipeFinish(jobId)
+    expect(r).toEqual({ path, size: 3 })
+    expect(readdirSync(dir)).toEqual(['Trilha.wav'])
+    expect(jobs.busy).toBe(false)
+  })
+
+  it('GIF: passada 1 no FFV1 temporário, paleta e paletteuse (com progresso) → .gif; temporários apagados', async () => {
+    const calls: string[][] = []
+    runFfmpeg.mockImplementation(async (args: string[], opts: Opts) => {
+      calls.push(args)
+      opts.onProgress?.({ outTimeUs: 1_000_000 / 12 })
+      writeFileSync(args[args.length - 1], args.includes('gif') ? 'GIF89a' : 'paleta')
+      return { code: 0, stderrTail: '', cancelled: false }
+    })
+    try {
+      const jobs = new EditorExportJobs(deps())
+      const { jobId, path } = await jobs.openPipe(dir, 'Clipe', gifSpec, 0)
+      expect(path).toBe(join(dir, 'Clipe.gif'))
+      const lossless = join(dir, 'Clipe.gif.ffv1.part')
+      expect(pipes[0].args[pipes[0].args.length - 1]).toBe(lossless)
+      // 2 quadros de 4×2 RGBA
+      await jobs.pipeWrite(jobId, new Uint8Array(32))
+      await jobs.pipeWrite(jobId, new Uint8Array(32))
+      const fractions: number[] = []
+      const r = await jobs.pipeFinish(jobId, { onProgress: (f) => fractions.push(f) })
+      expect(r).toEqual({ path, size: 6 })
+      expect(calls.map((a) => a.includes('palettegen=stats_mode=diff'))).toEqual([true, false])
+      expect(calls[1]).toEqual(expect.arrayContaining(['-i', lossless, '-i', join(dir, 'Clipe.gif.palette.part'), '-loop', '0']))
+      expect(calls[1][calls[1].length - 1]).toBe(join(dir, 'Clipe.gif.part'))
+      // 2 quadros a 12 fps: progresso relativo à duração, crescente e no fim 1
+      expect(fractions.length).toBeGreaterThan(1)
+      expect(fractions[fractions.length - 1]).toBe(1)
+      expect([...fractions].sort((a, b) => a - b)).toEqual(fractions)
+      expect(readdirSync(dir)).toEqual(['Clipe.gif'])
+    } finally {
+      runFfmpeg.mockImplementation(async (args: string[]) => {
+        copyFileSync(args[args.indexOf('-i') + 1], args[args.length - 1])
+        return { code: 0, stderrTail: '', cancelled: false }
+      })
+    }
+  })
+
+  it('uma exportação por vez (vale entre MP4, pipe e quadro); cancelar mata o ffmpeg e apaga parcial e temporários', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId } = await jobs.openPipe(dir, 'g', gifSpec)
+    await expect(jobs.open(dir, 'x')).rejects.toThrow(/em andamento/)
+    await expect(jobs.openPipe(dir, 'y', wavSpec)).rejects.toThrow(/em andamento/)
+    await expect(jobs.writeStill(dir, 'q', new Uint8Array([1]))).rejects.toThrow(/em andamento/)
+    await jobs.pipeWrite(jobId, new Uint8Array(32))
+    writeFileSync(join(dir, 'g.gif.ffv1.part'), 'temporário')
+    await jobs.cancel(jobId)
+    expect(pipes[0].abort).toHaveBeenCalled()
+    expect(readdirSync(dir)).toEqual([])
+    expect(jobs.busy).toBe(false)
+    await expect(jobs.pipeWrite(jobId, new Uint8Array(1))).rejects.toThrow()
+  })
+
+  it('cancelar durante a paleta: interrompe o ffmpeg e não sobra nada', async () => {
+    let started: () => void = () => {}
+    const paletteStarted = new Promise<void>((r) => (started = r))
+    runFfmpeg.mockImplementationOnce(async (args: string[], opts: Opts) => {
+      writeFileSync(args[args.length - 1], 'meia paleta')
+      started()
+      await new Promise<void>((r) => opts.signal!.addEventListener('abort', () => setTimeout(r, 20)))
+      return { code: 1, stderrTail: '', cancelled: true }
+    })
+    const jobs = new EditorExportJobs(deps())
+    const { jobId } = await jobs.openPipe(dir, 'c', gifSpec)
+    await jobs.pipeWrite(jobId, new Uint8Array(32))
+    const fin = jobs.pipeFinish(jobId)
+    fin.catch(() => {})
+    await paletteStarted
+    await jobs.cancel(jobId)
+    await expect(fin).rejects.toThrow('cancelado')
+    expect(readdirSync(dir)).toEqual([])
+    expect(jobs.busy).toBe(false)
+  })
+
+  it('ffmpeg que falha na finalização: erro com a causa, sem .part nem temporários', async () => {
+    const failing = (args: string[]) => ({
+      ...fakePipe(args),
+      end: async () => {
+        writeFileSync(args[args.length - 1], 'x')
+        throw new Error('ffmpeg saiu com código 1')
+      }
+    })
+    const jobs = new EditorExportJobs({ ...plenty, openPipe: failing })
+    const { jobId } = await jobs.openPipe(dir, 'f', wavSpec)
+    await expect(jobs.pipeFinish(jobId)).rejects.toThrow(/código 1/)
+    expect(readdirSync(dir)).toEqual([])
+    expect(jobs.busy).toBe(false)
+  })
+
+  it('pedido inválido é recusado no main', async () => {
+    const jobs = new EditorExportJobs(deps())
+    await expect(jobs.openPipe(dir, 'a', { kind: 'gif', width: 3, height: 2, fps: 12, loop: true })).rejects.toThrow('Formato de exportação inválido')
+    expect(jobs.busy).toBe(false)
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  it('espaço livre também vale para o pipe', async () => {
+    const jobs = new EditorExportJobs({ freeBytes: async () => 100, openPipe: (a: string[]) => fakePipe(a) })
+    await expect(jobs.openPipe(dir, 'a', wavSpec, 0, 1000)).rejects.toThrow(/Espaço insuficiente/)
+    expect(jobs.busy).toBe(false)
+  })
+})
+
+describe('EditorExportJobs.writeStill', () => {
+  it('grava atômico (.part → nome final), nunca sobrescreve, extensão .png', async () => {
+    writeFileSync(join(dir, 'Projeto - 00m12s.png'), 'antigo')
+    const jobs = new EditorExportJobs(plenty)
+    const r = await jobs.writeStill(dir, 'Projeto - 00m12s.mp4', new Uint8Array([137, 80, 78, 71]))
+    expect(r).toEqual({ path: join(dir, 'Projeto - 00m12s (2).png'), size: 4 })
+    expect(readFileSync(join(dir, 'Projeto - 00m12s.png'), 'utf8')).toBe('antigo')
+    expect([...readFileSync(r.path)]).toEqual([137, 80, 78, 71])
+    expect(readdirSync(dir).sort()).toEqual(['Projeto - 00m12s (2).png', 'Projeto - 00m12s.png'])
+    expect(jobs.busy).toBe(false)
+  })
+})
