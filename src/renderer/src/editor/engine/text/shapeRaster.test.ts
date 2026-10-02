@@ -33,9 +33,12 @@ describe('shapeRaster (partes puras)', () => {
   })
   it('holofote: região = caixa × escala, centro e rotação do transform; seta ou dim 0 não têm', () => {
     const rect = { cx: 0.4, cy: 0.6, scale: 2, rotation: 30 }
-    expect(spotlightRegion({ item: { shape: 'ellipse', box: { w: 0.3, h: 0.45 }, spotlight: { dim: 0.6 } }, rect })).toEqual({ shape: 'ellipse', x: 0.4, y: 0.6, w: 0.6, h: 0.9, rotation: 30, dim: 0.6 })
+    expect(spotlightRegion({ item: { shape: 'ellipse', box: { w: 0.3, h: 0.45 }, spotlight: { dim: 0.6 } }, rect })).toEqual({ shape: 'ellipse', x: 0.4, y: 0.6, w: 0.6, h: 0.9, rotation: 30, dim: 0.6, cornerPx: 0 })
     expect(spotlightRegion({ item: { shape: 'arrow', spotlight: { dim: 0.6 } }, rect })).toBeNull()
     expect(spotlightRegion({ item: { shape: 'rect', spotlight: { dim: 0 } }, rect })).toBeNull()
     expect(spotlightRegion({ item: { shape: 'rect' }, rect })).toBeNull()
+    // retângulo com cantos: raio = cornerRadius × lado menor da caixa em px (× escala), como no desenho
+    const r = spotlightRegion({ item: { shape: 'rect', box: { w: 0.3, h: 0.2 }, cornerRadius: 0.25, spotlight: { dim: 0.6 } }, rect: { ...rect, scale: 1 } }, F)
+    expect(r?.cornerPx).toBeCloseTo(0.25 * 216, 6)
   })
 })

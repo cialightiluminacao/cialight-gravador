@@ -61,7 +61,9 @@ function stampLegacyTargets(d: Project): void {
     for (const it of t.items) {
       if (it.type !== 'effect' || it.scope !== 'track' || it.targetTrackId) continue
       const below = visualTrackBelow(d, t.id)
-      if (below) it.targetTrackId = below
+      // faixa com texto/forma: gravar a ligação faria o efeito passar a agir no texto (o alvo antigo só vale para
+      // mídia/anotações — resolve legacyTarget); fica sem gravar, com o mesmo comportamento de antes
+      if (below && !d.tracks.find((x) => x.id === below)!.items.some((x) => x.type === 'text' || x.type === 'shape')) it.targetTrackId = below
     }
   }
 }

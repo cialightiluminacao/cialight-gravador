@@ -34,6 +34,12 @@ export interface EffectLayer {
    * visível logo abaixo); null = nenhuma. resolveFrame põe o efeito `track` logo depois da camada dessa faixa.
    */
   targetTrackId: string | null
+  /**
+   * Escopo `track` SEM targetTrackId gravado (projeto antigo, ou "só a faixa abaixo" sem mídia abaixo): o alvo é a faixa
+   * de vídeo logo abaixo, mas só a mídia/anotações/transição dela contam (como até a v1.4) — texto/forma não, para o
+   * aviso noTarget continuar valendo. Ausente = ligação explícita (qualquer camada da faixa).
+   */
+  legacyTarget?: true
   region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }
   strength: number; feather: number; color: string; invert: boolean; scope: 'below' | 'track'
 }
@@ -238,11 +244,17 @@ export function effectBound(layers: Layer[], i: number): boolean {
     j--
   }
   const prev = layers[j]
-  return !!prev && isTrackLayer(prev) && prev.trackId === fx.targetTrackId
+  return !!prev && bindsTo(prev, fx)
 }
 
 /** Camada que representa o conteúdo de uma faixa para o escopo `track`: tudo menos efeito (inclui texto/forma, F5). */
 const isTrackLayer = (l: Layer): l is Exclude<Layer, EffectLayer> => l.kind !== 'effect'
+
+/** A camada `l` é a da faixa-alvo do efeito `track` fx? Alvo antigo (legacyTarget): só mídia/anotações/transição. */
+function bindsTo(l: Layer, fx: EffectLayer): boolean {
+  if (!isTrackLayer(l) || l.trackId !== fx.targetTrackId) return false
+  return !fx.legacyTarget || l.kind === 'media' || l.kind === 'annotations' || l.kind === 'transition'
+}
 
 /** Faixa de vídeo não oculta imediatamente abaixo de trackId (faixas de áudio e ocultas são puladas). */
 export function visualTrackBelow(p: Project, trackId: string): string | null {
@@ -286,6 +298,7 @@ function itemLayer(p: Project, track: Track, item: Item, tUs: Us): Layer | null 
     case 'effect':
       return {
         kind: 'effect', itemId: item.id, trackId: track.id, effect: item.effect, targetTrackId: item.targetTrackId ?? visualTrackBelow(p, track.id),
+        ...(item.scope === 'track' && !item.targetTrackId ? { legacyTarget: true as const } : {}),
         region: { shape: item.region.shape, ...effectRegionAt(p, item, tUs) },
         strength: ev(item.strength, local), feather: item.feather, color: item.color, invert: item.invert, scope: item.scope
       }
@@ -309,7 +322,7 @@ function stackAt(p: Project, tUs: Us, transitions?: ReadonlyMap<string, Transiti
   if (trackFx.length === 0) return layers
   const out = layers.filter((l) => !(l.kind === 'effect' && l.scope === 'track'))
   for (const fx of trackFx) {
-    let at = out.findIndex((l) => isTrackLayer(l) && l.trackId === fx.targetTrackId)
+    let at = out.findIndex((l) => bindsTo(l, fx))
     if (at < 0) { out.push(fx); continue }
     while (out[at + 1]?.kind === 'effect' && (out[at + 1] as EffectLayer).scope === 'track' && (out[at + 1] as EffectLayer).targetTrackId === fx.targetTrackId) at++
     out.splice(at + 1, 0, fx)

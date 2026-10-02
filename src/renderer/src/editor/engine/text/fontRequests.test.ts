@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject, createTextItem } from '@shared/editor/factory'
-import { projectFontRequests } from './fontRequests'
+import { fontFamilyOf, projectFontRequests } from './fontRequests'
 
 describe('projectFontRequests', () => {
   it('uma requisição por fonte (estilo/peso/família), com os caracteres dos textos', () => {
@@ -20,5 +20,9 @@ describe('projectFontRequests', () => {
     expect(projectFontRequests(p)).toEqual([])
     p.tracks[0].items = [createTextItem('countdown', 0)]
     expect(projectFontRequests(p)[0].text).toBe('-0123456789')
+  })
+  it('fontFamilyOf: família da fonte CSS (aviso de fonte que não carregou)', () => {
+    expect(fontFamilyOf('normal 800 16px "Manrope Variable", sans-serif')).toBe('Manrope Variable')
+    expect(fontFamilyOf('italic 400 16px "Arial", sans-serif')).toBe('Arial')
   })
 })

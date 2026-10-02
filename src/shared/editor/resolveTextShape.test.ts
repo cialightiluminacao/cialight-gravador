@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createShapeItem } from './factory'
-import type { ShapeItem } from './project'
+import * as ops from './ops'
+import { findItem } from './ops'
+import type { EffectItem, ShapeItem, TextItem } from './project'
 import { privacyWarnings } from './privacy'
 import { effectBound, resolveFrame, type TransitionLayer } from './resolve'
 import { S, fx, project, textClip, tr, track, vclip, vid } from './__fixtures__/transitionScenes'
@@ -70,4 +72,55 @@ describe('privacidade: noTarget considera texto/forma como alvo desenhado', () =
   it('faixa-alvo com texto o tempo todo: sem aviso', () => expect(noTarget('T', 'cheia')).toEqual([]))
   it('faixa-alvo com forma o tempo todo: sem aviso', () => expect(noTarget('F', 'cheia')).toEqual([]))
   it('texto acaba antes do efeito: aviso no fim dele', () => expect(noTarget('T', 'lacuna')).toEqual([2 * S]))
+})
+
+describe('escopo `track` sem targetTrackId (alvo antigo): só mídia/anotações da faixa abaixo, nunca texto/forma', () => {
+  // efeito `track` sem ligação gravada logo acima de uma faixa de texto, sobre uma mídia
+  const legacy = () =>
+    project(
+      [
+        track('V1', 'video', [vclip('m', 'v', 0, 4 * S)]),
+        track('T', 'video', [textClip('t', 0, 4 * S)]),
+        track('FX', 'video', [fx('e', 'pixelate', 0, 4 * S, { scope: 'track' })])
+      ],
+      [vid('v')]
+    )
+  it('resolve: não se liga ao texto (fica no fim, sem efeito) e o noTarget avisa', () => {
+    const p = legacy()
+    const layers = resolveFrame(p, S)
+    expect(layers.map((l) => l.kind)).toEqual(['media', 'text', 'effect'])
+    expect(layers[2]).toMatchObject({ targetTrackId: 'T', legacyTarget: true })
+    expect(effectBound(layers, 2)).toBe(false)
+    expect(privacyWarnings(p, 0, 4 * S).filter((w) => w.kind === 'noTarget').map((w) => w.tUs)).toEqual([0])
+  })
+  it('uma edição qualquer não grava o alvo de texto (o comportamento continua o mesmo)', () => {
+    const q = ops.updateItem<TextItem>(legacy(), 't', (d) => {
+      d.text = 'outro'
+    })
+    const e = findItem(q, 'e')!.item as EffectItem
+    expect(e.targetTrackId).toBeUndefined()
+    const layers = resolveFrame(q, S)
+    expect(effectBound(layers, layers.findIndex((l) => l.kind === 'effect'))).toBe(false)
+  })
+  it('alvo antigo com mídia na faixa abaixo continua ligado (e a edição grava a ligação)', () => {
+    const p = project([track('V1', 'video', [vclip('m', 'v', 0, 4 * S)]), track('FX', 'video', [fx('e', 'pixelate', 0, 4 * S, { scope: 'track' })])], [vid('v')])
+    const layers = resolveFrame(p, S)
+    expect(effectBound(layers, 1)).toBe(true)
+    const q = ops.updateItem<EffectItem>(p, 'e', (d) => {
+      d.feather = 0.1
+    })
+    expect((findItem(q, 'e')!.item as EffectItem).targetTrackId).toBe('V1')
+  })
+  it('"Só a faixa abaixo" num efeito novo SEMPRE grava a ligação (faixa de texto logo abaixo = alvo explícito, age nele)', () => {
+    const p = project([track('V1', 'video', [vclip('m', 'v', 0, 4 * S)]), track('T', 'video', [textClip('t', 0, 4 * S)]), track('FX', 'video', [fx('e', 'pixelate', 0, 4 * S)])], [vid('v')])
+    const q = ops.setEffectScope(p, 'e', 'track')
+    expect((findItem(q, 'e')!.item as EffectItem).targetTrackId).toBe('T')
+    const layers = resolveFrame(q, S)
+    expect(layers.map((l) => l.kind)).toEqual(['media', 'text', 'effect'])
+    expect(effectBound(layers, 2)).toBe(true)
+    // sem nenhuma faixa visual abaixo: sem ligação (alvo antigo nulo) — nada a afetar, avisa
+    const lone = ops.setEffectScope(project([track('FX', 'video', [fx('e', 'pixelate', 0, 4 * S)])], []), 'e', 'track')
+    expect((findItem(lone, 'e')!.item as EffectItem).targetTrackId).toBeUndefined()
+    expect(privacyWarnings(lone, 0, 4 * S).some((w) => w.kind === 'noTarget')).toBe(true)
+  })
 })

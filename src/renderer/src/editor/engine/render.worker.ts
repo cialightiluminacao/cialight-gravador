@@ -33,7 +33,7 @@ import { Compositor, type SourceMeta } from './compositor/compositor'
 import { DecoderPool } from './decoderPool'
 import { assignSlots, decodedLayers, firstDrawUs, flatLayers, type SlotMap } from './layerSources'
 import { loadFonts, registerAppFonts } from './text/fonts'
-import { projectFontRequests, type FontRequest } from './text/fontRequests'
+import { fontFamilyOf, projectFontRequests, type FontRequest } from './text/fontRequests'
 import { fontReady } from './text/textRaster'
 import { SR } from './audio/mixer'
 import type { AudioIn, AudioOut } from './audio/protocol'
@@ -68,7 +68,7 @@ let lastSlots: SlotMap = new Map()
 let lastFrame: FrameMsg | null = null
 let fontRedraw = false
 // fontes já pedidas ao FontFaceSet (cada uma uma vez)
-const fontLoads = new Map<string, Promise<void>>()
+const fontLoads = new Map<string, Promise<string[]>>()
 
 registerAppFonts()
 
@@ -172,7 +172,7 @@ async function pump(): Promise<void> {
 }
 
 /** Pede ao FontFaceSet as fontes (cada uma uma vez); resolve quando todas carregaram ou falharam. */
-function requestFonts(reqs: readonly FontRequest[]): Promise<void> {
+function requestFonts(reqs: readonly FontRequest[], warn = true): Promise<string[]> {
   return Promise.all(
     reqs.map((r) => {
       const key = `${r.font}|${r.text}`
@@ -180,12 +180,21 @@ function requestFonts(reqs: readonly FontRequest[]): Promise<void> {
       if (!load) {
         // cada texto digitado gera uma chave nova: o mapa não cresce sem limite (pedir de novo é barato)
         if (fontLoads.size >= 256) fontLoads.clear()
-        load = loadFonts([r])
+        load = loadFonts([r]).then((failed) => {
+          // não carregou (erro ou prazo): sai do mapa — o próximo pedido tenta de novo
+          if (failed.length) fontLoads.delete(key)
+          return failed.map((f) => fontFamilyOf(f.font))
+        })
         fontLoads.set(key, load)
       }
       return load
     })
-  ).then(() => {})
+  ).then((lists) => {
+    const families = [...new Set(lists.flat())]
+    // preview: aviso (o editor mostra um toast por família); a exportação junta nos avisos do fim
+    if (warn && families.length) post({ t: 'fontWarning', families })
+    return families
+  })
 }
 
 /** Redesenha quando alguma das fontes pendentes ficar pronta (fonte que não carrega nunca: sem laço de redesenho). */
@@ -201,6 +210,11 @@ function redrawWhenLoaded(reqs: readonly FontRequest[]): void {
  */
 async function redrawForFonts(): Promise<void> {
   fontRedraw = true
+  // tocando, o próximo quadro já vem com a fonte (redesenhar aqui seria um seek no meio dos iteradores da reprodução)
+  if (lastFrame?.playing) {
+    fontRedraw = false
+    return
+  }
   if (busy || pending || exporting || !lastFrame || !project) return
   fontRedraw = false
   busy = true
@@ -564,14 +578,14 @@ async function runExport(
   signal: AbortSignal,
   outbox: ChunkOutbox,
   state: { packets: number }
-): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }> {
+): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[] }> {
   const p = project
   if (!compositor || !canvas || !p) throw new Error('exportação antes de init/project')
   compositor.resize(job.width, job.height)
   selection = []
   prefetched.clear()
   // fontes dos textos carregadas antes do 1º quadro (nenhum quadro exportado com a fonte de reserva)
-  await requestFonts(projectFontRequests(p))
+  const missingFonts = await requestFonts(projectFontRequests(p), false)
   const durationUs = job.toUs - job.fromUs
   const total = frameCount(job.fromUs, job.toUs, job.fps)
   if (total <= 0) throw new Error('Intervalo de exportação vazio')
@@ -640,7 +654,7 @@ async function runExport(
     if (feed) await feed.feed(audio!, Infinity)
     if (signal.aborted) throw new Cancelled()
     await encoderCall(() => output.finalize())
-    return { videoCodec, audioCodec, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations] }
+    return { videoCodec, audioCodec, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations], missingFonts }
   } catch (err) {
     if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {})
     throw err

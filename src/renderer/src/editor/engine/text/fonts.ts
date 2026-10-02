@@ -6,7 +6,7 @@
 import manropeLatin from '@fontsource-variable/manrope/files/manrope-latin-wght-normal.woff2?url'
 import manropeLatinExt from '@fontsource-variable/manrope/files/manrope-latin-ext-wght-normal.woff2?url'
 import type { FontRequest } from './fontRequests'
-import { fontSet } from './textRaster'
+import { fontReady, fontSet } from './textRaster'
 
 // mesmas faixas Unicode do CSS do pacote (latim cobre o português; latin-ext, nomes estrangeiros)
 const APP_FONTS: { family: string; url: string; weight: string; unicodeRange: string }[] = [
@@ -25,10 +25,11 @@ export function registerAppFonts(): void {
 }
 
 /** Carrega as fontes pedidas (falha ou demora além de `timeoutMs`: segue com a reserva). */
-export async function loadFonts(reqs: readonly FontRequest[], timeoutMs = 10_000): Promise<void> {
+export async function loadFonts(reqs: readonly FontRequest[], timeoutMs = 10_000): Promise<FontRequest[]> {
   const set = fontSet()
-  if (!set || reqs.length === 0) return
+  if (!set || reqs.length === 0) return []
   let timer: ReturnType<typeof setTimeout> | undefined
   const all = Promise.allSettled(reqs.map((r) => set.load(r.font, r.text)))
   await Promise.race([all, new Promise<void>((resolve) => (timer = setTimeout(resolve, timeoutMs)))]).finally(() => clearTimeout(timer))
+  return reqs.filter((r) => !fontReady(r.font, r.text))
 }

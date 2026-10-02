@@ -108,9 +108,13 @@ export function rasterizeShape(item: ShapeFields, frame: FrameSize): ShapeRaster
  * Região do holofote (frações do quadro, como EffectLayer.region): a caixa × escala do transform, centrada e girada
  * como a forma. null = forma sem holofote (ou seta, que não tem "dentro").
  */
-export function spotlightRegion(layer: { item: Pick<ShapeItem, 'shape' | 'box' | 'spotlight'>; rect: Rect }): { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number; dim: number } | null {
+export function spotlightRegion(layer: { item: Pick<ShapeItem, 'shape' | 'box' | 'spotlight' | 'cornerRadius'>; rect: Rect }, frame?: FrameSize): { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number; dim: number; cornerPx: number } | null {
   const it = layer.item
   if (!it.spotlight || !(it.spotlight.dim > 0) || it.shape === 'arrow') return null
   const b = it.box ?? DEFAULT_SHAPE_BOX
-  return { shape: it.shape, x: layer.rect.cx, y: layer.rect.cy, w: Math.abs(b.w) * layer.rect.scale, h: Math.abs(b.h) * layer.rect.scale, rotation: layer.rect.rotation, dim: Math.min(1, it.spotlight.dim) }
+  const w = Math.abs(b.w) * layer.rect.scale
+  const h = Math.abs(b.h) * layer.rect.scale
+  // cantos do retângulo: a mesma conta do desenho (fração do lado menor da caixa em px), × escala
+  const cornerPx = it.shape === 'rect' && frame ? Math.max(0, Math.min(0.5, it.cornerRadius ?? 0)) * Math.min(w * frame.W, h * frame.H) : 0
+  return { shape: it.shape, x: layer.rect.cx, y: layer.rect.cy, w, h, rotation: layer.rect.rotation, dim: Math.min(1, it.spotlight.dim), cornerPx }
 }

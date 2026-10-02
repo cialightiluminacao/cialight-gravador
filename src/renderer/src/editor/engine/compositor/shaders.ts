@@ -235,6 +235,8 @@ uniform int u_shape;
 uniform float u_feather;
 uniform int u_invert;
 uniform float u_amount;
+uniform int u_opaque;
+uniform float u_corner;
 out vec4 o;
 void main() {
   vec2 p = gl_FragCoord.xy;
@@ -252,8 +254,10 @@ void main() {
     dist = g > 1e-6 ? f * (f - 1.0) / g : -min(hl.x, hl.y);
     if (f > 1.0) dist = max(dist, (f - 1.0) * min(hl.x, hl.y));
   } else {
-    vec2 q = abs(l) - hl;
-    dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+    // u_corner > 0: retângulo com cantos arredondados (raio em px; holofote de forma com cornerRadius)
+    float r = u_corner > 0.0 ? min(u_corner, min(hl.x, hl.y)) : 0.0;
+    vec2 q = abs(l) - (hl - r);
+    dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
   }
   float m;
   if (u_invert == 1) {
@@ -270,7 +274,9 @@ void main() {
     ivec2 ik = ivec2(int(p.x), int(u_frame.y) - 1 - int(p.y));
     e = texelFetch(u_fx, (2 * ik + 1) * 128 / u_q, 0);
   } else {
-    e = vec4(u_color * s.a, s.a);
+    // u_opaque: tarja OPACA na região toda (texto/forma isolados por um efeito 'track': a camada é transparente fora
+    // das letras e, com o alfa do que está abaixo, a tarja só recoloriria as letras — que continuariam legíveis)
+    e = u_opaque == 1 ? vec4(u_color, 1.0) : vec4(u_color * s.a, s.a);
   }
   o = mix(s, e, m * u_amount);
 }`

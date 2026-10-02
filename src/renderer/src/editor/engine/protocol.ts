@@ -51,10 +51,12 @@ export type RenderOut =
   | { t: 'exportChunk'; jobId: string; seq: number; data: Uint8Array; position: number }
   // missing: assets desenhados como "mídia indisponível" (quadros por asset); missingAnnotations: gravações
   // cujas anotações não puderam ser lidas — viram avisos na tela de concluído
-  | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: HwPref; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }
+  | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: HwPref; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[] }
   // encoderError: a falha veio do codificador; beforeFirstPacket: antes de qualquer pacote de vídeo
   // (só as duas juntas justificam tentar outro modo de hardware)
   | { t: 'exportError'; jobId: string; message: string; cancelled: boolean; beforeFirstPacket: boolean; encoderError: boolean }
+  // fontes de texto que não carregaram (erro ou prazo de 10 s): o texto aparece com a fonte padrão; o editor avisa
+  | { t: 'fontWarning'; families: string[] }
   // testes: RGBA linha a linha de cima para baixo
   | { t: 'pixels'; id: number; data: Uint8Array }
   // testes: drawMs = compositor (desenho + espera da GPU); frameMs = quadro inteiro (decodificação inclusa)

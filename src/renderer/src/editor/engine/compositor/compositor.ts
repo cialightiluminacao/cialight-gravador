@@ -239,7 +239,9 @@ export class Compositor {
           gl.enable(gl.BLEND)
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
         }
-        for (let j = i + 1; j <= last; j++) this.applyEffect(aux, layers[j] as EffectLayer, W, H)
+        // tarja sobre texto/forma isolado: opaca na região toda (senão só recolore as letras, que seguem legíveis)
+        const opaque = layer.kind === 'text' || layer.kind === 'shape'
+        for (let j = i + 1; j <= last; j++) this.applyEffect(aux, layers[j] as EffectLayer, W, H, opaque)
         this.bindTarget(target)
         this.effects.composite(aux)
         i = last
@@ -414,19 +416,19 @@ export class Compositor {
 
   /** Holofote da forma (se tiver): escurece o alvo fora dela com preto·dim·opacidade; religa o alvo com o blend. */
   private spotlight(layer: ShapeLayer, target: twgl.FramebufferInfo, W: number, H: number): void {
-    const r = spotlightRegion(layer)
+    const r = spotlightRegion(layer, { W, H })
     if (!r) return
     const gl = this.gl
-    this.effects.dimOutside(target, r, r.dim * layer.opacity, SPOTLIGHT_FEATHER_PX, W, H)
+    this.effects.dimOutside(target, r, r.dim * layer.opacity, SPOTLIGHT_FEATHER_PX, W, H, r.cornerPx)
     this.bindTarget(target)
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
   }
 
   /** Efeito sobre o alvo; devolve o estado de desenho das camadas (alvo ligado, blend premultiplicado). */
-  private applyEffect(target: twgl.FramebufferInfo, layer: EffectLayer, W: number, H: number): void {
+  private applyEffect(target: twgl.FramebufferInfo, layer: EffectLayer, W: number, H: number, opaque = false): void {
     const gl = this.gl
-    this.effects.applyEffect(target, layer, W, H)
+    this.effects.applyEffect(target, layer, W, H, opaque)
     this.bindTarget(target)
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)

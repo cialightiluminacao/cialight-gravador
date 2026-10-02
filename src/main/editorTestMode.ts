@@ -412,7 +412,10 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       if (tp.exportPath) {
         const raw = join(dir, 'texto-titulo.rgb')
         await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', ((tp.frame - 0.5) / 30).toFixed(4), '-i', tp.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do título' })
-        tp.meanDiff = meanDiffPerChannel(tp.preview, paritySample(new Uint8Array(readFileSync(raw)), 1920, 1080, 3))
+        const rgb = new Uint8Array(readFileSync(raw))
+        tp.meanDiff = meanDiffPerChannel(tp.preview, paritySample(rgb, 1920, 1080, 3))
+        // fundo azul do título no quadro exportado (±12: compressão): a caixa prova a fonte da exportação
+        tp.exportBlue = boundsRgb(rgb, 1920, 1080, (r, g, b) => Math.abs(r - 32) <= 12 && Math.abs(g - 80) <= 12 && Math.abs(b - 255) <= 12)
       }
     } catch (e) {
       tp.exportError = e instanceof Error ? e.message : String(e)
@@ -685,6 +688,18 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   return failures.length ? 1 : 0
 }
 
+/** Caixa dos pixels (RGB24, linha a linha de cima) que satisfazem `pred`; x1/y1 exclusivos. */
+function boundsRgb(d: Uint8Array, W: number, H: number, pred: (r: number, g: number, b: number) => boolean): PxBounds | null {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, n = 0
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 3
+    if (!pred(d[i], d[i + 1], d[i + 2])) continue
+    n++
+    x0 = Math.min(x0, x); x1 = Math.max(x1, x + 1); y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1)
+  }
+  return n ? { x0, y0, x1, y1, n } : null
+}
+
 /** Texto e formas (F5 Task 4): verificações das medidas do textHarness. */
 function checkText(tx: TextReport | undefined, failures: string[]): void {
   console.log(`texto/formas: ${JSON.stringify(tx)}`)
@@ -717,12 +732,19 @@ function checkText(tx: TextReport | undefined, failures: string[]): void {
   check(!!hw && !!hd && hd.n > 500 && Math.abs(hd.x1 - hw.x1 - (sh?.offsetPx ?? 0)) <= 3 && Math.abs(hd.y1 - hw.y1 - (sh?.offsetPx ?? 0)) <= 3, `texto: sombra preta deslocada (+${sh?.offsetPx}, +${sh?.offsetPx}) px (branco ${bx(hw)}, sombra ${bx(hd)})`, failures)
   const wr = tx?.wrap
   const wb = wr?.blue
-  check(!!wr && !!wb && wr.lines >= 3 && Math.abs(wb.y1 - wb.y0 - wr.expectedH) <= 3 && wb.x1 - wb.x0 <= wr.maxW + 2, `texto: quebra com maxWidth 0,3 — ${wr?.lines} linhas, altura da caixa ${wb ? wb.y1 - wb.y0 : '?'} ≈ ${wr?.expectedH.toFixed(1)} ±3, largura ${wb ? wb.x1 - wb.x0 : '?'} ≤ ${wr?.maxW.toFixed(1)}`, failures)
+  check(!!wr && !!wb && wr.lines === 3 && Math.abs(wb.y1 - wb.y0 - wr.expectedH) <= 3 && wb.x1 - wb.x0 <= wr.maxW + 2, `texto: quebra com maxWidth 0,3 — ${wr?.lines} linhas, altura da caixa ${wb ? wb.y1 - wb.y0 : '?'} ≈ ${wr?.expectedH.toFixed(1)} ±3, largura ${wb ? wb.x1 - wb.x0 : '?'} ≤ ${wr?.maxW.toFixed(1)}`, failures)
   const sp = tx?.shapes
   check(close(sp?.rectCenter, [0, 192, 0], 1), `formas: centro do retângulo = (0,192,0) (${JSON.stringify(sp?.rectCenter)})`, failures)
   check(close(sp?.ellipseCenter, [0, 192, 0], 1) && close(sp?.ellipseCorner, [128, 128, 128], 2), `formas: elipse preenchida no centro (${JSON.stringify(sp?.ellipseCenter)}), canto da caixa NÃO (${JSON.stringify(sp?.ellipseCorner)} = cinza)`, failures)
   check(close(sp?.arrowTip, [255, 0, 255], 2) && close(sp?.arrowTail, [255, 0, 255], 2), `formas: seta magenta na ponta direita (${JSON.stringify(sp?.arrowTip)}) e na haste (${JSON.stringify(sp?.arrowTail)})`, failures)
   check(close(sp?.spotOutside, [51, 51, 51], 3) && close(sp?.spotEdgeOutside, [51, 51, 51], 3) && close(sp?.spotInside, [128, 128, 128], 2), `formas: holofote dim 0,6 sobre cinza 128 — fora ${JSON.stringify(sp?.spotOutside)} / logo fora da borda ${JSON.stringify(sp?.spotEdgeOutside)} ≈ 51 ±3, dentro ${JSON.stringify(sp?.spotInside)} = 128 ±2`, failures)
+  check(close(sp?.spotRoundCorner, [51, 51, 51], 3) && close(sp?.spotRoundInside, [128, 128, 128], 2), `formas: holofote em retângulo com cantos (cornerRadius 0,5) — canto da caixa, fora da forma, escurecido ${JSON.stringify(sp?.spotRoundCorner)} ≈ 51 ±3; centro ${JSON.stringify(sp?.spotRoundInside)} = 128`, failures)
+  const so = tx?.trackSolid
+  check(!!so && so.letterPx > 1000 && so.bar > 70_000 && so.barWrong === 0 && so.same > 1_000_000 && so.sameMaxDiff <= 1, `privacidade: tarja \`track\` na faixa do texto é OPACA na região toda — ${so?.bar} px, ${so?.barWrong} fora da cor #123456 (região com ${so?.letterPx} px de letra); fora dela igual ao sem efeito (${so?.same} px, dif. máx. ${so?.sameMaxDiff})`, failures)
+  const si = tx?.trackSolidInvert
+  check(!!si && si.bar > 1_800_000 && si.barWrong === 0 && si.same > 19_000 && si.sameMaxDiff <= 1, `privacidade: tarja invertida \`track\` na faixa do texto — fora do buraco tudo #123456 (${si?.bar} px, ${si?.barWrong} errados); no buraco igual ao sem efeito (${si?.same} px, dif. máx. ${si?.sameMaxDiff})`, failures)
+  const pz = tx?.trackPixelate
+  check(!!pz && pz.belowMaxDiff <= 2 && pz.lapRatio < 0.2, `privacidade: pixelização padrão (${pz?.strength}, bloco ${pz?.cellPx.toFixed(1)} px; altura das maiúsculas ≈ ${pz?.capHeightPx.toFixed(0)} px) na faixa do texto = a mesma pixelização do quadro (escopo below, a da mídia na F2) ±2 (dif. máx. ${pz?.belowMaxDiff}); laplaciano na caixa ${pz?.lapRatio} < 0,2 do texto nítido (contraste ${pz?.contrastRatio})`, failures)
   const lb = tx?.layerBlur
   check(!!lb && lb.blurPx > 3 && lb.outsideMaxDiff <= 1 && lb.insideDiff > 100_000, `texto: desfoque da camada (${lb?.blurPx.toFixed(1)} px) só na caixa — fora dela idêntico ao sem desfoque (dif. máx. ${lb?.outsideMaxDiff}), dentro borrado (Σ dif. ${lb?.insideDiff})`, failures)
   const ts = tx?.trackScope
@@ -730,6 +752,8 @@ function checkText(tx: TextReport | undefined, failures: string[]): void {
   const cf = tx?.crossfade
   check(!!cf && Math.abs(cf.p - 0.5) < 0.01 && close(cf.inBox, cf.expectedIn, 3) && close(cf.outside, cf.expectedOut, 3), `texto: crossfade imagem → título no meio (p ${cf?.p}): no fundo do título ${JSON.stringify(cf?.inBox)} ≈ ${JSON.stringify(cf?.expectedIn.map(Math.round))}, fora ${JSON.stringify(cf?.outside)} ≈ ${JSON.stringify(cf?.expectedOut.map(Math.round))} ±3`, failures)
   const pr = tx?.parity
+  const pe = pr?.expected, xb = pr?.exportBlue
+  check(!!pe && !!xb && Math.abs(xb.x0 - (pe.cx - pe.w / 2)) <= 3 && Math.abs(xb.x1 - (pe.cx + pe.w / 2)) <= 3 && Math.abs(xb.y0 - (pe.cy - pe.h / 2)) <= 3 && Math.abs(xb.y1 - (pe.cy + pe.h / 2)) <= 3, `texto: a exportação espera a fonte — fundo do título no arquivo ${bx(xb)} = caixa de measureTextBox (Manrope) ±3 (${pe ? `x ${(pe.cx - pe.w / 2).toFixed(1)}–${(pe.cx + pe.w / 2).toFixed(1)}` : '?'})`, failures)
   const md = pr?.meanDiff ?? []
   check(md.length === 3 && md.every((d) => d <= 4), `texto: exportação = preview no quadro ${pr?.frame} do título (diferença média por canal ${JSON.stringify(md)} ≤ 4) ${pr?.exportError ?? ''}`, failures)
 }

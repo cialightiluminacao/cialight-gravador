@@ -18,3 +18,5 @@ export function projectFontRequests(p: Project): FontRequest[] {
   }
   return [...by].map(([font, chars]) => ({ font, text: [...chars].join('') || ' ' }))
 }
+/** Família de uma fonte CSS de cssFont ('normal 800 16px "Manrope Variable", sans-serif' → 'Manrope Variable'). */
+export const fontFamilyOf = (font: string): string => /"([^"]+)"/.exec(font)?.[1] ?? font

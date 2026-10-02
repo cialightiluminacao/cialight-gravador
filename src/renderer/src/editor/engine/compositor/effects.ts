@@ -82,7 +82,7 @@ export class EffectPass {
   }
 
   /** Aplica o efeito sobre o conteúdo atual de `target` (W×H). Deixa o blend desligado e o scissor desligado. */
-  applyEffect(target: twgl.FramebufferInfo, fx: EffectLayer, W: number, H: number): void {
+  applyEffect(target: twgl.FramebufferInfo, fx: EffectLayer, W: number, H: number, opaque = false): void {
     const gl = this.gl
     const s = this.ensure(W, H)
     const area: PxRect = fx.invert ? { x: 0, y: 0, w: W, h: H } : regionScissor(fx.region, fx.feather, W, H)
@@ -141,7 +141,9 @@ export class EffectPass {
       u_shape: fx.region.shape === 'ellipse' ? 1 : 0,
       u_feather: featherPx(fx.region, fx.feather, W, H),
       u_invert: fx.invert ? 1 : 0,
-      u_amount: 1
+      u_amount: 1,
+      u_opaque: opaque ? 1 : 0,
+      u_corner: 0
     })
     gl.disable(gl.SCISSOR_TEST)
   }
@@ -163,7 +165,7 @@ export class EffectPass {
     // região = o quadro inteiro + 1 px, sem borda suave: máscara 1 em todo pixel da área (o scissor limita)
     this.pass(this.apply, {
       u_src: s.snapshot, u_fx: b.tex, u_fxScale: b.scale, u_frame: [W, H], u_mode: MODE.blur, u_q: 512, u_color: [0, 0, 0],
-      u_center: [W / 2, H / 2], u_half: [W / 2 + 1, H / 2 + 1], u_rot: [1, 0], u_shape: 0, u_feather: 0, u_invert: 0, u_amount: 1
+      u_center: [W / 2, H / 2], u_half: [W / 2 + 1, H / 2 + 1], u_rot: [1, 0], u_shape: 0, u_feather: 0, u_invert: 0, u_amount: 1, u_opaque: 0, u_corner: 0
     })
     gl.disable(gl.SCISSOR_TEST)
   }
@@ -173,7 +175,7 @@ export class EffectPass {
    * girado, frações do quadro); dentro fica intacto; borda suave de `featherPx` px para dentro. Mesmo FS_APPLY dos
    * efeitos (sólido preto, invertido, máscara × u_amount). Deixa o blend e o scissor desligados.
    */
-  dimOutside(target: twgl.FramebufferInfo, region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }, amount: number, featherPx: number, W: number, H: number): void {
+  dimOutside(target: twgl.FramebufferInfo, region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }, amount: number, featherPx: number, W: number, H: number, cornerPx = 0): void {
     if (!(amount > 0)) return
     const gl = this.gl
     const s = this.ensure(W, H)
@@ -187,7 +189,7 @@ export class EffectPass {
     this.pass(this.apply, {
       u_src: s.snapshot, u_fx: s.snapshot, u_fxScale: [1 / W, 1 / H], u_frame: [W, H], u_mode: MODE.solid, u_q: 512, u_color: [0, 0, 0],
       u_center: [region.x * W, region.y * H], u_half: [(Math.abs(region.w) * W) / 2, (Math.abs(region.h) * H) / 2], u_rot: [Math.cos(th), Math.sin(th)],
-      u_shape: region.shape === 'ellipse' ? 1 : 0, u_feather: featherPx, u_invert: 1, u_amount: Math.min(1, amount)
+      u_shape: region.shape === 'ellipse' ? 1 : 0, u_feather: featherPx, u_invert: 1, u_amount: Math.min(1, amount), u_opaque: 0, u_corner: Math.max(0, cornerPx)
     })
     gl.disable(gl.SCISSOR_TEST)
   }

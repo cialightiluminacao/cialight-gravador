@@ -49,12 +49,21 @@ export interface TextReport {
   stroke?: { white: PxBounds | null; red: PxBounds | null; strokePx: number }
   shadow?: { white: PxBounds | null; dark: PxBounds | null; offsetPx: number }
   wrap?: { lines: number; blue: PxBounds | null; expectedH: number; maxW: number }
-  shapes?: { rectCenter: Rgb; ellipseCenter: Rgb; ellipseCorner: Rgb; arrowTip: Rgb; arrowTail: Rgb; spotOutside: Rgb; spotInside: Rgb; spotEdgeOutside: Rgb }
+  shapes?: { rectCenter: Rgb; ellipseCenter: Rgb; ellipseCorner: Rgb; arrowTip: Rgb; arrowTail: Rgb; spotOutside: Rgb; spotInside: Rgb; spotEdgeOutside: Rgb; spotRoundCorner?: Rgb; spotRoundInside?: Rgb }
   /** Desfoque da camada de texto: diferença máx. fora da área (caixa + alcance) e soma da diferença dentro da caixa. */
   layerBlur?: { blurPx: number; outsideMaxDiff: number; insideDiff: number; area: { x0: number; y0: number; x1: number; y1: number } }
   /** Efeito `track` (blur) com alvo na faixa do texto: a mídia abaixo (fora do alcance do texto) intacta, o texto borrado. */
   trackScope?: { radius: number; mediaMaxDiff: number; textDiff: number; mediaPixels: number }
+  /**
+   * Tarja (`solid`, escopo `track`, alvo na faixa do texto, sobre listras): pixels da região que têm a cor da tarja
+   * (barWrong = os que não têm) e fora dela a diferença para o quadro sem efeito. letterPx: letras na região (controle).
+   */
+  trackSolid?: { bar: number; barWrong: number; same: number; sameMaxDiff: number; letterPx: number }
+  /** Tarja invertida (buraco nítido pequeno): fora do buraco tudo na cor da tarja; dentro, igual ao sem efeito. */
+  trackSolidInvert?: { bar: number; barWrong: number; same: number; sameMaxDiff: number }
+  /** Pixelização padrão no texto: diferença para a mesma pixelização `below` e razões de legibilidade na caixa. */
+  trackPixelate?: { strength: number; cellPx: number; capHeightPx: number; belowMaxDiff: number; lapRatio: number; contrastRatio: number }
   /** Crossfade A = imagem vermelha → B = título: meio da janela. */
   crossfade?: { p: number; A: Rgb; inBox: Rgb; outside: Rgb; expectedIn: Rgb; expectedOut: Rgb }
-  parity?: { frame: number; fromUs: number; preview: number[]; exportPath?: string; exportError?: string; meanDiff?: number[] }
+  parity?: { frame: number; fromUs: number; preview: number[]; expected?: TextBoxPx; exportBlue?: PxBounds | null; exportPath?: string; exportError?: string; meanDiff?: number[] }
 }

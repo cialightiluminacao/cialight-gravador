@@ -8,7 +8,8 @@ import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import { arrowGeometry, strokePx } from '../engine/text/shapeRaster'
 import { cssFont, measureTextBox } from '../engine/text/textRaster'
-import { downsampleFactor, effectBlurRadiusPx, layerBlurRect } from '../engine/compositor/effectsMath'
+import { downsampleFactor, effectBlurRadiusPx, effectPixelBlockPx, layerBlurRect } from '../engine/compositor/effectsMath'
+import { laplacianVar, localContrast } from '@shared/testing/pixels'
 import { runEditorExport } from '../export/editorExport'
 
 // Texto e formas (F5 Task 4) no motor real (CIALIGHT_TEST=editor-render). Projeto p-editor-text-test (criado pelo
@@ -177,6 +178,12 @@ export async function textCheck(outDir: string | null): Promise<TextReport> {
       shapes.spotInside = rgbAt(s, W / 2, H / 2)
       // logo fora da borda direita da elipse (meia-largura 288 px): +4 px já é "fora" inteiro (borda suave para dentro)
       shapes.spotEdgeOutside = rgbAt(s, W / 2 + 0.15 * W + 4, H / 2)
+      // retângulo com cantos (cornerRadius 0,5 = raio de metade do lado menor da caixa): o canto da caixa fica FORA da
+      // forma e é escurecido; o centro não
+      use(scene(base, [vtrack('t_bg', [bg(gray)]), vtrack('t_sh', [shapeItem('i_spot_r', { shape: 'rect', box: { w: 0.3, h: 0.45 }, cornerRadius: 0.5, spotlight: { dim: 0.6 } })])]))
+      const sr = (await frame(AT)).d
+      shapes.spotRoundCorner = rgbAt(sr, W / 2 - 0.15 * W + 6, H / 2 - 0.225 * H + 6)
+      shapes.spotRoundInside = rgbAt(sr, W / 2, H / 2)
       report.shapes = shapes
     }
 
@@ -240,6 +247,73 @@ export async function textCheck(outDir: string | null): Promise<TextReport> {
       report.trackScope = { radius, mediaMaxDiff, textDiff, mediaPixels }
     }
 
+    // 6b. privacidade com alvo na faixa do texto (sobre listras): tarja, tarja invertida e pixelização padrão
+    {
+      const R = { x: 0.5, y: 0.5, w: 0.25, h: 0.15 }
+      const HOLE = { x: 0.5, y: 0.5, w: 0.1, h: 0.1 }
+      const mk = (fxs: EffectItem[], bgAsset = stripes): Project =>
+        scene(base, [vtrack('t_bg', [bg(bgAsset)]), vtrack('t_tx', [textItem('i_pv', 'TESTE F5', {})]), ...(fxs.length ? [vtrack('t_fx', fxs)] : [])])
+      const solid = (region: typeof R, invert: boolean): EffectItem => ({ ...createEffectItem('solid', 0, 4 * S, region), id: 'i_sol', color: '#123456', feather: 0, invert, scope: 'track', targetTrackId: 't_tx' })
+      use(mk([]))
+      const ref = (await frame(AT)).d
+      /** Pixel com centro dentro de r (px), com 1 px de folga na borda: dentro (1), fora (−1) ou na borda (0). */
+      const side = (r: typeof R, x: number, y: number): number => {
+        const dx = Math.abs(x + 0.5 - r.x * W), dy = Math.abs(y + 0.5 - r.y * H), hw = (r.w * W) / 2, hh = (r.h * H) / 2
+        if (dx < hw - 1 && dy < hh - 1) return 1
+        if (dx > hw + 1 || dy > hh + 1) return -1
+        return 0
+      }
+      const measure = async (fx: EffectItem, region: typeof R, barInside: boolean): Promise<{ bar: number; barWrong: number; same: number; sameMaxDiff: number }> => {
+        use(mk([fx]))
+        const d = (await frame(AT)).d
+        let bar = 0, barWrong = 0, same = 0, sameMaxDiff = 0
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const s = side(region, x, y)
+            if (s === 0) continue
+            const i = (y * W + x) * 4
+            if ((s === 1) === barInside) {
+              bar++
+              if (Math.abs(d[i] - 0x12) > 1 || Math.abs(d[i + 1] - 0x34) > 1 || Math.abs(d[i + 2] - 0x56) > 1) barWrong++
+            } else {
+              same++
+              sameMaxDiff = Math.max(sameMaxDiff, Math.abs(d[i] - ref[i]), Math.abs(d[i + 1] - ref[i + 1]), Math.abs(d[i + 2] - ref[i + 2]))
+            }
+          }
+        }
+        return { bar, barWrong, same, sameMaxDiff }
+      }
+      // controle: a região da tarja tem letra (pixels brancos) — sem a correção ela só recoloriria as letras
+      let letterPx = 0
+      for (let y = Math.ceil((R.y - R.h / 2) * H); y < (R.y + R.h / 2) * H; y++) for (let x = Math.ceil((R.x - R.w / 2) * W); x < (R.x + R.w / 2) * W; x++) {
+        const i = (y * W + x) * 4
+        // letra: branco onde a listra seria preta (as listras brancas também passam de 200)
+        if (x % 4 < 2 && ref[i] > 200) letterPx++
+      }
+      report.trackSolid = { ...(await measure(solid(R, false), R, true)), letterPx }
+      report.trackSolidInvert = await measure(solid(HOLE, true), HOLE, false)
+      // pixelização com a intensidade padrão (50) sobre fundo cinza liso: igual (±2) à mesma pixelização com escopo
+      // `below` (a do quadro acumulado, a da F2 em mídia); legibilidade pelo laplaciano na caixa do texto
+      const pixRegion = { x: 0.5, y: 0.5, w: 0.4, h: 0.3 }
+      const pix = (scope: 'track' | 'below'): EffectItem => ({ ...createEffectItem('pixelate', 0, 4 * S, pixRegion), id: 'i_pix', scope, ...(scope === 'track' ? { targetTrackId: 't_tx' } : {}) })
+      use(mk([], gray))
+      const plain = (await frame(AT)).d
+      use(mk([pix('track')], gray))
+      const onText = (await frame(AT)).d
+      use(mk([pix('below')], gray))
+      const below = (await frame(AT)).d
+      const e = expectBox(mk([], gray), 'i_pv')
+      const tb = { x0: Math.round(e.cx - e.w / 2), y0: Math.round(e.cy - e.h / 2), x1: Math.round(e.cx + e.w / 2), y1: Math.round(e.cy + e.h / 2) }
+      let belowMaxDiff = 0
+      for (let i = 0; i < onText.length; i += 4) belowMaxDiff = Math.max(belowMaxDiff, Math.abs(onText[i] - below[i]), Math.abs(onText[i + 1] - below[i + 1]), Math.abs(onText[i + 2] - below[i + 2]))
+      const lapPlain = laplacianVar(plain, W, H, tb)
+      report.trackPixelate = {
+        strength: 50, cellPx: effectPixelBlockPx(50, pixRegion, W, H), capHeightPx: 110 * 0.72,
+        belowMaxDiff, lapRatio: Math.round((laplacianVar(onText, W, H, tb) / lapPlain) * 1e4) / 1e4,
+        contrastRatio: Math.round((localContrast(onText, W, H, tb) / localContrast(plain, W, H, tb)) * 1e4) / 1e4
+      }
+    }
+
     // 7. crossfade A = imagem vermelha [0, 2 s) → B = título com fundo azul [2 s, 4 s), 1 s: meio da janela (2 s)
     {
       const A: MediaItem = { ...createMediaItem(red, 0, 'video'), id: 'i_a', durationUs: 2 * S }
@@ -267,7 +341,8 @@ export async function textCheck(outDir: string | null): Promise<TextReport> {
       const p = scene(base, [vtrack('t_tx', [textItem('i_title', 'TESTE F5', { background: '#2050ff', padding: 0.3, shadow: true, shadowStyle: { color: '#000000b3', blur: 0.08, dx: 0.04, dy: 0.04 } })])])
       use(p)
       const preview = paritySample((await frame(frameToUs(TEXT_PARITY_FRAME, FPS))).d, W, H, 4)
-      const run: NonNullable<TextReport['parity']> = { frame: TEXT_PARITY_FRAME, fromUs: 0, preview }
+      // caixa esperada: a exportação tem de sair com a Manrope (espera as fontes) — o main mede o fundo azul nela
+      const run: NonNullable<TextReport['parity']> = { frame: TEXT_PARITY_FRAME, fromUs: 0, preview, expected: expectBox(p, 'i_title', frameToUs(TEXT_PARITY_FRAME, FPS)) }
       if (outDir) {
         try {
           const out = await runEditorExport({ project: p, width: W, height: H, fps: FPS, fromUs: 0, toUs: TEXT_PARITY_TO_US, videoBitrate: 16_000_000, audioBitrate: 128_000, outputDir: outDir, fileName: 'texto-titulo.mp4' })

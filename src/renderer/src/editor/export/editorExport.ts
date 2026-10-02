@@ -271,7 +271,8 @@ function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, stage: 're
             () => {
               const media = missingMediaWarnings(req.project, m.missing)
               const ann = m.missingAnnotations.length ? [`As anotações de ${m.missingAnnotations.length === 1 ? 'uma gravação' : `${m.missingAnnotations.length} gravações`} não puderam ser lidas e ficaram de fora.`] : []
-              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, warnings: [...media, ...ann, ...audioWarnings] } })
+              const fonts = m.missingFonts.map((f) => `A fonte “${f}” não carregou a tempo: os textos com ela saíram com uma fonte padrão.`)
+              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, warnings: [...media, ...ann, ...fonts, ...audioWarnings] } })
             },
             () => {}
           )
