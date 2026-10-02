@@ -1,7 +1,7 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addEffect, addMarker, addMediaFromAsset, addTrack, deleteItems, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
+import { addEffect, addMarker, addMediaFromAsset, addTrack, deleteItems, musicTrackName, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
 import type { EffectPresetId, EffectRegionInit } from '@shared/editor/factory'
 import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
 import { frameDurUs, frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
@@ -74,7 +74,9 @@ export function addAssetAt(assetId: string, atUs: Us, track?: { trackId: string 
     let q = p
     let trackId: string | undefined
     if (track && 'newTrack' in track) {
-      const r = addTrack(q, track.newTrack)
+      // música (arquivo só de áudio) solta abaixo das faixas: a faixa nova já nasce com papel música
+      const music = track.newTrack === 'audio' && q.assets.find((a) => a.id === assetId)?.kind === 'audio'
+      const r = music ? addTrack(q, 'audio', undefined, musicTrackName(q), 'music') : addTrack(q, track.newTrack)
       q = r.project
       trackId = r.trackId
     } else trackId = track?.trackId

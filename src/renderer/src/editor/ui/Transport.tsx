@@ -7,8 +7,10 @@ import { cn } from '@/lib/cn'
 import type { PlaybackController } from '../engine/PlaybackController'
 import { useEditorStore } from '../state/editorStore'
 import { seekTo, stepFrames, togglePlay } from './editorActions'
+import { LevelMeter } from './LevelMeter'
 
-// Barra de transporte do visualizador: timecode (+ taxa do shuttle J/L), ⏮ ◀quadro ▶/❚❚ quadro▶ ⏭, volume master e tela cheia.
+// Barra de transporte do visualizador: timecode (+ taxa do shuttle J/L), ⏮ ◀quadro ▶/❚❚ quadro▶ ⏭, medidor master
+// (L/R com pico), volume da prévia e tela cheia.
 
 const VOLUME_KEY = 'editor.previewVolume'
 
@@ -95,6 +97,19 @@ export function Transport({ playback, fullscreen, onToggleFullscreen }: { playba
         </IconBtn>
       </div>
       <div className="flex items-center justify-end gap-1">
+        <Tip content="Nível da mixagem (L/R, pico)">
+          <span className="mr-1 flex items-center">
+            <LevelMeter
+              bars={2}
+              label="Nível da mixagem"
+              className="h-[9px] w-16"
+              read={() => {
+                const l = playback?.levels
+                return l ? [l.l, l.r] : []
+              }}
+            />
+          </span>
+        </Tip>
         <IconBtn
           label={volume === 0 ? 'Ativar som da prévia' : 'Silenciar prévia'}
           onClick={() => {

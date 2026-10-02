@@ -13,7 +13,7 @@ import { flushAutosave, useEditorStore } from '../state/editorStore'
 
 const errMsg = ipcErrorMessage
 
-export function mediaUrl(projectId: string, assetId: string, variant: 'original' | 'proxy' = 'original'): string {
+export function mediaUrl(projectId: string, assetId: string, variant: 'original' | 'proxy' | 'intermediate' = 'original'): string {
   return `${FILE_PROTOCOL}://${FILE_HOST_MEDIA}/${encodeURIComponent(projectId)}/${encodeURIComponent(assetId)}?v=${variant}`
 }
 

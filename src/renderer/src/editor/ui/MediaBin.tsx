@@ -11,9 +11,12 @@ import { EffectLibrary } from './EffectLibrary'
 import { MediaCard } from './MediaCard'
 import { addAssetAtPlayhead } from './editorActions'
 import { importPaths, importSession, relinkAsset } from './mediaImport'
+import { stopAudioPreview } from './audioPreview'
 
 // Biblioteca (coluna esquerda): abas Mídia / Áudio / Gravações / Efeitos; importar por botão ou arrastando
 // arquivos do Explorer; cartões arrastáveis para a linha do tempo (efeitos também para o visualizador).
+// Aba Áudio: músicas com prévia no cartão; ao entrar na linha do tempo vão para a faixa "Música" (papel música,
+// abaixa sozinha sob a voz). A prévia para quando a linha do tempo toca, ao trocar de aba ou ao sair do editor.
 
 type Tab = 'media' | 'audio' | 'recordings' | 'effects'
 const NO_ASSETS: Asset[] = []
@@ -34,6 +37,14 @@ export function MediaBin({ projectId }: { projectId: string }): React.JSX.Elemen
   const [tab, setTab] = useState<Tab>('media')
   const [dropping, setDropping] = useState(false)
   const [busy, setBusy] = useState(false)
+  const playing = useEditorStore((s) => s.playing)
+  useEffect(() => {
+    if (playing) stopAudioPreview()
+  }, [playing])
+  useEffect(() => () => stopAudioPreview(), [])
+  useEffect(() => {
+    if (tab !== 'audio') stopAudioPreview()
+  }, [tab])
 
   const runImport = async (paths: string[]): Promise<void> => {
     if (!paths.length) return
@@ -111,7 +122,8 @@ export function MediaBin({ projectId }: { projectId: string }): React.JSX.Elemen
           {grid(visual, <DropHint onPick={() => void pick()} text="Arraste vídeos e imagens do Explorer para cá ou clique em Importar." />)}
         </TabsContent>
         <TabsContent value="audio" className="min-h-0 flex-1 overflow-y-auto">
-          {grid(audio, <DropHint onPick={() => void pick()} text="Arraste músicas e narrações (MP3, WAV, M4A…) para cá ou clique em Importar." />)}
+          {audio.length ? <p className="px-3 pt-2 text-[10.5px] leading-relaxed text-muted-2">Na linha do tempo, a música vai para a faixa Música e abaixa sozinha quando há fala nas faixas de Voz.</p> : null}
+          {grid(audio, <DropHint onPick={() => void pick()} text="Arraste músicas (MP3, WAV, M4A…) para cá ou clique em Importar. Elas vão para a faixa Música e abaixam sozinhas sob a voz." />)}
         </TabsContent>
         <TabsContent value="recordings" className="min-h-0 flex-1 overflow-y-auto">
           <Recordings projectId={projectId} onAdded={() => setTab('media')} />

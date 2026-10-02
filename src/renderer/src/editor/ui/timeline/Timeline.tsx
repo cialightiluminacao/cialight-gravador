@@ -224,7 +224,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
             <div className="absolute inset-y-0 left-0 border-r border-border bg-surface/60" style={{ width: HEADER_W }} />
             {layout.rows.map((row) => (
               <div key={row.track.id} className="absolute inset-x-0 flex border-b border-border/70" style={{ top: row.y, height: row.h }}>
-                <TrackHeader track={row.track} rowH={row.h - 1} up={displayNeighborIndex(project.tracks, row.track.id, 'up')} down={displayNeighborIndex(project.tracks, row.track.id, 'down')} />
+                <TrackHeader playback={playback} track={row.track} rowH={row.h - 1} up={displayNeighborIndex(project.tracks, row.track.id, 'up')} down={displayNeighborIndex(project.tracks, row.track.id, 'down')} />
                 <TrackLane track={row.track} rowH={row.h - 1} projectId={project.id} assets={assets} pxPerSec={pps} scrollUs={scrollUs} viewW={viewW} selection={selection} />
               </div>
             ))}

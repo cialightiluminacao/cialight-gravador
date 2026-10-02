@@ -28,8 +28,11 @@ const GAIN_STEP = 64
 const frameAtOrAfter = (fromUs: Us, tUs: Us): number => Math.ceil(((tUs - fromUs) * SR) / 1e6)
 const usAtFrame = (fromUs: Us, frame: number): Us => fromUs + Math.round((frame * 1e6) / SR)
 
-/** `sources`: fontes de PCM por AudioSegment.sourceKey (original = assetId; processada = assetId~chave). */
-export function mixBlock(segments: AudioSegment[], fromUs: Us, frames: number, sources: Map<string, PcmSource>): Float32Array {
+/**
+ * `sources`: fontes de PCM por AudioSegment.sourceKey (original = assetId; processada = assetId~chave).
+ * `trackPeaks` (medidores): recebe o pico (0–1+, depois do ganho e antes do limitador) de cada faixa que soou no bloco.
+ */
+export function mixBlock(segments: AudioSegment[], fromUs: Us, frames: number, sources: Map<string, PcmSource>, trackPeaks?: Map<string, number>): Float32Array {
   const out = new Float32Array(frames * 2)
   for (const seg of segments) {
     const src = seg.mode === 'mute' ? undefined : sources.get(seg.sourceKey)
@@ -43,6 +46,7 @@ export function mixBlock(segments: AudioSegment[], fromUs: Us, frames: number, s
     const srcFrom = seg.reverse ? seg.srcInUs + Math.round((seg.durationUs - local) * seg.speed) : seg.srcInUs + Math.round(local * seg.speed)
     const pcm = seg.mode === 'stretch' ? src.readStretched(seg.itemId, srcFrom, n, seg.speed) : src.read(srcFrom, n, seg.speed, seg.reverse)
     const g = (frame: number): number => gainAt(seg, Math.min(endUs, Math.max(seg.startUs, usAtFrame(fromUs, frame))))
+    let pk = 0
     for (let j = 0; j < n; j += GAIN_STEP) {
       const len = Math.min(GAIN_STEP, n - j)
       const g0 = g(i0 + j)
@@ -51,10 +55,15 @@ export function mixBlock(segments: AudioSegment[], fromUs: Us, frames: number, s
         const gain = g0 + dg * k
         const s = (j + k) * 2
         const o = (i0 + j + k) * 2
-        out[o] += pcm[s] * gain
-        out[o + 1] += pcm[s + 1] * gain
+        const l = pcm[s] * gain
+        const r = pcm[s + 1] * gain
+        out[o] += l
+        out[o + 1] += r
+        if (trackPeaks) pk = Math.max(pk, Math.abs(l), Math.abs(r))
       }
     }
+    // itens de uma faixa não se sobrepõem: o pico do segmento é o da faixa no trecho dele
+    if (trackPeaks) trackPeaks.set(seg.trackId, Math.max(pk, trackPeaks.get(seg.trackId) ?? 0))
   }
   for (let i = 0; i < out.length; i++) out[i] = limit(out[i])
   return out

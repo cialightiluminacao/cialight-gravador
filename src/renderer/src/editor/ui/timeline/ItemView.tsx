@@ -34,6 +34,8 @@ interface Props {
   scrollUs: number
   viewW: number
   selected: boolean
+  /** Volume da faixa (a forma de onda reflete faixa × item). */
+  trackVolume: number
 }
 
 const TONE: Record<Item['type'] | 'audio', string> = {
@@ -76,13 +78,13 @@ function Filmstrip({ item, asset, projectId, h, pxPerSec, clipFrom, clipTo }: { 
   )
 }
 
-function ItemWave({ item, asset, projectId, pxPerSec, clipFrom, clipTo, height, color }: { item: MediaItem; asset: Asset; projectId: string; pxPerSec: number; clipFrom: number; clipTo: number; height: number; color: string }): React.JSX.Element | null {
+function ItemWave({ item, asset, projectId, pxPerSec, clipFrom, clipTo, height, color, trackVolume }: { item: MediaItem; asset: Asset; projectId: string; pxPerSec: number; clipFrom: number; clipTo: number; height: number; color: string; trackVolume: number }): React.JSX.Element | null {
   const peaks = usePeaks(asset.id, asset.peaks && asset.status !== 'missing' ? projectFileUrl(projectId, asset.peaks) : null)
   if (!peaks) return null
-  return <Waveform peaks={peaks} item={item} pxPerSec={pxPerSec} clipFromPx={clipFrom} clipToPx={clipTo} height={height} color={color} gain={item.audio.enabled ? item.audio.volume.value : 0.15} />
+  return <Waveform peaks={peaks} item={item} pxPerSec={pxPerSec} clipFromPx={clipFrom} clipToPx={clipTo} height={height} color={color} trackVolume={trackVolume} />
 }
 
-export const ItemView = memo(function ItemView({ item, asset, projectId, kind, rowH, locked, dimmed, pxPerSec, scrollUs, viewW, selected }: Props): React.JSX.Element | null {
+export const ItemView = memo(function ItemView({ item, asset, projectId, kind, rowH, locked, dimmed, pxPerSec, scrollUs, viewW, selected, trackVolume }: Props): React.JSX.Element | null {
   const x = usToPx(item.startUs, pxPerSec, scrollUs)
   const w = (item.durationUs * pxPerSec) / 1e6
   const visL = Math.max(x, -ITEM_MARGIN_PX)
@@ -120,11 +122,11 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
       {media && asset && asset.kind === 'image' && asset.status !== 'missing' ? (
         <span className="absolute inset-0 block opacity-90" style={{ backgroundImage: `url("${mediaUrl(projectId, asset.id)}")`, backgroundSize: `auto ${h}px`, backgroundRepeat: 'repeat-x', backgroundPosition: `${-clipFrom}px 0` }} />
       ) : null}
-      {media && asset && isAudio ? <ItemWave item={media} asset={asset} projectId={projectId} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} height={h - 2} color="rgba(93, 224, 168, 0.85)" /> : null}
+      {media && asset && isAudio ? <ItemWave item={media} asset={asset} projectId={projectId} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} height={h - 2} color="rgba(93, 224, 168, 0.85)" trackVolume={trackVolume} /> : null}
       {/* vídeo com áudio próprio (não separado): faixa de onda embaixo */}
       {media && asset && !isAudio && asset.kind === 'video' && media.audio.enabled && !media.linkId ? (
         <span className="absolute inset-x-0 bottom-0 block h-[16px] bg-black/45">
-          <ItemWave item={media} asset={asset} projectId={projectId} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} height={16} color="rgba(93, 224, 168, 0.8)" />
+          <ItemWave item={media} asset={asset} projectId={projectId} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} height={16} color="rgba(93, 224, 168, 0.8)" trackVolume={trackVolume} />
         </span>
       ) : null}
       {broken ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(255,92,92,0.22)_0_6px,transparent_6px_12px)]" /> : null}

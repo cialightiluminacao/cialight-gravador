@@ -38,6 +38,7 @@ export const TrackLane = memo(function TrackLane({ track, rowH, projectId, asset
           scrollUs={scrollUs}
           viewW={viewW}
           selected={selection.includes(it.id)}
+          trackVolume={track.volume}
         />
       ))}
     </div>

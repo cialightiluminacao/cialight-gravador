@@ -64,3 +64,23 @@ export function rmsOf(x: Float32Array, from = 0, to = x.length): number {
   for (let i = from; i < to; i++) s += x[i] * x[i]
   return Math.sqrt(s / Math.max(1, to - from))
 }
+
+/**
+ * Amplitude (pico da senoide) da componente de `hz` em x[start, start + len) pelo algoritmo de Goertzel. Com `len`
+ * múltiplo do período de `hz` e dos outros tons presentes, não há vazamento entre eles (medir a música sob a voz).
+ */
+export function toneAmplitude(x: Float32Array, start: number, len: number, hz: number, sr: number): number {
+  const w = (2 * Math.PI * hz) / sr
+  const k = 2 * Math.cos(w)
+  let s1 = 0
+  let s2 = 0
+  const end = Math.min(x.length, start + len)
+  for (let i = Math.max(0, start); i < end; i++) {
+    const s0 = x[i] + k * s1 - s2
+    s2 = s1
+    s1 = s0
+  }
+  const re = s1 - s2 * Math.cos(w)
+  const im = s2 * Math.sin(w)
+  return (2 * Math.sqrt(re * re + im * im)) / Math.max(1, end - Math.max(0, start))
+}

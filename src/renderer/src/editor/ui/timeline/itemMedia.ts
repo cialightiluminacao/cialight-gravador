@@ -1,7 +1,9 @@
+import { evalAnim } from '@shared/editor/anim'
 import type { FilmstripInfo, MediaItem, Us } from '@shared/editor/project'
 
 // Matemática pura do conteúdo dos itens: qual quadro do sprite (filmstrip) mostrar em cada
-// posição e o min/max da forma de onda por coluna de pixel (peaks: Int8 min/max, 100 por segundo).
+// posição, o min/max da forma de onda por coluna de pixel (peaks: Int8 min/max, 100 por segundo) e o ganho
+// de exibição por coluna (volume da faixa × volume do item com keyframes).
 
 export const PEAKS_PER_SEC = 100
 const PEAK_US = 1e6 / PEAKS_PER_SEC
@@ -51,5 +53,21 @@ export function waveColumns(peaks: Int8Array, item: MediaItem, pxPerSec: number,
     out[c * 2] = mn
     out[c * 2 + 1] = mx
   }
+  return out
+}
+
+/** Altura relativa da onda com o áudio do item desligado (fica visível, mas apagada). */
+export const WAVE_DISABLED_GAIN = 0.15
+
+/**
+ * Ganho de exibição por coluna de pixel em [fromPx, fromPx + n) (relativos ao início do item): volume da faixa ×
+ * volume do item no meio da coluna (estático + keyframes). Fades e ducking não entram (têm a sua própria marcação).
+ */
+export function waveGains(item: Pick<MediaItem, 'audio'>, trackVolume: number, pxPerSec: number, fromPx: number, n: number): Float32Array {
+  const out = new Float32Array(Math.max(0, n))
+  if (!item.audio.enabled) return out.fill(WAVE_DISABLED_GAIN)
+  const vol = item.audio.volume
+  if (!vol.keys?.length) return out.fill(trackVolume * vol.value)
+  for (let c = 0; c < out.length; c++) out[c] = trackVolume * evalAnim(vol, Math.round(((fromPx + c + 0.5) * 1e6) / pxPerSec))
   return out
 }

@@ -241,7 +241,7 @@ describe('ops', () => {
     const q = ops.closeGaps(p, p.tracks[0].id)
     expect(items(q, 0)[0].startUs).toBe(0); expect(items(q, 1)[0].startUs).toBe(0)
     p = ops.addAsset(p, { ...vid('a2', S), kind: 'audio', video: undefined })
-    p = ops.addMediaFromAsset(p, 'a2', 0).project
+    p = ops.addMediaFromAsset(p, 'a2', 0, { audioTrackId: p.tracks[1].id }).project
     expect(items(p, 1)).toHaveLength(2)
     const r = ops.closeGaps(p, p.tracks[0].id)
     expect(items(r, 0)[0].startUs).toBe(0); expect(items(r, 1).map((i) => i.startUs)).toEqual([0, 2 * S])

@@ -84,10 +84,17 @@ export type TrackKind = 'video' | 'audio'
 export interface Track { id: string; kind: TrackKind; name: string; muted: boolean; hidden: boolean; locked: boolean; volume: number; role?: 'voice' | 'music' | 'sfx' | 'effects'; items: Item[] }
 export interface Marker { id: string; tUs: Us; label: string; color: string }
 export interface ProjectCanvas { width: number; height: number; fps: number; background: string }
+/**
+ * Mixagem do projeto. Ducking: as faixas `role: 'music'` abaixam `duckingDb` enquanto há fala nas faixas `role: 'voice'`
+ * (rampa de `attackMs` terminando no início da fala, `holdMs` depois do fim, soltura em `releaseMs`). Ausente = padrões
+ * (AUDIO_MIX_DEFAULTS em audioPlan.ts: ligado, −12 dB, 250/400/300 ms).
+ */
+export interface AudioMix { enabled: boolean; duckingDb: number; attackMs: number; releaseMs: number; holdMs: number }
 export interface Project {
   version: 1; id: string; name: string; createdAt: string; updatedAt: string
   canvas: ProjectCanvas; assets: Asset[]; tracks: Track[]; markers: Marker[]
   originSessionId?: string
+  audioMix?: AudioMix
 }
 export const MIN_ITEM_US = 33_334 // ~1 quadro a 30 fps; nenhuma operação cria item menor
 export const MIN_SPEED = 0.1, MAX_SPEED = 16

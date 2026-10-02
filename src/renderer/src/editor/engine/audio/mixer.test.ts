@@ -27,7 +27,7 @@ function seg(over: Partial<AudioSegment> = {}): AudioSegment {
   const durationUs = over.durationUs ?? 2_000_000
   const assetId = over.assetId ?? 'a1'
   return {
-    itemId: 'i1', assetId, sourceKey: assetId, processKey: null, startUs, durationUs, srcInUs: 0, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
+    itemId: 'i1', assetId, trackId: 't1', sourceKey: assetId, processKey: null, startUs, durationUs, srcInUs: 0, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
     gain: [{ tUs: startUs, gain: 1 }, { tUs: startUs + durationUs, gain: 1 }],
     ...over
   }
@@ -351,5 +351,17 @@ describe('mixBlock + StretchBank (fake determinístico)', () => {
     await expect(bank.ensure('i1', 2)).rejects.toThrow('sem WASM')
     await expect(bank.ensure('i2', 2)).rejects.toThrow('sem WASM')
     expect(tries).toBe(1)
+  })
+})
+describe('mixBlock: picos por faixa (medidores)', () => {
+  it('pico de cada faixa depois do ganho (antes do limitador); faixa sem som no bloco fica de fora', () => {
+    const a = seg({ itemId: 'i1', assetId: 'a1', trackId: 'tv', gain: [{ tUs: 0, gain: 0.5 }, { tUs: 2_000_000, gain: 0.5 }] })
+    const b = seg({ itemId: 'i2', assetId: 'a2', trackId: 'tm' })
+    const c = seg({ itemId: 'i3', assetId: 'a1', trackId: 'tz', startUs: 5_000_000 })
+    const peaks = new Map<string, number>()
+    mixBlock([a, b, c], 0, 4800, new Map([['a1', sine(1000, 0.8)], ['a2', sine(500, 0.6)]]), peaks)
+    expect(peaks.get('tv')).toBeCloseTo(0.4, 2)
+    expect(peaks.get('tm')).toBeCloseTo(0.6, 2)
+    expect(peaks.has('tz')).toBe(false)
   })
 })

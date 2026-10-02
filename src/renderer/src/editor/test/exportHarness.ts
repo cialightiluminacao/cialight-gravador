@@ -7,6 +7,8 @@ import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import { EditorExportCancelled, runEditorExport, type EditorExportRequest } from '../export/editorExport'
 import { composeSession } from '@/export/exportComposer'
+import { channel, toneAmplitude } from '@shared/audio/pcmAnalysis'
+import { AudioClient } from '../engine/audio/AudioClient'
 
 // Teste de integração da exportação do editor (CIALIGHT_TEST=editor-export), rota
 // index.html#editor-export-test/<json>: exporta o cenário, a falha simulada do hardware, um cancelamento e o
@@ -20,7 +22,7 @@ declare global {
   }
 }
 
-interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; speedProjectId: string; reverseProjectId: string; denoiseProjectId: string; effects: { projectId: string; width: number; height: number; tUs: number; block: number; blurCrop: { x: number; y: number; w: number; h: number } } }
+interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; speedProjectId: string; reverseProjectId: string; denoiseProjectId: string; duckingProjectId: string; duckingHz: number; effects: { projectId: string; width: number; height: number; tUs: number; block: number; blurCrop: { x: number; y: number; w: number; h: number } } }
 
 export async function runExportHarness(params: Params): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
@@ -94,6 +96,12 @@ export async function runExportHarness(params: Params): Promise<void> {
     report.denoise = await exportOnce(base(dnProject, 'ruido-tratado.mp4'))
     const dnItem = dnProject.tracks.flatMap((t) => t.items).find((i) => i.type === 'media')!
     report.denoiseOff = await exportOnce(base(updateItem<MediaItem>(dnProject, dnItem.id, (d) => { d.audio.denoise = false }), 'ruido-original.mp4'))
+    // ducking: música (seno) na faixa Música + voz (bursts) na faixa Voz com o speech.json da ingestão → a exportação
+    // abaixa a música sob a fala; o mesmo projeto tocado pelo caminho do preview (AudioClient, blocos de 100 ms) dá os
+    // níveis da música para o main comparar com a exportação
+    const duckProject = await window.api.project.load(params.duckingProjectId)
+    report.ducking = await exportOnce(base(duckProject, 'ducking.mp4'))
+    report.duckingPreview = await previewToneLevels(duckProject, params.duckingHz)
 
     if (!report.previewUntouched) {
       try {
@@ -113,6 +121,35 @@ export async function runExportHarness(params: Params): Promise<void> {
     errors.push(e instanceof Error ? (e.stack ?? e.message) : String(e))
   }
   window.__captureTestSend?.({ ok, report })
+}
+
+/** Janela (50 ms = 11 ciclos de 220 Hz e 50 de 1 kHz: sem vazamento) e passo (10 ms) das medidas de nível da música. */
+const DUCK_WIN = 2400
+const DUCK_HOP = 480
+
+/** Nível (dB relativo a 1) do tom `hz` ao longo do projeto tocado pelo caminho do preview (blocos de 100 ms). */
+async function previewToneLevels(p: Project, hz: number): Promise<{ levelsDb?: number[]; error?: string }> {
+  const audio = new AudioClient()
+  const errors: string[] = []
+  audio.onError((m) => errors.push(m))
+  try {
+    audio.setProject(p, mediaUrlsFor(p, 'preview'), true)
+    const frames = Math.round((projectDurationUs(p) * 48000) / 1e6)
+    const pcm = new Float32Array(frames * 2)
+    for (let f = 0; f < frames; f += 4800) {
+      const b = await audio.render(Math.round((f * 1e6) / 48000), Math.min(4800, frames - f))
+      if (!b) throw new Error(`bloco ${f} sem resposta (${errors.join('; ')})`)
+      pcm.set(b.pcm, f * 2)
+    }
+    const l = channel(pcm, 0)
+    const levelsDb: number[] = []
+    for (let i = 0; i + DUCK_WIN <= l.length; i += DUCK_HOP) levelsDb.push(+(20 * Math.log10(Math.max(1e-9, toneAmplitude(l, i, DUCK_WIN, hz, 48000)))).toFixed(3))
+    return errors.length ? { levelsDb, error: errors.join('; ') } : { levelsDb }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) }
+  } finally {
+    audio.dispose()
+  }
 }
 
 /**

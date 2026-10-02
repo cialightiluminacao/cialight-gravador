@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
-import { AlertTriangle, Check, Headphones, Loader2 } from 'lucide-react'
+import { AlertTriangle, Check, Headphones, Info, Loader2 } from 'lucide-react'
+import { findItem } from '@shared/editor/ops'
 import type { MediaItem } from '@shared/editor/project'
 import { audioProcessKey, audioSourceKey } from '@shared/editor/audioProcess'
 import { planAudio } from '@shared/editor/audioPlan'
@@ -14,7 +15,8 @@ import { PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, u
 
 // Inspetor de áudio do item de mídia: ativar, volume em dB (−60…+12; −60 = mudo), fades e o tratamento da voz
 // (redução de ruído e normalização a −16 LUFS, pré-processados em cache — ver audioProcessing.ts), com o estado do
-// processamento e a comparação A/B (segurar o botão toca o original).
+// processamento e a comparação A/B (segurar o botão toca o original). Item numa faixa de Voz cuja mídia ainda não tem a
+// análise de fala: aviso de que ele não abaixa a música (ducking).
 
 const MIN_DB = -60
 const MAX_DB = 12
@@ -66,6 +68,7 @@ export function AudioPanel({ item }: { item: MediaItem }): React.JSX.Element {
         </div>
       </PanelSection>
       <VoicePanel item={item} />
+      <SpeechNote item={item} />
       <PanelSection title="Fade de áudio">
         <div className="grid grid-cols-2 gap-x-3">
           <NumberField compact label="Entrada" value={usToSec2(a.fadeInUs)} min={0} max={halfSec} precision={2} step={0.01} unit="s" disabled={!a.enabled} onChange={(n) => editItemTransient<MediaItem>(id, (d) => { d.audio.fadeInUs = sec2ToUs(n) })} />
@@ -73,6 +76,20 @@ export function AudioPanel({ item }: { item: MediaItem }): React.JSX.Element {
         </div>
       </PanelSection>
     </>
+  )
+}
+
+/** Faixa de Voz sem os intervalos de fala da mídia: este item não abaixa a música (sem dados, sem ducking). */
+function SpeechNote({ item }: { item: MediaItem }): React.JSX.Element | null {
+  const voice = useEditorStore((s) => !!s.project && findItem(s.project, item.id)?.track.role === 'voice')
+  const asset = useEditorStore((s) => s.project?.assets.find((a) => a.id === item.assetId))
+  const analyzing = useEditorStore((s) => !!s.ingest[item.assetId])
+  if (!voice || !asset || asset.speech) return null
+  return (
+    <p className="flex items-start gap-1.5 border-b border-border px-3 py-2 text-[11px] leading-relaxed text-muted-2" data-speech-note="">
+      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <span>{asset.status === 'processing' || analyzing ? 'Analisando a fala desta mídia… até lá ela não abaixa a música.' : 'Fala desta mídia não analisada: ela não abaixa a música (ducking).'}</span>
+    </p>
   )
 }
 

@@ -7,7 +7,9 @@ import type { Asset, EffectItem, MediaItem, Project, Track } from '@shared/edito
 import type { ExportOptions } from '@shared/types'
 import { createEffectItem, createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset, deleteRange, setSpeed, updateItem } from '@shared/editor/ops'
-import { dominantHz } from '@shared/audio/pcmAnalysis'
+import { dominantHz, toneAmplitude } from '@shared/audio/pcmAnalysis'
+import { AUDIO_MIX_DEFAULTS } from '@shared/editor/audioPlan'
+import { speechFromFile, type SpeechInterval } from '@shared/editor/speech'
 import { clampPip, pipPixelRect, pipRectAt } from '@shared/compositor/pipMath'
 import { untaggedFamily } from '@shared/editor/sourceColor'
 import type { ProjectStore } from './project/projectStore'
@@ -19,6 +21,7 @@ import { cachedEncoderProbe } from './export/encoderProbe'
 import { probe } from './media/probe'
 import { assetFromInfo } from './media/ingest'
 import { processAudioFile } from './media/audioProcess'
+import { buildSpeech } from './media/analysis'
 import { processedAudioRel, sourceFingerprint } from '@shared/editor/audioProcess'
 import { rnnoiseDir } from './export/ffmpegPath'
 import { crossCorrelationLag, isFastStart, makeSyntheticSession, makeVoiceFixture } from './testFixtures'
@@ -62,6 +65,12 @@ const VOICE_HZ = 220
 const REVERSE_ID = 'p-editor-export-reverso'
 // redução de ruído (F3): voz sintética com pausas + ruído branco −30 dBFS, item com denoise e o processado pronto
 const DENOISE_ID = 'p-editor-export-ruido'
+// ducking (F3): música = seno de 220 Hz (amplitude 0,25) na faixa Música; voz = bursts de 1 kHz na faixa Voz com a pausa
+// [3; 3,52) s (vira um vão de ~0,28 s entre os intervalos de fala com o padding: menor que o hold de 300 ms, não solta)
+const DUCKING_ID = 'p-editor-export-ducking'
+const DUCK_HZ = 220
+const DUCK_WIN = 2400 // 50 ms: 11 ciclos de 220 Hz e 50 de 1 kHz (Goertzel sem vazamento da voz)
+const DUCK_HOP = 480 // 10 ms
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
 
@@ -83,7 +92,67 @@ interface HarnessReport {
   reverse?: ExportOut
   denoise?: ExportOut
   denoiseOff?: ExportOut
+  ducking?: ExportOut
+  duckingPreview?: { levelsDb?: number[]; error?: string }
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
+}
+
+interface LevelSpan { n: number; min: number; max: number }
+interface DuckingResult { speech: LevelSpan; hold: LevelSpan; outside: LevelSpan; holdGapMs: number; ramps: { kind: 'ataque' | 'soltura'; atS: number; windows: number; backstep: number; span: number }[] }
+
+/**
+ * Classifica as janelas de nível da música (dB relativo à fonte; janela DUCK_WIN, passo DUCK_HOP) pelos intervalos de
+ * fala (timeline = fonte: item em 0 a 1×), com os tempos padrão do ducking: dentro da fala, dentro de uma pausa menor
+ * que o hold, fora (a mais de ataque/hold + soltura + 50 ms de qualquer fala) e as rampas (janelas inteiras dentro do
+ * ataque [início − ataque, início] e da soltura [fim + hold, fim + hold + soltura] de cada região): recuo = maior passo
+ * no sentido errado, variação = nível do 1º − último (ataque) ou último − 1º (soltura).
+ */
+function duckingCheck(levels: number[], speech: SpeechInterval[]): DuckingResult {
+  const A = AUDIO_MIX_DEFAULTS.attackMs / 1000
+  const R = AUDIO_MIX_DEFAULTS.releaseMs / 1000
+  const H = AUDIO_MIX_DEFAULTS.holdMs / 1000
+  const M = 0.05
+  const iv = speech.map((s) => ({ a: s.fromUs / 1e6, b: s.toUs / 1e6 }))
+  const regions: { a: number; e: number }[] = []
+  const held: { a: number; b: number }[] = []
+  iv.forEach((x, k) => {
+    const last = regions[regions.length - 1]
+    if (last && x.a <= last.e) {
+      held.push({ a: iv[k - 1].b, b: x.a })
+      last.e = Math.max(last.e, x.b + H)
+    } else regions.push({ a: x.a, e: x.b + H })
+  })
+  const span = (): LevelSpan => ({ n: 0, min: Infinity, max: -Infinity })
+  const add = (s: LevelSpan, v: number): void => {
+    s.n++
+    s.min = Math.min(s.min, v)
+    s.max = Math.max(s.max, v)
+  }
+  const out: DuckingResult = { speech: span(), hold: span(), outside: span(), holdGapMs: held.length ? Math.round((held[0].b - held[0].a) * 1000) : 0, ramps: [] }
+  const t0 = (i: number): number => (i * DUCK_HOP) / 48000
+  const t1 = (i: number): number => (i * DUCK_HOP + DUCK_WIN) / 48000
+  const inside = (i: number, a: number, b: number): boolean => t0(i) >= a && t1(i) <= b
+  // as pontas do arquivo ficam de fora: o AAC da exportação atenua os primeiros milissegundos (priming do encoder)
+  const edge = 0.05
+  const endS = t1(levels.length - 1)
+  levels.forEach((v, i) => {
+    if (t0(i) < edge || t1(i) > endS - edge) return
+    if (iv.some((x) => inside(i, x.a, x.b))) add(out.speech, v)
+    else if (held.some((x) => inside(i, x.a, x.b))) add(out.hold, v)
+    else if (regions.every((g) => t1(i) <= g.a - A - M || t0(i) >= g.e + R + M)) add(out.outside, v)
+  })
+  const ramp = (kind: 'ataque' | 'soltura', a: number, b: number): void => {
+    const seq = levels.filter((_, i) => inside(i, a, b))
+    const dir = kind === 'ataque' ? -1 : 1
+    let backstep = 0
+    for (let i = 1; i < seq.length; i++) backstep = Math.max(backstep, -dir * (seq[i] - seq[i - 1]))
+    out.ramps.push({ kind, atS: +a.toFixed(3), windows: seq.length, backstep: +backstep.toFixed(4), span: seq.length ? +(dir * (seq[seq.length - 1] - seq[0])).toFixed(2) : 0 })
+  }
+  for (const g of regions) {
+    ramp('ataque', g.a - A, g.a)
+    ramp('soltura', g.e, g.e + R)
+  }
+  return out
 }
 
 function check(cond: boolean, msg: string, failures: string[]): void {
@@ -270,6 +339,21 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   projects.create(updateItem<MediaItem>(dnAdded.project, dnAdded.itemIds[0], (d) => { d.audio.denoise = true }))
   await processAudioFile(noisyVoice, '0:a:0', projects.filePath(DENOISE_ID, processedAudioRel(aNoisy.id, 'dn-sh', noisyFp)), { denoise: true, normalize: false }, { modelDir: rnnoiseDir(), durationUs: Math.round(voiceFx.durS * 1e6), dualMono: false })
 
+  // ducking: música e voz só de áudio, cada uma na sua faixa com papel; fala da voz analisada pelo mesmo caminho da
+  // ingestão (silencedetect → cache/<id>.speech.json)
+  const duckMusic = join(dir, 'ducking-musica.m4a')
+  const duckVoice = join(dir, 'ducking-voz.m4a')
+  const tone = `0.25*sin(2*PI*${DUCK_HZ}*t)`
+  const bursts = '0.3*sin(2*PI*1000*t)*(between(t,2,3)+between(t,3.52,4.5)+between(t,7,8))'
+  await gen(['-f', 'lavfi', '-i', `aevalsrc='${tone}|${tone}':s=48000:d=10`, '-c:a', 'aac', '-b:a', '192k', duckMusic], 'editor-export: música 220 Hz')
+  await gen(['-f', 'lavfi', '-i', `aevalsrc='${bursts}|${bursts}':s=48000:d=10`, '-c:a', 'aac', '-b:a', '192k', duckVoice], 'editor-export: voz em bursts')
+  const aDuckMusic: Asset = { ...assetFromInfo('a_dmus', duckMusic, statSync(duckMusic), await probe(duckMusic)), status: 'ready' }
+  const aDuckVoice: Asset = { ...assetFromInfo('a_dvoz', duckVoice, statSync(duckVoice), await probe(duckVoice)), status: 'ready', speech: 'cache/a_dvoz.speech.json' }
+  const at = (id: string, name: string, role: Track['role'], a: Asset): Track => ({ id, kind: 'audio', name, muted: false, hidden: false, locked: false, volume: 1, role, items: [{ ...createMediaItem(a, 0, 'audio'), durationUs: 10_000_000 }] })
+  rmSync(projects.dirOf(DUCKING_ID), { recursive: true, force: true })
+  projects.create({ ...createEmptyProject('Ducking', { width: W, height: H, fps: FPS, background: '#000000' }), id: DUCKING_ID, assets: [aDuckVoice, aDuckMusic], tracks: [at('t_voz', 'Voz', 'voice', aDuckVoice), at('t_mus', 'Música', 'music', aDuckMusic)] })
+  const duckSpeech = speechFromFile(await buildSpeech(duckVoice, projects.filePath(DUCKING_ID, 'cache/a_dvoz.speech.json'), 10_000_000))
+
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
   const session = await makeSyntheticSession(sessions, SESSION_ID)
@@ -284,7 +368,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, denoiseProjectId: DENOISE_ID, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, denoiseProjectId: DENOISE_ID, duckingProjectId: DUCKING_ID, duckingHz: DUCK_HZ, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -470,6 +554,31 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
       const lag = crossCorrelationLag(await pcmOf(dnOff, join(dir, 'ruido-original.f32')), await pcmOf(dnOn, join(dir, 'ruido-tratado.f32')), 2400, 4)
       check(Math.abs(lag) <= 96, `ruído: exportação tratada alinhada à original (${lag} amostras = ${((lag / 48) || 0).toFixed(2)} ms; ≤ 2 ms)`, failures)
     } else console.log('ruído: sem voz do Windows; correlação tratado × original não se aplica à voz harmônica')
+  }
+
+  // ---- ducking: música −12 dB ±1 durante a fala (e nas pausas menores que o hold), 0 dB ±0,5 fora, rampas monotônicas ----
+  const dk = r.ducking?.path
+  check(!!dk && existsSync(dk), `ducking: exportado (${dk ?? r.ducking?.error})`, failures)
+  if (dk && existsSync(dk)) {
+    // canal esquerdo (o preview mede o mesmo canal); nível relativo à música da fonte
+    const left = (x: Float32Array): Float32Array => x.filter((_, i) => i % 2 === 0)
+    const ref = toneAmplitude(left(await pcmOf(duckMusic, join(dir, 'ducking-musica.f32'), 2)), 48000, 4 * 48000, DUCK_HZ, 48000)
+    const out = left(await pcmOf(dk, join(dir, 'ducking-saida.f32'), 2))
+    const levels: number[] = []
+    for (let i = 0; i + DUCK_WIN <= out.length; i += DUCK_HOP) levels.push(20 * Math.log10(Math.max(1e-9, toneAmplitude(out, i, DUCK_WIN, DUCK_HZ, 48000)) / ref))
+    const dc = duckingCheck(levels, duckSpeech)
+    console.log(`ducking: fala ${JSON.stringify(duckSpeech)}; ${JSON.stringify(dc)}`)
+    check(dc.speech.n > 100 && dc.speech.min >= -13 && dc.speech.max <= -11, `ducking: música durante a fala −12 dB ±1 (${dc.speech.n} janelas de 50 ms: ${dc.speech.min.toFixed(2)} a ${dc.speech.max.toFixed(2)} dB)`, failures)
+    check(dc.hold.n > 5 && dc.hold.min >= -13 && dc.hold.max <= -11, `ducking: pausa de ${dc.holdGapMs} ms (< hold de 300 ms) não solta (${dc.hold.n} janelas: ${dc.hold.min.toFixed(2)} a ${dc.hold.max.toFixed(2)} dB)`, failures)
+    check(dc.outside.n > 100 && dc.outside.min >= -0.5 && dc.outside.max <= 0.5, `ducking: fora da fala (longe das rampas) 0 dB ±0,5 (${dc.outside.n} janelas: ${dc.outside.min.toFixed(2)} a ${dc.outside.max.toFixed(2)} dB)`, failures)
+    check(dc.ramps.length === 4 && dc.ramps.every((x) => x.backstep <= 0.1 && x.span >= 6), `ducking: rampas monotônicas — ataque desce e soltura sobe (recuo máx. ${Math.max(0, ...dc.ramps.map((x) => x.backstep)).toFixed(3)} dB ≤ 0,1; variação ${dc.ramps.map((x) => x.span.toFixed(1)).join(' / ')} dB) ${JSON.stringify(dc.ramps)}`, failures)
+    const pl = r.duckingPreview?.levelsDb
+    let maxDiff = 0
+    const n = pl ? Math.min(pl.length, levels.length) : 0
+    // sem as pontas (priming do AAC da exportação), como em duckingCheck
+    const skip = Math.ceil((0.05 * 48000) / DUCK_HOP)
+    for (let i = skip; i < n - skip - DUCK_WIN / DUCK_HOP; i++) maxDiff = Math.max(maxDiff, Math.abs(pl![i] - (levels[i] + 20 * Math.log10(ref))))
+    check(!r.duckingPreview?.error && n > 900 && maxDiff <= 0.5, `ducking: preview (AudioClient, blocos de 100 ms) = exportação — nível da música por janela (dif. máx. ${maxDiff.toFixed(3)} dB em ${n} janelas) ${r.duckingPreview?.error ?? ''}`, failures)
   }
 
   // ---- reverso × ffmpeg -vf reverse ----

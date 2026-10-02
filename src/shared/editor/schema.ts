@@ -161,7 +161,16 @@ export const ProjectSchema: z.ZodType<Project> = z.object({
   assets: z.array(asset),
   tracks: z.array(track),
   markers: z.array(z.object({ id: z.string(), tUs: us, label: z.string(), color: z.string() })),
-  originSessionId: z.string().optional()
+  originSessionId: z.string().optional(),
+  audioMix: z
+    .object({
+      enabled: z.boolean(),
+      duckingDb: z.number().min(-60).max(0),
+      attackMs: z.number().int().min(0).max(5000),
+      releaseMs: z.number().int().min(0).max(10000),
+      holdMs: z.number().int().min(0).max(5000)
+    })
+    .optional()
 })
 
 /**

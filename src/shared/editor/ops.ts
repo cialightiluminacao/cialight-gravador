@@ -485,6 +485,14 @@ function finalize(d: Project): void {
   }
 }
 
+/** "Música", "Música 2"… (nome livre para uma faixa de música nova). */
+export function musicTrackName(p: Project): string {
+  if (!p.tracks.some((t) => t.name === 'Música')) return 'Música'
+  let n = 2
+  while (p.tracks.some((t) => t.name === `Música ${n}`)) n++
+  return `Música ${n}`
+}
+
 function defaultTrackName(p: Project, kind: TrackKind): string {
   const prefix = kind === 'video' ? 'Vídeo' : 'Áudio'
   let n = p.tracks.filter((t) => t.kind === kind && !isFxTrack(t)).length + 1
@@ -623,17 +631,19 @@ export function insertItems(p: Project, trackId: string, items: Item[], mode: In
 /**
  * Escolhe a faixa: explícita; com modo → primeira desbloqueada do tipo; sem modo → primeira livre (ou cria).
  * Faixas "Efeitos" não recebem mídia automaticamente (ela ficaria por cima dos efeitos das faixas de baixo).
+ * `music`: arquivo só de áudio (música) vai para as faixas de papel 'music' (ou cria "Música"); o som de um vídeo
+ * nunca vai para elas sozinho (o ducking abaixaria a voz do vídeo).
  */
-function pickTrack(p: Project, kind: TrackKind, explicitId: string | undefined, mode: InsertMode | undefined, s: Us, e: Us): { project: Project; trackId: string; mode: InsertMode } {
+function pickTrack(p: Project, kind: TrackKind, explicitId: string | undefined, mode: InsertMode | undefined, s: Us, e: Us, music = false): { project: Project; trackId: string; mode: InsertMode } {
   if (explicitId) {
     const t = mustTrack(p, explicitId)
     if (t.kind !== kind) throw new EditError('invalid', `Faixa ${t.name} não é de ${kind === 'video' ? 'vídeo' : 'áudio'}`)
     return { project: p, trackId: t.id, mode: mode ?? 'overwrite' }
   }
-  const candidates = p.tracks.filter((t) => t.kind === kind && !t.locked && !isFxTrack(t))
+  const candidates = p.tracks.filter((t) => t.kind === kind && !t.locked && !isFxTrack(t) && (kind !== 'audio' || (t.role === 'music') === music))
   const chosen = mode ? candidates[0] : candidates.find((t) => isFree(t, s, e))
   if (chosen) return { project: p, trackId: chosen.id, mode: mode ?? 'overwrite' }
-  const r = addTrack(p, kind)
+  const r = music ? addTrack(p, 'audio', undefined, musicTrackName(p), 'music') : addTrack(p, kind)
   return { project: r.project, trackId: r.trackId, mode: 'overwrite' }
 }
 
@@ -661,7 +671,7 @@ export function addMediaFromAsset(p: Project, assetId: string, atUs: Us, opts?: 
     const it = createMediaItem(asset, at, 'audio')
     // em modo insert o espaço já foi aberto em todas as faixas pela inserção do vídeo
     const mode = hasVideo && opts?.mode === 'insert' ? 'overwrite' : opts?.mode
-    const r = pickTrack(q, 'audio', opts?.audioTrackId, mode, at, end(it))
+    const r = pickTrack(q, 'audio', opts?.audioTrackId, mode, at, end(it), !hasVideo)
     q = insertItems(r.project, r.trackId, [it], r.mode)
     itemIds.push(it.id)
   }

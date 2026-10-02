@@ -52,4 +52,17 @@ describe('mediaUrlsFor', () => {
       expect(mediaUrlsFor(q, mode).a_dn).toEqual({ original: `${base('a_dn')}?v=original`, audio: { 'dn-sh': `${base('a_dn')}?v=audio&k=dn-sh&f=2n-ab` } })
     }
   })
+
+  it('fala (speech.json do ducking): URL do arquivo do projeto com a impressão da fonte (relido quando a mídia muda)', () => {
+    const q = project([
+      asset('a_sp', { speech: 'cache/a_sp.speech.json', source: { type: 'file', path: 'C:/v.m4a', size: 36, mtimeMs: 72 } }),
+      asset('a_ses', { speech: 'cache/a_ses.speech.json', source: { type: 'session', sessionId: 's1', stream: 'mic' } }),
+      asset('a_bad', { speech: '../fora.json' })
+    ])
+    const u = mediaUrlsFor(q, 'export')
+    expect(u.a_sp.speech).toBe('cialight-file://project/p-1/cache/a_sp.speech.json?f=10-20')
+    expect(u.a_ses.speech).toBe('cialight-file://project/p-1/cache/a_ses.speech.json')
+    expect(u.a_bad.speech).toBeUndefined()
+    expect(mediaUrlsFor(q, 'preview').a_sp.speech).toBe(u.a_sp.speech)
+  })
 })

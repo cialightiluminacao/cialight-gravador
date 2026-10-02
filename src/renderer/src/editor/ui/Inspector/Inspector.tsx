@@ -12,6 +12,7 @@ import { VideoPanel } from './VideoPanel'
 import { AudioPanel } from './AudioPanel'
 import { SpeedPanel } from './SpeedPanel'
 import { EffectPanel } from './EffectPanel'
+import { AudioMixPanel } from './AudioMixPanel'
 import { InspectorPlayback } from './KeyframeButton'
 import { ITEM_TYPE_LABEL, itemLabel } from '../itemLabel'
 
@@ -134,6 +135,7 @@ function ProjectPanel({ project }: { project: Project }): React.JSX.Element {
           <ColorInput label="Cor de fundo" value={c.background} onChange={(hex) => apply((p) => ({ ...p, canvas: { ...p.canvas, background: hex } }), { transient: true })} />
         </FieldRow>
       </PanelSection>
+      <AudioMixPanel project={project} />
       <PanelSection title="Resumo">
         <FieldRow label="Mídias">
           <span className="font-mono tnum text-[11px] text-fg-2">{project.assets.length}</span>

@@ -1,7 +1,8 @@
 // Plano de áudio: segmentos com envelope de ganho em tempo absoluto de timeline. Puro.
 import { evalAnim } from './anim'
 import { audioProcessKey, audioSourceKey, parseAudioProcessKey, type AudioProcessOpts } from './audioProcess'
-import type { Project, Us } from './project'
+import type { AudioMix, Project, Us } from './project'
+import type { SpeechInterval } from './speech'
 
 export interface GainPoint { tUs: Us; gain: number } // linear entre pontos
 /**
@@ -10,7 +11,10 @@ export interface GainPoint { tUs: Us; gain: number } // linear entre pontos
  */
 export type AudioMode = 'copy' | 'resample' | 'stretch' | 'mute'
 export interface AudioSegment {
-  itemId: string; assetId: string; startUs: Us; durationUs: Us; srcInUs: Us
+  itemId: string; assetId: string
+  /** Faixa do item (medidores de nível por faixa). */
+  trackId: string
+  startUs: Us; durationUs: Us; srcInUs: Us
   speed: number; reverse: boolean; preservePitch: boolean; mode: AudioMode; gain: GainPoint[]
   /** "Manter áudio acelerado" do item: acima de 4× continua soando (também no shuttle). */
   keepFastAudio: boolean
@@ -26,7 +30,19 @@ export interface AudioSegment {
 export interface PlanAudioOpts {
   /** Comparar A/B: lê o original mesmo com o processado pronto. */
   bypassProcessing?: boolean
+  /**
+   * Ducking: intervalos de fala (tempo da FONTE, speechFromFile) por assetId, carregados por quem chama (o audio
+   * worker lê os cache/<id>.speech.json pelo protocolo — o mesmo no preview e na exportação). Asset sem entrada = sem
+   * dados: aquele item de voz não abaixa a música. Ausente = sem ducking.
+   */
+  speech?: Readonly<Record<string, readonly SpeechInterval[]>>
 }
+
+/** Padrões da mixagem do projeto (Project.audioMix ausente). */
+export const AUDIO_MIX_DEFAULTS: AudioMix = { enabled: true, duckingDb: -12, attackMs: 250, releaseMs: 400, holdMs: 300 }
+export const audioMixOf = (p: Project): AudioMix => ({ ...AUDIO_MIX_DEFAULTS, ...p.audioMix })
+/** Rampas de ducking nunca menores que isto (degrau = clique). */
+const MIN_RAMP_US = 10_000
 
 /** O item pede pré-processamento que ainda não está pronto (o mixer toca o original enquanto isso). */
 export const audioProcessPending = (s: AudioSegment): boolean => s.processKey !== null && s.sourceKey === s.assetId
@@ -72,13 +88,131 @@ export function planAudio(p: Project, opts: PlanAudioOpts = {}): AudioSegment[] 
       const processKey = audioProcessKey({ denoise: a.denoise, normalize: a.normalize })
       const ready = processKey !== null && !opts.bypassProcessing && !!asset.processedAudio?.[processKey]
       out.push({
-        itemId: item.id, assetId: item.assetId, sourceKey: audioSourceKey(item.assetId, ready ? processKey : null), processKey, startUs: item.startUs, durationUs: dur, srcInUs: item.inUs,
+        itemId: item.id, assetId: item.assetId, trackId: track.id, sourceKey: audioSourceKey(item.assetId, ready ? processKey : null), processKey, startUs: item.startUs, durationUs: dur, srcInUs: item.inUs,
         speed: item.speed, reverse: item.reverse, preservePitch: a.preservePitch, keepFastAudio: a.keepFastAudio ?? false,
         mode: audioMode(item.speed, item.reverse, a.preservePitch, a.keepFastAudio ?? false), gain
       })
     }
   }
+  return opts.speech ? applyDucking(p, out, opts.speech) : out
+}
+
+/** Segmentos de voz que soam (faixa `voice`, não mudos pela velocidade): a fonte da fala do ducking. */
+function voiceSegments(p: Project, segs: AudioSegment[]): AudioSegment[] {
+  const voice = new Set(p.tracks.filter((t) => t.role === 'voice').map((t) => t.id))
+  return segs.filter((s) => voice.has(s.trackId) && s.mode !== 'mute')
+}
+
+/**
+ * Assets de voz cuja fala o ducking precisa (ducking ligado, alguma música no plano, voz audível com speech.json):
+ * o que o audio worker carrega antes de montar o plano.
+ */
+export function voiceAssetIds(p: Project): string[] {
+  if (!audioMixOf(p).enabled) return []
+  const segs = planAudio(p)
+  const music = new Set(p.tracks.filter((t) => t.role === 'music').map((t) => t.id))
+  if (!segs.some((s) => music.has(s.trackId))) return []
+  const out = new Set<string>()
+  for (const s of voiceSegments(p, segs)) if (p.assets.find((a) => a.id === s.assetId)?.speech) out.add(s.assetId)
+  return [...out]
+}
+
+/**
+ * Fala da fonte → timeline para um segmento: a fonte é lida em srcIn + local·speed (reverso: srcIn + (dur − local)·speed,
+ * a mesma conta do mixer), então local = (src − srcIn)/speed (reverso: dur − …). Preso ao trecho do item (trim).
+ */
+export function speechOnTimeline(seg: Pick<AudioSegment, 'startUs' | 'durationUs' | 'srcInUs' | 'speed' | 'reverse'>, speech: readonly SpeechInterval[]): SpeechInterval[] {
+  const out: SpeechInterval[] = []
+  const dur = seg.durationUs
+  for (const iv of speech) {
+    const a = (iv.fromUs - seg.srcInUs) / seg.speed
+    const b = (iv.toUs - seg.srcInUs) / seg.speed
+    const l0 = Math.max(0, seg.reverse ? dur - b : a)
+    const l1 = Math.min(dur, seg.reverse ? dur - a : b)
+    if (l1 > l0) out.push({ fromUs: seg.startUs + Math.round(l0), toUs: seg.startUs + Math.round(l1) })
+  }
   return out
+}
+
+/**
+ * Envelope de ducking (ganho linear em tempo de timeline) a partir dos intervalos de fala já na timeline. Regiões =
+ * fala + holdMs depois do fim; pausa menor que o hold (fala seguinte começando antes do fim do hold) emenda as regiões,
+ * sem "bombear". Cada região abaixa a `duckingDb` numa rampa de attackMs que TERMINA no início da fala (o plano
+ * conhece o futuro: a fala já começa com a música abaixada) e volta a 1 numa rampa de releaseMs depois do hold.
+ * Regiões vizinhas cujas rampas se cruzam (pausa entre hold e hold + ataque) valem pelo máximo do abaixamento, sem
+ * degrau. Primeiro e último pontos têm ganho 1; vazio = sem fala.
+ */
+export function duckEnvelope(speech: readonly SpeechInterval[], mix: AudioMix): GainPoint[] {
+  const A = Math.max(MIN_RAMP_US, Math.round(mix.attackMs * 1000))
+  const R = Math.max(MIN_RAMP_US, Math.round(mix.releaseMs * 1000))
+  const H = Math.max(0, Math.round(mix.holdMs * 1000))
+  const duck = Math.pow(10, Math.min(0, mix.duckingDb) / 20)
+  const sorted = speech.filter((s) => s.toUs > s.fromUs).sort((x, y) => x.fromUs - y.fromUs)
+  // regiões [a, e]: abaixadas por inteiro (fala + hold)
+  const regions: { a: Us; e: Us }[] = []
+  for (const s of sorted) {
+    const last = regions[regions.length - 1]
+    if (last && s.fromUs <= last.e) last.e = Math.max(last.e, s.toUs + H)
+    else regions.push({ a: s.fromUs, e: s.toUs + H })
+  }
+  if (!regions.length) return []
+  // abaixamento 0–1 de uma região (trapézio)
+  const trap = (r: { a: Us; e: Us }, t: Us): number => {
+    if (t <= r.a - A || t >= r.e + R) return 0
+    if (t < r.a) return (t - (r.a - A)) / A
+    if (t <= r.e) return 1
+    return 1 - (t - r.e) / R
+  }
+  const times: Us[] = []
+  regions.forEach((r, i) => {
+    times.push(r.a - A, r.a, r.e, r.e + R)
+    const n = regions[i + 1]
+    // soltura desta × ataque da seguinte: o cruzamento vira um ponto (o máximo dos dois é um "V" raso)
+    if (n && n.a - A < r.e + R) {
+      const s = n.a - A
+      const x = Math.round((A * R + A * r.e + s * R) / (A + R))
+      if (x > r.e && x < n.a) times.push(x)
+    }
+  })
+  times.sort((x, y) => x - y)
+  const out: GainPoint[] = []
+  let k = 0
+  for (const t of times) {
+    if (out.length && out[out.length - 1].tUs === t) continue
+    while (k < regions.length && regions[k].e + R <= t) k++ // regiões já soltas por inteiro antes de t
+    let d = 0
+    for (let j = Math.max(0, k - 1); j < regions.length && regions[j].a - A < t; j++) d = Math.max(d, trap(regions[j], t))
+    out.push({ tUs: t, gain: d === 0 ? 1 : 1 - d * (1 - duck) })
+  }
+  return out
+}
+
+/** Ganho de uma lista de pontos no instante t (preso às pontas). */
+function gainOf(points: GainPoint[], t: Us): number {
+  if (!points.length) return 1
+  if (t <= points[0].tUs) return points[0].gain
+  for (let i = 1; i < points.length; i++) {
+    if (t <= points[i].tUs) {
+      const a = points[i - 1], b = points[i]
+      return b.tUs === a.tUs ? b.gain : a.gain + ((b.gain - a.gain) * (t - a.tUs)) / (b.tUs - a.tUs)
+    }
+  }
+  return points[points.length - 1].gain
+}
+
+/** Envelope de ducking nas faixas de música pela fala das faixas de voz (puro: a fala chega como dado). */
+function applyDucking(p: Project, segs: AudioSegment[], speech: Readonly<Record<string, readonly SpeechInterval[]>>): AudioSegment[] {
+  const mix = audioMixOf(p)
+  if (!mix.enabled) return segs
+  const env = duckEnvelope(voiceSegments(p, segs).flatMap((s) => speechOnTimeline(s, speech[s.assetId] ?? [])), mix)
+  if (!env.length) return segs
+  const music = new Set(p.tracks.filter((t) => t.role === 'music').map((t) => t.id))
+  return segs.map((s) => {
+    const end = s.startUs + s.durationUs
+    if (!music.has(s.trackId) || env[0].tUs >= end || env[env.length - 1].tUs <= s.startUs) return s
+    const times = [...new Set([...s.gain.map((g) => g.tUs), ...env.map((g) => g.tUs), s.startUs, end])].filter((t) => t >= s.startUs && t <= end).sort((x, y) => x - y)
+    return { ...s, gain: times.map((t) => ({ tUs: t, gain: gainOf(s.gain, t) * gainOf(env, t) })) }
+  })
 }
 
 /**
@@ -86,9 +220,9 @@ export function planAudio(p: Project, opts: PlanAudioOpts = {}): AudioSegment[] 
  * diferente. O worker mantém vivas (e aquecidas) as fontes dos dois, então segurar/soltar o botão não decodifica
  * do zero.
  */
-export function abPlan(p: Project, bypass: boolean): { segments: AudioSegment[]; alternate: AudioSegment[] } {
-  const segments = planAudio(p, { bypassProcessing: bypass })
-  const other = planAudio(p, { bypassProcessing: !bypass })
+export function abPlan(p: Project, bypass: boolean, speech?: PlanAudioOpts['speech']): { segments: AudioSegment[]; alternate: AudioSegment[] } {
+  const segments = planAudio(p, { bypassProcessing: bypass, speech })
+  const other = planAudio(p, { bypassProcessing: !bypass, speech })
   return { segments, alternate: other.filter((s, i) => s.sourceKey !== segments[i]?.sourceKey) }
 }
 

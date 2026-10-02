@@ -32,7 +32,8 @@ export function nextShuttleRate(current: number | null, dir: 1 | -1): number {
 /** O shuttle toca som nesta taxa? (até 2× para frente) */
 export const shuttleHasAudio = (rate: number): boolean => rate > 0 && rate <= SHUTTLE_AUDIO_MAX_RATE
 
-interface Scheduled { atS: number; endS: number; l: number; r: number }
+interface Scheduled { atS: number; endS: number; l: number; r: number; tracks: Record<string, number> }
+const NO_TRACKS: Record<string, number> = {}
 /** Nó agendado: bloco da timeline em fromUs, tocando a partir de startS (tempo do AudioContext). */
 export interface ScheduledInfo { fromUs: Us; startS: number; offsetS: number }
 
@@ -101,13 +102,18 @@ export class PlaybackController {
     return this.us0 + Math.round(elapsedUs * this.playRate)
   }
 
-  /** Pico (0–1) por canal do bloco que está soando (VU); zeros fora da reprodução. */
+  /** Pico (0–1) por canal do bloco que está soando (VU master); zeros fora da reprodução. */
   get levels(): { l: number; r: number } {
-    if (!this.active || !this.ctx) return { l: 0, r: 0 }
-    const now = this.ctx.currentTime - this.latencyS()
-    while (this.scheduled.length && this.scheduled[0].endS <= now) this.scheduled.shift() // já tocados
-    const cur = this.scheduled[0]
-    return cur && cur.atS <= now ? { l: cur.l, r: cur.r } : { l: 0, r: 0 }
+    const cur = this.sounding()
+    return cur ? { l: cur.l, r: cur.r } : { l: 0, r: 0 }
+  }
+
+  /**
+   * Pico por faixa (trackId → 0–1+, depois do volume/ducking e antes do limitador) do bloco que está soando; faixa
+   * ausente = sem som. Vazio fora da reprodução. Não inclui o volume da prévia (como `levels`).
+   */
+  get trackLevels(): Readonly<Record<string, number>> {
+    return this.sounding()?.tracks ?? NO_TRACKS
   }
 
   /** Toca a `rate`× a partir do playhead (Espaço: 1×; shuttle: ±1, ±2, ±4, ±8). */
@@ -222,6 +228,15 @@ export class PlaybackController {
     return this.ctx
   }
 
+  /** Bloco agendado que está saindo no alto-falante agora (descarta os já tocados). */
+  private sounding(): Scheduled | null {
+    if (!this.active || !this.ctx) return null
+    const now = this.ctx.currentTime - this.latencyS()
+    while (this.scheduled.length && this.scheduled[0].endS <= now) this.scheduled.shift() // já tocados
+    const cur = this.scheduled[0]
+    return cur && cur.atS <= now ? cur : null
+  }
+
   private latencyS(): number {
     return this.ctx ? this.ctx.outputLatency || this.ctx.baseLatency || 0 : 0
   }
@@ -329,7 +344,7 @@ export class PlaybackController {
       this.nodes.delete(node)
     }
     this.nodes.add(node)
-    this.scheduled.push({ atS: at, endS: at + dur, l: pl, r: pr })
+    this.scheduled.push({ atS: at, endS: at + dur, l: pl, r: pr, tracks: b.tracks })
     this.scheduled.sort((x, y) => x.atS - y.atS)
   }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { FilmstripInfo, MediaItem } from '@shared/editor/project'
-import { filmstripSlots, sourceUsAt, waveColumns } from './itemMedia'
+import { filmstripSlots, sourceUsAt, waveColumns, waveGains } from './itemMedia'
 
 const S = 1_000_000
 const item = (over: Partial<MediaItem> = {}): MediaItem => ({ id: 'i', type: 'media', assetId: 'a', startUs: 10 * S, durationUs: 4 * S, inUs: 2 * S, speed: 1, reverse: false, audio: { enabled: true, volume: { value: 1 }, fadeInUs: 0, fadeOutUs: 0, preservePitch: true, denoise: false, normalize: false }, ...over })
@@ -50,5 +50,24 @@ describe('waveColumns', () => {
   it('fora da fonte dá silêncio', () => {
     const cols = waveColumns(new Int8Array(4).fill(100), item({ inUs: 0 }), 100, 50, 52)
     expect(Array.from(cols)).toEqual([0, 0, 0, 0])
+  })
+})
+
+describe('waveGains (forma de onda reflete o volume)', () => {
+  it('volume da faixa × volume do item (estático) em toda coluna', () => {
+    const g = waveGains(item({ audio: { ...item().audio, volume: { value: 0.5 } } }), 2, 100, 0, 4)
+    expect([...g]).toEqual([1, 1, 1, 1])
+  })
+  it('keyframes de volume: ganho no meio de cada coluna (tempo local do item)', () => {
+    // 100 px/s: coluna c cobre [c, c+1) × 10 ms; keys 0 s → 0, 1 s → 1 (linear)
+    const it = item({ audio: { ...item().audio, volume: { value: 1, keys: [{ tUs: 0, value: 0, ease: 'linear' }, { tUs: S, value: 1, ease: 'linear' }] } } })
+    const g = waveGains(it, 1, 100, 50, 3)
+    expect(g[0]).toBeCloseTo(0.505, 6)
+    expect(g[1]).toBeCloseTo(0.515, 6)
+    expect(waveGains(it, 1, 100, 200, 1)[0]).toBe(1)
+  })
+  it('áudio desligado: forma de onda apagada (15 %)', () => {
+    const g = waveGains(item({ audio: { ...item().audio, enabled: false } }), 1, 100, 0, 2)
+    expect(g[0]).toBeCloseTo(0.15, 6)
   })
 })

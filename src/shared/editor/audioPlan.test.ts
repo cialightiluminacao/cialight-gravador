@@ -91,7 +91,7 @@ describe('planAudio', () => {
 
 describe('shuttleSegments (J/K/L: áudio do preview em taxa ≠ 1)', () => {
   const seg = (over: Partial<AudioSegment> = {}): AudioSegment => ({
-    itemId: 'i', assetId: 'a1', sourceKey: 'a1', processKey: null, startUs: 3 * S, durationUs: 4 * S, srcInUs: S, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
+    itemId: 'i', assetId: 'a1', trackId: 't', sourceKey: 'a1', processKey: null, startUs: 3 * S, durationUs: 4 * S, srcInUs: S, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
     gain: [{ tUs: 3 * S, gain: 0 }, { tUs: 4 * S, gain: 1 }, { tUs: 7 * S, gain: 1 }], ...over
   })
   it('1× devolve os mesmos segmentos', () => {

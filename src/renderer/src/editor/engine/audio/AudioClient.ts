@@ -3,7 +3,8 @@ import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 import type { AudioIn, AudioOut } from './protocol'
 
-export interface AudioBlock { fromUs: Us; pcm: Float32Array }
+/** tracks: pico (0–1+) de cada faixa que soou no bloco (medidores). */
+export interface AudioBlock { fromUs: Us; pcm: Float32Array; tracks: Record<string, number> }
 
 export class AudioClient {
   private readonly worker: Worker
@@ -16,7 +17,7 @@ export class AudioClient {
     this.worker = new Worker(new URL('./audio.worker.ts', import.meta.url), { type: 'module' })
     this.worker.addEventListener('message', (e: MessageEvent<AudioOut>) => {
       const m = e.data
-      if (m.t === 'block') this.settle(m.seq, { fromUs: m.fromUs, pcm: m.pcm })
+      if (m.t === 'block') this.settle(m.seq, { fromUs: m.fromUs, pcm: m.pcm, tracks: m.tracks })
       else {
         if (m.seq !== undefined) this.settle(m.seq, null)
         for (const l of this.errorListeners) l(m.message, m.assetId)

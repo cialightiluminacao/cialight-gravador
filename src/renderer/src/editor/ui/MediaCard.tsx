@@ -1,13 +1,16 @@
-import { AlertTriangle, AudioLines, Film, Image as ImageIcon, Plus, SearchX } from 'lucide-react'
+import { toast } from 'sonner'
+import { AlertTriangle, AudioLines, Film, Image as ImageIcon, Pause, Play, Plus, SearchX } from 'lucide-react'
 import type { Asset, Us } from '@shared/editor/project'
 import type { IngestStep } from '@shared/ipc'
 import { Tip } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
 import type { IngestProgress } from '../state/editorStore'
 import { mediaUrl, projectFileUrl } from './mediaImport'
+import { toggleAudioPreview, useAudioPreview } from './audioPreview'
 
 // Cartão de mídia da biblioteca: miniatura (1º quadro do filmstrip), duração e estado da ingestão.
 // Arrastável para a linha do tempo (application/x-cialight-asset); duplo clique adiciona no playhead.
+// Áudio: botão de prévia (tocar/parar) no meio do cartão.
 
 export const ASSET_MIME = 'application/x-cialight-asset'
 
@@ -39,6 +42,30 @@ function Thumb({ projectId, asset }: { projectId: string; asset: Asset }): React
   return <Icon className={cn('h-6 w-6', asset.kind === 'audio' ? 'text-info/70' : 'text-muted-2')} />
 }
 
+/** Tocar/parar a prévia de um áudio da biblioteca (arquivo original, ou o intermediário se o original não decodifica). */
+function PreviewButton({ projectId, asset }: { projectId: string; asset: Asset }): React.JSX.Element {
+  const playing = useAudioPreview() === asset.id
+  const label = playing ? `Parar a prévia de ${asset.name}` : `Ouvir ${asset.name}`
+  return (
+    <Tip content={playing ? 'Parar a prévia' : 'Ouvir'}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={playing}
+        data-audio-preview={asset.id}
+        className={cn('absolute left-1/2 top-1/2 flex h-8 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full shadow-lg transition-colors', playing ? 'bg-accent text-white' : 'bg-black/60 text-white hover:bg-black/80')}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation()
+          toggleAudioPreview(asset.id, mediaUrl(projectId, asset.id, asset.intermediate ? 'intermediate' : 'original'), () => toast.error(`Não foi possível tocar “${asset.name}”`))
+        }}
+      >
+        {playing ? <Pause className="h-3.5 w-3.5 fill-current" /> : <Play className="ml-0.5 h-3.5 w-3.5 fill-current" />}
+      </button>
+    </Tip>
+  )
+}
+
 export function MediaCard({ projectId, asset, progress, onAdd, onRelink }: { projectId: string; asset: Asset; progress?: IngestProgress; onAdd: () => void; onRelink: () => void }): React.JSX.Element {
   const unusable = asset.status === 'error'
   return (
@@ -60,6 +87,7 @@ export function MediaCard({ projectId, asset, progress, onAdd, onRelink }: { pro
     >
       <div className={cn('relative flex aspect-video items-center justify-center overflow-hidden rounded-md border border-border', asset.kind === 'audio' ? 'bg-gradient-to-br from-info/10 to-bg-2' : 'bg-bg-2')}>
         <Thumb projectId={projectId} asset={asset} />
+        {asset.kind === 'audio' && asset.status === 'ready' ? <PreviewButton projectId={projectId} asset={asset} /> : null}
         {asset.durationUs !== null ? <span className="font-mono tnum absolute bottom-1 right-1 rounded bg-black/65 px-1 text-[9.5px] leading-4 text-white">{shortDuration(asset.durationUs)}</span> : null}
         {asset.status === 'processing' ? (
           <div className="absolute inset-x-0 bottom-0 bg-black/70 px-1.5 pb-1 pt-0.5">

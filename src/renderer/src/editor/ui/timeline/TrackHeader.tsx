@@ -1,16 +1,20 @@
 import { memo, useRef, useState } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
-import { ArrowDown, ArrowUp, AudioLines, Eye, EyeOff, Film, Lock, LockOpen, MoreVertical, SlidersHorizontal, Trash2, Volume2, VolumeX } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, AudioWaveform, Check, Eye, EyeOff, Film, Lock, LockOpen, Mic, MoreVertical, Music, SlidersHorizontal, Trash2, Volume2, VolumeX } from 'lucide-react'
 import { moveTrack, removeTrack, updateTrack } from '@shared/editor/ops'
 import type { Track } from '@shared/editor/project'
 import { Slider, Tip } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
+import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
+import { LevelMeter } from '../LevelMeter'
 import { HEADER_W } from './layout'
 
 // Cabeçalho da faixa: nome (duplo clique renomeia), ocultar (vídeo), mudo, cadeado, volume
-// (popover com slider, uma transação por arrasto) e menu (mover para cima/baixo, excluir).
+// (popover com slider, uma transação por arrasto) e menu (mover para cima/baixo, excluir). Faixa de áudio: o ícone
+// mostra e troca o papel (Voz / Música / Efeitos sonoros; a música abaixa sozinha sob a voz) e a borda direita tem
+// o medidor de nível da faixa.
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 const MENU_ITEM = 'flex cursor-pointer select-none items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] text-fg outline-none data-[highlighted]:bg-white/8 data-[disabled]:pointer-events-none data-[disabled]:opacity-40'
@@ -115,28 +119,85 @@ function VolumePopover({ track }: { track: Track }): React.JSX.Element {
   )
 }
 
-interface HeaderProps { track: Track; rowH: number; up: number | null; down: number | null }
+type AudioRole = 'voice' | 'music' | 'sfx'
+const ROLE_LABEL: Record<AudioRole, string> = { voice: 'Voz', music: 'Música', sfx: 'Efeitos sonoros' }
+const ROLE_ICON = { voice: Mic, music: Music, sfx: AudioWaveform } as const
+const ROLE_HINT: Record<AudioRole, string> = {
+  voice: 'A fala desta faixa abaixa a música.',
+  music: 'Abaixa sozinha quando há fala nas faixas de Voz.',
+  sfx: 'Não abaixa nem faz a música abaixar.'
+}
+
+/** Ícone do papel da faixa de áudio; clicar abre o seletor (Voz / Música / Efeitos sonoros). */
+function RoleMenu({ track }: { track: Track }): React.JSX.Element {
+  const role = track.role === 'voice' || track.role === 'music' || track.role === 'sfx' ? track.role : null
+  const Icon = role ? ROLE_ICON[role] : AudioLines
+  return (
+    <DropdownMenu.Root>
+      <Tip content={role ? `Papel da faixa: ${ROLE_LABEL[role]}` : 'Definir o papel da faixa (Voz, Música…)'}>
+        <DropdownMenu.Trigger asChild>
+          <button type="button" aria-label="Papel da faixa" data-track-role={role ?? 'none'} className="-ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded text-ok hover:bg-white/10">
+            <Icon className="h-3 w-3" />
+          </button>
+        </DropdownMenu.Trigger>
+      </Tip>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content side="right" align="start" sideOffset={6} className="z-50 w-[250px] rounded-xl border border-border-strong bg-surface-3 p-1 shadow-2xl animate-in fade-in-0 zoom-in-95">
+          <DropdownMenu.Label className="px-2.5 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-muted">Papel da faixa</DropdownMenu.Label>
+          <DropdownMenu.RadioGroup value={role ?? ''} onValueChange={(v) => st().apply((p) => updateTrack(p, track.id, { role: v as AudioRole }))}>
+            {(Object.keys(ROLE_LABEL) as AudioRole[]).map((r) => {
+              const RIcon = ROLE_ICON[r]
+              return (
+                <DropdownMenu.RadioItem key={r} value={r} className={cn(MENU_ITEM, 'items-start')}>
+                  <RIcon className="mt-0.5 h-4 w-4 shrink-0 text-muted" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block">{ROLE_LABEL[r]}</span>
+                    <span className="block text-[11px] leading-snug text-muted">{ROLE_HINT[r]}</span>
+                  </span>
+                  <DropdownMenu.ItemIndicator className="mt-0.5">
+                    <Check className="h-3.5 w-3.5 text-accent" />
+                  </DropdownMenu.ItemIndicator>
+                </DropdownMenu.RadioItem>
+              )
+            })}
+          </DropdownMenu.RadioGroup>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  )
+}
+
+interface HeaderProps { track: Track; rowH: number; up: number | null; down: number | null; playback: PlaybackController | null }
 
 /** Os itens mudam a cada evento de arraste; o cabeçalho só depende dos campos da própria faixa. */
 function sameHeader(a: HeaderProps, b: HeaderProps): boolean {
   const x = a.track, y = b.track
-  return a.rowH === b.rowH && a.up === b.up && a.down === b.down && x.id === y.id && x.name === y.name && x.muted === y.muted && x.hidden === y.hidden && x.locked === y.locked && x.volume === y.volume && x.items.length === y.items.length
+  return a.rowH === b.rowH && a.up === b.up && a.down === b.down && a.playback === b.playback && x.id === y.id && x.name === y.name && x.muted === y.muted && x.hidden === y.hidden && x.locked === y.locked && x.volume === y.volume && x.role === y.role && x.items.length === y.items.length
 }
 
 /** up/down: índice de destino no modelo para "mover para cima/baixo" (null = já na ponta). */
-export const TrackHeader = memo(function TrackHeader({ track, rowH, up, down }: HeaderProps): React.JSX.Element {
+export const TrackHeader = memo(function TrackHeader({ track, rowH, up, down, playback }: HeaderProps): React.JSX.Element {
   const set = (patch: Partial<Pick<Track, 'muted' | 'hidden' | 'locked'>>): void => void st().apply((p) => updateTrack(p, track.id, patch))
-  const KindIcon = track.kind === 'video' ? Film : AudioLines
+  const audio = track.kind === 'audio'
   return (
     <div
       data-track-header={track.id}
-      className={cn('flex shrink-0 flex-col justify-center gap-0.5 border-r border-border bg-surface px-2', track.locked && 'bg-[repeating-linear-gradient(135deg,rgba(255,255,255,0.025)_0_5px,transparent_5px_10px)]')}
+      className={cn('relative flex shrink-0 flex-col justify-center gap-0.5 border-r border-border bg-surface px-2', audio && 'pr-3', track.locked && 'bg-[repeating-linear-gradient(135deg,rgba(255,255,255,0.025)_0_5px,transparent_5px_10px)]')}
       style={{ width: HEADER_W, height: rowH }}
     >
       <div className="flex min-w-0 items-center gap-1.5">
-        <KindIcon className={cn('h-3 w-3 shrink-0', track.kind === 'video' ? 'text-info' : 'text-ok')} />
+        {audio ? <RoleMenu track={track} /> : <Film className="h-3 w-3 shrink-0 text-info" />}
         <TrackName track={track} />
       </div>
+      {audio ? (
+        <LevelMeter
+          bars={1}
+          vertical
+          label={`Nível da faixa ${track.name}`}
+          className="absolute bottom-1.5 right-1 top-1.5 w-[4px]"
+          read={() => [playback?.trackLevels[track.id] ?? 0]}
+        />
+      ) : null}
       <div className="flex items-center gap-0.5">
         {track.kind === 'video' ? (
           <IconToggle label={track.hidden ? 'Mostrar faixa' : 'Ocultar faixa'} active={track.hidden} warn onClick={() => set({ hidden: !track.hidden })}>

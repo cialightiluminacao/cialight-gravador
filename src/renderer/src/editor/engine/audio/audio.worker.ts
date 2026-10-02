@@ -10,8 +10,13 @@
 // Redução de ruído/normalização: cada segmento lê a fonte do seu sourceKey — o original do asset ou a versão
 // pré-processada em generated/ (arquivo só de áudio, faixa única); `bypassProcessing` (A/B) força o original. No
 // preview as fontes dos dois lados do A/B ficam vivas e aquecidas (segurar/soltar o botão não decodifica do zero).
+// Ducking: o plano (puro) recebe a fala das faixas de voz como dado — o worker lê os speech.json (mediaUrls.speech,
+// cache por URL) antes de montar o plano, e os pedidos de bloco esperam o plano pronto. Mesmo caminho no preview e
+// na exportação, então os dois abaixam a música igual. speech.json que não carrega = sem dados (aquela voz não abaixa).
+// Medidores: cada bloco devolve o pico por faixa (mixBlock), poucos números por bloco.
 import { splitAudioSourceKey } from '@shared/editor/audioProcess'
-import { abPlan, shuttleSegments, type AudioSegment } from '@shared/editor/audioPlan'
+import { abPlan, shuttleSegments, voiceAssetIds, type AudioSegment } from '@shared/editor/audioPlan'
+import { speechFromFile, type SpeechFile, type SpeechInterval } from '@shared/editor/speech'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 import { AssetPcm } from './assetPcm'
@@ -34,6 +39,11 @@ const sources = new Map<string, AssetPcm>()
 const stretch = new StretchBank((rate) => createStretcher(rate, 2))
 const queue: RenderMsg[] = []
 let busy = false
+// fala por URL do speech.json (falha não fica em cache: tenta de novo no próximo projeto)
+const speechCache = new Map<string, Promise<SpeechInterval[] | null>>()
+// plano com ducking em montagem (speech.json carregando); os blocos esperam
+let planReady: Promise<void> = Promise.resolve()
+let planGen = 0
 // muda a cada `cancel`: pedidos e aquecimentos de antes ficam obsoletos
 let epoch = 0
 
@@ -79,11 +89,21 @@ function enqueue(m: Extract<AudioIn, { t: 'render' }>, reply: RenderMsg['reply']
 }
 
 function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean, bypassProcessing: boolean): void {
-  const ab = abPlan(project, bypassProcessing)
-  segments = ab.segments
-  // exportação (sem proxy) não compara: só o plano tocado
-  alternate = useProxy ? ab.alternate.filter((s) => s.mode !== 'mute') : []
-  shuttle = new Map()
+  const gen = ++planGen
+  const use = (ab: ReturnType<typeof abPlan>): void => {
+    segments = ab.segments
+    // exportação (sem proxy) não compara: só o plano tocado
+    alternate = useProxy ? ab.alternate.filter((s) => s.mode !== 'mute') : []
+    shuttle = new Map()
+  }
+  // as fontes não dependem do ducking (só o ganho muda): o plano sem fala já define o que decodificar
+  use(abPlan(project, bypassProcessing))
+  const voice = voiceAssetIds(project).filter((id) => mediaUrls[id]?.speech)
+  planReady = voice.length
+    ? loadSpeech(voice, mediaUrls).then((speech) => {
+        if (gen === planGen) use(abPlan(project, bypassProcessing, speech))
+      })
+    : Promise.resolve()
   stretch.retain(new Set(segments.filter((s) => s.mode === 'stretch').map((s) => s.itemId)))
   const used = new Set([...segments.filter((s) => s.mode !== 'mute'), ...alternate].map((s) => s.sourceKey))
   for (const [key, src] of sources) {
@@ -120,10 +140,41 @@ function sourceFor(project: Project, sourceKey: string, mediaUrls: MediaUrls, us
   return { url: u.original, trackIndex: multi ? asset.audioTrackIndex! : null }
 }
 
+/** Intervalos de fala dos assets (speech.json pela URL do protocolo), por assetId; o que não carregar fica de fora. */
+async function loadSpeech(assetIds: string[], mediaUrls: MediaUrls): Promise<Record<string, SpeechInterval[]>> {
+  const out: Record<string, SpeechInterval[]> = {}
+  await Promise.all(
+    assetIds.map(async (id) => {
+      const url = mediaUrls[id]!.speech!
+      let p = speechCache.get(url)
+      if (!p) {
+        p = fetch(url, { cache: 'no-store' })
+          .then(async (r) => (r.ok ? speechFromFile((await r.json()) as SpeechFile) : null))
+          .catch(() => null)
+        speechCache.set(url, p)
+      }
+      const iv = await p
+      if (iv) out[id] = iv
+      else if (speechCache.get(url) === p) speechCache.delete(url)
+    })
+  )
+  return out
+}
+
+/** Espera o plano mais recente (um projeto novo durante a espera troca a promessa). */
+async function planSettled(): Promise<void> {
+  let p: Promise<void>
+  do {
+    p = planReady
+    await p
+  } while (p !== planReady)
+}
+
 async function pump(): Promise<void> {
   busy = true
   try {
     while (queue.length) {
+      await planSettled()
       const m = queue.shift()!
       const e0 = epoch
       const stale = (): boolean => epoch !== e0
@@ -137,8 +188,9 @@ async function pump(): Promise<void> {
         stretch.pin(new Set(segs.filter((s) => s.mode === 'stretch' && s.startUs < blockEnd && s.startUs + s.durationUs > fromUs).map((s) => s.itemId)))
         await prepare(segs, fromUs, m.frames, stale)
         if (stale()) continue // cancelado durante a decodificação: o cliente já descartou
-        const pcm = mixBlock(segs, fromUs, m.frames, sources as Map<string, PcmSource>)
-        m.reply({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm }, [pcm.buffer])
+        const peaks = new Map<string, number>()
+        const pcm = mixBlock(segs, fromUs, m.frames, sources as Map<string, PcmSource>, peaks)
+        m.reply({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm, tracks: Object.fromEntries(peaks) }, [pcm.buffer])
         void prepare(segs, blockEnd, Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
         // A/B: o outro lado também fica decodificado (bloco + aquecimento), para segurar/soltar não começar do zero
         if (rate === 1 && alternate.length) void warm(alternate, fromUs, m.frames + Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
