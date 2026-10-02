@@ -10,7 +10,8 @@
 // quadro), em `releaseAll` (pausa/ociosidade) e ao descartar a entrada.
 // As ImageBitmap de `image()` pertencem ao pool (o chamador NÃO as fecha); as substituídas em
 // `setSources` só são fechadas em `flushRetired()`, chamado quando nenhum render as usa.
-// Reverso (reprodução com o tempo da fonte voltando: item reverso, shuttle para trás): em vez de um seek por quadro
+// Reverso (reprodução com o tempo da fonte voltando: item reverso, shuttle para trás — dois passos seguidos para
+// trás; o primeiro vai por seek simples, sem bloco nem pré-busca): em vez de um seek por quadro
 // (decodificar do keyframe até ali a cada quadro), a entrada decodifica em bloco os últimos quadros antes do alvo
 // (`samples(início, fim)`, do keyframe em diante), guarda o bloco e serve os quadros dele em ordem decrescente; o
 // bloco anterior é pré-buscado assim que o atual entra em uso. Os quadros do bloco são copiados (`detach`) para fora
@@ -19,7 +20,9 @@
 // de reserva). Tamanho do bloco: o que cabe em REV_BUDGET_BYTES (entre REV_MIN_FRAMES e REV_MAX_FRAMES); no máximo
 // 2 blocos vivos por entrada (atual + anterior).
 // Passos grandes para trás (shuttle −4×/−8×, render atrasado): o bloco guarda um quadro a cada meio passo em vez de
-// todos (o mesmo trecho decodificado serve ~2·n pedidos; o quadro mostrado fica a menos de meio passo do exato).
+// todos (o mesmo trecho decodificado serve ~2·n pedidos; o quadro mostrado fica a menos de meio passo do exato). O
+// espaçamento é decidido por bloco pelo passo atual (um bloco esparso não serve a passos pequenos), e nenhum bloco
+// passa de n quadros (fonte VFR mais densa que a taxa média: os mais antigos saem).
 // Salto (passo > REV_JUMP_S, não é reprodução contínua): seek simples.
 // Se o decoder de uma entrada saudável falhar (ex.: recuperado pelo Chromium), ela é recriada uma vez.
 // Abertura que falhou (arquivo preso por outro programa, ausente…) vira placeholder e é tentada de novo
@@ -42,6 +45,11 @@ const REV_END_PAD_S = 1e-4
 const REV_JUMP_S = 2
 // passos até 4 quadros: bloco denso (todos os quadros); acima, um quadro a cada meio passo
 const REV_DENSE_STEPS = 4
+// folga para reaproveitar um bloco mais esparso que o passo atual pede (ver usable)
+const REV_STRIDE_SLACK = 3
+// trecho máximo da fonte que um bloco esparso cobre: passo grande × n quadros decodificaria quase o arquivo todo
+// (lento → passo maior → bloco maior); com o teto o custo fica perto do de um seek
+const REV_SPARSE_SPAN_S = 1.5
 
 interface Opened {
   input: Input
@@ -53,13 +61,14 @@ interface Opened {
 
 /**
  * Bloco do reverso: quadros em ordem crescente que cobrem [frames[0].timestamp, endS); atStart = vai até o 1º quadro;
- * stride = espaçamento dos quadros guardados (a duração de um quadro no bloco denso).
+ * stride = espaçamento dos quadros guardados (frameS, a duração média de um quadro, no bloco denso).
  */
 interface RevBlock {
   frames: VideoSample[]
   endS: number
   atStart: boolean
   stride: number
+  frameS: number
 }
 
 interface Entry {
@@ -79,6 +88,9 @@ interface Entry {
   revGen: number
   /** Último alvo pedido (s): alvo menor que ele = reprodução para trás. */
   lastT: number | null
+  /** Passos sequenciais seguidos para trás e o tamanho do último (s). */
+  backSteps: number
+  lastStep: number
   lock: Promise<unknown>
   busy: number // contado desde a aquisição (inclui a espera de `opened`): não é despejada
   lastUsed: number
@@ -143,14 +155,21 @@ export class DecoderPool {
           const step = e.lastT !== null ? e.lastT - t : 0
           const back = sequential && step > EPS_S
           e.lastT = t
-          if (sequential && (back || (e.rev && covers(e.rev, t)))) {
-            // reverso: quadro do bloco em cache sem esperar a fila da entrada (a pré-busca pode estar rodando nela)
-            const hit = e.rev && covers(e.rev, t) ? pick(e.rev, t) : null
-            if (hit) {
-              this.prefetchPrev(e, o)
-              return hit.clone()
+          e.backSteps = back ? e.backSteps + 1 : 0
+          if (back) e.lastStep = step
+          if (sequential) {
+            // quadro do bloco do reverso em cache, sem esperar a fila da entrada (a pré-busca pode estar rodando nela)
+            const rev = e.rev
+            if (rev && usable(rev, t, back ? step : 0)) {
+              if (back) this.prefetchPrev(e, o)
+              return pick(rev, t)!.clone()
             }
-            return await this.run(e, (oo) => this.reverse(e, oo, t, step))
+            // 2º passo seguido para trás: reverso em bloco; o 1º (pode ser só um ajuste) vai por seek simples
+            if (back && e.backSteps >= 2) return await this.run(e, (oo) => this.reverse(e, oo, t, step))
+            if (back) return await this.run(e, (oo) => {
+              closeIter(e)
+              return this.seek(oo, t)
+            })
           }
           return await this.run(e, (oo) => {
             if (sequential) return this.sequential(e, oo, t)
@@ -242,7 +261,7 @@ export class DecoderPool {
       const trackIndex = this.trackIdx[assetId] ?? null
       e = {
         assetId, url, trackIndex, opened: this.openFn(url, trackIndex), openFailedAt: null, it: null, held: null, ahead: null, done: false,
-        rev: null, revPrev: null, revGen: 0, lastT: null, lock: Promise.resolve(), busy: 0, lastUsed: 0
+        rev: null, revPrev: null, revGen: 0, lastT: null, backSteps: 0, lastStep: 0, lock: Promise.resolve(), busy: 0, lastUsed: 0
       }
       e.opened.catch(() => {}) // falha tratada em frameAt/prefetch
       this.entries.set(key, e)
@@ -296,16 +315,16 @@ export class DecoderPool {
     if (e.revPrev) {
       const prev = await e.revPrev
       e.revPrev = null
-      if (prev && covers(prev, t)) {
+      if (prev && usable(prev, t, step)) {
         closeBlock(e.rev)
         e.rev = prev
       } else closeBlock(prev)
     }
-    if (!e.rev || !covers(e.rev, t)) {
+    if (!e.rev || !usable(e.rev, t, step)) {
       closeBlock(e.rev)
       e.rev = null
       const { frameS } = await blockShape(o)
-      e.rev = await this.decodeBlock(o, t + REV_END_PAD_S, step <= REV_DENSE_STEPS * frameS ? frameS : step / 2)
+      e.rev = await this.decodeBlock(o, t + REV_END_PAD_S, strideFor(step, frameS))
     }
     const hit = pick(e.rev, t)
     if (!hit) return this.seek(o, t) // bloco vazio (fora do arquivo): o quadro mais próximo
@@ -318,10 +337,13 @@ export class DecoderPool {
    * duração do quadro) ou, esparso, o último quadro ≤ cada alvo endS − k·stride.
    */
   private async decodeBlock(o: Opened, endS: number, stride: number): Promise<RevBlock> {
-    const { n, frameS } = await blockShape(o)
+    const shape = await blockShape(o)
+    const frameS = shape.frameS
     const dense = stride <= frameS + EPS_S
+    const n = dense ? shape.n : Math.min(shape.n, Math.max(2, Math.floor(REV_SPARSE_SPAN_S / stride) + 1))
     const startS = Math.max(o.firstS, endS - (dense ? n * frameS : (n - 1) * stride + frameS))
     const frames: VideoSample[] = []
+    let dropped = false
     // esparso: guarda p se há um alvo T = endS − k·stride em [p, próximo quadro) — em µs inteiros (sem deriva)
     const endUs = Math.round(endS * 1e6)
     const strideUs = Math.max(1, Math.round(stride * 1e6))
@@ -330,6 +352,21 @@ export class DecoderPool {
       const k = Math.floor((endUs - Math.round(p.timestamp * 1e6)) / strideUs)
       return endUs - k * strideUs < Math.round(next.timestamp * 1e6)
     }
+    // guarda a cópia; nunca mais que n (os mais antigos saem). Se a cópia falhar, o quadro original é fechado aqui.
+    const push = async (p: VideoSample): Promise<void> => {
+      let copy: VideoSample
+      try {
+        copy = await this.detach(p)
+      } catch (err) {
+        p.close()
+        throw err
+      }
+      frames.push(copy)
+      if (frames.length > n) {
+        frames.shift()!.close()
+        dropped = true
+      }
+    }
     let pending: VideoSample | null = null
     try {
       for await (const s of o.sink.samples(startS, endS)) {
@@ -337,20 +374,22 @@ export class DecoderPool {
           s.close()
           break
         }
-        if (pending) {
-          if (keep(pending, s)) frames.push(await this.detach(pending))
-          else pending.close()
+        const prev = pending
+        pending = s // antes da cópia de prev: se ela falhar, o catch fecha este
+        if (prev) {
+          if (keep(prev, s)) await push(prev)
+          else prev.close()
         }
-        pending = s
       }
-      if (pending) frames.push(await this.detach(pending))
+      const last = pending
       pending = null
+      if (last) await push(last)
     } catch (err) {
       pending?.close()
       for (const f of frames) f.close()
       throw err
     }
-    return { frames, endS, atStart: startS <= o.firstS + EPS_S, stride }
+    return { frames, endS, atStart: !dropped && startS <= o.firstS + EPS_S, stride, frameS }
   }
 
   /** Pré-busca (na fila da entrada) o bloco imediatamente anterior ao atual; descartada se o reverso for abandonado. */
@@ -359,7 +398,9 @@ export class DecoderPool {
     if (!cur || e.revPrev || cur.atStart || cur.frames.length === 0) return
     const gen = e.revGen
     const endS = cur.frames[0].timestamp
-    e.revPrev = this.run(e, () => this.decodeBlock(o, endS, cur.stride))
+    // espaçamento pelo passo atual (não herdado do bloco atual)
+    const stride = strideFor(e.lastStep, cur.frameS)
+    e.revPrev = this.run(e, () => this.decodeBlock(o, endS, stride))
       .then((blk) => {
         if (gen === e.revGen) return blk
         closeBlock(blk)
@@ -488,6 +529,22 @@ export async function applySourceColorRule(track: Pick<InputVideoTrack, 'getColo
 async function blockShape(o: Opened): Promise<{ n: number; frameS: number }> {
   const { frameS, frameBytes } = await o.meta()
   return { n: Math.min(REV_MAX_FRAMES, Math.max(REV_MIN_FRAMES, Math.floor(REV_BUDGET_BYTES / Math.max(1, frameBytes)))), frameS }
+}
+
+/** Espaçamento do bloco para o passo para trás `step`: denso (todos os quadros) até REV_DENSE_STEPS quadros, senão meio passo. */
+function strideFor(step: number, frameS: number): number {
+  return step <= REV_DENSE_STEPS * frameS ? frameS : step / 2
+}
+
+/**
+ * O bloco serve ao pedido t com este passo? Cobre t e não é esparso demais: até REV_STRIDE_SLACK× o espaçamento que
+ * o passo pede. A folga absorve a variação do passo no shuttle rápido (−8× a 60 Hz anda ~4 quadros por pedido,
+ * bem na fronteira denso/esparso: sem folga a pré-busca era recusada e cada pedido decodificava duas vezes); passos
+ * de volta a ~1 quadro recusam bloco com mais de 3 quadros entre os guardados. O quadro mostrado continua a menos de
+ * meio passo do maior passo recente (o espaçamento de um bloco é sempre metade de um passo pedido).
+ */
+function usable(b: RevBlock, t: number, step: number): boolean {
+  return covers(b, t) && b.stride <= REV_STRIDE_SLACK * strideFor(step, b.frameS) + EPS_S
 }
 
 /** O bloco cobre t? (antes do 1º quadro do arquivo, o bloco do início cobre: devolve o 1º quadro) */

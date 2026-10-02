@@ -15,6 +15,7 @@ import { useEditorStore } from '../state/editorStore'
 // e a taxa do relógio. O main valida (editorTestMode.ts).
 
 export const SPEED_PROJECT_ID = 'p-editor-speed-test'
+export const SPEED_SD_PROJECT_ID = 'p-editor-speed-sd-test'
 const W = 1920
 const H = 1080
 const FPS = 30
@@ -28,8 +29,16 @@ export interface SpeedRun {
   wrong: number
   /** maior distância (em quadros) entre o quadro na tela e o esperado */
   maxError: number
+  /** leituras com o quadro da fonte na tela depois do esperado (o pool só devolve quadro ≤ alvo; o esparso fica antes) */
+  ahead: number
+  /** maior passo entre quadros renderizados seguidos, em quadros da fonte (o bloco esparso guarda um a cada meio passo) */
+  maxStepFrames: number
+  /** tempo de render no worker por quadro (ms): mediana e máximo na janela medida */
+  renderMs: { median: number; max: number }
   /** pares consecutivos fora do sentido esperado (marcador andando ao contrário) */
   wrongDirection: number
+  /** maior recuo (em quadros) entre leituras seguidas fora do sentido esperado */
+  maxBacktrack: number
   firstMarker: number | null
   lastMarker: number | null
   meanLagUs: number
@@ -50,7 +59,9 @@ export interface SpeedReport {
    * Quadro servido pelo bloco do reverso (cópia na GPU) × o mesmo quadro da fonte por seek no item normal: maior
    * diferença por canal no miolo da imagem (a cópia não pode mudar cor nem geometria).
    */
-  parity?: { maxDiff: number; meanDiff: number; markers: number[]; error?: string }
+  parity?: { maxDiff: number; meanDiff: number; neighborMeanDiff: number; markers: number[]; error?: string }
+  /** a mesma paridade numa fonte SD 640×480 sem marcação de cor (o decoder recebe BT.601 pela regra única) */
+  paritySd?: SpeedReport['parity']
   /** bloco de 0,5 s mixado a 2× pelo audio worker: frequência dominante (1 kHz esticado; reamostrado daria 2 kHz) */
   pcm2x?: { hz: number; rms: number; error?: string }
 }
@@ -77,7 +88,7 @@ function expectedFrame(p: Project, tUs: number): number {
 }
 
 async function run(client: RenderClient, audio: AudioClient, p: Project, startUs: number, dir: 1 | -1, start: (ctl: PlaybackController) => Promise<void>, measureMs: number): Promise<SpeedRun> {
-  const out: SpeedRun = { frames: 0, samples: 0, wrong: 0, maxError: 0, wrongDirection: 0, firstMarker: null, lastMarker: null, meanLagUs: 0, maxLagUs: 0, ratio: 0, peak: 0, mismatches: [] }
+  const out: SpeedRun = { frames: 0, samples: 0, wrong: 0, maxError: 0, ahead: 0, maxStepFrames: 0, renderMs: { median: 0, max: 0 }, maxBacktrack: 0, wrongDirection: 0, firstMarker: null, lastMarker: null, meanLagUs: 0, maxLagUs: 0, ratio: 0, peak: 0, mismatches: [] }
   const urls = mediaUrlsFor(p, 'preview')
   useEditorStore.getState().open(p)
   client.setProject(p, urls, true)
@@ -88,13 +99,16 @@ async function run(client: RenderClient, audio: AudioClient, p: Project, startUs
   let measuring = false
   let last: number | null = null
   const lags: number[] = []
+  const renderMs: number[] = []
   const off = client.onMessage((m) => {
     if (m.t !== 'rendered') return
+    if (last !== null && ctl.playing) out.maxStepFrames = Math.max(out.maxStepFrames, Math.ceil((Math.abs(m.tUs - last) * FPS) / 1e6))
     last = m.tUs
     const c = ctl.clockUs
     if (!measuring || c === null || !ctl.playing) return
     out.frames++
     lags.push(Math.abs(c - m.tUs))
+    renderMs.push(m.ms)
   })
   const vu = setInterval(() => {
     const lv = ctl.levels
@@ -117,11 +131,15 @@ async function run(client: RenderClient, audio: AudioClient, p: Project, startUs
         const expected = expectedFrame(p, last)
         out.samples++
         out.maxError = Math.max(out.maxError, Math.abs(marker - expected))
+        if (marker > expected) out.ahead++ // quadro da fonte depois do alvo: o pool só pode devolver quadro ≤ alvo
         if (marker !== expected) {
           out.wrong++
           if (out.mismatches.length < 8) out.mismatches.push({ tUs: last, marker, expected })
         }
-        if (prev !== null && marker !== prev && Math.sign(marker - prev) !== dir) out.wrongDirection++
+        if (prev !== null && marker !== prev && Math.sign(marker - prev) !== dir) {
+          out.wrongDirection++
+          out.maxBacktrack = Math.max(out.maxBacktrack, Math.abs(marker - prev))
+        }
         out.firstMarker ??= marker
         out.lastMarker = marker
         prev = marker
@@ -134,6 +152,8 @@ async function run(client: RenderClient, audio: AudioClient, p: Project, startUs
     out.ratio = Math.round(((c1 - c0) / ((w1 - w0) * 1000)) * 1000) / 1000
     out.meanLagUs = lags.length ? Math.round(lags.reduce((s, v) => s + v, 0) / lags.length) : -1
     out.maxLagUs = lags.length ? Math.max(...lags) : -1
+    const sorted = [...renderMs].sort((a, b) => a - b)
+    out.renderMs = { median: Math.round(sorted[sorted.length >> 1] ?? -1), max: Math.round(sorted[sorted.length - 1] ?? -1) }
   } catch (e) {
     out.error = e instanceof Error ? e.message : String(e)
   } finally {
@@ -170,7 +190,9 @@ export async function speedCheck(): Promise<SpeedReport> {
     // J J J J: −8× (bloco esparso: um quadro a cada meio passo, a menos de meio passo do exato)
     report.shuttleBack8x = await run(client, audio, base, 7_950_000, -1, async (ctl) => { for (let i = 0; i < 4; i++) await ctl.shuttle(-1) }, 600)
     report.pcm2x = await pcm2x(audio, base)
-    report.parity = await parity(client, base, reversed)
+    report.parity = await parity(client, base, reversed, true)
+    const sd = await window.api.project.load(SPEED_SD_PROJECT_ID)
+    report.paritySd = await parity(client, sd, setReverse(sd, [sd.tracks[0].items[0].id], true), false)
   } catch (e) {
     report.error = e instanceof Error ? (e.stack ?? e.message) : String(e)
   } finally {
@@ -182,39 +204,49 @@ export async function speedCheck(): Promise<SpeedReport> {
   return report
 }
 
-/** Pede quadros sequenciais do item reverso (fonte voltando: bloco do reverso) e compara com o seek no item normal. */
-async function parity(client: RenderClient, base: Project, reversed: Project): Promise<SpeedReport['parity']> {
+/** Maior diferença por canal e média no miolo da imagem (passo 2). */
+function diff(a: Uint8Array, b: Uint8Array): { max: number; mean: number } {
+  let max = 0
+  let sum = 0
+  let n = 0
+  for (let y = 120; y < H - 40; y += 2) {
+    for (let x = 40; x < W - 40; x += 2) {
+      const i = (y * W + x) * 4
+      for (let c = 0; c < 3; c++) {
+        const d = Math.abs(a[i + c] - b[i + c])
+        max = Math.max(max, d)
+        sum += d
+        n++
+      }
+    }
+  }
+  return { max, mean: Math.round((sum / n) * 1000) / 1000 }
+}
+
+/**
+ * Pede quadros sequenciais do item reverso (fonte voltando: do 3º pedido em diante, bloco do reverso com a cópia na
+ * GPU) e compara com o seek do mesmo quadro no item normal; e com o quadro vizinho (a medida distingue quadros).
+ */
+async function parity(client: RenderClient, base: Project, reversed: Project, withMarkers: boolean): Promise<SpeedReport['parity']> {
   try {
     const urls = mediaUrlsFor(base, 'preview')
     client.setProject(reversed, urls, true)
-    // item reverso de 8 s: em 3,0 s mostra a fonte em 5,0 − 1 quadro; quadros seguidos voltam na fonte
-    const ts = [3_000_000, 3_033_333, 3_066_667, 3_100_000]
+    // item reverso: quadros seguidos voltam na fonte
+    const ts = [2_900_000, 2_933_333, 2_966_667, 3_000_000, 3_033_333, 3_066_667, 3_100_000]
     for (const t of ts) await client.requestFrame(t, true)
     const rev = await client.readPixels(0, 0, W, H)
-    const markers = [decodeMarker(rev.subarray(40 * W * 4, 41 * W * 4))]
     const item = reversed.tracks[0].items[0] as MediaItem
     const srcUs = sourceTimeUs(item, reversed.assets[0], ts[ts.length - 1])
     client.setProject(base, urls, true)
     await client.requestFrame(srcUs, false)
     const fwd = await client.readPixels(0, 0, W, H)
-    markers.push(decodeMarker(fwd.subarray(40 * W * 4, 41 * W * 4)))
-    let maxDiff = 0
-    let sum = 0
-    let n = 0
-    for (let y = 120; y < H - 40; y += 2) {
-      for (let x = 40; x < W - 40; x += 2) {
-        const i = (y * W + x) * 4
-        for (let c = 0; c < 3; c++) {
-          const d = Math.abs(rev[i + c] - fwd[i + c])
-          maxDiff = Math.max(maxDiff, d)
-          sum += d
-          n++
-        }
-      }
-    }
-    return { maxDiff, meanDiff: Math.round((sum / n) * 1000) / 1000, markers }
+    await client.requestFrame(srcUs - 33_334, false)
+    const prev = await client.readPixels(0, 0, W, H)
+    const d = diff(rev, fwd)
+    const markers = withMarkers ? [rev, fwd].map((px) => decodeMarker(px.subarray(40 * W * 4, 41 * W * 4))) : []
+    return { maxDiff: d.max, meanDiff: d.mean, neighborMeanDiff: diff(rev, prev).mean, markers }
   } catch (e) {
-    return { maxDiff: -1, meanDiff: -1, markers: [], error: e instanceof Error ? e.message : String(e) }
+    return { maxDiff: -1, meanDiff: -1, neighborMeanDiff: -1, markers: [], error: e instanceof Error ? e.message : String(e) }
   }
 }
 

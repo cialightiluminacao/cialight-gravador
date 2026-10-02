@@ -4,7 +4,7 @@ import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
 import { visualTrackBelow } from './resolve'
 
-export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget'
+export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget' | 'unlinkedOverEdited'
 /** `tUs`: instante (absoluto, dentro do intervalo) que "Revisar" mostra — o mais fraco, o início da sobreposição… */
 export interface PrivacyWarning { itemId: string; kind: PrivacyWarningKind; message: string; tUs: Us }
 
@@ -24,7 +24,8 @@ const MSG = {
   weakPixelate: `Pixelado fraco pode ser revertido; use intensidade ≥ ${WEAK_PIXELATE} ou Tarja`,
   disabled: 'Efeito de privacidade desativado neste trecho: o conteúdo aparece sem proteção',
   covered: 'Há mídia acima deste efeito; ela não será borrada',
-  noTarget: "Efeito 'só a faixa abaixo' sem mídia embaixo neste trecho"
+  noTarget: "Efeito 'só a faixa abaixo' sem mídia embaixo neste trecho",
+  unlinkedOverEdited: 'Efeito não vinculado sobre um trecho invertido — confira se ainda cobre o conteúdo'
 } as const
 
 /**
@@ -135,6 +136,17 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
         const gap = noTargetAt(p, it, track.id, from, Math.min(e, hi))
         if (gap !== null) out.push({ itemId: it.id, kind: 'noTarget', message: MSG.noTarget, tUs: gap })
       }
+      // clipe invertido sob um efeito que não é dele: o efeito não acompanha o conteúdo espelhado
+      let rev: Us | null = null
+      for (const t of p.tracks) {
+        if (t.kind !== 'video' || t.hidden) continue
+        for (const m of t.items) {
+          if (m.type !== 'media' || !m.reverse || m.freeze || m.enabled === false || (it.linkId && m.linkId === it.linkId)) continue
+          const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
+          if (a < b) rev = rev === null ? a : Math.min(rev, a)
+        }
+      }
+      if (rev !== null) out.push({ itemId: it.id, kind: 'unlinkedOverEdited', message: MSG.unlinkedOverEdited, tUs: rev })
     }
   })
   return out

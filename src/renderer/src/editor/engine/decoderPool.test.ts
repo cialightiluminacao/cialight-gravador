@@ -91,7 +91,8 @@ describe('DecoderPool: reverso eficiente (bloco do GOP decodificado para trás, 
     const pool = new DecoderPool(8, { open: v.open, detach: ident })
     pool.setSources({ a: 'x' })
     ;(await pool.frameAt('a', 3_000_000, false))!.close() // seek (pausado)
-    ;(await pool.frameAt('a', 2_966_667, true))!.close() // 1º pedido para trás
+    ;(await pool.frameAt('a', 2_966_667, true))!.close() // 1º pedido para trás: seek
+    ;(await pool.frameAt('a', 2_933_334, true))!.close() // 2º: bloco
     await new Promise((r) => setTimeout(r, 0))
     expect(v.stats.blocks).toBe(2)
   })
@@ -132,9 +133,10 @@ describe('DecoderPool: reverso com passos grandes', () => {
       s!.close()
       await new Promise((r) => setTimeout(r, 0))
     }
-    // quadro exato (os pedidos caem nos alvos do bloco) e poucos blocos: 16 pedidos ≈ 3 blocos de 12 quadros a 0,2 s
+    // quadro exato (os pedidos caem nos alvos do bloco) e poucos blocos: 16 pedidos (6,4 s) em blocos esparsos de 1,5 s
+    // (8 quadros a 0,2 s) ≈ 5 blocos — não um seek por pedido
     expect(got).toEqual(Array.from({ length: 16 }, (_, k) => Math.round((6.6 - 0.4 * k) * v.FPS)))
-    expect(v.stats.blocks).toBeLessThanOrEqual(4)
+    expect(v.stats.blocks).toBeLessThanOrEqual(6)
     expect(v.stats.maxLive).toBeLessThanOrEqual(2 * 13 + 1)
     // pedido fora dos alvos: o quadro guardado mais próximo antes dele, a menos de meio passo
     const off = await pool.frameAt('a', 450_000, true)
@@ -148,5 +150,131 @@ describe('DecoderPool: reverso com passos grandes', () => {
     expect(Math.round(j!.timestamp * v.FPS)).toBe(120)
     j!.close()
     expect(v.stats.blocks).toBe(before)
+  })
+})
+
+/** Sink falso com timestamps dados (VFR); GOP = `keyEvery` quadros. */
+function fakeVfr(ts: number[], keyEvery = 30, frameS = 1 / 30, throwOnDetach = -1) {
+  const stats = { blocks: 0, live: 0, maxLive: 0, detaches: 0 }
+  const mk = (i: number): VideoSample => {
+    stats.live++
+    stats.maxLive = Math.max(stats.maxLive, stats.live)
+    let open = true
+    const s = { timestamp: ts[i], duration: (ts[i + 1] ?? ts[i] + frameS) - ts[i], close() { if (open) { open = false; stats.live-- } }, clone() { return mk(i) } }
+    return s as unknown as VideoSample
+  }
+  const idxAt = (t: number): number => { let i = 0; while (i + 1 < ts.length && ts[i + 1] <= t + 1e-6) i++; return i } // mesma tolerância do pool
+  const open = async () => ({
+    input: { dispose() {} },
+    firstS: ts[0],
+    meta: async () => ({ frameS, frameBytes: 1920 * 1080 * 4 }),
+    sink: {
+      getSample: async (t: number) => mk(idxAt(t)),
+      samples: async function* (start = 0, end = Infinity) {
+        stats.blocks++
+        const first = idxAt(start)
+        for (let i = Math.floor(first / keyEvery) * keyEvery; i < ts.length && ts[i] < end - 1e-9; i++) if (i >= first) yield mk(i)
+      }
+    }
+  })
+  const detach = async (s: VideoSample): Promise<VideoSample> => {
+    if (++stats.detaches === throwOnDetach) throw new Error('falha na cópia')
+    return s
+  }
+  return { open: open as never, stats, detach, idxAt }
+}
+
+describe('DecoderPool: revisão do reverso', () => {
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
+  it('1º passo para trás vai por seek (sem bloco nem pré-busca); o reverso em bloco só a partir do 2º', async () => {
+    const v = fakeVideo()
+    const pool = new DecoderPool(8, { open: v.open, detach: async (s: VideoSample) => s })
+    pool.setSources({ a: 'x' })
+    ;(await pool.frameAt('a', 3_000_000, false))!.close()
+    const s1 = await pool.frameAt('a', 2_966_667, true)
+    expect(Math.round(s1!.timestamp * v.FPS)).toBe(89)
+    s1!.close()
+    await tick()
+    expect(v.stats.blocks).toBe(0)
+    ;(await pool.frameAt('a', 2_933_334, true))!.close()
+    await tick()
+    expect(v.stats.blocks).toBe(2) // bloco + pré-busca do anterior
+  })
+  it('bloco denso limitado a n quadros mesmo com fonte VFR mais densa que a taxa média (memória limitada, quadros certos)', async () => {
+    // 0–2 s a 10 quadros/s, 2–4 s a 120 quadros/s; o meta diz 30 quadros/s
+    const ts = [...Array.from({ length: 20 }, (_, i) => i / 10), ...Array.from({ length: 240 }, (_, i) => 2 + i / 120)]
+    const v = fakeVfr(ts)
+    const pool = new DecoderPool(8, { open: v.open, detach: v.detach })
+    pool.setSources({ a: 'x' })
+    ;(await pool.frameAt('a', 3_900_000, false))!.close()
+    const got: number[] = []
+    for (let k = 1; k <= 120; k++) {
+      const t = Math.round((3.9 - k / 120) * 1e6)
+      const s = await pool.frameAt('a', t, true)
+      got.push(Math.round(s!.timestamp * 1e6))
+      expect(s!.timestamp).toBe(ts[v.idxAt(t / 1e6)])
+      s!.close()
+      await tick()
+    }
+    expect(new Set(got).size).toBe(120)
+    // n = 12 (96 MiB / 1080p RGBA): bloco atual + anterior, cada um com no máximo 12 (+ o entregue + o pendente)
+    expect(v.stats.maxLive).toBeLessThanOrEqual(2 * 12 + 3)
+  })
+  it('passo volta a ser pequeno: o próximo bloco (e a pré-busca) é denso de novo — quadros exatos', async () => {
+    const v = fakeVideo(8)
+    const pool = new DecoderPool(8, { open: v.open, detach: async (s: VideoSample) => s })
+    pool.setSources({ a: 'x' })
+    ;(await pool.frameAt('a', 7_000_000, false))!.close()
+    for (const t of [6_600_000, 6_200_000, 5_800_000]) {
+      ;(await pool.frameAt('a', t, true))!.close()
+      await tick()
+    }
+    const got: number[] = []
+    for (let k = 1; k <= 60; k++) {
+      const t = Math.round((5.8 - k / 30) * 1e6)
+      const s = await pool.frameAt('a', t, true)
+      got.push(Math.round(s!.timestamp * v.FPS))
+      s!.close()
+      await tick()
+    }
+    expect(got).toEqual(Array.from({ length: 60 }, (_, k) => Math.round(5.8 * 30) - 1 - k))
+  })
+  it('cópia que falha não vaza o quadro que acabou de sair do decoder', async () => {
+    const ts = Array.from({ length: 120 }, (_, i) => i / 30)
+    const v = fakeVfr(ts, 30, 1 / 30, 3)
+    const pool = new DecoderPool(8, { open: v.open, detach: v.detach })
+    pool.setSources({ a: 'x' })
+    for (const t of [3_000_000, 2_966_667, 2_933_334, 2_900_000]) {
+      const s = await pool.frameAt('a', t, true)
+      s?.close()
+      await tick()
+    }
+    pool.releaseAll()
+    await tick()
+    await tick()
+    expect(v.stats.live).toBe(0)
+  })
+})
+
+describe('DecoderPool: −8× na fronteira denso/esparso', () => {
+  it('passo oscilando em torno de 4 quadros (−8× a 60 Hz): nenhum pedido decodifica mais de um bloco (a pré-busca serve)', async () => {
+    const v = fakeVideo(8)
+    const pool = new DecoderPool(8, { open: v.open, detach: async (s: VideoSample) => s })
+    pool.setSources({ a: 'x' })
+    ;(await pool.frameAt('a', 7_950_000, false))!.close()
+    let t = 7_950_000
+    let worst = 0
+    for (const step of [16_667, 33_000, 66_000, 133_000, 140_000, 120_000, 135_000, 150_000, 130_000, 133_000, 133_000, 140_000, 133_000, 125_000, 133_000]) {
+      t -= step
+      const b0 = v.stats.blocks
+      const s = await pool.frameAt('a', t, true)
+      // nunca depois do alvo, no máximo meio passo antes
+      expect(s!.timestamp).toBeLessThanOrEqual(t / 1e6 + 1e-6)
+      expect(t / 1e6 - s!.timestamp).toBeLessThanOrEqual(0.075 + 1e-6)
+      s!.close()
+      await new Promise((r) => setTimeout(r, 0))
+      if (step > 33_000) worst = Math.max(worst, v.stats.blocks - b0)
+    }
+    expect(worst).toBe(1) // o bloco do pedido OU a pré-busca do seguinte, nunca os dois descartados e refeitos
   })
 })

@@ -1094,7 +1094,8 @@ function mirrorKeys(a: Anim<number>, dur: Us): Anim<number> {
 
 /**
  * Insere um trecho parado de D µs no instante local `local` das animações do item (o valor de `local` fica até
- * local + D; os keys depois andam D). Constantes não mudam.
+ * local + D; os keys depois andam D). O resto do trecho que continha `local` segue com o ease desse trecho (o do
+ * último key ≤ local). Constantes não mudam.
  */
 function holdAnimAt(a: Anim<number>, local: Us, D: Us): Anim<number> {
   const k = a.keys
@@ -1102,8 +1103,30 @@ function holdAnimAt(a: Anim<number>, local: Us, D: Us): Anim<number> {
   const v = evalAnim(a, local)
   const before = k.filter((x) => x.tUs < local)
   const after = k.filter((x) => x.tUs > local).map((x) => ({ ...x, tUs: x.tUs + D }))
-  const at = k.find((x) => x.tUs === local)
-  return { ...a, keys: [...before, { tUs: local, value: v, ease: at?.ease ?? 'linear' }, { tUs: local + D, value: v, ease: at?.ease ?? 'linear' }, ...after] }
+  const seg = [...k].reverse().find((x) => x.tUs <= local)?.ease ?? 'linear'
+  return { ...a, keys: [...before, { tUs: local, value: v, ease: 'linear' }, { tUs: local + D, value: v, ease: seg }, ...after] }
+}
+
+/** Sobreposição visual que o congelar estica sobre o quadro parado (não é conteúdo da fonte): efeito, texto, forma, imagem. */
+function isOverlay(p: Project, it: Item): boolean {
+  if (it.type === 'effect' || it.type === 'text' || it.type === 'shape') return true
+  return it.type === 'media' && !!it.visual && p.assets.find((a) => a.id === it.assetId)?.kind === 'image'
+}
+
+/**
+ * Efeitos sem vínculo com o clipe (ou vinculados a outro) que cruzam o trecho dele numa faixa de vídeo: depois de
+ * reverter/congelar, não acompanham o conteúdo e podem não cobrir mais o que cobriam.
+ */
+export function unlinkedEffectsOver(p: Project, itemId: string): string[] {
+  const f = findItem(p, itemId)
+  if (!f) return []
+  const s = f.item.startUs, e = end(f.item), link = f.item.linkId
+  const out: string[] = []
+  for (const t of p.tracks) {
+    if (t.kind !== 'video') continue
+    for (const it of t.items) if (it.type === 'effect' && (!link || it.linkId !== link) && it.startUs < e && end(it) > s) out.push(it.id)
+  }
+  return out
 }
 
 /**
@@ -1134,18 +1157,37 @@ export function freezeFrameAt(p: Project, itemId: string, atUs: Us, durationUs: 
     visual: mapVisual(item.visual, (a) => ({ value: evalAnim(a, at - item.startUs) }))
   }
   return edit(p, (d) => {
-    // efeitos que cruzam o ponto saem antes do makeRoom (que os dividiria) e voltam esticados sobre o congelado
+    // sobreposições (efeitos, texto, formas, imagens) que cruzam o ponto saem antes do makeRoom (que as dividiria no
+    // ponto) e voltam esticadas sobre o congelado, paradas no valor do instante
     const held: { track: Track; item: Item }[] = []
+    // grupo vinculado → uma mídia dele que cruza o ponto (a faixa onde achar o pedaço da direita depois do makeRoom)
+    const crossingMedia = new Map<string, string>()
     for (const t of d.tracks) {
       if (t.locked) continue
-      const crossing = t.items.filter((i) => i.type === 'effect' && i.startUs < at && end(i) > at)
+      for (const i of t.items) if (i.linkId && !isOverlay(d, i) && i.type !== 'effect' && i.startUs < at && end(i) > at) crossingMedia.set(i.linkId, t.id)
+    }
+    for (const t of d.tracks) {
+      if (t.locked) continue
+      const crossing = t.items.filter((i) => isOverlay(d, i) && i.startUs < at && end(i) > at)
       if (!crossing.length) continue
       t.items = t.items.filter((i) => !crossing.includes(i))
       for (const i of crossing) held.push({ track: t, item: { ...mapAnims(i, (a) => holdAnimAt(a, at - i.startUs, D)), durationUs: i.durationUs + D } })
     }
     makeRoom(d, at, D, f.track.id)
     mustTrack(d, f.track.id).items.push(piece)
-    for (const h of held) h.track.items.push(h.item)
+    for (const h of held) {
+      const it = h.item
+      // grupo dividido pelo makeRoom (mídia dos dois lados): como no splitInPlace/relinkAcross, a parte da sobreposição
+      // depois do congelado [at+D, fim) vai para o grupo da direita; [início, at+D) com o trecho parado fica no da esquerda
+      const mediaTrack = it.linkId ? crossingMedia.get(it.linkId) : undefined
+      const rightLink = mediaTrack ? mustTrack(d, mediaTrack).items.find((x) => x.startUs === at + D && x.type !== 'effect')?.linkId : undefined
+      const cut = at + D
+      if (!rightLink || rightLink === it.linkId || end(it) - cut < MIN_ITEM_US) {
+        h.track.items.push(it)
+        continue
+      }
+      h.track.items.push(sliceItem(it, it.startUs, cut, false), { ...sliceItem(it, cut, end(it), false), id: newId('i_'), linkId: rightLink })
+    }
     finalize(d)
   })
 }

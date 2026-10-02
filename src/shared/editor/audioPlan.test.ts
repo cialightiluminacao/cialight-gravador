@@ -91,7 +91,7 @@ describe('planAudio', () => {
 
 describe('shuttleSegments (J/K/L: áudio do preview em taxa ≠ 1)', () => {
   const seg = (over: Partial<AudioSegment> = {}): AudioSegment => ({
-    itemId: 'i', assetId: 'a1', startUs: 3 * S, durationUs: 4 * S, srcInUs: S, speed: 1, reverse: false, preservePitch: true, mode: 'copy',
+    itemId: 'i', assetId: 'a1', startUs: 3 * S, durationUs: 4 * S, srcInUs: S, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
     gain: [{ tUs: 3 * S, gain: 0 }, { tUs: 4 * S, gain: 1 }, { tUs: 7 * S, gain: 1 }], ...over
   })
   it('1× devolve os mesmos segmentos', () => {
@@ -109,10 +109,15 @@ describe('shuttleSegments (J/K/L: áudio do preview em taxa ≠ 1)', () => {
     expect(shuttleSegments([seg({ speed: 1.5, mode: 'stretch' })], 2)[0]).toMatchObject({ speed: 3, mode: 'stretch' })
     expect(shuttleSegments([seg({ speed: 1.5, mode: 'resample', preservePitch: false })], 2)[0]).toMatchObject({ speed: 3, mode: 'stretch' })
   })
-  it('mudo continua mudo; acima de 4× efetivo fica mudo (salvo trecho já esticado acima de 4×, o "manter áudio"); reverso reamostra', () => {
+  it('mudo continua mudo; acima de 4× efetivo fica mudo salvo keepFastAudio (respeitado no shuttle); reverso reamostra', () => {
     expect(shuttleSegments([seg({ mode: 'mute', speed: 8 })], 2)[0].mode).toBe('mute')
     expect(shuttleSegments([seg({ speed: 3, mode: 'stretch' })], 2)[0].mode).toBe('mute')
-    expect(shuttleSegments([seg({ speed: 6, mode: 'stretch' })], 2)[0]).toMatchObject({ speed: 12, mode: 'stretch' })
+    expect(shuttleSegments([seg({ speed: 3, mode: 'stretch', keepFastAudio: true })], 2)[0]).toMatchObject({ speed: 6, mode: 'stretch' })
+    expect(shuttleSegments([seg({ speed: 6, mode: 'stretch', keepFastAudio: true })], 2)[0]).toMatchObject({ speed: 12, mode: 'stretch' })
+    expect(shuttleSegments([seg({ speed: 3, mode: 'resample', preservePitch: false, keepFastAudio: true })], 2)[0]).toMatchObject({ speed: 6, mode: 'stretch' })
+    const { p, a } = base()
+    const keep = ops.updateItem<MediaItem>(p, a, (d) => { d.audio.keepFastAudio = true })
+    expect([planAudio(p)[0].keepFastAudio, planAudio(keep)[0].keepFastAudio]).toEqual([false, true])
     expect(shuttleSegments([seg({ reverse: true, mode: 'copy' })], 2)[0]).toMatchObject({ speed: 2, mode: 'resample', reverse: true })
   })
   it('acima de 2× ou para trás o shuttle é mudo (lança: quem chama não pede áudio)', () => {

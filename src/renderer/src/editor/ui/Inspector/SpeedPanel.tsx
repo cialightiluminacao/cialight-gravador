@@ -1,6 +1,6 @@
 import { Info, Rewind, Snowflake } from 'lucide-react'
 import { toast } from 'sonner'
-import { FREEZE_DEFAULT_US, findItem, freezeFrameAt, linkedIds, setReverse, setSpeed, updateItem } from '@shared/editor/ops'
+import { FREEZE_DEFAULT_US, findItem, freezeFrameAt, linkedIds, setReverse, setSpeed, unlinkedEffectsOver, updateItem } from '@shared/editor/ops'
 import { MAX_STRETCH_SPEED } from '@shared/editor/audioPlan'
 import { MAX_SPEED, MIN_SPEED, type MediaItem, type Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
@@ -76,6 +76,15 @@ export function SpeedPanel({ item }: { item: MediaItem }): React.JSX.Element {
     apply((p) => freezeFrameAt(p, clip.id, at, FREEZE_DEFAULT_US))
   }
   const muted = preservePitch && !keepFast && item.speed > MAX_STRETCH_SPEED
+  const toggleReverse = (): void => {
+    const on = !item.reverse
+    if (!apply((p) => setReverse(p, [item.id], on)) || !on) return
+    // efeitos que não são do clipe não acompanham o conteúdo espelhado (também vira aviso de privacidade)
+    const p = useEditorStore.getState().project
+    if (p && linkedIds(p, item.id).some((id) => unlinkedEffectsOver(p, id).length > 0)) {
+      toast.warning('Há efeitos não vinculados sobre o trecho invertido — confira se ainda cobrem o conteúdo')
+    }
+  }
 
   return (
     <>
@@ -130,7 +139,7 @@ export function SpeedPanel({ item }: { item: MediaItem }): React.JSX.Element {
           <button
             type="button"
             aria-pressed={item.reverse}
-            onClick={() => apply((p) => setReverse(p, [item.id], !item.reverse))}
+            onClick={toggleReverse}
             title="Toca o clipe de trás para frente (efeitos vinculados acompanham)"
             className={cn(
               'flex h-8 items-center justify-center gap-1.5 rounded-md border text-[11px] font-medium transition-colors',

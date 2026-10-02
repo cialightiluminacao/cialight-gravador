@@ -212,6 +212,11 @@ async function watchdogCheck(project: Awaited<ReturnType<typeof window.api.proje
     await engine.render.ready
     engine.render.resize(W, H)
     const pxAt1s = async (): Promise<number[]> => {
+      // o motor redesenha sozinho o playhead parado no próximo rAF (assinatura da store): com o playhead em 1 s os dois
+      // desenhos são o mesmo quadro — senão o redesenho do ponto da pausa (às vezes > 3 s, onde esse pixel é a faixa
+      // preta do vídeo girado) podia cair entre o requestFrame e a leitura
+      useEditorStore.getState().setPlayhead(1_000_000)
+      await sleep(100)
       const r = await engine.render.requestFrame(1_000_000, false)
       if (r.t !== 'rendered') return [-1]
       // o motor desenha em CSS × devicePixelRatio: centro do círculo vermelho (1680, 135) nessa escala

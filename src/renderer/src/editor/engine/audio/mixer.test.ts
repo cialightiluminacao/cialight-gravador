@@ -26,7 +26,7 @@ function seg(over: Partial<AudioSegment> = {}): AudioSegment {
   const startUs = over.startUs ?? 0
   const durationUs = over.durationUs ?? 2_000_000
   return {
-    itemId: 'i1', assetId: 'a1', startUs, durationUs, srcInUs: 0, speed: 1, reverse: false, preservePitch: true, mode: 'copy',
+    itemId: 'i1', assetId: 'a1', startUs, durationUs, srcInUs: 0, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
     gain: [{ tUs: startUs, gain: 1 }, { tUs: startUs + durationUs, gain: 1 }],
     ...over
   }

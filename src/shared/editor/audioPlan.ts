@@ -11,6 +11,8 @@ export type AudioMode = 'copy' | 'resample' | 'stretch' | 'mute'
 export interface AudioSegment {
   itemId: string; assetId: string; startUs: Us; durationUs: Us; srcInUs: Us
   speed: number; reverse: boolean; preservePitch: boolean; mode: AudioMode; gain: GainPoint[]
+  /** "Manter áudio acelerado" do item: acima de 4× continua soando (também no shuttle). */
+  keepFastAudio: boolean
 }
 
 /** Acima disso, com tom preservado, o áudio fica mudo (salvo "Manter áudio acelerado"). */
@@ -53,7 +55,7 @@ export function planAudio(p: Project): AudioSegment[] {
       })
       out.push({
         itemId: item.id, assetId: item.assetId, startUs: item.startUs, durationUs: dur, srcInUs: item.inUs,
-        speed: item.speed, reverse: item.reverse, preservePitch: a.preservePitch,
+        speed: item.speed, reverse: item.reverse, preservePitch: a.preservePitch, keepFastAudio: a.keepFastAudio ?? false,
         mode: audioMode(item.speed, item.reverse, a.preservePitch, a.keepFastAudio ?? false), gain
       })
     }
@@ -67,8 +69,8 @@ export const SHUTTLE_AUDIO_MAX_RATE = 2
 /**
  * Segmentos para tocar a timeline a `rate`× (0 < rate ≤ 2) no preview: o tempo do shuttle é t/rate, então início,
  * duração e envelope são divididos por rate e a velocidade multiplicada (cada instante lê a mesma fonte). O som
- * fica esticado com o tom da fonte (stretch); acima de 4× efetivos fica mudo, salvo trecho que já esticava acima de
- * 4× ("Manter áudio acelerado"); reverso reamostra (como no plano normal); mudo continua mudo. rate 1: os mesmos.
+ * fica esticado com o tom da fonte (stretch); acima de 4× efetivos fica mudo, salvo keepFastAudio ("Manter áudio
+ * acima de 4×"); reverso reamostra (como no plano normal); mudo continua mudo. rate 1: os mesmos.
  */
 export function shuttleSegments(segs: AudioSegment[], rate: number): AudioSegment[] {
   if (!(rate > 0 && rate <= SHUTTLE_AUDIO_MAX_RATE)) throw new Error(`shuttle sem áudio a ${rate}×`)
@@ -78,9 +80,9 @@ export function shuttleSegments(segs: AudioSegment[], rate: number): AudioSegmen
     const speed = s.speed * rate
     let mode: AudioMode
     if (s.mode === 'mute') mode = 'mute'
+    else if (speed > MAX_STRETCH_SPEED && !s.keepFastAudio) mode = 'mute'
     else if (s.reverse) mode = 'resample'
-    else if (s.mode === 'stretch' && s.speed > MAX_STRETCH_SPEED) mode = 'stretch'
-    else mode = speed > MAX_STRETCH_SPEED ? 'mute' : 'stretch'
+    else mode = 'stretch'
     const startUs = t(s.startUs)
     return { ...s, startUs, durationUs: t(s.startUs + s.durationUs) - startUs, speed, mode, gain: s.gain.map((g) => ({ tUs: t(g.tUs), gain: g.gain })) }
   })

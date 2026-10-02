@@ -30,7 +30,7 @@ function source(hz: number, seconds: number, gap?: [number, number]): { pcm: Chu
 function seg(speed: number, srcSeconds: number, srcInUs = 0): AudioSegment {
   const durationUs = Math.round((srcSeconds * 1e6) / speed)
   return {
-    itemId: 'i1', assetId: 'a1', startUs: 0, durationUs, srcInUs, speed, reverse: false, preservePitch: true, mode: 'stretch',
+    itemId: 'i1', assetId: 'a1', startUs: 0, durationUs, srcInUs, speed, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'stretch',
     gain: [{ tUs: 0, gain: 1 }, { tUs: durationUs, gain: 1 }]
   }
 }

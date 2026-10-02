@@ -5,6 +5,7 @@ import * as ops from './ops'
 import { validateProject } from './schema'
 import { itemEndUs as end } from './time'
 import { resolveFrame } from './resolve'
+import { privacyWarnings } from './privacy'
 
 // F3 Task 2: congelar quadro (freezeFrameAt) e reverso (setReverse), com vínculos e efeitos seguindo o clipe.
 const S = 1_000_000
@@ -80,7 +81,9 @@ describe('freezeFrameAt', () => {
     const { p, v, f } = linked()
     const before = fxLayerX(p, 6 * S)!
     const q = ops.freezeFrameAt(p, v, 6 * S, 2 * S)
-    expect([fx(q, f).startUs, end(fx(q, f))]).toEqual([2 * S, 12 * S])
+    // dividido em at+D (revisão 1): [2,8) com o trecho parado + [8,12) do grupo da direita — cobre o mesmo [2,12)
+    expect([fx(q, f).startUs, end(fx(q, f))]).toEqual([2 * S, 8 * S])
+    expect(q.tracks[1].items.map((i) => [i.startUs, end(i)])).toEqual([[2 * S, 8 * S], [8 * S, 12 * S]])
     // região parada no valor do instante congelado, depois continua de onde estava
     expect(fxLayerX(q, 6 * S)).toBeCloseTo(before, 6)
     expect(fxLayerX(q, 7.5 * S)).toBeCloseTo(before, 6)
@@ -95,6 +98,47 @@ describe('freezeFrameAt', () => {
     expect([fx(q2, e2.itemId).startUs, fx(q2, e2.itemId).durationUs]).toEqual([9 * S, S])
     expect(validateProject(q)).toEqual([])
     expect(validateProject(q2)).toEqual([])
+  })
+  it('revisão 1: o efeito do grupo é dividido em at+D — a parte da direita vai com o clipe da direita (reverter a direita não vaza)', () => {
+    const { p, v, f } = linked()
+    const q = ops.freezeFrameAt(p, v, 6 * S, 2 * S)
+    // esquerda [2,8) com o trecho parado, no grupo da esquerda; direita [8,12) no grupo do pedaço da direita
+    const right = media(q, 0).find((i) => i.startUs === 8 * S)!
+    const fxs = q.tracks[1].items as EffectItem[]
+    expect(fxs.map((i) => [i.startUs, end(i)])).toEqual([[2 * S, 8 * S], [8 * S, 12 * S]])
+    expect(fxs[0].id).toBe(f)
+    expect(fxs[0].linkId).toBe(it_(q, v).linkId)
+    expect(fxs[1].linkId).toBe(right.linkId)
+    expect(right.linkId).not.toBe(it_(q, v).linkId)
+    expect(fxLayerX(q, 7.5 * S)).toBeCloseTo(fxLayerX(p, 6 * S)!, 6)
+    // reverter o pedaço da direita: o efeito dele espelha junto (o conteúdo em t aparece em 20 − t)
+    const r = ops.setReverse(q, [right.id], true)
+    for (const t of [8.5 * S, 10 * S, 11.5 * S]) expect(fxLayerX(r, 20 * S - t)).toBeCloseTo(fxLayerX(q, t)!, 6)
+    // a esquerda e o congelado não mudam
+    expect(fxLayerX(r, 7 * S)).toBeCloseTo(fxLayerX(q, 7 * S)!, 6)
+    expect(ops.unlinkedEffectsOver(r, right.id)).toEqual([])
+    expect(validateProject(r)).toEqual([])
+  })
+  it('revisão 7/8: o trecho depois do parado segue com o ease do trecho; imagem/sobreposição sem vínculo é esticada inteira', () => {
+    const b = base()
+    let p = ops.updateItem<MediaItem>(b.p, b.v, (d) => {
+      d.visual!.transform.x = { value: 0.5, keys: [{ tUs: 0, value: 0, ease: 'in' }, { tUs: 10 * S, value: 1, ease: 'linear' }] }
+    })
+    const img: Asset = { id: 'img', name: 'logo.png', kind: 'image', source: { type: 'file', path: 'C:/logo.png', size: 1, mtimeMs: 1 }, durationUs: null, status: 'ready' }
+    p = ops.addAsset(p, img)
+    const added = ops.addMediaFromAsset(p, 'img', 2 * S) // [2,7) numa faixa de vídeo nova
+    const q = ops.freezeFrameAt(added.project, b.v, 4 * S, 2 * S)
+    const logo = it_(q, added.itemIds[0])
+    expect([logo.startUs, end(logo)]).toEqual([2 * S, 9 * S])
+    // efeito com keys: o resto do trecho 'in' depois do parado continua 'in'
+    const e = ops.addEffect(b.p, 'blur', 0, { durationUs: 10 * S })
+    let pe = ops.toggleKeyframe(e.project, e.itemId, 'region.x', 0)
+    pe = ops.toggleKeyframe(pe, e.itemId, 'region.x', 10 * S)
+    pe = ops.setAnimValue(pe, e.itemId, 'region.x', 10 * S, 0.9)
+    pe = ops.updateItem<EffectItem>(pe, e.itemId, (d) => { d.region.x.keys![0].ease = 'in' })
+    const fq = ops.freezeFrameAt(pe, pe.tracks[0].items[0].id, 4 * S, 2 * S)
+    const keys = fx(fq, e.itemId).region.x.keys!
+    expect(keys.map((k) => [k.tUs, k.ease])).toEqual([[0, 'in'], [4 * S, 'linear'], [6 * S, 'in']])
   })
   it('recusa áudio, imagem, faixa bloqueada e instante fora do item', () => {
     const { p, v, a } = base()
@@ -139,6 +183,20 @@ describe('setReverse', () => {
     const r = ops.setReverse(e.project, [v2], true)
     expect([fx(r, e.itemId).startUs, fx(r, e.itemId).durationUs]).toEqual([6 * S, 2 * S])
     expect(validateProject(r)).toEqual([])
+  })
+  it('revisão 10: efeito sem vínculo sobre o trecho invertido → unlinkedEffectsOver e aviso unlinkedOverEdited', () => {
+    const b = base()
+    const fxp = ops.addEffect(b.p, 'blur', 2 * S, { durationUs: 2 * S }).project
+    const e = fxp.tracks[1].items[0]
+    const free = ops.unlinkItems(fxp, [e.id])
+    expect(privacyWarnings(free, 0, 10 * S).filter((w) => w.kind === 'unlinkedOverEdited')).toEqual([])
+    const r = ops.setReverse(free, [b.v], true)
+    expect(ops.unlinkedEffectsOver(r, b.v)).toEqual([e.id])
+    const w = privacyWarnings(r, 0, 10 * S).filter((x) => x.kind === 'unlinkedOverEdited')
+    expect(w).toEqual([{ itemId: e.id, kind: 'unlinkedOverEdited', message: 'Efeito não vinculado sobre um trecho invertido — confira se ainda cobre o conteúdo', tUs: 2 * S }])
+    // vinculado ao clipe: segue o conteúdo, sem aviso
+    const linkedRev = ops.setReverse(fxp, [b.v], true)
+    expect(privacyWarnings(linkedRev, 0, 10 * S).filter((x) => x.kind === 'unlinkedOverEdited')).toEqual([])
   })
   it('a partir do efeito não reverte nada; faixa bloqueada recusa; congelado é ignorado', () => {
     const { p, v, f } = linked()
