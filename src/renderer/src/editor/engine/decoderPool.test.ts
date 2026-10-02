@@ -278,3 +278,45 @@ describe('DecoderPool: −8× na fronteira denso/esparso', () => {
     expect(worst).toBe(1) // o bloco do pedido OU a pré-busca do seguinte, nunca os dois descartados e refeitos
   })
 })
+
+describe('DecoderPool: revisão 2 do reverso', () => {
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
+  it('|taxa| ≈ 1 depois de um trecho rápido: bloco esparso recusado, quadros exatos já no 1º passo pequeno', async () => {
+    const v = fakeVideo(8)
+    const pool = new DecoderPool(8, { open: v.open, detach: async (s: VideoSample) => s })
+    pool.setSources({ a: 'x' })
+    ;(await pool.frameAt('a', 7_000_000, false))!.close()
+    // passos de 0,2 s (6 quadros) → espaçamento de 3 quadros (a folga 3× aceitaria isso a 1×)
+    for (const t of [6_800_000, 6_600_000, 6_400_000]) {
+      ;(await pool.frameAt('a', t, true))!.close()
+      await tick()
+    }
+    for (let k = 1; k <= 10; k++) {
+      const t = Math.round((6.4 - k / 30) * 1e6)
+      const s = await pool.frameAt('a', t, true)
+      expect(Math.round(s!.timestamp * v.FPS)).toBe(Math.round(6.4 * 30) - k)
+      s!.close()
+      await tick()
+    }
+  })
+  it('pedido sequencial repetido no mesmo instante é servido do cache do reverso sem descartá-lo', async () => {
+    const v = fakeVideo(8)
+    const pool = new DecoderPool(8, { open: v.open, detach: async (s: VideoSample) => s })
+    pool.setSources({ a: 'x' })
+    ;(await pool.frameAt('a', 7_000_000, false))!.close()
+    for (const t of [6_600_000, 6_200_000, 5_800_000]) {
+      ;(await pool.frameAt('a', t, true))!.close()
+      await tick()
+    }
+    const blocks = v.stats.blocks
+    const again = await pool.frameAt('a', 5_800_000, true)
+    expect(Math.round(again!.timestamp * v.FPS)).toBe(174)
+    again!.close()
+    await tick()
+    const next = await pool.frameAt('a', 5_400_000, true)
+    expect(Math.round(next!.timestamp * v.FPS)).toBe(162)
+    next!.close()
+    await tick()
+    expect(v.stats.blocks).toBe(blocks) // o bloco esparso continuou valendo: nenhum bloco novo
+  })
+})

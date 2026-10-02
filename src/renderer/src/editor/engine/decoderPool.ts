@@ -45,8 +45,6 @@ const REV_END_PAD_S = 1e-4
 const REV_JUMP_S = 2
 // passos até 4 quadros: bloco denso (todos os quadros); acima, um quadro a cada meio passo
 const REV_DENSE_STEPS = 4
-// folga para reaproveitar um bloco mais esparso que o passo atual pede (ver usable)
-const REV_STRIDE_SLACK = 3
 // trecho máximo da fonte que um bloco esparso cobre: passo grande × n quadros decodificaria quase o arquivo todo
 // (lento → passo maior → bloco maior); com o teto o custo fica perto do de um seek
 const REV_SPARSE_SPAN_S = 1.5
@@ -154,13 +152,15 @@ export class DecoderPool {
         try {
           const step = e.lastT !== null ? e.lastT - t : 0
           const back = sequential && step > EPS_S
+          // mesmo instante de novo (quadro repetido): não muda o sentido nem o passo do reverso
+          const same = sequential && e.lastT !== null && Math.abs(step) <= EPS_S
           e.lastT = t
-          e.backSteps = back ? e.backSteps + 1 : 0
+          if (!same) e.backSteps = back ? e.backSteps + 1 : 0
           if (back) e.lastStep = step
           if (sequential) {
             // quadro do bloco do reverso em cache, sem esperar a fila da entrada (a pré-busca pode estar rodando nela)
             const rev = e.rev
-            if (rev && usable(rev, t, back ? step : 0)) {
+            if (rev && usable(rev, t, back ? step : same ? e.lastStep : 0)) {
               if (back) this.prefetchPrev(e, o)
               return pick(rev, t)!.clone()
             }
@@ -537,14 +537,15 @@ function strideFor(step: number, frameS: number): number {
 }
 
 /**
- * O bloco serve ao pedido t com este passo? Cobre t e não é esparso demais: até REV_STRIDE_SLACK× o espaçamento que
- * o passo pede. A folga absorve a variação do passo no shuttle rápido (−8× a 60 Hz anda ~4 quadros por pedido,
- * bem na fronteira denso/esparso: sem folga a pré-busca era recusada e cada pedido decodificava duas vezes); passos
- * de volta a ~1 quadro recusam bloco com mais de 3 quadros entre os guardados. O quadro mostrado continua a menos de
- * meio passo do maior passo recente (o espaçamento de um bloco é sempre metade de um passo pedido).
+ * O bloco serve ao pedido t com este passo? Cobre t e o espaçamento dos quadros guardados não passa de
+ * max(espaçamento que o passo pede, o próprio passo). A folga de até um passo absorve a variação do passo no shuttle
+ * rápido (−8× a 60 Hz anda ~4 quadros por pedido, bem na fronteira denso/esparso: sem ela a pré-busca era recusada e
+ * cada pedido decodificava duas vezes), e some quando o passo é ~1 quadro (|taxa| ≈ 1 exige bloco denso). O quadro
+ * mostrado fica antes do alvo, a menos de um espaçamento: menos de um passo do pedido atual e de meio passo do pedido
+ * que criou o bloco.
  */
 function usable(b: RevBlock, t: number, step: number): boolean {
-  return covers(b, t) && b.stride <= REV_STRIDE_SLACK * strideFor(step, b.frameS) + EPS_S
+  return covers(b, t) && b.stride <= Math.max(strideFor(step, b.frameS), step) + EPS_S
 }
 
 /** O bloco cobre t? (antes do 1º quadro do arquivo, o bloco do início cobre: devolve o 1º quadro) */

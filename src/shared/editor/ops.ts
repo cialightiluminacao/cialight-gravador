@@ -1166,6 +1166,8 @@ export function freezeFrameAt(p: Project, itemId: string, atUs: Us, durationUs: 
       if (t.locked) continue
       for (const i of t.items) if (i.linkId && !isOverlay(d, i) && i.type !== 'effect' && i.startUs < at && end(i) > at) crossingMedia.set(i.linkId, t.id)
     }
+    // o grupo do próprio clipe: a faixa dele (outra mídia do grupo pode cruzar o ponto sem ser dividida, a < MIN_ITEM_US)
+    if (item.linkId && end(item) > at && item.startUs < at) crossingMedia.set(item.linkId, f.track.id)
     for (const t of d.tracks) {
       if (t.locked) continue
       const crossing = t.items.filter((i) => isOverlay(d, i) && i.startUs < at && end(i) > at)
@@ -1186,7 +1188,8 @@ export function freezeFrameAt(p: Project, itemId: string, atUs: Us, durationUs: 
         h.track.items.push(it)
         continue
       }
-      h.track.items.push(sliceItem(it, it.startUs, cut, false), { ...sliceItem(it, cut, end(it), false), id: newId('i_'), linkId: rightLink })
+      // corte como o do splitInPlace: fades, animações e transição do lado do corte saem dos dois pedaços
+      h.track.items.push(sliceItem(it, it.startUs, cut, true), { ...sliceItem(it, cut, end(it), true), id: newId('i_'), linkId: rightLink })
     }
     finalize(d)
   })

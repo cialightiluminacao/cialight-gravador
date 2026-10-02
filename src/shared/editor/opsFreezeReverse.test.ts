@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createEmptyProject } from './factory'
-import { MIN_ITEM_US, type Asset, type EffectItem, type Item, type MediaItem, type Project } from './project'
+import { createEmptyProject, defaultVisual } from './factory'
+import { MIN_ITEM_US, type Asset, type EffectItem, type Item, type MediaItem, type Project, type ShapeItem } from './project'
 import * as ops from './ops'
 import { validateProject } from './schema'
 import { itemEndUs as end } from './time'
@@ -139,6 +139,33 @@ describe('freezeFrameAt', () => {
     const fq = ops.freezeFrameAt(pe, pe.tracks[0].items[0].id, 4 * S, 2 * S)
     const keys = fx(fq, e.itemId).region.x.keys!
     expect(keys.map((k) => [k.tUs, k.ease])).toEqual([[0, 'in'], [4 * S, 'linear'], [6 * S, 'in']])
+  })
+  it('revisão 2: forma vinculada com fades dividida no corte como o splitInPlace — nenhum pedaço faz fade no corte', () => {
+    const b = base()
+    const shape: ShapeItem = { id: 'sh', type: 'shape', shape: 'rect', fill: '#ff0000', stroke: '#000000', strokeWidth: 0, startUs: 2 * S, durationUs: 6 * S, visual: { ...defaultVisual(), fadeInUs: 500_000, fadeOutUs: 700_000 } }
+    let p = ops.addTrack(b.p, 'video').project
+    const tId = p.tracks.find((t) => t.kind === 'video' && t.items.length === 0)!.id
+    p = ops.insertItems(p, tId, [shape], 'overwrite')
+    p = ops.linkItems(p, [b.v, 'sh'])
+    const q = ops.freezeFrameAt(p, b.v, 4 * S, 2 * S)
+    const pieces = [...(q.tracks.find((t) => t.id === tId)!.items as ShapeItem[])].sort((x, y) => x.startUs - y.startUs)
+    expect(pieces.map((i) => [i.startUs, end(i)])).toEqual([[2 * S, 6 * S], [6 * S, 10 * S]])
+    expect([pieces[0].visual.fadeInUs, pieces[0].visual.fadeOutUs]).toEqual([500_000, 0])
+    expect([pieces[1].visual.fadeInUs, pieces[1].visual.fadeOutUs]).toEqual([0, 700_000])
+    expect(pieces[1].linkId).toBe(media(q, 0).find((i) => i.startUs === 6 * S)!.linkId)
+    expect(validateProject(q)).toEqual([])
+  })
+  it('revisão 2 (a): o grupo do clipe congelado acha a direita na faixa do próprio clipe (áudio vinculado terminando junto ao ponto)', () => {
+    const { p, v, a, f } = linked()
+    // áudio do grupo termina 10 ms depois do ponto: não é dividido (pedaço < MIN_ITEM_US)
+    const short = ops.trimItem(p, a, 'end', 6 * S + 10_000, { includeLinked: false })
+    const q = ops.freezeFrameAt(short, v, 6 * S, 2 * S)
+    const right = media(q, 0).find((i) => i.startUs === 8 * S)!
+    const fxs = q.tracks[1].items as EffectItem[]
+    expect(fxs.map((i) => [i.startUs, end(i)])).toEqual([[2 * S, 8 * S], [8 * S, 12 * S]])
+    expect(fxs.find((i) => i.id === f)!.linkId).toBe(it_(q, v).linkId)
+    expect(fxs.find((i) => i.id !== f)!.linkId).toBe(right.linkId)
+    expect(validateProject(q)).toEqual([])
   })
   it('recusa áudio, imagem, faixa bloqueada e instante fora do item', () => {
     const { p, v, a } = base()
