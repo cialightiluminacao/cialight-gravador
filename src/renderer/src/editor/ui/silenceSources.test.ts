@@ -29,6 +29,13 @@ describe('fontes do Remover silêncios', () => {
     expect(defaultSilenceSources(noVoice)).toEqual(['t_sys'])
     expect(defaultSilenceSources(createEmptyProject('x'))).toEqual([])
   })
+  it('sugestão nunca inclui faixa bloqueada (Voz bloqueada sai; sem outra Voz, a primeira desbloqueada com som)', () => {
+    const lock = (p: Project, ...ids: string[]): Project => ({ ...p, tracks: p.tracks.map((t) => (ids.includes(t.id) ? { ...t, locked: true } : t)) })
+    const twoVoices = { ...proj(), tracks: [...proj().tracks, { ...proj().tracks[4], id: 't_mic2', items: [{ ...proj().tracks[4].items[0], id: 'i_mic2' }] }] }
+    expect(defaultSilenceSources(lock(twoVoices, 't_mic'))).toEqual(['t_mic2'])
+    expect(defaultSilenceSources(lock(proj(), 't_mic'))).toEqual(['t_sys'])
+    expect(defaultSilenceSources(lock(proj(), 't_mic', 't_sys'), 't_sys')).toEqual(['t_vid'])
+  })
   it('formatSaved', () => {
     expect(formatSaved(5_400_000)).toBe('5,4 s')
     expect(formatSaved(65_000_000)).toBe('1 min 05 s')

@@ -493,6 +493,25 @@ export function musicTrackName(p: Project): string {
   return `Música ${n}`
 }
 
+/** `base`, "`base` 2", "`base` 3"… — o primeiro nome que nenhuma faixa usa. */
+function freeTrackName(p: Project, base: string): string {
+  if (!p.tracks.some((t) => t.name === base)) return base
+  let n = 2
+  while (p.tracks.some((t) => t.name === `${base} ${n}`)) n++
+  return `${base} ${n}`
+}
+
+/**
+ * Faixa de áudio de papel Voz para um item em [s, e): a primeira desbloqueada e livre nesse trecho (com `named`, só as
+ * chamadas `name` ou "`name` N"); sem nenhuma, cria "`name`" (ou "`name` N", se o nome já existe) no fim, com papel Voz.
+ */
+export function voiceTrackFor(p: Project, s: Us, e: Us, opts: { name: string; named?: boolean }): { project: Project; trackId: string } {
+  const named = (t: Track): boolean => t.name === opts.name || (t.name.startsWith(`${opts.name} `) && /^\d+$/.test(t.name.slice(opts.name.length + 1)))
+  const found = p.tracks.find((t) => t.kind === 'audio' && t.role === 'voice' && !t.locked && (!opts.named || named(t)) && isFree(t, s, e))
+  if (found) return { project: p, trackId: found.id }
+  return addTrack(p, 'audio', undefined, freeTrackName(p, opts.name), 'voice')
+}
+
 function defaultTrackName(p: Project, kind: TrackKind): string {
   const prefix = kind === 'video' ? 'Vídeo' : 'Áudio'
   let n = p.tracks.filter((t) => t.kind === kind && !isFxTrack(t)).length + 1

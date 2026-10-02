@@ -161,15 +161,17 @@ export function SilenceDialog(): React.JSX.Element | null {
     const st = useEditorStore.getState
     const before = st().history.present
     if (!st().apply((p) => applySilenceCuts(p, cuts))) return
-    // "Desfazer" do aviso só desfaz ESTE corte: nada pode ter entrado no histórico depois dele
+    // "Desfazer" do aviso só desfaz ESTE corte: nada pode ter entrado no histórico depois dele (nem um desfazer
+    // seguido de outra edição, que deixaria a mesma profundidade com outro projeto no topo)
     const depth = st().history.past.length
+    const after = st().history.present
     close()
     toast.success(`${cuts.length === 1 ? '1 silêncio removido' : `${cuts.length} silêncios removidos`} (${formatSaved(savedUs)} a menos)`, {
       action: {
         label: 'Desfazer',
         onClick: () => {
           const h = st().history
-          if (h.past.length === depth && h.past[depth - 1] === before && !st().txBase) st().undo()
+          if (h.past.length === depth && h.past[depth - 1] === before && h.present === after && !st().txBase) st().undo()
           else toast('Houve outras edições depois: use Desfazer (Ctrl+Z) para voltar passo a passo.')
         }
       }

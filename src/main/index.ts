@@ -44,6 +44,16 @@ const spikeMode = app.isPackaged ? undefined : process.env.CIALIGHT_SPIKE
 const reclaimFlag = !(spikeMode === 'editor' && process.env.CIALIGHT_SPIKE_NOFLAG)
 if (reclaimFlag) app.commandLine.appendSwitch('disable-features', 'ReclaimInactiveWebCodecs')
 
+// Teste da narração (CIALIGHT_TEST=editor-narration, só fora do pacote; scripts/qa/editor-f3-narration.mjs): microfone
+// falso do Chromium (o WAV de CIALIGHT_FAKE_AUDIO, se houver; senão o bipe padrão) sem pedir permissão, e o app normal
+// para o script CDP conduzir. Nunca no app normal.
+const narrationTest = !app.isPackaged && process.env.CIALIGHT_TEST === 'editor-narration'
+if (narrationTest) {
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream')
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
+  if (process.env.CIALIGHT_FAKE_AUDIO) app.commandLine.appendSwitch('use-file-for-fake-audio-capture', process.env.CIALIGHT_FAKE_AUDIO)
+}
+
 // QA/testes rodam em paralelo (várias instâncias): sem lock nesses modos
 const gotLock = process.env.CIALIGHT_SHOT || process.env.CIALIGHT_TEST || (process.env.CIALIGHT_QA && !app.isPackaged) || spikeMode === 'editor' ? true : app.requestSingleInstanceLock()
 if (!gotLock) {
@@ -119,7 +129,7 @@ if (!gotLock) {
       w.webContents.send(IPC.recording.command, cmd)
     })
 
-    if (process.env.CIALIGHT_TEST) {
+    if (process.env.CIALIGHT_TEST && !narrationTest) {
       await runIntegrationTest(process.env.CIALIGHT_TEST, store, projects)
       return
     }

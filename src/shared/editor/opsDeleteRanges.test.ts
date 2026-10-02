@@ -39,6 +39,8 @@ function randomProject(r: () => number): Project {
       let it: Item
       if (k.make === 'fx') {
         it = { ...createEffectItem('blur', t, dur), id: `i${ti}_${i}` }
+        // "só a faixa abaixo" de projeto antigo (sem targetTrackId): a 1ª edição grava a faixa pela posição
+        if (r() < 0.35) it = { ...it, scope: 'track' }
         if (r() < 0.5) it = { ...it, region: { ...it.region, x: { value: 0.5, keys: [{ tUs: 0, value: 0.1, ease: 'linear' }, { tUs: Math.floor(dur * r()), value: 0.9, ease: 'linear' }, { tUs: dur, value: 0.3, ease: 'linear' }] } } }
       } else if (k.make === 'ann') {
         it = { id: `i${ti}_${i}`, type: 'annotations', sessionId: 's', inUs: int(0, 5 * S), startUs: t, durationUs: dur } satisfies AnnotationsItem
@@ -51,7 +53,7 @@ function randomProject(r: () => number): Project {
       items.push(it)
       t += dur + (r() < 0.3 ? 0 : int(0, 3 * S))
     }
-    return { id: `t${ti}`, kind: k.kind, name: `T${ti}`, muted: false, hidden: false, locked: r() < 0.15, volume: 1, ...(k.role ? { role: k.role } : {}), items }
+    return { id: `t${ti}`, kind: k.kind, name: `T${ti}`, muted: false, hidden: r() < 0.2, locked: r() < 0.15, volume: 1, ...(k.role ? { role: k.role } : {}), items }
   })
   const markers = Array.from({ length: int(0, 5) }, (_, i) => ({ id: `m${i}`, tUs: int(0, 40 * S), label: '', color: '#fff' }))
   return { ...createEmptyProject('rnd'), assets: [asset('v', 'video'), asset('a', 'audio')], tracks, markers }
@@ -95,28 +97,44 @@ function canon(p: Project, original: Set<string>): unknown {
   }
 }
 
-const sequential = (p: Project, ranges: { fromUs: number; toUs: number }[]): Project =>
-  [...ranges].sort((a, b) => b.fromUs - a.fromUs).reduce((q, c) => ops.deleteRange(q, c.fromUs, c.toUs), p)
+const sequential = (p: Project, ranges: { fromUs: number; toUs: number }[], opts?: { trackIds?: string[] }): Project =>
+  [...ranges].sort((a, b) => b.fromUs - a.fromUs).reduce((q, c) => ops.deleteRange(q, c.fromUs, c.toUs, opts), p)
+
+/** Às vezes só algumas faixas (opts.trackIds, como remover silêncios com faixas de fora): subconjunto aleatório. */
+function randomOpts(p: Project, r: () => number): { trackIds?: string[] } | undefined {
+  if (r() < 0.6) return undefined
+  // inclui de vez em quando uma faixa bloqueada (os dois caminhos devem recusar igual)
+  const ids = p.tracks.filter((t) => (!t.locked || r() < 0.1) && r() < 0.6).map((t) => t.id)
+  return { trackIds: ids.length ? ids : [p.tracks[0].id] }
+}
 
 describe('deleteRanges = deleteRange do último intervalo para o primeiro', () => {
-  it('200 projetos aleatórios (mídia com velocidade/reverso/keyframes, anotações, efeitos vinculados, faixas bloqueadas, marcadores)', () => {
+  it('200 projetos aleatórios (mídia com velocidade/reverso/keyframes, anotações, efeitos vinculados e "só a faixa abaixo" antigos, faixas bloqueadas e ocultas, marcadores, só algumas faixas)', () => {
     const r = rng(20261002)
-    let compared = 0
+    let compared = 0, withTrackIds = 0, legacyScope = 0, hidden = 0
     for (let k = 0; k < 200; k++) {
       const p = randomProject(r)
       const ranges = randomRanges(p, r)
+      const opts = randomOpts(p, r)
       const original = new Set(p.tracks.flatMap((t) => t.items.map((i) => i.id)))
       let want: Project
       try {
-        want = sequential(p, ranges)
+        want = sequential(p, ranges, opts)
       } catch {
-        expect(() => ops.deleteRanges(p, ranges)).toThrow()
+        expect(() => ops.deleteRanges(p, ranges, opts)).toThrow()
         continue
       }
-      expect(canon(ops.deleteRanges(p, ranges), original), `projeto ${k}`).toEqual(canon(want, original))
+      expect(canon(ops.deleteRanges(p, ranges, opts), original), `projeto ${k}`).toEqual(canon(want, original))
       compared++
+      if (opts) withTrackIds++
+      if (p.tracks.some((t) => t.items.some((i) => i.type === 'effect' && i.scope === 'track' && !i.targetTrackId))) legacyScope++
+      if (p.tracks.some((t) => t.hidden && t.items.length)) hidden++
     }
     expect(compared).toBeGreaterThan(160)
+    // as variações cobertas de fato
+    expect(withTrackIds).toBeGreaterThan(40)
+    expect(legacyScope).toBeGreaterThan(40)
+    expect(hidden).toBeGreaterThan(40)
   }, 30_000)
 
   it('sem intervalos devolve o mesmo projeto; intervalo vazio ou sobreposto é erro', () => {

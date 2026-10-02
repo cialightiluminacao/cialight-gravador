@@ -1,7 +1,7 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addEffect, addMarker, addMediaFromAsset, addTrack, deleteItems, musicTrackName, updateTrack, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
+import { addEffect, addMarker, addMediaFromAsset, addTrack, deleteItems, musicTrackName, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
 import type { EffectPresetId, EffectRegionInit } from '@shared/editor/factory'
 import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
 import { frameDurUs, frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
@@ -10,7 +10,7 @@ import type { ShortcutAction } from '../shortcuts'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
 import { useKeyframeSelection } from '../state/keyframeSelection'
 import { useViewerTool } from '../state/viewerTool'
-import { autoMusicLanding } from './musicLanding'
+import { autoMusicLanding, moveToVoice } from './musicLanding'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 
@@ -71,6 +71,7 @@ function trimToPlayhead(edge: 'start' | 'end'): void {
 export function addAssetAt(assetId: string, atUs: Us, track?: { trackId: string } | { newTrack: TrackKind }): void {
   const s = st()
   let ids: string[] = []
+  const tracksBefore = new Set(s.project?.tracks.map((t) => t.id) ?? [])
   const ok = s.apply((p) => {
     let q = p
     let trackId: string | undefined
@@ -88,13 +89,22 @@ export function addAssetAt(assetId: string, atUs: Us, track?: { trackId: string 
   })
   if (!ok) return
   s.select(ids)
-  // áudio que caiu sozinho na faixa Música: pode ser narração — um clique troca o papel da faixa para Voz
+  // áudio que caiu sozinho na faixa Música: pode ser narração — um clique leva ESTE item para uma faixa de Voz (a
+  // faixa Música e o que mais houver nela continuam música; se ela foi criada só para ele e ficou vazia, sai)
   const p = st().project
   const landed = p ? autoMusicLanding(p, assetId, ids, !track || 'newTrack' in track) : null
   if (landed) {
+    const itemId = ids.find((id) => findItem(p!, id)?.track.id === landed.trackId)!
+    const created = !tracksBefore.has(landed.trackId)
     toast(`Áudio adicionado à faixa “${landed.trackName}”`, {
       description: 'A música abaixa sozinha quando há fala nas faixas de Voz.',
-      action: { label: 'É narração? Mover para Voz', onClick: () => void st().apply((q) => updateTrack(q, landed.trackId, { role: 'voice' })) }
+      action: {
+        label: 'É narração? Mover para Voz',
+        onClick: () => {
+          if (!st().project || !findItem(st().project!, itemId)) return toast('O áudio não está mais na linha do tempo.')
+          void st().apply((q) => moveToVoice(q, itemId, created ? { removeEmptyTrackId: landed.trackId } : undefined))
+        }
+      }
     })
   }
 }

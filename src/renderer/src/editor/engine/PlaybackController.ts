@@ -41,6 +41,7 @@ export class PlaybackController {
   private ctx: AudioContext | null = null
   private master: GainNode | null = null
   private volume = 1
+  private muted = false
   private gen = 0
   private active = false
   private t0 = 0 // ctx.currentTime do início (bloco 0)
@@ -206,7 +207,33 @@ export class PlaybackController {
   /** Volume master do preview (0–1); não afeta a exportação. */
   setVolume(v: number): void {
     this.volume = Math.min(1, Math.max(0, v))
-    if (this.master) this.master.gain.value = this.volume
+    if (this.master) this.master.gain.value = this.muted ? 0 : this.volume
+  }
+
+  /** Preview mudo sem perder o volume escolhido (gravação de narração sem fone: o relógio segue o áudio mudo). */
+  setMuted(muted: boolean): void {
+    this.muted = muted
+    if (this.master) this.master.gain.value = muted ? 0 : this.volume
+  }
+
+  /** O AudioContext da reprodução (criado se preciso): a captura da narração roda nele, no mesmo relógio. */
+  audioContext(): AudioContext {
+    return this.ensureCtx()
+  }
+
+  /**
+   * Âncora do relógio da reprodução em curso (null parado ou antes do 1º bloco): a timeline estava em `us0` no bloco 0,
+   * agendado em `t0S` (tempo do contexto), e o alto-falante soa `outputLatencyS` depois. Ver PlaybackController.clockUs.
+   */
+  get clockAnchor(): { us0: Us; t0S: number; outputLatencyS: number; rate: number } | null {
+    if (!this.active || !this.started || !this.ctx) return null
+    return { us0: this.us0, t0S: this.t0, outputLatencyS: this.latencyS(), rate: this.playRate }
+  }
+
+  /** Há o que tocar para frente a partir do playhead (sem voltar ao início, como o play() faz no fim)? */
+  canPlayForward(): boolean {
+    const st = this.store.getState()
+    return !!st.project && st.playheadUs < this.endFor(st.project, st.playheadUs)
   }
 
   dispose(): void {
@@ -222,7 +249,7 @@ export class PlaybackController {
     if (!this.ctx) {
       this.ctx = new AudioContext({ sampleRate: SR, latencyHint: 'interactive' })
       this.master = this.ctx.createGain()
-      this.master.gain.value = this.volume
+      this.master.gain.value = this.muted ? 0 : this.volume
       this.master.connect(this.ctx.destination)
     }
     return this.ctx

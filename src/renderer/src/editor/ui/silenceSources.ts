@@ -15,10 +15,11 @@ export function silenceSourceTracks(p: Project): Track[] {
 
 /**
  * Faixas de referência sugeridas: todas as de papel Voz (mais a preferida — a do item do menu — se tiver som); sem
- * nenhuma, a primeira de silenceSourceTracks.
+ * nenhuma, a primeira de silenceSourceTracks. Faixas bloqueadas nunca entram na sugestão (referência bloqueada impede
+ * aplicar); o usuário ainda pode ligá-las à mão.
  */
 export function defaultSilenceSources(p: Project, preferred?: string | null): string[] {
-  const all = silenceSourceTracks(p)
+  const all = silenceSourceTracks(p).filter((t) => !t.locked)
   const out = all.filter((t) => t.role === 'voice' || t.id === preferred).map((t) => t.id)
   return out.length ? out : all.slice(0, 1).map((t) => t.id)
 }

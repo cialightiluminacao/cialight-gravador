@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { basename, extname, join } from 'path'
-import { statSync } from 'fs'
-import { IPC, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
+import { renameSync, rmSync, statSync } from 'fs'
+import { IPC, type GeneratedExt, type GeneratedMeta, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
 import { getSettings, outputDir, rawDir, setSettings } from './settings/settingsStore'
 import { listDisplays, listSources, sourceThumbnail } from './capture/sources'
@@ -26,6 +26,7 @@ import type { AudioProcessOpts } from '@shared/editor/audioProcess'
 import { rnnoiseDir } from './export/ffmpegPath'
 import { MissingModelError, missingModelMessage } from './media/audioProcess'
 import { buildReviewAssets } from './export/reviewAssets'
+import { runFfmpeg } from './export/ffmpegRunner'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
 import { EditorExportJobs } from './export/editorExportJob'
@@ -229,6 +230,49 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
     return r.canceled ? [] : r.filePaths
   })
+
+  // ---- gravações em generated/ (narração), no padrão de session.write* ----
+  const generatedOwners = new Set<number>()
+  ipcMain.handle(IPC.project.writeGeneratedOpen, (e, projectId: string, base: string, ext: GeneratedExt, meta: GeneratedMeta) => {
+    const wc = e.sender
+    if (!generatedOwners.has(wc.id)) {
+      // janela fechada, renderer caído ou recarregado: o arquivo fecha e o parcial é recuperado ao abrir o projeto
+      generatedOwners.add(wc.id)
+      const drop = (): void => projects.closeGeneratedWritesOf(wc.id)
+      wc.once('destroyed', () => {
+        drop()
+        generatedOwners.delete(wc.id)
+      })
+      wc.on('render-process-gone', drop)
+      wc.on('did-navigate', drop)
+    }
+    return projects.openGeneratedWrite(projectId, base, ext, meta, wc.id)
+  })
+  ipcMain.handle(IPC.project.writeGenerated, (_e, handle: number, data: Uint8Array, position: number) => projects.writeGenerated(handle, data, position))
+  ipcMain.handle(IPC.project.writeGeneratedMeta, (_e, handle: number, meta: GeneratedMeta) => projects.setGeneratedMeta(handle, meta))
+  ipcMain.handle(IPC.project.writeGeneratedClose, (_e, handle: number) => projects.closeGeneratedWrite(handle))
+  ipcMain.handle(IPC.project.generatedAsset, async (_e, projectId: string, rel: string, opts: { name: string; repair?: boolean }) => {
+    if (typeof rel !== 'string' || !rel.startsWith('generated/')) throw new Error(`arquivo gerado inválido: ${rel}`)
+    const path = projects.filePath(projectId, rel)
+    if (opts?.repair) {
+      // gravação interrompida: o último fragmento pode ter ficado pela metade — remux só do que é legível
+      const tmp = `${path}.repair.${rel.endsWith('.webm') ? 'webm' : 'm4a'}`
+      try {
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', path, '-map', '0:a:0', '-c', 'copy', ...(rel.endsWith('.webm') ? ['-f', 'webm'] : ['-f', 'mp4', '-movflags', '+faststart']), tmp], { label: 'recuperar narração' })
+        renameSync(tmp, path)
+      } catch (e) {
+        rmSync(tmp, { force: true })
+        log.warn(`recuperação de ${rel} em ${projectId}: remux falhou, usando o arquivo como está`, e)
+      }
+    }
+    const info = await probe(path)
+    if (info.kind !== 'audio' || !info.audio) throw new Error('o arquivo gravado não tem áudio legível')
+    const asset: Asset = { id: newId('a_'), name: String(opts?.name || rel.slice('generated/'.length)), kind: 'audio', source: { type: 'generated', file: rel }, durationUs: info.durationUs, audio: info.audio, status: 'processing' }
+    projects.cacheAssets(projectId, [asset])
+    return asset
+  })
+  ipcMain.handle(IPC.project.pendingGenerated, (_e, projectId: string) => projects.pendingGenerated(projectId))
+  ipcMain.handle(IPC.project.clearPendingGenerated, (_e, projectId: string, rel: string) => projects.clearPendingGenerated(projectId, rel))
 
   // ---- media (ingestão do editor) ----
   ipcMain.handle(IPC.media.import, async (_e, projectId: string, paths: string[]) => {

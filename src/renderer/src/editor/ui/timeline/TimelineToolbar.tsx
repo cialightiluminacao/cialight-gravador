@@ -8,11 +8,12 @@ import { SHORTCUT_LABELS, type ShortcutAction } from '../../shortcuts'
 import { useEditorStore } from '../../state/editorStore'
 import { useSilencePreview } from '../../state/silencePreview'
 import { runShortcut } from '../editorActions'
+import { NarrationButton } from '../NarrationRecorder'
 import { ZOOM_MAX, ZOOM_MIN } from '../../state/zoom'
 
 // Barra da linha do tempo: dividir, apagar, desfazer/refazer, ímã, marcador, entrada/saída e
-// "Apagar trecho I–O", "Remover silêncios" (abre o painel), zoom (−, slider logarítmico, +, ajustar).
-// Tudo, menos "Remover silêncios", passa por runShortcut, o mesmo caminho dos atalhos de teclado.
+// "Apagar trecho I–O", "Remover silêncios" (abre o painel), "Gravar narração" (popover), zoom (−, slider logarítmico,
+// +, ajustar). Tudo, menos os dois painéis, passa por runShortcut, o mesmo caminho dos atalhos de teclado.
 
 const LOG_RANGE = Math.log(ZOOM_MAX / ZOOM_MIN)
 const zoomToSlider = (z: number): number => (Math.log(z / ZOOM_MIN) / LOG_RANGE) * 1000
@@ -78,6 +79,7 @@ export const TimelineToolbar = memo(function TimelineToolbar({ playback, onZoom 
           <AudioLines className="h-4 w-4" /> Silêncios
         </button>
       </Tip>
+      <NarrationButton playback={playback} />
       {range ? (
         <span className="ml-1 font-mono text-[10px] text-muted">
           {formatTimecodeUs(inUs, fps)} – {formatTimecodeUs(outUs, fps)}

@@ -75,7 +75,14 @@ const api: IpcApi = {
     save: (p) => ipcRenderer.invoke(IPC.project.save, p),
     remove: (id) => ipcRenderer.invoke(IPC.project.remove, id),
     fromSession: (sessionId) => ipcRenderer.invoke(IPC.project.fromSession, sessionId),
-    pickMedia: () => ipcRenderer.invoke(IPC.project.pickMedia)
+    pickMedia: () => ipcRenderer.invoke(IPC.project.pickMedia),
+    writeGeneratedOpen: (projectId, base, ext, meta) => ipcRenderer.invoke(IPC.project.writeGeneratedOpen, projectId, base, ext, meta),
+    writeGenerated: (handle, data, position) => ipcRenderer.invoke(IPC.project.writeGenerated, handle, data, position),
+    writeGeneratedMeta: (handle, meta) => ipcRenderer.invoke(IPC.project.writeGeneratedMeta, handle, meta),
+    writeGeneratedClose: (handle) => ipcRenderer.invoke(IPC.project.writeGeneratedClose, handle),
+    generatedAsset: (projectId, rel, opts) => ipcRenderer.invoke(IPC.project.generatedAsset, projectId, rel, opts),
+    pendingGenerated: (projectId) => ipcRenderer.invoke(IPC.project.pendingGenerated, projectId),
+    clearPendingGenerated: (projectId, rel) => ipcRenderer.invoke(IPC.project.clearPendingGenerated, projectId, rel)
   },
   media: {
     import: (projectId, paths) => ipcRenderer.invoke(IPC.media.import, projectId, paths),

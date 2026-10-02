@@ -261,3 +261,74 @@ describe('ProjectStore.projectDirs', () => {
     }
   })
 })
+
+describe('ProjectStore: arquivos gerados (narração) e recuperação', () => {
+  let root: string
+  let store: ProjectStore
+  const meta = (startUs: number) => ({ kind: 'narration' as const, startUs, inUs: 0, createdAt: '2026-10-02T10:00:00.000Z' })
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cialight-gen-'))
+    store = new ProjectStore({ projectsRoot: () => root, trash: async () => {} })
+    store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
+  })
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+  it('nome livre narracao-<n>, escrita por posição, marcador com o meta enquanto não vira asset', () => {
+    const a = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(1))
+    expect(a.rel).toBe('generated/narracao-1.m4a')
+    const b = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(2))
+    expect(b.rel).toBe('generated/narracao-2.m4a')
+    store.writeGenerated(a.handle, new Uint8Array([1, 2, 3, 4]), 0)
+    store.writeGenerated(a.handle, new Uint8Array([9]), 1)
+    store.setGeneratedMeta(a.handle, { ...meta(1), startUs: 500, inUs: 20 })
+    store.closeGeneratedWrite(a.handle)
+    store.closeGeneratedWrite(b.handle)
+    expect([...readFileSync(join(root, 'p-a', 'generated', 'narracao-1.m4a'))]).toEqual([1, 9, 3, 4])
+    // o 2º ficou vazio: nada a recuperar (marcador limpo); o 1º volta com o meta atualizado
+    expect(store.pendingGenerated('p-a')).toEqual([{ rel: 'generated/narracao-1.m4a', meta: { ...meta(1), startUs: 500, inUs: 20 }, bytes: 4 }])
+    expect(existsSync(join(root, 'p-a', 'generated', 'narracao-2.m4a.pending.json'))).toBe(false)
+    // o número seguinte não reusa nomes existentes
+    const c = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(3))
+    expect(c.rel).toBe('generated/narracao-3.m4a')
+    store.closeGeneratedWrite(c.handle)
+  })
+
+  it('gravação ainda aberta não aparece como pendente; usada por um asset do projeto ou limpa → some', () => {
+    const a = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(1))
+    store.writeGenerated(a.handle, new Uint8Array([1]), 0)
+    expect(store.pendingGenerated('p-a')).toEqual([])
+    store.closeGeneratedWrite(a.handle)
+    expect(store.pendingGenerated('p-a')).toHaveLength(1)
+    const p = store.load('p-a')
+    const asset: Asset = { id: 'n1', name: 'Narração 1', kind: 'audio', source: { type: 'generated', file: a.rel }, durationUs: 1, status: 'processing' }
+    store.save({ ...p, assets: [asset] })
+    expect(store.pendingGenerated('p-a')).toEqual([])
+    expect(existsSync(join(root, 'p-a', 'generated', 'narracao-1.m4a.pending.json'))).toBe(false)
+
+    const b = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(2))
+    store.writeGenerated(b.handle, new Uint8Array([1]), 0)
+    store.closeGeneratedWrite(b.handle)
+    store.clearPendingGenerated('p-a', b.rel)
+    expect(store.pendingGenerated('p-a')).toEqual([])
+    expect(existsSync(join(root, 'p-a', b.rel))).toBe(true) // o arquivo fica
+  })
+
+  it('closeGeneratedWritesOf fecha as escritas de uma janela (renderer caiu): o parcial vira pendente', () => {
+    const a = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(1), 7)
+    const b = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(2), 8)
+    store.writeGenerated(a.handle, new Uint8Array([5, 5]), 0)
+    store.writeGenerated(b.handle, new Uint8Array([6]), 0)
+    store.closeGeneratedWritesOf(7)
+    expect(store.pendingGenerated('p-a').map((x) => x.rel)).toEqual(['generated/narracao-1.m4a'])
+    expect(() => store.writeGenerated(a.handle, new Uint8Array([1]), 0)).toThrow()
+    store.closeGeneratedWrite(b.handle)
+  })
+
+  it('nome/extensão inválidos e meta malformado no disco', () => {
+    expect(() => store.openGeneratedWrite('p-a', '../x', 'm4a', meta(1))).toThrow()
+    expect(() => store.openGeneratedWrite('p-a', 'narracao', 'exe' as 'm4a', meta(1))).toThrow()
+    writeFileSync(join(root, 'p-a', 'generated', 'lixo.m4a'), 'x')
+    writeFileSync(join(root, 'p-a', 'generated', 'lixo.m4a.pending.json'), '{nao json')
+    expect(store.pendingGenerated('p-a')).toEqual([])
+  })
+})

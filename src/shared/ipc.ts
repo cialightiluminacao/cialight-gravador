@@ -29,6 +29,15 @@ export interface ProjectSummary {
   originSessionId?: string
 }
 
+/**
+ * Gravação em generated/ (narração) ainda não registrada no projeto: o marcador `<arquivo>.pending.json` guarda onde o
+ * item entra. Some quando o renderer salva o projeto com o asset; se a janela/o app cair antes, o arquivo parcial é
+ * recuperado ao abrir o projeto.
+ */
+export interface GeneratedMeta { kind: 'narration'; startUs: Us; inUs: Us; createdAt: string }
+export interface PendingGenerated { rel: string; meta: GeneratedMeta; bytes: number }
+export type GeneratedExt = 'm4a' | 'webm'
+
 export type IngestStep = 'probe' | 'proxy' | 'intermediate' | 'filmstrip' | 'peaks' | 'speech' | 'loudness' | 'audioProcess'
 /** Progresso de uma etapa da ingestão de um asset (0–100). `key`: chave do pré-processamento de áudio (step 'audioProcess'). */
 export interface IngestJob { projectId: string; assetId: string; step: IngestStep; percent: number; key?: string }
@@ -213,6 +222,25 @@ export interface IpcApi {
     fromSession(sessionId: string): Promise<Project>
     /** Diálogo de abrir arquivos de mídia (multi-seleção); [] se cancelado. */
     pickMedia(): Promise<string[]>
+    /**
+     * Gravação direto em generated/ (narração), no padrão de session.write*: `writeGeneratedOpen` cria
+     * `generated/<base>-<n>.<ext>` (n livre) e o marcador com `meta`; `writeGenerated` grava por posição;
+     * `writeGeneratedMeta` atualiza o meta (o início exato só se sabe depois que a reprodução começa);
+     * `writeGeneratedClose` fecha (o marcador fica até `clearPendingGenerated`). Janela que cai fecha as suas.
+     */
+    writeGeneratedOpen(projectId: string, base: string, ext: GeneratedExt, meta: GeneratedMeta): Promise<{ handle: number; rel: string }>
+    writeGenerated(handle: number, data: Uint8Array, position: number): Promise<void>
+    writeGeneratedMeta(handle: number, meta: GeneratedMeta): Promise<void>
+    writeGeneratedClose(handle: number): Promise<void>
+    /**
+     * Asset `generated` do arquivo (probe; status 'processing', pronto para media.enqueue), já resolvível no protocolo
+     * media/. `repair`: arquivo parcial de uma gravação interrompida é remuxado antes (fragmento final incompleto).
+     */
+    generatedAsset(projectId: string, rel: string, opts: { name: string; repair?: boolean }): Promise<Asset>
+    /** Gravações em generated/ que não chegaram ao projeto (janela/app caiu): com o meta e o tamanho. */
+    pendingGenerated(projectId: string): Promise<PendingGenerated[]>
+    /** O asset do arquivo já foi salvo no projeto: o marcador sai (o arquivo fica). */
+    clearPendingGenerated(projectId: string, rel: string): Promise<void>
   }
   /**
    * Ingestão de mídia do editor. Fluxo: `import` (probe no main; vídeos/áudios voltam com status
@@ -354,7 +382,14 @@ export const IPC = {
     save: 'project:save',
     remove: 'project:remove',
     fromSession: 'project:fromSession',
-    pickMedia: 'project:pickMedia'
+    pickMedia: 'project:pickMedia',
+    writeGeneratedOpen: 'project:writeGeneratedOpen',
+    writeGenerated: 'project:writeGenerated',
+    writeGeneratedMeta: 'project:writeGeneratedMeta',
+    writeGeneratedClose: 'project:writeGeneratedClose',
+    generatedAsset: 'project:generatedAsset',
+    pendingGenerated: 'project:pendingGenerated',
+    clearPendingGenerated: 'project:clearPendingGenerated'
   },
   media: {
     import: 'media:import',

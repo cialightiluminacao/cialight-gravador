@@ -14,6 +14,9 @@ import { TopBar } from './TopBar'
 import { ExportDialog } from './ExportDialog'
 import { SilenceDialog } from './SilenceDialog'
 import { useSilencePreview } from '../state/silencePreview'
+import { useNarration } from '../state/narration'
+import { NarrationOverlay } from './NarrationRecorder'
+import { abandonNarration, narrationActive, recoverNarrations, settleNarration } from './narrationFlow'
 import { MediaBin } from './MediaBin'
 import { Viewer } from './Viewer'
 import { Inspector } from './Inspector/Inspector'
@@ -28,7 +31,7 @@ import { viewerGestureActive } from './viewer/viewerGesture'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string }
+    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; narration: typeof useNarration; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string }
   }
 }
 
@@ -67,7 +70,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     setEngine(eng)
     const stopAutosave = startAutosave((p) => api.project.save(p))
     // QA (fora do pacote): store e motor acessíveis por CDP
-    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
+    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, narration: useNarration, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
     const offProgress = api.media.onProgress((j) => {
       if (j.projectId.toLowerCase() !== projectId.toLowerCase()) return
       const st = useEditorStore.getState()
@@ -91,6 +94,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     })
     // fechar a janela/sair com o editor aberto: o main pede para gravar tudo antes (e espera até 2 s)
     const offFlush = api.editor.onFlushRequest(async () => {
+      // narração gravando: para e insere o que foi gravado antes de salvar
+      await settleNarration()
       // campo com texto digitado: o blur confirma o valor (commit síncrono)
       const active = document.activeElement
       if (active instanceof HTMLElement) active.blur()
@@ -112,6 +117,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         await api.media.setOpenProject(project.id)
         if (!alive) return
         enqueuePending(project.id, project.assets)
+        // narrações que a janela/o app não chegaram a inserir (queda no meio da gravação): entram com aviso
+        void recoverNarrations(project.id)
         // redução de ruído/normalização pedidas e sem o arquivo em cache (ex.: projeto vindo de outro PC): reprocessa
         stopAudioProcessing = startAudioProcessing(project.id)
       } catch (e) {
@@ -127,6 +134,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       offFlush()
       offProgress()
       offDone()
+      // gravando narração ao desmontar sem passar por "Voltar": fecha o arquivo; o projeto a recupera ao abrir
+      abandonNarration()
       eng.playback.pause()
       useSilencePreview.getState().close()
       engineRef.current = null
@@ -162,6 +171,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       if (isK(e) && !e.ctrlKey && !e.altKey && !e.metaKey) kHeld = true
       if (e.defaultPrevented || (e.repeat && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && !frameStep(e))) return
       if (useEditorStore.getState().project?.id !== projectId) return // outro projeto ainda no store (troca em curso)
+      if (narrationActive()) return // gravando narração: o teclado é da barra de gravação (Espaço/Esc param)
       if (gestureActive() || viewerGestureActive()) return // arraste na linha do tempo/no visualizador: o teclado é do gesto
       // diálogo aberto (ex.: exportação): o teclado é dele. O painel "Remover silêncios" (não modal) só deixa passar o
       // transporte, e os controles dele (sliders, interruptores, botões) ficam com as próprias teclas
@@ -196,6 +206,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
   }, [projectId])
 
   const back = async (): Promise<void> => {
+    await settleNarration()
     engineRef.current?.playback.pause()
     await flushAutosave()
     useAppStore.getState().closeEditor()
@@ -249,6 +260,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         {loaded ? <Timeline playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
       </div>
       {loaded ? <SilenceDialog /> : null}
+      {loaded ? <NarrationOverlay /> : null}
       {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} onSeek={(us) => seekTo(engineRef.current?.playback ?? null, us)} /> : null}
     </div>
   )

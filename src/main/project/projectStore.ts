@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'fs'
 import { join } from 'path'
 import { parseProject } from '@shared/editor/schema'
 import { projectDurationUs, updateAsset } from '@shared/editor/ops'
 import { sessionRefs } from '@shared/editor/fromSession'
 import type { Asset, Project } from '@shared/editor/project'
-import type { ProjectSummary } from '@shared/ipc'
+import type { GeneratedExt, GeneratedMeta, PendingGenerated, ProjectSummary } from '@shared/ipc'
 import type { SessionStore } from '../session/sessionStore'
 import { derivedComplete } from '../media/proxyPolicy'
 import { isAudioProcessKey, isSourceFingerprint, processedAudioRel, sourceFingerprint } from '@shared/editor/audioProcess'
@@ -30,6 +30,16 @@ export interface ProjectStoreDeps {
 export type AssetVariant = 'original' | 'proxy' | 'intermediate'
 
 const SUBDIRS = ['proxies', 'cache', 'generated', 'versions']
+const PENDING_SUFFIX = '.pending.json'
+const GENERATED_EXTS: readonly GeneratedExt[] = ['m4a', 'webm']
+
+/** Escrita aberta em generated/ (narração): arquivo, marcador e a janela dona (fechada se ela cair). */
+interface GeneratedWrite { fd: number; projectId: string; rel: string; marker: string; owner?: number }
+
+function isGeneratedMeta(m: unknown): m is GeneratedMeta {
+  const o = m as GeneratedMeta | null
+  return !!o && o.kind === 'narration' && Number.isInteger(o.startUs) && o.startUs >= 0 && Number.isInteger(o.inUs) && o.inUs >= 0 && typeof o.createdAt === 'string'
+}
 const MAX_VERSIONS = 20
 const VERSION_MIN_INTERVAL_MS = 60_000
 
@@ -42,6 +52,8 @@ export class ProjectStore {
   // Cache em memória do último project.json carregado/salvo, chave = id minúsculo
   // (o host da URL do protocolo chega em lowercase).
   private cache = new Map<string, Project>()
+  private generatedWrites = new Map<number, GeneratedWrite>()
+  private nextGeneratedHandle = 1
 
   constructor(private deps: ProjectStoreDeps) {}
 
@@ -321,6 +333,103 @@ export class ProjectStore {
       }
     }
     return removed
+  }
+
+  // ---- gravações em generated/ (narração) ----
+
+  /**
+   * Cria `generated/<base>-<n>.<ext>` (n = 1 + o maior já usado, nunca sobrescreve) e o marcador `<arquivo>.pending.json`
+   * com `meta`. `owner`: id da janela (webContents) — closeGeneratedWritesOf fecha as dela se cair.
+   */
+  openGeneratedWrite(id: string, base: string, ext: GeneratedExt, meta: GeneratedMeta, owner?: number): { handle: number; rel: string } {
+    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(base)) throw new Error(`nome de arquivo gerado inválido: ${base}`)
+    if (!GENERATED_EXTS.includes(ext)) throw new Error(`extensão de arquivo gerado inválida: ${ext}`)
+    if (!isGeneratedMeta(meta)) throw new Error('meta de arquivo gerado inválido')
+    const gen = join(this.dirOf(id), 'generated')
+    mkdirSync(gen, { recursive: true })
+    let n = 1
+    for (const f of readdirSync(gen)) {
+      const m = f.startsWith(`${base}-`) ? /^(\d+)\./.exec(f.slice(base.length + 1)) : null
+      if (m) n = Math.max(n, Number(m[1]) + 1)
+    }
+    const rel = `generated/${base}-${n}.${ext}`
+    const file = this.filePath(id, rel)
+    const marker = `${file}${PENDING_SUFFIX}`
+    writeFileSync(marker, JSON.stringify(meta), 'utf8')
+    const fd = openSync(file, 'wx')
+    const handle = this.nextGeneratedHandle++
+    this.generatedWrites.set(handle, { fd, projectId: id, rel, marker, owner })
+    return { handle, rel }
+  }
+
+  writeGenerated(handle: number, data: Uint8Array, position: number): void {
+    const w = this.generatedWrites.get(handle)
+    if (!w) throw new Error('handle de escrita inválido')
+    let off = 0
+    while (off < data.byteLength) off += writeSync(w.fd, data, off, data.byteLength - off, position + off)
+  }
+
+  setGeneratedMeta(handle: number, meta: GeneratedMeta): void {
+    const w = this.generatedWrites.get(handle)
+    if (!w) throw new Error('handle de escrita inválido')
+    if (!isGeneratedMeta(meta)) throw new Error('meta de arquivo gerado inválido')
+    const tmp = `${w.marker}.tmp`
+    writeFileSync(tmp, JSON.stringify(meta), 'utf8')
+    renameSync(tmp, w.marker)
+  }
+
+  /** Fecha o arquivo; o marcador fica até clearPendingGenerated (o renderer salvou o projeto com o asset). */
+  closeGeneratedWrite(handle: number): void {
+    const w = this.generatedWrites.get(handle)
+    if (!w) return
+    this.generatedWrites.delete(handle)
+    closeSync(w.fd)
+  }
+
+  /** Janela que fechou/caiu: fecha as escritas dela (o parcial vira pendente e é recuperado ao abrir o projeto). */
+  closeGeneratedWritesOf(owner: number): void {
+    for (const [h, w] of [...this.generatedWrites]) if (w.owner === owner) this.closeGeneratedWrite(h)
+  }
+
+  /**
+   * Gravações que não chegaram ao projeto: marcadores cujo arquivo existe, não está aberto e nenhum asset do projeto usa.
+   * Marcador de arquivo vazio/ausente, já usado por um asset ou ilegível sai (nada a recuperar).
+   */
+  pendingGenerated(id: string): PendingGenerated[] {
+    const gen = join(this.dirOf(id), 'generated')
+    if (!existsSync(gen)) return []
+    const open = new Set([...this.generatedWrites.values()].filter((w) => w.projectId.toLowerCase() === id.toLowerCase()).map((w) => w.rel))
+    let used: Set<string>
+    try {
+      used = new Set(this.cached(id).assets.flatMap((a) => (a.source.type === 'generated' ? [a.source.file] : [])))
+    } catch {
+      used = new Set()
+    }
+    const out: PendingGenerated[] = []
+    for (const f of readdirSync(gen).sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))) {
+      if (!f.endsWith(PENDING_SUFFIX)) continue
+      const rel = `generated/${f.slice(0, -PENDING_SUFFIX.length)}`
+      if (open.has(rel)) continue
+      const marker = join(gen, f)
+      let meta: unknown = null
+      let bytes = 0
+      try {
+        meta = JSON.parse(readFileSync(marker, 'utf8'))
+        bytes = statSync(this.filePath(id, rel)).size
+      } catch {
+        // marcador ilegível ou arquivo ausente
+      }
+      if (!isGeneratedMeta(meta) || bytes === 0 || used.has(rel)) {
+        rmSync(marker, { force: true })
+        continue
+      }
+      out.push({ rel, meta, bytes })
+    }
+    return out
+  }
+
+  clearPendingGenerated(id: string, rel: string): void {
+    rmSync(`${this.filePath(id, rel)}${PENDING_SUFFIX}`, { force: true })
   }
 
   assetPath(p: Project, assetId: string, variant: AssetVariant, sessionsStore: SessionStore): string {
