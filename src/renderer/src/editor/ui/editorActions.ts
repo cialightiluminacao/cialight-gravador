@@ -1,22 +1,22 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addEffect, addMarker, addMediaFromAsset, addTrack, deleteItems, musicTrackName, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
+import { addEffect, addMarker, addMediaFromAsset, addTrack, copyKeyframes, deleteItems, musicTrackName, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, pasteKeyframes, projectDurationUs, removeKeys, splitAt, toggleEnabled, toggleKeyframes, trimItem, type KeyframeClipboard } from '@shared/editor/ops'
 import type { EffectPresetId, EffectRegionInit } from '@shared/editor/factory'
 import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
 import { frameDurUs, frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
 import type { PlaybackController } from '../engine/PlaybackController'
 import type { ShortcutAction } from '../shortcuts'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
-import { useKeyframeSelection } from '../state/keyframeSelection'
+import { concreteRefs, useKeyframeSelection, type KeyframeSel } from '../state/keyframeSelection'
 import { useViewerTool } from '../state/viewerTool'
 import { autoMusicLanding, moveToVoice } from './musicLanding'
 import { narrationActive } from './narrationFlow'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 
-/** Área de transferência interna (ids dos itens copiados). */
-let clipboard: string[] = []
+/** Área de transferência interna: itens (ids) ou keyframes — vale o que foi copiado por último. */
+let clipboard: { kind: 'items'; ids: string[] } | { kind: 'keys'; clip: KeyframeClipboard } | null = null
 
 /** "Ajustar tudo" (Shift+Z) depende da largura da linha do tempo: ela registra o handler aqui. */
 let zoomFitHandler: (() => void) | null = null
@@ -142,14 +142,56 @@ export function deleteSelection(ripple: boolean): void {
   if (st().apply((p) => deleteItems(p, selection, { ripple }))) st().select([])
 }
 
-/** Delete com um losango selecionado na linha do tempo: remove os keys daquele instante (não o item). */
-function deleteSelectedKeyframe(): boolean {
+/** Losangos selecionados que valem agora (o item deles é a seleção única) e o item. */
+function activeKeyframeSel(): { kf: KeyframeSel; item: Item } | null {
   const kf = useKeyframeSelection.getState().sel
-  const { selection } = st()
-  if (!kf || selection.length !== 1 || selection[0] !== kf.itemId) return false
+  const { selection, project } = st()
+  if (!kf || !project || selection.length !== 1 || selection[0] !== kf.itemId) return null
+  const f = findItem(project, kf.itemId)
+  return f ? { kf, item: f.item } : null
+}
+
+/** Delete com losangos selecionados na linha do tempo: remove esses keys (não o item). */
+function deleteSelectedKeyframe(): boolean {
+  const a = activeKeyframeSel()
+  if (!a) return false
   useKeyframeSelection.getState().set(null)
-  st().apply((p) => removeKeyframesAt(p, kf.itemId, kf.tUs))
+  st().apply((p) => removeKeys(p, a.kf.itemId, concreteRefs(a.item, a.kf.keys)))
   return true
+}
+
+/** Ctrl+C com losangos selecionados: copia esses keyframes (tempos relativos ao primeiro). */
+function copySelectedKeyframes(): boolean {
+  const a = activeKeyframeSel()
+  const p = st().project
+  if (!a || !p) return false
+  const clip = copyKeyframes(p, a.kf.itemId, { keys: concreteRefs(a.item, a.kf.keys) })
+  if (!clip) return false
+  clipboard = { kind: 'keys', clip }
+  toast('Keyframes copiados — Ctrl+V cola no playhead do item selecionado.', { duration: 1800 })
+  return true
+}
+
+/** Ctrl+V de keyframes: a partir do playhead, em cada item selecionado sob ele (tempos relativos mantidos; um passo de desfazer). */
+function pasteKeyframesAtPlayhead(clip: KeyframeClipboard): void {
+  const { project, selection, playheadUs } = st()
+  if (!project) return
+  const targets = selection.filter((id) => {
+    const f = findItem(project, id)
+    return !!f && playheadUs >= f.item.startUs && playheadUs < itemEndUs(f.item)
+  })
+  if (!targets.length) {
+    toast('Selecione um item sob o playhead para colar os keyframes.')
+    return
+  }
+  // apply mostra o erro (faixa bloqueada…); nada aplicável → o mesmo projeto, sem passo de desfazer
+  let same = false
+  st().apply((p) => {
+    const next = targets.reduce((q, id) => pasteKeyframes(q, id, clip, playheadUs), p)
+    same = next === p
+    return next
+  })
+  if (same) toast('Este item não tem as propriedades dos keyframes copiados.')
 }
 
 /**
@@ -231,13 +273,19 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'delete': if (!deleteSelectedKeyframe()) deleteSelection(false); return true
     case 'rippleDelete': deleteSelection(true); return true
     case 'copy':
+      if (copySelectedKeyframes()) return true
       if (!s.selection.length) return false
-      clipboard = [...s.selection]
+      clipboard = { kind: 'items', ids: [...s.selection] }
       return true
     case 'paste': {
-      if (!clipboard.length) return true
+      if (!clipboard) return true
+      if (clipboard.kind === 'keys') {
+        pasteKeyframesAtPlayhead(clipboard.clip)
+        return true
+      }
+      const ids0 = clipboard.ids
       let ids: string[] = []
-      if (s.apply((q) => { const r = duplicateItems(q, clipboard, s.playheadUs); ids = r.itemIds; return r.project })) s.select(ids)
+      if (s.apply((q) => { const r = duplicateItems(q, ids0, s.playheadUs); ids = r.itemIds; return r.project })) s.select(ids)
       return true
     }
     case 'duplicate': {

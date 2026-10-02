@@ -17,8 +17,8 @@ export type ShortcutAction =
   | 'rippleTrimEnd' // W
   | 'delete'
   | 'rippleDelete'
-  | 'copy'
-  | 'paste'
+  | 'copy' // itens selecionados ou, com losangos selecionados na linha do tempo, os keyframes
+  | 'paste' // o que foi copiado por último: itens no playhead ou keyframes no playhead do item selecionado
   | 'duplicate'
   | 'undo'
   | 'redo'
@@ -61,6 +61,8 @@ export const SHORTCUT_LABELS: Partial<Record<ShortcutAction, string>> = {
   end: 'End',
   split: 'S',
   delete: 'Del',
+  copy: 'Ctrl+C',
+  paste: 'Ctrl+V',
   undo: 'Ctrl+Z',
   redo: 'Ctrl+Shift+Z',
   markIn: 'I',

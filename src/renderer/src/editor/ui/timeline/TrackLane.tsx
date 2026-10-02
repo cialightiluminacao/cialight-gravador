@@ -16,9 +16,12 @@ interface Props {
   scrollUs: number
   viewW: number
   selection: string[]
+  /** Itens expandidos (linhas de keyframes) e o topo das linhas (px, relativo à faixa). */
+  expanded: ReadonlySet<string>
+  lanesTop: number
 }
 
-export const TrackLane = memo(function TrackLane({ track, rowH, projectId, assets, pxPerSec, scrollUs, viewW, selection }: Props): React.JSX.Element {
+export const TrackLane = memo(function TrackLane({ track, rowH, projectId, assets, pxPerSec, scrollUs, viewW, selection, expanded, lanesTop }: Props): React.JSX.Element {
   const marginUs = (ITEM_MARGIN_PX * 1e6) / pxPerSec
   const fromUs = scrollUs - marginUs
   const toUs = scrollUs + (viewW * 1e6) / pxPerSec + marginUs
@@ -39,6 +42,8 @@ export const TrackLane = memo(function TrackLane({ track, rowH, projectId, asset
           viewW={viewW}
           selected={selection.includes(it.id)}
           trackVolume={track.volume}
+          expanded={expanded.has(it.id)}
+          lanesTop={lanesTop}
         />
       ))}
     </div>

@@ -1,4 +1,4 @@
-import { addTrack, defaultEffectDurationUs, EditError, effectTrackAllowed, isFxTrack, findItem, linkedIds, moveItems, moveKeyframes, trimItem, updateItem } from '@shared/editor/ops'
+import { addTrack, defaultEffectDurationUs, EditError, effectTrackAllowed, isFxTrack, findItem, linkedIds, moveItems, moveKeyframes, moveKeys, trimItem, updateItem, type KeyRef } from '@shared/editor/ops'
 import type { MediaItem, Project, TrackKind, Us } from '@shared/editor/project'
 import { snapDelta, snapPoints, type SnapPoint } from '@shared/editor/snap'
 import { itemEndUs, snapToFrame } from '@shared/editor/time'
@@ -244,19 +244,33 @@ export function keyframeMarkLefts(timesUs: Us[], pxPerSec: number, clipFrom: num
   return out
 }
 
-export interface KeyframeDragInput { itemId: string; /** Instante local do losango no início do gesto. */ fromUs: Us; deltaUs: Us }
+export interface KeyframeDragInput {
+  itemId: string
+  /** Instante local do losango arrastado no início do gesto. */
+  fromUs: Us
+  deltaUs: Us
+  /** Keys escolhidos (linhas por propriedade / seleção múltipla): só eles andam; ausente = todos os keys de fromUs. */
+  keys?: readonly KeyRef[]
+}
 
 /**
- * Arrastar um losango: os keys do instante andam pelo delta, no quadro do projeto mais próximo, presos ao
- * item; soltar sobre outro key o substitui (ops.moveKeyframes). toUs = instante local final.
+ * Arrastar um losango: os keys andam pelo delta, com o losango arrastado no quadro do projeto mais próximo, presos
+ * ao item (um grupo mantém as distâncias e para na borda); soltar sobre outro key o substitui (ops.moveKeyframes /
+ * ops.moveKeys). toUs = instante local final do losango arrastado.
  */
 export function planKeyframeDrag(base: Project, input: KeyframeDragInput): GestureResult & { toUs: Us } {
   const f = findItem(base, input.itemId)
   if (!f) return { project: base, error: null, guideUs: null, toUs: input.fromUs }
   const abs = snapToFrame(f.item.startUs + input.fromUs + input.deltaUs, base.canvas.fps)
-  const toUs = Math.max(0, Math.min(f.item.durationUs, abs - f.item.startUs))
+  let toUs = Math.max(0, Math.min(f.item.durationUs, abs - f.item.startUs))
   try {
-    return { project: moveKeyframes(base, input.itemId, input.fromUs, toUs), error: null, guideUs: null, toUs }
+    if (!input.keys) return { project: moveKeyframes(base, input.itemId, input.fromUs, toUs), error: null, guideUs: null, toUs }
+    if (input.keys.length) {
+      const ts = input.keys.map((k) => k.tUs)
+      const d = Math.max(-Math.min(...ts), Math.min(f.item.durationUs - Math.max(...ts), toUs - input.fromUs))
+      toUs = input.fromUs + d
+    }
+    return { project: moveKeys(base, input.itemId, input.keys, toUs - input.fromUs), error: null, guideUs: null, toUs }
   } catch (e) {
     if (e instanceof EditError) return { project: null, error: e, guideUs: null, toUs: input.fromUs }
     throw e

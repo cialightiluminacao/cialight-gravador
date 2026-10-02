@@ -1,14 +1,16 @@
 import { memo } from 'react'
-import { AlertTriangle, EyeOff, Link2, PenLine, Rewind, Shapes, Snowflake, Sparkles, Type } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, EyeOff, Link2, PenLine, Rewind, Shapes, Snowflake, Sparkles, Type } from 'lucide-react'
 import type { Asset, Item, MediaItem, TrackKind } from '@shared/editor/project'
 import { cn } from '@/lib/cn'
 import { mediaUrl, projectFileUrl } from '../mediaImport'
 import { ITEM_TYPE_LABEL } from '../itemLabel'
 import { FadeHandles } from './FadeHandles'
+import { KeyframeLanes } from './KeyframeLanes'
 import { KeyframeMarks } from './KeyframeMarks'
 import { filmstripSlots } from './itemMedia'
 import { usePeaks } from './peaks'
 import { Waveform } from './Waveform'
+import { useExpandedItems } from '../../state/keyframeLanes'
 import { usToPx } from '../../state/zoom'
 
 // Um item na faixa: posicionado por usToPx e recortado à área visível (+ margem), para que itens
@@ -17,6 +19,8 @@ import { usToPx } from '../../state/zoom'
 // desenha a forma de onda. Losangos = keyframes (KeyframeMarks); item desativado fica apagado, com
 // borda tracejada e ícone de olho cortado (a hachura é da faixa bloqueada). Bordas (data-edge) fazem
 // trim; os eventos são tratados por delegação no useTimelineDrag (nenhum handler por item → memo efetivo).
+// A seta no rótulo expande o item: as linhas de keyframes por propriedade (KeyframeLanes) ficam abaixo
+// da caixa, na altura extra que a faixa ganha (layout.ts).
 
 export const ITEM_MARGIN_PX = 240
 const INSET = 3
@@ -36,6 +40,14 @@ interface Props {
   selected: boolean
   /** Volume da faixa (a forma de onda reflete faixa × item). */
   trackVolume: number
+  /** Item expandido: linhas de keyframes a partir de lanesTop (px, relativo à faixa). */
+  expanded: boolean
+  lanesTop: number
+}
+
+const toggleExpanded = (e: React.MouseEvent<HTMLButtonElement>): void => {
+  const id = e.currentTarget.dataset.expandItem
+  if (id) useExpandedItems.getState().toggle(id)
 }
 
 const TONE: Record<Item['type'] | 'audio', string> = {
@@ -84,7 +96,7 @@ function ItemWave({ item, asset, projectId, pxPerSec, clipFrom, clipTo, height, 
   return <Waveform peaks={peaks} item={item} pxPerSec={pxPerSec} clipFromPx={clipFrom} clipToPx={clipTo} height={height} color={color} trackVolume={trackVolume} />
 }
 
-export const ItemView = memo(function ItemView({ item, asset, projectId, kind, rowH, locked, dimmed, pxPerSec, scrollUs, viewW, selected, trackVolume }: Props): React.JSX.Element | null {
+export const ItemView = memo(function ItemView({ item, asset, projectId, kind, rowH, locked, dimmed, pxPerSec, scrollUs, viewW, selected, trackVolume, expanded, lanesTop }: Props): React.JSX.Element | null {
   const x = usToPx(item.startUs, pxPerSec, scrollUs)
   const w = (item.durationUs * pxPerSec) / 1e6
   const visL = Math.max(x, -ITEM_MARGIN_PX)
@@ -103,57 +115,74 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
   const fades = media ? (!isAudio && media.visual ? { in: media.visual.fadeInUs, out: media.visual.fadeOutUs } : { in: media.audio.fadeInUs, out: media.audio.fadeOutUs }) : null
   const fadeEditable = !!fades && !locked && w >= 30
   const disabled = item.enabled === false
+  const expandable = item.type !== 'annotations'
 
   return (
-    <div
-      data-item-id={item.id}
-      data-disabled={disabled || undefined}
-      className={cn(
-        'group absolute overflow-hidden rounded-[6px] border',
-        TONE[isAudio ? 'audio' : item.type],
-        locked ? 'cursor-not-allowed' : 'cursor-grab',
-        (dimmed || disabled) && 'opacity-45',
-        disabled && 'border-dashed',
-        selected && 'z-[1] border-accent shadow-[0_0_0_1.5px_var(--accent)]'
-      )}
-      style={{ left: visL, width: visR - visL, top: INSET, height: h }}
-    >
-      {media && asset && !isAudio && asset.kind === 'video' ? <Filmstrip item={media} asset={asset} projectId={projectId} h={h} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} /> : null}
-      {media && asset && asset.kind === 'image' && asset.status !== 'missing' ? (
-        <span className="absolute inset-0 block opacity-90" style={{ backgroundImage: `url("${mediaUrl(projectId, asset.id)}")`, backgroundSize: `auto ${h}px`, backgroundRepeat: 'repeat-x', backgroundPosition: `${-clipFrom}px 0` }} />
-      ) : null}
-      {media && asset && isAudio ? <ItemWave item={media} asset={asset} projectId={projectId} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} height={h - 2} color="rgba(93, 224, 168, 0.85)" trackVolume={trackVolume} /> : null}
-      {/* vídeo com áudio próprio (não separado): faixa de onda embaixo */}
-      {media && asset && !isAudio && asset.kind === 'video' && media.audio.enabled && !media.linkId ? (
-        <span className="absolute inset-x-0 bottom-0 block h-[16px] bg-black/45">
-          <ItemWave item={media} asset={asset} projectId={projectId} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} height={16} color="rgba(93, 224, 168, 0.8)" trackVolume={trackVolume} />
-        </span>
-      ) : null}
-      {broken ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(255,92,92,0.22)_0_6px,transparent_6px_12px)]" /> : null}
-      {locked ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(0,0,0,0.28)_0_4px,transparent_4px_9px)]" /> : null}
-      {fades ? <FadeHandles fadeInUs={fades.in} fadeOutUs={fades.out} pxPerSec={pxPerSec} w={w} clipFrom={clipFrom} visW={visR - visL} h={h} editable={fadeEditable} selected={selected} /> : null}
-      <KeyframeMarks item={item} pxPerSec={pxPerSec} clipFrom={clipFrom} visW={visR - visL} h={h} locked={locked} />
-      {/* desativado: o ícone aparece mesmo em item estreito (no rótulo quando cabe, senão no início) */}
-      {disabled && narrow ? (
-        <span className="pointer-events-none absolute left-0 top-0 z-[2] flex h-[14px] items-center rounded-br-[4px] bg-black/60 px-[2px] text-white/90">
-          <EyeOff className="h-2.5 w-2.5" aria-label="Desativado" />
-        </span>
-      ) : null}
-      {!narrow ? (
-        <span className={cn('pointer-events-none absolute top-0 z-[2] flex max-w-full items-center gap-1 rounded-br-[5px] bg-black/55 px-1.5 py-[1px] text-[10px] font-semibold leading-[14px] text-white/90', fadeEditable && clipFrom === 0 ? 'left-[11px]' : 'left-0')}>
-          {broken ? <AlertTriangle className="h-3 w-3 shrink-0 text-danger" /> : null}
-          {disabled ? <EyeOff className="h-3 w-3 shrink-0" aria-label="Desativado" /> : null}
-          {Icon ? <Icon className="h-3 w-3 shrink-0 opacity-80" /> : null}
-          {item.linkId ? <Link2 className="h-3 w-3 shrink-0 opacity-80" aria-label="Vinculado" /> : null}
-          <span className="truncate">{itemName(item, asset)}</span>
-          {media && media.speed !== 1 && !media.freeze ? <span className="shrink-0 rounded bg-warn/90 px-1 font-mono text-[9px] leading-[12px] text-black">{speedLabel(media.speed)}</span> : null}
-          {media?.reverse && !media.freeze ? <Rewind className="h-3 w-3 shrink-0 text-warn" aria-label="Reverso" /> : null}
-          {media?.freeze ? <Snowflake className="h-3 w-3 shrink-0 text-info" aria-label="Quadro congelado" /> : null}
-        </span>
-      ) : null}
-      {/* alças de trim: só nas bordas reais (não nas de recorte) e fora de faixa bloqueada */}
-      {!locked && clipFrom === 0 ? <span data-edge="start" className={cn('absolute inset-y-0 left-0 z-[2] block cursor-ew-resize group-hover:bg-white/25', selected && 'bg-accent/70 group-hover:bg-accent')} style={{ width: edgeW }} /> : null}
-      {!locked && clipTo >= w - 0.5 ? <span data-edge="end" className={cn('absolute inset-y-0 right-0 z-[2] block cursor-ew-resize group-hover:bg-white/25', selected && 'bg-accent/70 group-hover:bg-accent')} style={{ width: edgeW }} /> : null}
-    </div>
+    <>
+      <div
+        data-item-id={item.id}
+        data-disabled={disabled || undefined}
+        className={cn(
+          'group absolute overflow-hidden rounded-[6px] border',
+          TONE[isAudio ? 'audio' : item.type],
+          locked ? 'cursor-not-allowed' : 'cursor-grab',
+          (dimmed || disabled) && 'opacity-45',
+          disabled && 'border-dashed',
+          selected && 'z-[1] border-accent shadow-[0_0_0_1.5px_var(--accent)]'
+        )}
+        style={{ left: visL, width: visR - visL, top: INSET, height: h }}
+      >
+        {media && asset && !isAudio && asset.kind === 'video' ? <Filmstrip item={media} asset={asset} projectId={projectId} h={h} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} /> : null}
+        {media && asset && asset.kind === 'image' && asset.status !== 'missing' ? (
+          <span className="absolute inset-0 block opacity-90" style={{ backgroundImage: `url("${mediaUrl(projectId, asset.id)}")`, backgroundSize: `auto ${h}px`, backgroundRepeat: 'repeat-x', backgroundPosition: `${-clipFrom}px 0` }} />
+        ) : null}
+        {media && asset && isAudio ? <ItemWave item={media} asset={asset} projectId={projectId} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} height={h - 2} color="rgba(93, 224, 168, 0.85)" trackVolume={trackVolume} /> : null}
+        {/* vídeo com áudio próprio (não separado): faixa de onda embaixo */}
+        {media && asset && !isAudio && asset.kind === 'video' && media.audio.enabled && !media.linkId ? (
+          <span className="absolute inset-x-0 bottom-0 block h-[16px] bg-black/45">
+            <ItemWave item={media} asset={asset} projectId={projectId} pxPerSec={pxPerSec} clipFrom={clipFrom} clipTo={clipTo} height={16} color="rgba(93, 224, 168, 0.8)" trackVolume={trackVolume} />
+          </span>
+        ) : null}
+        {broken ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(255,92,92,0.22)_0_6px,transparent_6px_12px)]" /> : null}
+        {locked ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(0,0,0,0.28)_0_4px,transparent_4px_9px)]" /> : null}
+        {fades ? <FadeHandles fadeInUs={fades.in} fadeOutUs={fades.out} pxPerSec={pxPerSec} w={w} clipFrom={clipFrom} visW={visR - visL} h={h} editable={fadeEditable} selected={selected} /> : null}
+        <KeyframeMarks item={item} pxPerSec={pxPerSec} clipFrom={clipFrom} visW={visR - visL} h={h} locked={locked} />
+        {/* desativado: o ícone aparece mesmo em item estreito (no rótulo quando cabe, senão no início) */}
+        {disabled && narrow ? (
+          <span className="pointer-events-none absolute left-0 top-0 z-[2] flex h-[14px] items-center rounded-br-[4px] bg-black/60 px-[2px] text-white/90">
+            <EyeOff className="h-2.5 w-2.5" aria-label="Desativado" />
+          </span>
+        ) : null}
+        {!narrow ? (
+          <span className={cn('pointer-events-none absolute top-0 z-[2] flex max-w-full items-center gap-1 rounded-br-[5px] bg-black/55 px-1.5 py-[1px] text-[10px] font-semibold leading-[14px] text-white/90', fadeEditable && clipFrom === 0 ? 'left-[11px]' : 'left-0')}>
+            {expandable ? (
+              <button
+                type="button"
+                data-expand-item={item.id}
+                aria-expanded={expanded}
+                aria-label={expanded ? 'Ocultar keyframes por propriedade' : 'Mostrar keyframes por propriedade'}
+                title={expanded ? 'Ocultar keyframes por propriedade' : 'Mostrar keyframes por propriedade'}
+                className="pointer-events-auto -ml-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded text-white/80 hover:bg-white/20 hover:text-white"
+                onClick={toggleExpanded}
+              >
+                {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              </button>
+            ) : null}
+            {broken ? <AlertTriangle className="h-3 w-3 shrink-0 text-danger" /> : null}
+            {disabled ? <EyeOff className="h-3 w-3 shrink-0" aria-label="Desativado" /> : null}
+            {Icon ? <Icon className="h-3 w-3 shrink-0 opacity-80" /> : null}
+            {item.linkId ? <Link2 className="h-3 w-3 shrink-0 opacity-80" aria-label="Vinculado" /> : null}
+            <span className="truncate">{itemName(item, asset)}</span>
+            {media && media.speed !== 1 && !media.freeze ? <span className="shrink-0 rounded bg-warn/90 px-1 font-mono text-[9px] leading-[12px] text-black">{speedLabel(media.speed)}</span> : null}
+            {media?.reverse && !media.freeze ? <Rewind className="h-3 w-3 shrink-0 text-warn" aria-label="Reverso" /> : null}
+            {media?.freeze ? <Snowflake className="h-3 w-3 shrink-0 text-info" aria-label="Quadro congelado" /> : null}
+          </span>
+        ) : null}
+        {/* alças de trim: só nas bordas reais (não nas de recorte) e fora de faixa bloqueada */}
+        {!locked && clipFrom === 0 ? <span data-edge="start" className={cn('absolute inset-y-0 left-0 z-[2] block cursor-ew-resize group-hover:bg-white/25', selected && 'bg-accent/70 group-hover:bg-accent')} style={{ width: edgeW }} /> : null}
+        {!locked && clipTo >= w - 0.5 ? <span data-edge="end" className={cn('absolute inset-y-0 right-0 z-[2] block cursor-ew-resize group-hover:bg-white/25', selected && 'bg-accent/70 group-hover:bg-accent')} style={{ width: edgeW }} /> : null}
+      </div>
+      {expanded ? <KeyframeLanes item={item} pxPerSec={pxPerSec} clipFrom={clipFrom} visW={visR - visL} left={visL} top={lanesTop} locked={locked} /> : null}
+    </>
   )
 })

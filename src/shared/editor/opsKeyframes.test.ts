@@ -173,3 +173,52 @@ describe('pasteKeyframes em efeitos', () => {
   })
 })
 
+
+describe('keys por propriedade (linhas de keyframes na timeline)', () => {
+  const times = (a: Anim<number> | undefined): number[] => (a?.keys ?? []).map((k) => k.tUs)
+  it('moveKeys move só os keys pedidos, na mesma distância, com a curva junto', () => {
+    const { p, v } = base()
+    const q = ops.moveKeys(p, v, [{ path: 'crop.l', tUs: 0 }], 2 * S)
+    const m = byId<MediaItem>(q, v).visual!
+    expect(times(m.crop.l)).toEqual([2 * S, 10 * S])
+    expect(m.crop.l.keys![0].ease).toBe('in')
+    expect(times(m.adjust!.brightness)).toEqual([0, 10 * S]) // outra propriedade no mesmo instante fica
+    const g = byId<MediaItem>(ops.moveKeys(p, v, [{ path: 'crop.l', tUs: 10 * S }, { path: 'visual.radius', tUs: 10 * S }], -3 * S), v).visual!
+    expect(times(g.crop.l)).toEqual([0, 7 * S])
+    expect(times(g.radius)).toEqual([0, 7 * S])
+  })
+  it('moveKeys: o grupo fica preso ao item (distâncias mantidas) e substitui o key onde cai', () => {
+    const { p, v } = base()
+    // grupo [0, 10 s] não tem folga: nada muda
+    expect(ops.moveKeys(p, v, [{ path: 'crop.l', tUs: 0 }, { path: 'visual.radius', tUs: 10 * S }], S)).toBe(p)
+    const q = ops.moveKeys(p, v, [{ path: 'crop.l', tUs: 10 * S }], -20 * S)
+    const c = byId<MediaItem>(q, v).visual!.crop.l
+    expect(c.keys).toEqual([{ tUs: 0, value: 0.4, ease: 'linear' }])
+    expect(ops.moveKeys(p, v, [], S)).toBe(p)
+  })
+  it('moveKeys/removeKeys recusam faixa bloqueada', () => {
+    const { p, v } = base()
+    const tid = p.tracks.find((t) => t.items.some((i) => i.id === v))!.id
+    const locked = ops.updateTrack(p, tid, { locked: true })
+    expect(() => ops.moveKeys(locked, v, [{ path: 'crop.l', tUs: 0 }], S)).toThrow()
+    expect(() => ops.removeKeys(locked, v, [{ path: 'crop.l', tUs: 0 }])).toThrow()
+  })
+  it('removeKeys tira só os keys pedidos', () => {
+    const { p, v } = base()
+    const m = byId<MediaItem>(ops.removeKeys(p, v, [{ path: 'crop.l', tUs: 0 }, { path: 'visual.radius', tUs: 10 * S }]), v).visual!
+    expect(times(m.crop.l)).toEqual([10 * S])
+    expect(times(m.radius)).toEqual([0])
+    expect(times(m.adjust!.brightness)).toEqual([0, 10 * S])
+    expect(ops.removeKeys(p, v, [{ path: 'crop.l', tUs: 5 * S }])).toBe(p)
+  })
+  it('copyKeyframes com keys: copia exatamente os escolhidos, relativos ao primeiro', () => {
+    const { p, v } = base()
+    const c = ops.copyKeyframes(p, v, { keys: [{ path: 'crop.l', tUs: 10 * S }, { path: 'adjust.brightness', tUs: 0 }] })!
+    expect(Object.keys(c.keys).sort()).toEqual(['adjust.brightness', 'crop.l'])
+    expect(c.keys['crop.l']!.map((k) => k.tUs)).toEqual([10 * S])
+    expect(c.keys['adjust.brightness']!.map((k) => k.tUs)).toEqual([0])
+    const d = ops.copyKeyframes(p, v, { keys: [{ path: 'crop.l', tUs: 10 * S }] })!
+    expect(d.keys['crop.l']).toEqual([{ tUs: 0, value: 0.4, ease: 'linear' }])
+    expect(ops.copyKeyframes(p, v, { keys: [{ path: 'crop.l', tUs: 3 * S }] })).toBeNull()
+  })
+})

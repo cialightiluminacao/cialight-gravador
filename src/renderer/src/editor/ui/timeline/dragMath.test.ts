@@ -313,6 +313,25 @@ describe('planKeyframeDrag', () => {
     const r = planKeyframeDrag(p, { itemId: id, fromUs: S, deltaUs: 2 * S + 5_000 })
     expect(keys(r.project!, id)).toEqual([[3 * S, 10]])
   })
+  it('keys escolhidos (linhas): só eles andam, no quadro, e o grupo fica preso ao item', () => {
+    const { p, id } = fx()
+    const one = planKeyframeDrag(p, { itemId: id, fromUs: S, deltaUs: 530_000, keys: [{ path: 'strength', tUs: S }] })
+    expect(one.toUs).toBe(1_533_333)
+    expect(keys(one.project!, id)).toEqual([[1_533_333, 10], [3 * S, 90]])
+    // grupo [1 s, 3 s] num item de 4 s: no máximo +1 s
+    const g = planKeyframeDrag(p, { itemId: id, fromUs: S, deltaUs: 2 * S, keys: [{ path: 'strength', tUs: S }, { path: 'strength', tUs: 3 * S }] })
+    expect(g.toUs).toBe(2 * S)
+    expect(keys(g.project!, id)).toEqual([[2 * S, 10], [4 * S, 90]])
+    // a região (sem keys aqui) não muda
+    expect((ops.findItem(g.project!, id)!.item as EffectItem).region.x.keys).toBeUndefined()
+  })
+  it('keys escolhidos em faixa bloqueada: erro, sem mudar nada', () => {
+    const { p, id } = fx()
+    const locked = ops.updateTrack(p, ops.findItem(p, id)!.track.id, { locked: true })
+    const r = planKeyframeDrag(locked, { itemId: id, fromUs: S, deltaUs: S, keys: [{ path: 'strength', tUs: S }] })
+    expect(r.project).toBeNull()
+    expect(r.error?.code).toBe('locked')
+  })
   it('faixa bloqueada: erro, projeto null', () => {
     const { p, id } = fx()
     const locked = ops.updateTrack(p, ops.findItem(p, id)!.track.id, { locked: true })

@@ -1,13 +1,15 @@
 import { useCallback } from 'react'
 import { toast } from 'sonner'
+import type { AnimPath } from '@shared/editor/animPaths'
 import { findItem, projectDurationUs } from '@shared/editor/ops'
 import type { Project, Us } from '@shared/editor/project'
 import { formatTimecodeUs, itemEndUs } from '@shared/editor/time'
 import type { SnapPoint } from '@shared/editor/snap'
 import { useEditorStore } from '../../state/editorStore'
-import { useKeyframeSelection } from '../../state/keyframeSelection'
+import { useCurveEditor } from '../../state/keyframeLanes'
+import { concreteRefs, keysInLaneBox, shiftSelKeys, toggleKey, useKeyframeSelection, type SelKey } from '../../state/keyframeSelection'
 import { edgeScrollPx, gestureSnapPoints, planFade, planKeyframeDrag, planMove, planTrim, type MoveInput, type MovePlan } from './dragMath'
-import { HEADER_W, itemsInBox, ROW_H, TOP_PAD, zoneAt, type Layout } from './layout'
+import { HEADER_W, itemsInBox, laneAt, lanePaths, ROW_H, TOP_PAD, zoneAt, type Layout } from './layout'
 import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
 
 // Gestos da linha do tempo com Pointer Events, por delegação (um handler para todos os itens):
@@ -15,8 +17,10 @@ import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
 //    acima da 1ª de vídeo / abaixo da última de áudio cria faixa nova ao soltar)
 //  • borda do item (data-edge) → trim (Ctrl = ripple; Alt ignora o vínculo)
 //  • alça de fade (data-fade) → fade de entrada/saída
-//  • losango de keyframe (data-keyframe) → clique leva o playhead ao key e o seleciona; arrastar muda o
-//    instante (no quadro, preso ao item; soltar sobre outro key o substitui)
+//  • losango de keyframe (data-keyframe: combinado; data-lane-key: linha de uma propriedade) → clique leva o
+//    playhead ao key e o seleciona (Shift/Ctrl soma/tira); arrastar move o losango — ou todos os selecionados,
+//    se ele está entre eles — no quadro, preso ao item (soltar sobre outro key o substitui)
+//  • fundo das linhas de keyframes (data-lanes-item) → caixa seleciona os keys (Shift/Ctrl soma)
 //  • fundo → seleção por caixa (Ctrl/Shift soma); clique simples no fundo limpa a seleção
 // Mover/trim/fade: transação aberta ao passar do limiar; cada evento recalcula a partir da base da
 // transação (lida do store a cada evento: patches de ingestão no meio do gesto entram nela) com
@@ -111,16 +115,35 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
       const edge = target.closest<HTMLElement>('[data-edge]')?.dataset.edge as 'start' | 'end' | undefined
       const fade = target.closest<HTMLElement>('[data-fade]')?.dataset.fade as 'in' | 'out' | undefined
       const kfAttr = target.closest<HTMLElement>('[data-keyframe]')?.dataset.keyframe
-      const id = itemEl?.dataset.itemId
-      // qualquer outro gesto solta o losango selecionado (Delete volta a apagar o item)
-      if (!(id && kfAttr !== undefined)) useKeyframeSelection.getState().set(null)
-
-      if (id && kfAttr !== undefined) {
-        // ---------------- losango de keyframe
-        const fromUs = Number(kfAttr)
+      const lanesEl = target.closest<HTMLElement>('[data-lanes-item]')
+      const laneKeyEl = target.closest<HTMLElement>('[data-lane-key]')
+      const id = itemEl?.dataset.itemId ?? lanesEl?.dataset.lanesItem
+      // losango: o combinado (todas as propriedades no instante) ou o de uma linha
+      const kfKey: SelKey | null = laneKeyEl ? { path: laneKeyEl.dataset.path as AnimPath, tUs: Number(laneKeyEl.dataset.laneKey) } : kfAttr !== undefined ? { path: null, tUs: Number(kfAttr) } : null
+      // qualquer outro gesto solta os losangos selecionados (Delete volta a apagar o item)
+      if (!(id && (kfKey || lanesEl))) useKeyframeSelection.getState().set(null)
+      const selectOnly = (itemId: string): void => {
         const sel = st().selection
-        if (!(sel.length === 1 && sel[0] === id)) st().select([id])
-        useKeyframeSelection.getState().set({ itemId: id, tUs: fromUs })
+        if (!(sel.length === 1 && sel[0] === itemId)) st().select([itemId])
+      }
+
+      if (id && kfKey) {
+        // ---------------- losango de keyframe (combinado ou de uma linha)
+        const fromUs = kfKey.tUs
+        const setKf = useKeyframeSelection.getState().set
+        selectOnly(id) // antes de ler a seleção de losangos: trocar de item a limpa
+        if (e.shiftKey || e.ctrlKey || e.metaKey) {
+          setKf(toggleKey(useKeyframeSelection.getState().sel, id, kfKey))
+          return
+        }
+        // arrastar um losango que já está numa seleção de vários leva o grupo junto
+        const prev = useKeyframeSelection.getState().sel
+        const inGroup = !!prev && prev.itemId === id && prev.keys.length > 1 && prev.keys.some((k) => k.path === kfKey.path && Math.abs(k.tUs - fromUs) <= 1)
+        const group = inGroup ? prev.keys : [kfKey]
+        setKf({ itemId: id, keys: group })
+        const startItem = findItem(st().project!, id)?.item
+        // combinado sozinho: todos os keys do instante (moveKeyframes); senão exatamente os keys escolhidos
+        const refs = !startItem || (group.length === 1 && kfKey.path === null) ? undefined : concreteRefs(startItem, group)
         let failed: string | null = null
         let toUs = fromUs
         autoScroll = true
@@ -131,7 +154,7 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
           }
           const base = txBase()
           if (!base) return
-          const r = planKeyframeDrag(base, { itemId: id, fromUs, deltaUs: deltaAt(ev) })
+          const r = planKeyframeDrag(base, { itemId: id, fromUs, deltaUs: deltaAt(ev), keys: refs })
           failed = r.error?.message ?? null
           toUs = r.toUs
           st().apply(() => r.project ?? base, { transient: true })
@@ -148,9 +171,39 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
           }
           if (commit && !failed) {
             st().commitTx()
-            useKeyframeSelection.getState().set({ itemId: id, tUs: toUs })
+            useKeyframeSelection.getState().set({ itemId: id, keys: shiftSelKeys(group, toUs - fromUs) })
           } else st().cancelTx()
           if (commit && failed) toast.error(failed)
+        }
+      } else if (id && lanesEl) {
+        // ---------------- caixa de seleção no fundo das linhas de keyframes do item
+        selectOnly(id)
+        const prev = useKeyframeSelection.getState().sel
+        const before = prev?.itemId === id ? prev : null
+        const additive = e.ctrlKey || e.metaKey || e.shiftKey
+        const f = findItem(st().project!, id)
+        const row = f ? layoutRef.current.rows.find((r) => r.track.id === f.track.id) : undefined
+        if (!f || !row) return
+        const item = f.item
+        const paths = lanePaths(item)
+        const lane = (y: number): number => Math.min(paths.length - 1, laneAt(row, y, true) ?? 0)
+        const cy0 = contentY(y0)
+        autoScroll = true
+        onMove = (ev) => {
+          if (!started) {
+            if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < MOVE_THRESHOLD_PX) return
+            started = true
+          }
+          const { zoomPxPerSec: z, scrollUs: s } = st()
+          const x1 = laneX(ev.clientX), cy1 = contentY(ev.clientY)
+          const hits = keysInLaneBox(item, paths, startUs - item.startUs, pxToUs(x1, z, s) - item.startUs, lane(cy0), lane(cy1))
+          const keys = additive && before ? [...before.keys, ...hits.filter((h) => !before.keys.some((k) => k.path === h.path && Math.abs(k.tUs - h.tUs) <= 1))] : hits
+          useKeyframeSelection.getState().set(keys.length ? { itemId: id, keys } : null)
+          setOverlay({ ...NO_OVERLAY, box: { x0: usToPx(startUs, z, s), y0: cy0, x1, y1: cy1 } })
+        }
+        onEnd = (commit) => {
+          if (!commit) useKeyframeSelection.getState().set(before)
+          else if (!started && !additive) useKeyframeSelection.getState().set(null)
         }
       } else if (id && fade) {
         // ---------------- fade (alça no canto superior)
@@ -361,8 +414,15 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
       const target = e.target as HTMLElement
       if (target.closest('[data-track-header]')) return
       e.preventDefault()
-      const id = target.closest<HTMLElement>('[data-item-id]')?.dataset.itemId
+      const laneKey = target.closest<HTMLElement>('[data-lane-key]')
+      const id = target.closest<HTMLElement>('[data-item-id]')?.dataset.itemId ?? target.closest<HTMLElement>('[data-lanes-item]')?.dataset.lanesItem
       if (!id || active) return
+      if (laneKey) {
+        // botão direito num losango de uma linha: editor de curvas do trecho que começa nele
+        if (!st().selection.includes(id)) st().select([id])
+        useCurveEditor.getState().open({ itemId: id, path: laneKey.dataset.path as AnimPath, tUs: Number(laneKey.dataset.laneKey), x: e.clientX, y: e.clientY })
+        return
+      }
       if (!st().selection.includes(id)) st().select([id])
       onItemMenu(id, e.clientX, e.clientY)
     },

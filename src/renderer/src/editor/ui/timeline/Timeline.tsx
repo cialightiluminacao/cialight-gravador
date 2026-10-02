@@ -7,6 +7,7 @@ import { formatTimecodeUs } from '@shared/editor/time'
 import { cn } from '@/lib/cn'
 import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
+import { useExpandedItems } from '../../state/keyframeLanes'
 import { useSilencePreview } from '../../state/silencePreview'
 import { addAssetAt, addEffectAt, registerZoomFit, seekTo } from '../editorActions'
 import { effectFromDrag, isEffectDrag } from '../EffectLibrary'
@@ -47,6 +48,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
   const inUs = useEditorStore((s) => s.inUs)
   const outUs = useEditorStore((s) => s.outUs)
   const silenceCuts = useSilencePreview((s) => s.cuts)
+  const expanded = useExpandedItems((s) => s.ids)
   const [viewW, setViewW] = useState(0)
   const [overlay, setOverlay] = useState<DragOverlay>(NO_OVERLAY)
   const [menu, setMenu] = useState<{ x: number; y: number; entries: MenuEntry[] } | null>(null)
@@ -58,7 +60,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
   viewWRef.current = viewW
 
   const tracks = project?.tracks
-  const layout = useMemo(() => buildLayout(tracks ?? []), [tracks])
+  const layout = useMemo(() => buildLayout(tracks ?? [], expanded), [tracks, expanded])
   const layoutRef = useRef(layout)
   layoutRef.current = layout
   const assetList = project?.assets
@@ -227,7 +229,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
             {layout.rows.map((row) => (
               <div key={row.track.id} className="absolute inset-x-0 flex border-b border-border/70" style={{ top: row.y, height: row.h }}>
                 <TrackHeader playback={playback} track={row.track} rowH={row.h - 1} up={displayNeighborIndex(project.tracks, row.track.id, 'up')} down={displayNeighborIndex(project.tracks, row.track.id, 'down')} />
-                <TrackLane track={row.track} rowH={row.h - 1} projectId={project.id} assets={assets} pxPerSec={pps} scrollUs={scrollUs} viewW={viewW} selection={selection} />
+                <TrackLane track={row.track} rowH={row.itemH - 1} expanded={expanded} lanesTop={row.itemH} projectId={project.id} assets={assets} pxPerSec={pps} scrollUs={scrollUs} viewW={viewW} selection={selection} />
               </div>
             ))}
             {layout.sepY !== null ? <div className="absolute inset-x-0 border-b border-border-strong bg-bg" style={{ top: layout.sepY, height: SEP_H }} /> : null}

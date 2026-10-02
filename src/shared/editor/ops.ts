@@ -1580,13 +1580,13 @@ export function keyframeTimesUs(item: Item): Us[] {
 }
 
 /** Aplica `fn` a cada propriedade animável do item (draft); null = não muda. Recusa faixa bloqueada. */
-function editAllAnims(p: Project, itemId: string, fn: (a: Anim<number>, durationUs: Us) => Anim<number> | null): Project {
+function editAllAnims(p: Project, itemId: string, fn: (a: Anim<number>, durationUs: Us, path: AnimPath) => Anim<number> | null): Project {
   const f = mustFind(p, itemId)
   assertUnlocked(f.track)
   const changes: [AnimPath, Anim<number>][] = []
   for (const pt of ANIM_PATHS) {
     const a = getAnim(f.item, pt)
-    const next = a ? fn(a, f.item.durationUs) : null
+    const next = a ? fn(a, f.item.durationUs, pt) : null
     if (next) changes.push([pt, next])
   }
   if (changes.length === 0) return p
@@ -1620,6 +1620,46 @@ export function removeKeyframesAt(p: Project, itemId: string, localUs: Us): Proj
   })
 }
 
+/** Um key de uma propriedade: instante local (µs desde o início do item). */
+export interface KeyRef { path: AnimPath; tUs: Us }
+
+/** O key da propriedade a ±1 µs de tUs. */
+const keyAt = (a: Anim<number>, tUs: Us): Keyframe<number> | undefined => (a.keys ?? []).find((k) => Math.abs(k.tUs - tUs) <= 1)
+
+/**
+ * Move os keys escolhidos (por propriedade) pelo mesmo delta, mantendo as distâncias: o delta é limitado para o
+ * grupo inteiro ficar em [0, duração]. Um key que fica a ±meio quadro do destino de um key movido (na mesma
+ * propriedade) é substituído, como em moveKeyframes. Delta efetivo 0 ou nenhum key → igual.
+ */
+export function moveKeys(p: Project, itemId: string, refs: readonly KeyRef[], deltaUs: Us): Project {
+  const f = mustFind(p, itemId)
+  const found = refs.flatMap((r) => {
+    const a = getAnim(f.item, r.path)
+    const k = a && keyAt(a, r.tUs)
+    return k ? [{ path: r.path, key: k }] : []
+  })
+  if (found.length === 0) return p
+  const lo = Math.min(...found.map((x) => x.key.tUs)), hi = Math.max(...found.map((x) => x.key.tUs))
+  const d = Math.round(Math.max(-lo, Math.min(f.item.durationUs - hi, deltaUs)))
+  if (d === 0) return p
+  const tol = frameDurUs(p.canvas.fps) / 2
+  return editAllAnims(p, itemId, (a, _dur, path) => {
+    const moving = new Set(found.filter((x) => x.path === path).map((x) => x.key))
+    if (moving.size === 0) return null
+    const dest = [...moving].map((k) => k.tUs + d)
+    const rest = (a.keys ?? []).filter((k) => !moving.has(k) && dest.every((t) => Math.abs(k.tUs - t) > tol))
+    return { ...a, keys: [...rest, ...[...moving].map((k) => ({ ...k, tUs: k.tUs + d }))].sort((x, y) => x.tUs - y.tUs) }
+  })
+}
+
+/** Remove os keys escolhidos (por propriedade); nenhum encontrado → igual. */
+export function removeKeys(p: Project, itemId: string, refs: readonly KeyRef[]): Project {
+  return editAllAnims(p, itemId, (a, _dur, path) => {
+    const gone = refs.filter((r) => r.path === path).map((r) => keyAt(a, r.tUs)).filter((k) => !!k)
+    return gone.length ? gone.reduce((acc, k) => removeKey(acc, k.tUs), a) : null
+  })
+}
+
 /**
  * Troca a curva (ease) do key mais próximo de tUs (absoluto, até ±meio quadro) da propriedade: é a curva do trecho
  * que começa nele. Sem key ali → igual. Bezier com x1/x2 fora de [0,1] é recusado (a curva deixaria de ser função do
@@ -1640,16 +1680,18 @@ export interface KeyframeClipboard { keys: Partial<Record<AnimPath, Keyframe<num
 
 /**
  * Copia os keys do item em [fromUs, toUs] (absolutos; padrão = o item inteiro) das propriedades dadas (padrão =
- * todas). Os tempos ficam relativos ao primeiro key copiado, preservando a distância entre propriedades. null = nada.
+ * todas), ou exatamente os keys de `keys` (instantes locais). Os tempos ficam relativos ao primeiro key copiado, preservando a distância entre propriedades. null = nada.
  */
-export function copyKeyframes(p: Project, itemId: string, opts?: { paths?: AnimPath[]; fromUs?: Us; toUs?: Us }): KeyframeClipboard | null {
+export function copyKeyframes(p: Project, itemId: string, opts?: { paths?: AnimPath[]; fromUs?: Us; toUs?: Us; keys?: readonly KeyRef[] }): KeyframeClipboard | null {
   const it = mustFind(p, itemId).item
   const from = Math.max(0, (opts?.fromUs ?? it.startUs) - it.startUs)
   const to = Math.min(it.durationUs, (opts?.toUs ?? end(it)) - it.startUs)
   const found: [AnimPath, Keyframe<number>[]][] = []
   for (const pt of opts?.paths ?? ANIM_PATHS) {
     const a = getAnim(it, pt)
-    const keys = a ? copyKeys(a, from, to) : []
+    // keys: só os escolhidos (linhas de keyframes); senão o trecho [from, to]
+    const picked = opts?.keys?.filter((r) => r.path === pt)
+    const keys = !a ? [] : picked ? picked.map((r) => keyAt(a, r.tUs)).filter((k) => !!k).sort((x, y) => x.tUs - y.tUs) : copyKeys(a, from, to)
     if (keys.length) found.push([pt, keys])
   }
   if (found.length === 0) return null

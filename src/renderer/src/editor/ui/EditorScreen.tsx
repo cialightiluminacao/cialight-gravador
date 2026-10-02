@@ -20,6 +20,7 @@ import { abandonNarration, narrationActive, recoverNarrations, settleNarration }
 import { MediaBin } from './MediaBin'
 import { Viewer } from './Viewer'
 import { Inspector } from './Inspector/Inspector'
+import { CurveEditor } from './Inspector/CurveEditor'
 import { Timeline } from './timeline/Timeline'
 import { invalidatePeaks } from './timeline/peaks'
 import { gestureActive } from './timeline/useTimelineDrag'
@@ -260,6 +261,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         {loaded ? <Timeline playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
       </div>
       {loaded ? <SilenceDialog /> : null}
+      {loaded ? <CurveEditor /> : null}
       {loaded ? <NarrationOverlay /> : null}
       {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} onSeek={(us) => seekTo(engineRef.current?.playback ?? null, us)} /> : null}
     </div>
