@@ -40,3 +40,18 @@ Marcar a cada release. Máquinas: PC de desenvolvimento (Win11, 2 monitores) e p
 - [ ] Atalhos: gravar combinação, avisos (ABNT2/reservados), conflito duplicado, "não registrado" quando outro app usa, restaurar padrões.
 - [ ] Anotações: cor/espessura/auto-sumir refletidos na overlay.
 - [ ] Avançado: proteção das janelas ligada/desligada; teste de encoders; pastas; logs.
+
+## Editor
+- [ ] Histórico → Editar abre o editor com a gravação (tela, webcam na posição/forma gravada, microfone e sistema em faixas separadas); Editar de novo reabre o mesmo projeto; "Novo projeto desta gravação" cria outro.
+- [ ] Projetos: novo projeto, renomear, abrir recentes, excluir (originais e gravações intocados); excluir uma gravação usada por projeto é recusado com aviso (Histórico, Revisão e diálogo de gravação interrompida).
+- [ ] Importar (botão e arrastar do Explorer) vídeo mp4/mov/mkv, áudio mp3/wav/m4a/flac e imagem png/jpg: miniatura, filmstrip e forma de onda aparecem; HEVC/GOP longo/4K ganham proxy com progresso; FLAC/AC-3 tocam (intermediário AAC).
+- [ ] Mover o arquivo original → "mídia indisponível" no item e "Localizar…" reconecta.
+- [ ] Reprodução: Espaço, J/K/L, ←/→ (Shift = 1 s), Home/End; áudio sincronizado com o vídeo em 1 min; minimizar a janela tocando não mostra "O visualizador travou".
+- [ ] Linha do tempo: dividir (S/Ctrl+B), mover com ímã (linha guia), Alt ignora o vínculo, trim e ripple (Ctrl), Q/W, Delete/Shift+Delete, I/O + Ctrl+Shift+X apaga o trecho em todas as faixas, faixa nova ao soltar acima, bloquear/ocultar/mudo, zoom (Ctrl+roda, +/−, Shift+Z), seleção por caixa, marcadores (M).
+- [ ] Fades nos cantos do item (vídeo e áudio) com dica de duração; volume em dB no inspetor; fade audível/visível no preview e no arquivo exportado.
+- [ ] Visualizador: mover/escalar/girar a webcam e imagens (guias de centro, Shift), corte, forma redonda/arredondada, borda, espelhar; o resultado no preview = exportado.
+- [ ] Desfazer/refazer (Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y) de qualquer ação, incluindo arrastes (1 passo por gesto); salvamento automático ("Salvo") e reabrir o projeto depois de fechar o app.
+- [ ] Exportar Alta 1080p, WhatsApp (≤ 64 MB), Original e Vertical 9:16 (projeto 9:16): progresso com %/velocidade/ETA, arquivo abre no Windows/VLC/WhatsApp Web, sem `.part` sobrando; cancelar apaga o parcial; sair durante a exportação pergunta uma vez.
+- [ ] Exportação usa a GPU quando disponível (NVIDIA/Intel/AMD) e cai para software sem erro quando o encoder falha.
+- [ ] Projeto com 20+ cortes e 3 faixas de vídeo continua fluido (preview e arraste na linha do tempo).
+- [ ] O app instalado (v1.0.x) e o de desenvolvimento podem dividir o mesmo `settings.json` sem perder configurações.

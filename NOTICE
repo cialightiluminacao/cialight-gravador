@@ -1,0 +1,41 @@
+CiaLight Gravador
+Copyright (c) Cia Light. Licenciado sob a licença MIT (ver package.json).
+
+Este produto inclui software de terceiros, distribuído sob as licenças abaixo.
+
+--------------------------------------------------------------------------------
+FFmpeg (ffmpeg.exe, ffprobe.exe e DLLs em resources/ffmpeg → <instalação>/resources/ffmpeg)
+  Build BtbN (https://github.com/BtbN/FFmpeg-Builds), versão em resources/ffmpeg/VERSION.json.
+  Licença: GNU General Public License v3 (texto em resources/ffmpeg/LICENSE.txt, instalado junto).
+  Código-fonte: https://ffmpeg.org e https://github.com/BtbN/FFmpeg-Builds
+  O FFmpeg roda como processo separado; não é ligado ao código do app.
+
+--------------------------------------------------------------------------------
+mediabunny (https://github.com/Vanilagy/mediabunny) — Copyright (c) Vanilagy
+  Licença: Mozilla Public License 2.0 (https://mozilla.org/MPL/2.0/)
+  Usado sem modificações (gravação fMP4, decodificação e exportação do editor). O código-fonte
+  correspondente está disponível em https://github.com/Vanilagy/mediabunny e em node_modules/mediabunny.
+
+--------------------------------------------------------------------------------
+twgl.js (https://github.com/greggman/twgl.js) — Copyright (c) 2019 Gregg Tavares
+  Licença: MIT
+
+immer (https://github.com/immerjs/immer) — Copyright (c) 2017 Michel Weststrate
+  Licença: MIT
+
+React, Radix UI, Zustand, Zod, sonner, class-variance-authority, clsx, tailwind-merge — Licença: MIT
+lucide-react — Licença: ISC
+electron-updater, electron-log — Licença: MIT
+Electron (https://github.com/electron/electron) — Licença: MIT (Chromium: licenças em LICENSES.chromium.html)
+
+Fontes Manrope e Azeret Mono (via @fontsource-variable) — SIL Open Font License 1.1
+
+--------------------------------------------------------------------------------
+signalsmith-stretch (https://github.com/Signalsmith-Audio/signalsmith-stretch) — Licença: MIT
+  Usado apenas nas páginas de medição (spike F0) fora do instalador; não é distribuído com o app.
+
+--------------------------------------------------------------------------------
+opencut-classic (https://github.com/OpenCut-app/OpenCut, MIT) foi consultado como referência de
+arquitetura para o editor; nenhum código dele foi copiado ou adaptado.
+
+Textos completos das licenças MIT/ISC/MPL-2.0/OFL-1.1 acompanham cada pacote em node_modules/<pacote>/.
