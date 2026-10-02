@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { parseProject, validateProject } from './schema'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
-import type { Asset, Project } from './project'
+import type { Asset, MediaItem, Project, TextItem } from './project'
+import { resolveFrame } from './resolve'
+import { planAudio } from './audioPlan'
+import fixture from './__fixtures__/v13-project.json'
+import golden from './__fixtures__/v13-golden.json'
 
 const asset: Asset = { id: 'a1', name: 'a', kind: 'video', source: { type: 'file', path: 'x', size: 1, mtimeMs: 1 }, durationUs: 2_000_000, status: 'ready' }
 const withItems = (items: ReturnType<typeof createMediaItem>[]): Project => {
@@ -101,5 +105,45 @@ describe('schema', () => {
     expect(f('blurText')).toMatchObject({ strength: { value: 80 }, region: { shape: 'rect', w: { value: 0.4 }, h: { value: 0.08 } } })
     expect(f('blurAllExcept')).toMatchObject({ invert: true, strength: { value: 80 }, feather: 0.2, region: { w: { value: 0.5 }, h: { value: 0.5 } } })
     expect(createEffectItem('blur', 0, 1, { x: 0.2, shape: 'ellipse' }).region).toMatchObject({ shape: 'ellipse', x: { value: 0.2 }, y: { value: 0.5 } })
+  })
+})
+
+describe('schema F4: propriedades que viraram animáveis (compatível com v1.1–v1.3)', () => {
+  // projeto no formato da v1.3 (corte/ajuste/raio/tamanho do texto numéricos) e o que a v1.3 resolvia/mixava
+  // (golden gerado com o código da v1.3 antes da mudança; ShapeLayer.item reduzido ao id)
+  const old = fixture as unknown
+  const shrink = (layers: ReturnType<typeof resolveFrame>) => layers.map((l) => (l.kind === 'shape' ? { ...l, item: l.item.id } : l))
+  it('número vira { value } no parse, sem mudar version', () => {
+    const p = parseProject(old)
+    expect(p.version).toBe(1)
+    const v = (p.tracks[0].items[0] as MediaItem).visual!
+    expect(v.crop).toEqual({ l: { value: 0.1 }, t: { value: 0 }, r: { value: 0.05 }, b: { value: 0.02 } })
+    expect(v.adjust).toEqual({ brightness: { value: 0.1 }, contrast: { value: 0.2 }, saturation: { value: -0.3 } })
+    expect(v.radius).toEqual({ value: 12 })
+    expect((p.tracks[2].items[0] as TextItem).style.size).toEqual({ value: 48 })
+    // salvar e abrir de novo (formato novo) é estável
+    expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+    expect(validateProject(p)).toEqual([])
+  })
+  it('projeto v1.3: resolveFrame e planAudio idênticos aos da v1.3 (golden)', () => {
+    const p = parseProject(old)
+    for (const { t, layers } of golden.frames) expect(JSON.parse(JSON.stringify(shrink(resolveFrame(p, t))))).toEqual(layers)
+    expect(JSON.parse(JSON.stringify(planAudio(p)))).toEqual(golden.audio)
+    expect(golden.frames.length).toBeGreaterThan(150)
+  })
+  it('as novas propriedades aceitam keyframes; ordem dos keys é validada', () => {
+    const p = parseProject(old)
+    const m = p.tracks[0].items[0] as MediaItem
+    m.visual!.crop.l = { value: 0, keys: [{ tUs: 200, value: 0.1, ease: 'in' }, { tUs: 100, value: 0.2, ease: 'linear' }] }
+    expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+    expect(validateProject(p).some((s) => s.includes('crop.l'))).toBe(true)
+  })
+  it('bezier: x1/x2 fora de [0,1] é recusado; y livre (overshoot)', () => {
+    const p = parseProject(old)
+    const m = p.tracks[0].items[0] as MediaItem
+    m.visual!.transform.y = { value: 0, keys: [{ tUs: 0, value: 0, ease: { bezier: [0.3, -0.5, 0.7, 1.8] } }] }
+    expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
+    m.visual!.transform.y = { value: 0, keys: [{ tUs: 0, value: 0, ease: { bezier: [1.2, 0, 0.7, 1] } }] }
+    expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/Projeto inválido/)
   })
 })

@@ -40,12 +40,13 @@ export type AnimPreset = 'fade' | 'slideL' | 'slideR' | 'slideU' | 'slideD' | 'z
 export interface Transform { x: Anim<number>; y: Anim<number>; scale: Anim<number>; rotation: Anim<number>; opacity: Anim<number> }
 export interface VisualProps {
   transform: Transform
-  crop: { l: number; t: number; r: number; b: number }
+  /** Corte de cada lado (fração da fonte). Projetos até a v1.3 gravavam números: o schema converte para `{ value }`. */
+  crop: { l: Anim<number>; t: Anim<number>; r: Anim<number>; b: Anim<number> }
   fit: 'contain' | 'cover' | 'fill'
   fadeInUs: Us; fadeOutUs: Us
   animIn?: { preset: AnimPreset; durationUs: Us }; animOut?: { preset: AnimPreset; durationUs: Us }
-  adjust?: { brightness: number; contrast: number; saturation: number }
-  shape?: 'rect' | 'rounded' | 'circle'; radius?: number
+  adjust?: { brightness: Anim<number>; contrast: Anim<number>; saturation: Anim<number> }
+  shape?: 'rect' | 'rounded' | 'circle'; radius?: Anim<number>
   border?: { width: number; color: string }
   mirror?: boolean
 }
@@ -63,7 +64,7 @@ export interface MediaItem extends ItemBase {
   freeze?: { atUs: Us }
   audio: AudioProps; visual?: VisualProps; transitionIn?: Transition
 }
-export interface TextStyle { font: string; size: number; weight: number; color: string; background?: string; stroke?: { width: number; color: string }; shadow?: boolean; align: 'left' | 'center' | 'right'; lineHeight: number }
+export interface TextStyle { font: string; size: Anim<number>; weight: number; color: string; background?: string; stroke?: { width: number; color: string }; shadow?: boolean; align: 'left' | 'center' | 'right'; lineHeight: number }
 export interface TextItem extends ItemBase { type: 'text'; text: string; style: TextStyle; visual: VisualProps; transitionIn?: Transition }
 export interface ShapeItem extends ItemBase { type: 'shape'; shape: 'rect' | 'ellipse' | 'arrow'; fill: string; stroke: string; strokeWidth: number; visual: VisualProps }
 export interface EffectRegion { shape: 'rect' | 'ellipse'; x: Anim<number>; y: Anim<number>; w: Anim<number>; h: Anim<number>; rotation: Anim<number> }

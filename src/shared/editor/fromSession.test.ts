@@ -134,8 +134,8 @@ describe('projectFromSession', () => {
     if (cam.type !== 'media') throw new Error('esperado item de mídia')
     expect(cam.visual!.shape).toBe('rounded')
     // fonte 16:9 → alvo 1:1: corta a largura
-    expect(cam.visual!.crop.l).toBeCloseTo((1 - 9 / 16) / 2)
-    expect(cam.visual!.crop.t).toBe(0)
+    expect(cam.visual!.crop.l.value).toBeCloseTo((1 - 9 / 16) / 2)
+    expect(cam.visual!.crop.t.value).toBe(0)
   })
 })
 

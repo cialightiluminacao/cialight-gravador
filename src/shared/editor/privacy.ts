@@ -2,9 +2,9 @@
 import { evalAnim } from './anim'
 import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
-import { visualTrackBelow } from './resolve'
+import { visualStateAt, visualTrackBelow } from './resolve'
 
-export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget' | 'unlinkedOverEdited'
+export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget' | 'unlinkedOverEdited' | 'transformedUnderEffect'
 /** `tUs`: instante (absoluto, dentro do intervalo) que "Revisar" mostra — o mais fraco, o início da sobreposição… */
 export interface PrivacyWarning { itemId: string; kind: PrivacyWarningKind; message: string; tUs: Us }
 
@@ -25,7 +25,8 @@ const MSG = {
   disabled: 'Efeito de privacidade desativado neste trecho: o conteúdo aparece sem proteção',
   covered: 'Há mídia acima deste efeito; ela não será borrada',
   noTarget: "Efeito 'só a faixa abaixo' sem mídia embaixo neste trecho",
-  unlinkedOverEdited: 'Efeito não vinculado sobre um trecho invertido — confira se ainda cobre o conteúdo'
+  unlinkedOverEdited: 'Efeito não vinculado sobre um trecho invertido — confira se ainda cobre o conteúdo',
+  transformedUnderEffect: 'O clipe se move (zoom, pan ou animação) e a região deste efeito não acompanha: o conteúdo pode sair de baixo dele'
 } as const
 
 /**
@@ -73,7 +74,8 @@ function mediaBox(p: Project, it: MediaItem, W: number, H: number): Box | null {
   const a = p.assets.find((x) => x.id === it.assetId)
   if (!v || !a?.video || v.animIn || v.animOut) return null
   // recorte muda a proporção do conteúdo (matrix.layerMatrix): sem teste de espaço
-  if (v.crop.l || v.crop.t || v.crop.r || v.crop.b) return null
+  const c = v.crop
+  if (animated(c.l, c.t, c.r, c.b) || c.l.value || c.t.value || c.r.value || c.b.value) return null
   const t = v.transform
   if (animated(t.x, t.y, t.scale, t.rotation)) return null
   const turned = a.video.rotation === 90 || a.video.rotation === 270
@@ -89,6 +91,88 @@ function mediaBox(p: Project, it: MediaItem, W: number, H: number): Box | null {
   const cx = t.x.value * W
   const cy = t.y.value * H
   return { x0: Math.max(0, cx - ex), y0: Math.max(0, cy - ey), x1: Math.min(W, cx + ex), y1: Math.min(H, cy + ey) }
+}
+
+/** Desvio tolerado da região em relação ao conteúdo: 1 % do maior lado do quadro (px) e 1° de rotação. */
+const FOLLOW_TOL = 0.01
+const FOLLOW_TOL_DEG = 1
+
+/** O clipe move o conteúdo no quadro: x/y/escala/rotação com keys ou animação de entrada/saída que não é só fade. */
+function clipMoves(m: MediaItem): boolean {
+  const v = m.visual
+  if (!v) return false
+  const t = v.transform
+  return animated(t.x, t.y, t.scale, t.rotation) || (!!v.animIn && v.animIn.preset !== 'fade') || (!!v.animOut && v.animOut.preset !== 'fade')
+}
+
+/**
+ * Primeiro instante (absoluto) de [a, b) em que a região do efeito deixa de acompanhar o conteúdo do clipe; null =
+ * acompanha. A região é levada ao espaço do conteúdo (desfaz centro, rotação e escala do clipe — a mesma geometria
+ * do resolve, com animações de entrada/saída): acompanhar = centro, tamanho e rotação constantes nesse espaço (em
+ * relação ao início do trecho em comum clipe ∩ efeito), com tolerância de FOLLOW_TOL do quadro medida na tela. Amostras: pontas, keys do clipe e
+ * da região, janelas das animações de entrada/saída e 3 pontos entre cada par (curvas não lineares).
+ */
+function unfollowedAt(fx: EffectItem, m: MediaItem, a: Us, b: Us, W: number, H: number): Us | null {
+  const v = m.visual!
+  const t = v.transform, r = fx.region
+  const base = [a, b - 1]
+  const add = (offset: Us, ...as: Anim<number>[]): void => { for (const x of as) for (const k of x.keys ?? []) base.push(offset + k.tUs) }
+  add(m.startUs, t.x, t.y, t.scale, t.rotation)
+  add(fx.startUs, r.x, r.y, r.w, r.h, r.rotation)
+  if (v.animIn) base.push(m.startUs + v.animIn.durationUs)
+  if (v.animOut) base.push(itemEndUs(m) - v.animOut.durationUs)
+  const pts = [...new Set(base.filter((x) => x >= a && x < b))].sort((x, y) => x - y)
+  const times: Us[] = []
+  pts.forEach((x, i) => {
+    times.push(x)
+    const n = pts[i + 1]
+    if (n !== undefined) for (let j = 1; j < 4; j++) times.push(x + Math.round(((n - x) * j) / 4))
+  })
+  const tol = FOLLOW_TOL * Math.max(W, H)
+  type Pose = { qx: number; qy: number; w: number; h: number; rot: number; s: number }
+  const pose = (at: Us): Pose | null => {
+    const rect = visualStateAt(v, m.durationUs, at - m.startUs).rect
+    const s = rect.scale
+    if (s < 1e-6) return null // conteúdo invisível neste instante
+    const lf = at - fx.startUs
+    const dx = (evalAnim(r.x, lf) - rect.cx) * W, dy = (evalAnim(r.y, lf) - rect.cy) * H
+    const th = (rect.rotation * Math.PI) / 180, cos = Math.cos(th), sin = Math.sin(th)
+    // espaço do conteúdo (px com escala 1, eixos do clipe): R(−θ)·(região − centro) / escala
+    return {
+      qx: (cos * dx + sin * dy) / s, qy: (-sin * dx + cos * dy) / s,
+      w: (Math.abs(evalAnim(r.w, lf)) * W) / s, h: (Math.abs(evalAnim(r.h, lf)) * H) / s,
+      rot: evalAnim(r.rotation, lf) - rect.rotation, s
+    }
+  }
+  const off = (ref: Pose, c: Pose | null): boolean => {
+    if (!c) return false
+    const dRot = Math.abs(((((c.rot - ref.rot) % 360) + 540) % 360) - 180)
+    return Math.hypot(c.qx - ref.qx, c.qy - ref.qy) * c.s > tol || Math.abs(c.w - ref.w) * c.s > tol || Math.abs(c.h - ref.h) * c.s > tol || dRot > FOLLOW_TOL_DEG
+  }
+  // referência: o início do trecho em comum (não o da consulta), para o resultado não depender da janela pedida
+  let ref: Pose | null = pose(Math.max(m.startUs, fx.startUs))
+  let ok = a
+  for (const at of times) {
+    const cur = pose(at)
+    if (!ref) {
+      ref = cur
+      ok = at
+      continue
+    }
+    if (!off(ref, cur)) {
+      ok = at
+      continue
+    }
+    // bisseção até ~1 ms: o instante em que a região começa a sair (o que "Revisar" mostra)
+    let lo = ok, hi = at
+    while (hi - lo > 1000) {
+      const mid = Math.round((lo + hi) / 2)
+      if (off(ref, pose(mid))) hi = mid
+      else lo = mid
+    }
+    return hi
+  }
+  return null
 }
 
 const disjoint = (a: Box | null, b: Box | null): boolean => !!a && !!b && (a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 <= b.y0 || b.y1 <= a.y0)
@@ -147,6 +231,21 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
         }
       }
       if (rev !== null) out.push({ itemId: it.id, kind: 'unlinkedOverEdited', message: MSG.unlinkedOverEdited, tUs: rev })
+      // clipe vinculado com zoom/pan/animação de movimento sob uma região que não acompanha (F4): o efeito é em
+      // coordenadas do quadro, então o conteúdo sensível sai de baixo dele
+      if (it.linkId) {
+        let moved: Us | null = null
+        for (const t of p.tracks) {
+          if (t.kind !== 'video' || t.hidden) continue
+          for (const m of t.items) {
+            if (m.type !== 'media' || m.linkId !== it.linkId || m.enabled === false || !clipMoves(m)) continue
+            const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
+            const at = a < b ? unfollowedAt(it, m, a, b, W, H) : null
+            if (at !== null) moved = moved === null ? at : Math.min(moved, at)
+          }
+        }
+        if (moved !== null) out.push({ itemId: it.id, kind: 'transformedUnderEffect', message: MSG.transformedUnderEffect, tUs: moved })
+      }
     }
   })
   return out

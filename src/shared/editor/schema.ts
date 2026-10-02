@@ -1,32 +1,40 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
 import { MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, Item, Project, Transform } from './project'
+import type { Item, Project } from './project'
+import { itemAnimEntries, type AnimPath } from './animPaths'
 
 const us = z.number().int()
+const unit = z.number().min(0).max(1)
+// bezier estilo CSS: x1, x2 ∈ [0,1] (x monotônico); y livre (overshoot)
 const ease = z.union([
   z.enum(['linear', 'hold', 'in', 'out', 'inOut']),
-  z.object({ bezier: z.tuple([z.number(), z.number(), z.number(), z.number()]) })
+  z.object({ bezier: z.tuple([unit, z.number(), unit, z.number()]) })
 ])
 const anim = z.object({
   value: z.number(),
   keys: z.array(z.object({ tUs: us, value: z.number(), ease })).optional()
 })
+/**
+ * Propriedade que virou animável na F4 (corte, ajuste, raio, tamanho do texto): projetos v1.1–v1.3 gravavam o número;
+ * o schema aceita os dois e normaliza para `{ value }` (sem mudar `version`: o arquivo antigo é um caso particular).
+ */
+const animOrNumber = z.union([z.number().transform((value) => ({ value })), anim])
 
 const animPreset = z.enum(['fade', 'slideL', 'slideR', 'slideU', 'slideD', 'zoom', 'pop'])
 const presetAnim = z.object({ preset: animPreset, durationUs: us })
 const transform = z.object({ x: anim, y: anim, scale: anim, rotation: anim, opacity: anim })
 const visual = z.object({
   transform,
-  crop: z.object({ l: z.number(), t: z.number(), r: z.number(), b: z.number() }),
+  crop: z.object({ l: animOrNumber, t: animOrNumber, r: animOrNumber, b: animOrNumber }),
   fit: z.enum(['contain', 'cover', 'fill']),
   fadeInUs: us,
   fadeOutUs: us,
   animIn: presetAnim.optional(),
   animOut: presetAnim.optional(),
-  adjust: z.object({ brightness: z.number(), contrast: z.number(), saturation: z.number() }).optional(),
+  adjust: z.object({ brightness: animOrNumber, contrast: animOrNumber, saturation: animOrNumber }).optional(),
   shape: z.enum(['rect', 'rounded', 'circle']).optional(),
-  radius: z.number().optional(),
+  radius: animOrNumber.optional(),
   border: z.object({ width: z.number(), color: z.string() }).optional(),
   mirror: z.boolean().optional()
 })
@@ -60,7 +68,7 @@ const mediaItem = z.object({
 })
 const textStyle = z.object({
   font: z.string(),
-  size: z.number(),
+  size: animOrNumber,
   weight: z.number(),
   color: z.string(),
   background: z.string().optional(),
@@ -201,25 +209,8 @@ export function parseProject(json: unknown): Project {
   return r.data
 }
 
-function itemAnims(it: Item): [string, Anim<number>][] {
-  switch (it.type) {
-    case 'media': {
-      const out: [string, Anim<number>][] = [['volume', it.audio.volume]]
-      if (it.visual) out.push(...visualAnims(it.visual.transform))
-      return out
-    }
-    case 'text':
-    case 'shape':
-      return visualAnims(it.visual.transform)
-    case 'effect':
-      return [['x', it.region.x], ['y', it.region.y], ['w', it.region.w], ['h', it.region.h], ['rotation', it.region.rotation], ['strength', it.strength]]
-    default:
-      return []
-  }
-}
-const visualAnims = (t: Transform): [string, Anim<number>][] => [
-  ['x', t.x], ['y', t.y], ['scale', t.scale], ['rotation', t.rotation], ['opacity', t.opacity]
-]
+/** Nome da propriedade nas mensagens (os de antes da F4 mantidos: volume, x, strength…). */
+const animLabel = (pt: AnimPath): string => (pt === 'audio.volume' ? 'volume' : /^(transform|region)\./.test(pt) ? pt.split('.')[1] : pt)
 
 /** Invariantes semânticas; devolve mensagens em português (vazio = válido). */
 export function validateProject(p: Project): string[] {
@@ -248,7 +239,8 @@ export function validateProject(p: Project): string[] {
       } else if (tr.kind !== 'video') {
         errs.push(`${tag}: item visual só pode ficar em faixa de vídeo`)
       }
-      for (const [name, an] of itemAnims(it)) {
+      for (const [pt, an] of itemAnimEntries(it)) {
+        const name = animLabel(pt)
         const keys = an.keys ?? []
         for (let i = 0; i < keys.length; i++) {
           // tempo repetido também é inválido: evalAnim divide por (k1.tUs − k0.tUs)

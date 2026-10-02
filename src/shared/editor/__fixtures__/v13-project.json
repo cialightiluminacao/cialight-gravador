@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "id": "p_v13",
+  "name": "Projeto v1.3",
+  "createdAt": "2026-09-01T00:00:00.000Z",
+  "updatedAt": "2026-09-01T00:00:00.000Z",
+  "canvas": { "width": 1920, "height": 1080, "fps": 30, "background": "#000000" },
+  "assets": [
+    {
+      "id": "a1", "name": "a1.mp4", "kind": "video", "source": { "type": "file", "path": "C:/a1.mp4", "size": 1, "mtimeMs": 1 },
+      "durationUs": 10000000,
+      "video": { "width": 1920, "height": 1080, "fps": 30, "codec": "avc1", "rotation": 0, "decodable": true, "gopUs": 1000000 },
+      "audio": { "channels": 2, "sampleRate": 48000, "codec": "mp4a" },
+      "status": "ready"
+    },
+    {
+      "id": "im", "name": "im.png", "kind": "image", "source": { "type": "file", "path": "C:/im.png", "size": 1, "mtimeMs": 1 },
+      "durationUs": null,
+      "video": { "width": 400, "height": 300, "fps": 0, "codec": "png", "rotation": 0, "decodable": true, "gopUs": 0 },
+      "status": "ready"
+    }
+  ],
+  "tracks": [
+    {
+      "id": "t_v1", "kind": "video", "name": "Vídeo 1", "muted": false, "hidden": false, "locked": false, "volume": 1,
+      "items": [
+        {
+          "id": "i_v", "type": "media", "startUs": 0, "durationUs": 6000000, "linkId": "l_1", "assetId": "a1", "inUs": 0, "speed": 1, "reverse": false,
+          "audio": { "enabled": false, "volume": { "value": 1 }, "fadeInUs": 0, "fadeOutUs": 0, "preservePitch": true, "denoise": false, "normalize": false },
+          "visual": {
+            "transform": {
+              "x": { "value": 0.5, "keys": [{ "tUs": 0, "value": 0.4, "ease": "linear" }, { "tUs": 2000000, "value": 0.6, "ease": "inOut" }, { "tUs": 5000000, "value": 0.5, "ease": "linear" }] },
+              "y": { "value": 0.5 },
+              "scale": { "value": 1, "keys": [{ "tUs": 1000000, "value": 1, "ease": "in" }, { "tUs": 4000000, "value": 1.6, "ease": { "bezier": [0.2, 0, 0.3, 1.4] } }, { "tUs": 5500000, "value": 1.2, "ease": "linear" }] },
+              "rotation": { "value": 3 },
+              "opacity": { "value": 0.9 }
+            },
+            "crop": { "l": 0.1, "t": 0, "r": 0.05, "b": 0.02 },
+            "fit": "cover",
+            "fadeInUs": 500000, "fadeOutUs": 300000,
+            "animIn": { "preset": "slideL", "durationUs": 400000 },
+            "adjust": { "brightness": 0.1, "contrast": 0.2, "saturation": -0.3 },
+            "shape": "rounded", "radius": 12,
+            "border": { "width": 4, "color": "#ffffff" },
+            "mirror": true
+          }
+        },
+        {
+          "id": "i_v2", "type": "media", "startUs": 6000000, "durationUs": 3000000, "assetId": "a1", "inUs": 2000000, "speed": 2, "reverse": true,
+          "audio": { "enabled": false, "volume": { "value": 1 }, "fadeInUs": 0, "fadeOutUs": 0, "preservePitch": true, "denoise": false, "normalize": false },
+          "visual": {
+            "transform": { "x": { "value": 0.5 }, "y": { "value": 0.5 }, "scale": { "value": 1 }, "rotation": { "value": 0 }, "opacity": { "value": 1 } },
+            "crop": { "l": 0, "t": 0.1, "r": 0, "b": 0.1 },
+            "fit": "contain", "fadeInUs": 0, "fadeOutUs": 0,
+            "animOut": { "preset": "slideD", "durationUs": 500000 }
+          }
+        }
+      ]
+    },
+    {
+      "id": "t_pip", "kind": "video", "name": "Vídeo 2", "muted": false, "hidden": false, "locked": false, "volume": 1,
+      "items": [
+        {
+          "id": "i_img", "type": "media", "startUs": 1000000, "durationUs": 4000000, "assetId": "im", "inUs": 0, "speed": 1, "reverse": false,
+          "audio": { "enabled": true, "volume": { "value": 1 }, "fadeInUs": 0, "fadeOutUs": 0, "preservePitch": true, "denoise": false, "normalize": false },
+          "visual": {
+            "transform": { "x": { "value": 0.8 }, "y": { "value": 0.2 }, "scale": { "value": 0.3 }, "rotation": { "value": 0 }, "opacity": { "value": 1 } },
+            "crop": { "l": 0.125, "t": 0, "r": 0.125, "b": 0 },
+            "fit": "contain", "fadeInUs": 0, "fadeOutUs": 0,
+            "animOut": { "preset": "fade", "durationUs": 600000 },
+            "shape": "circle"
+          }
+        }
+      ]
+    },
+    {
+      "id": "t_txt", "kind": "video", "name": "Vídeo 3", "muted": false, "hidden": false, "locked": false, "volume": 1,
+      "items": [
+        {
+          "id": "i_txt", "type": "text", "startUs": 500000, "durationUs": 3000000, "text": "Olá",
+          "style": { "font": "Inter", "size": 48, "weight": 700, "color": "#ffffff", "align": "center", "lineHeight": 1.2 },
+          "visual": {
+            "transform": { "x": { "value": 0.5 }, "y": { "value": 0.9 }, "scale": { "value": 1 }, "rotation": { "value": 0 }, "opacity": { "value": 1 } },
+            "crop": { "l": 0, "t": 0, "r": 0, "b": 0 },
+            "fit": "contain", "fadeInUs": 200000, "fadeOutUs": 200000
+          }
+        },
+        {
+          "id": "i_shape", "type": "shape", "startUs": 4000000, "durationUs": 2000000, "shape": "rect", "fill": "#ff0000", "stroke": "#000000", "strokeWidth": 2,
+          "visual": {
+            "transform": { "x": { "value": 0.3 }, "y": { "value": 0.3 }, "scale": { "value": 1 }, "rotation": { "value": 10 }, "opacity": { "value": 1 } },
+            "crop": { "l": 0, "t": 0, "r": 0, "b": 0 },
+            "fit": "fill", "fadeInUs": 0, "fadeOutUs": 0, "radius": 6
+          }
+        }
+      ]
+    },
+    {
+      "id": "t_fx", "kind": "video", "name": "Efeitos", "muted": false, "hidden": false, "locked": false, "volume": 1, "role": "effects",
+      "items": [
+        {
+          "id": "i_fx", "type": "effect", "startUs": 0, "durationUs": 6000000, "linkId": "l_1", "effect": "blur",
+          "region": {
+            "shape": "rect",
+            "x": { "value": 0.5, "keys": [{ "tUs": 0, "value": 0.3, "ease": "linear" }, { "tUs": 6000000, "value": 0.7, "ease": "linear" }] },
+            "y": { "value": 0.5 }, "w": { "value": 0.2 }, "h": { "value": 0.1 }, "rotation": { "value": 0 }
+          },
+          "strength": { "value": 70 }, "feather": 0.2, "color": "#000000", "invert": false, "scope": "below"
+        }
+      ]
+    },
+    {
+      "id": "t_a1", "kind": "audio", "name": "Áudio 1", "muted": false, "hidden": false, "locked": false, "volume": 0.8,
+      "items": [
+        {
+          "id": "i_a", "type": "media", "startUs": 0, "durationUs": 6000000, "linkId": "l_1", "assetId": "a1", "inUs": 0, "speed": 1, "reverse": false,
+          "audio": {
+            "enabled": true,
+            "volume": { "value": 1, "keys": [{ "tUs": 1000000, "value": 1, "ease": "linear" }, { "tUs": 3000000, "value": 0.25, "ease": "linear" }, { "tUs": 5000000, "value": 0.9, "ease": "linear" }] },
+            "fadeInUs": 400000, "fadeOutUs": 700000, "preservePitch": true, "denoise": false, "normalize": false
+          }
+        }
+      ]
+    }
+  ],
+  "markers": []
+}

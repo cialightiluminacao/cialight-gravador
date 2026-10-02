@@ -1,12 +1,15 @@
 import { produce } from 'immer'
-import { evalAnim, removeKey, setKey, setValue, sliceKeys } from './anim'
+import { copyKeys, evalAnim, insertKeyExact, pasteKeys, removeKey, setEase, setKey, setValue, sliceKeys } from './anim'
+import { ANIM_PATHS, assignAnim, getAnim, mapItemAnims as mapAnims, mapVisualAnims as mapVisual, type AnimPath } from './animPaths'
 import { createEffectItem, createMediaItem } from './factory'
 import { sourceTimeUs, visualTrackBelow } from './resolve'
 import type { EffectPresetId, EffectRegionInit } from './factory'
 import { newId } from './ids'
 import { frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
-import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, Track, TrackKind, Us, VisualProps } from './project'
+import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, Track, TrackKind, Us } from './project'
+
+export { getAnim, type AnimPath } from './animPaths'
 
 // Operações de edição puras: (project, ...) => Project. Lançam EditError quando a operação é inválida.
 
@@ -159,29 +162,6 @@ function mapLink(linkMap: Map<string, string>, linkId: string | undefined): stri
   let n = linkMap.get(linkId)
   if (!n) linkMap.set(linkId, (n = newId('l_')))
   return n
-}
-
-function mapVisual(v: VisualProps, f: (a: Anim<number>) => Anim<number>): VisualProps {
-  const t = v.transform
-  return { ...v, transform: { x: f(t.x), y: f(t.y), scale: f(t.scale), rotation: f(t.rotation), opacity: f(t.opacity) } }
-}
-
-/** Aplica f a todas as animações com keyframes do item (transform, volume, região e força do efeito). */
-function mapAnims<T extends Item>(it: T, f: (a: Anim<number>) => Anim<number>): T {
-  const i = it as Item
-  switch (i.type) {
-    case 'media':
-      return { ...i, audio: { ...i.audio, volume: f(i.audio.volume) }, ...(i.visual ? { visual: mapVisual(i.visual, f) } : {}) } as T
-    case 'text':
-    case 'shape':
-      return { ...i, visual: mapVisual(i.visual, f) } as T
-    case 'effect': {
-      const r = i.region
-      return { ...i, region: { ...r, x: f(r.x), y: f(r.y), w: f(r.w), h: f(r.h), rotation: f(r.rotation) }, strength: f(i.strength) } as T
-    }
-    default:
-      return it
-  }
 }
 
 /** Zera o que pertence à entrada (fade/anim/transição de entrada) e/ou à saída de um pedaço. */
@@ -1276,17 +1256,16 @@ function mirrorKeys(a: Anim<number>, dur: Us): Anim<number> {
 
 /**
  * Insere um trecho parado de D µs no instante local `local` das animações do item (o valor de `local` fica até
- * local + D; os keys depois andam D). O resto do trecho que continha `local` segue com o ease desse trecho (o do
- * último key ≤ local). Constantes não mudam.
+ * local + D; os keys depois andam D). O resto do trecho que continha `local` segue com o pedaço exato da curva desse
+ * trecho (insertKeyExact): a animação antes e depois do congelado é a mesma de antes. Constantes não mudam.
  */
 function holdAnimAt(a: Anim<number>, local: Us, D: Us): Anim<number> {
-  const k = a.keys
-  if (!k || k.length === 0) return a
-  const v = evalAnim(a, local)
+  if (!a.keys || a.keys.length === 0) return a
+  const k = insertKeyExact(a, local).keys!
+  const at = k.find((x) => x.tUs === local)!
   const before = k.filter((x) => x.tUs < local)
   const after = k.filter((x) => x.tUs > local).map((x) => ({ ...x, tUs: x.tUs + D }))
-  const seg = [...k].reverse().find((x) => x.tUs <= local)?.ease ?? 'linear'
-  return { ...a, keys: [...before, { tUs: local, value: v, ease: 'linear' }, { tUs: local + D, value: v, ease: seg }, ...after] }
+  return { ...a, keys: [...before, { tUs: local, value: at.value, ease: 'linear' }, { tUs: local + D, value: at.value, ease: at.ease }, ...after] }
 }
 
 /** Sobreposição visual que o congelar estica sobre o quadro parado (não é conteúdo da fonte): efeito, texto, forma, imagem. */
@@ -1516,39 +1495,6 @@ export function addMarker(p: Project, tUs: Us, label = ''): Project {
 
 // ---------------------------------------------------------------- efeitos de privacidade e keyframes
 
-export type AnimPath =
-  | 'transform.x' | 'transform.y' | 'transform.scale' | 'transform.rotation' | 'transform.opacity'
-  | 'region.x' | 'region.y' | 'region.w' | 'region.h' | 'region.rotation'
-  | 'strength' | 'audio.volume'
-
-const ANIM_PATHS: AnimPath[] = [
-  'transform.x', 'transform.y', 'transform.scale', 'transform.rotation', 'transform.opacity',
-  'region.x', 'region.y', 'region.w', 'region.h', 'region.rotation', 'strength', 'audio.volume'
-]
-type RegionKey = 'x' | 'y' | 'w' | 'h' | 'rotation'
-type TransformKey = keyof VisualProps['transform']
-
-/** Animação do item no caminho dado; null se o tipo de item não tem essa propriedade. */
-export function getAnim(item: Item, path: AnimPath): Anim<number> | null {
-  if (path === 'strength') return item.type === 'effect' ? item.strength : null
-  if (path === 'audio.volume') return item.type === 'media' ? item.audio.volume : null
-  if (path.startsWith('region.')) return item.type === 'effect' ? item.region[path.slice(7) as RegionKey] : null
-  const v = item.type === 'media' || item.type === 'text' || item.type === 'shape' ? item.visual : undefined
-  return v ? v.transform[path.slice(10) as TransformKey] : null
-}
-
-/** Grava a animação no item (draft do immer); o caminho já foi validado por getAnim. */
-function assignAnim(item: Item, path: AnimPath, a: Anim<number>): void {
-  if (item.type === 'effect') {
-    if (path === 'strength') item.strength = a
-    else item.region[path.slice(7) as RegionKey] = a
-  } else if (path === 'audio.volume') {
-    if (item.type === 'media') item.audio.volume = a
-  } else if (item.type === 'media' || item.type === 'text' || item.type === 'shape') {
-    if (item.visual) item.visual.transform[path.slice(10) as TransformKey] = a
-  }
-}
-
 function editAnim(p: Project, itemId: string, path: AnimPath, tUs: Us, fn: (a: Anim<number>, localUs: Us) => Anim<number>): Project {
   const f = mustFind(p, itemId)
   assertUnlocked(f.track)
@@ -1671,6 +1617,65 @@ export function removeKeyframesAt(p: Project, itemId: string, localUs: Us): Proj
   return editAllAnims(p, itemId, (a) => {
     const k = (a.keys ?? []).find((x) => Math.abs(x.tUs - localUs) <= 1)
     return k ? removeKey(a, k.tUs) : null
+  })
+}
+
+/**
+ * Troca a curva (ease) do key mais próximo de tUs (absoluto, até ±meio quadro) da propriedade: é a curva do trecho
+ * que começa nele. Sem key ali → igual. Bezier com x1/x2 fora de [0,1] é recusado (a curva deixaria de ser função do
+ * tempo).
+ */
+export function setKeyEase(p: Project, itemId: string, path: AnimPath, tUs: Us, ease: Ease): Project {
+  if (typeof ease === 'object' && [ease.bezier[0], ease.bezier[2]].some((x) => !(x >= 0 && x <= 1))) throw new EditError('invalid', 'Curva inválida: x1 e x2 precisam ficar entre 0 e 1')
+  const tol = frameDurUs(p.canvas.fps) / 2
+  return editAnim(p, itemId, path, tUs, (a, local) => {
+    let near: Keyframe<number> | undefined
+    for (const k of a.keys ?? []) if (Math.abs(k.tUs - local) <= tol && (!near || Math.abs(k.tUs - local) < Math.abs(near.tUs - local))) near = k
+    return near ? setEase(a, near.tUs, ease) : a
+  })
+}
+
+/** Keyframes copiados: por propriedade, com tempos relativos ao 1º key copiado (de qualquer propriedade). */
+export interface KeyframeClipboard { keys: Partial<Record<AnimPath, Keyframe<number>[]>> }
+
+/**
+ * Copia os keys do item em [fromUs, toUs] (absolutos; padrão = o item inteiro) das propriedades dadas (padrão =
+ * todas). Os tempos ficam relativos ao primeiro key copiado, preservando a distância entre propriedades. null = nada.
+ */
+export function copyKeyframes(p: Project, itemId: string, opts?: { paths?: AnimPath[]; fromUs?: Us; toUs?: Us }): KeyframeClipboard | null {
+  const it = mustFind(p, itemId).item
+  const from = Math.max(0, (opts?.fromUs ?? it.startUs) - it.startUs)
+  const to = Math.min(it.durationUs, (opts?.toUs ?? end(it)) - it.startUs)
+  const found: [AnimPath, Keyframe<number>[]][] = []
+  for (const pt of opts?.paths ?? ANIM_PATHS) {
+    const a = getAnim(it, pt)
+    const keys = a ? copyKeys(a, from, to) : []
+    if (keys.length) found.push([pt, keys])
+  }
+  if (found.length === 0) return null
+  const t0 = Math.min(...found.map(([, k]) => k[0].tUs))
+  return { keys: Object.fromEntries(found.map(([pt, k]) => [pt, k.map((x) => ({ ...x, tUs: x.tUs - t0 }))])) }
+}
+
+/**
+ * Cola keyframes no item a partir de atUs (absoluto, dentro do item): tempos relativos preservados e presos à
+ * duração do item (o que passar dela é cortado com key de borda exato, sem salto — pasteKeys). Propriedades que o
+ * item não tem (ex.: tamanho do texto num vídeo) são ignoradas; nenhuma aplicável → igual.
+ */
+export function pasteKeyframes(p: Project, itemId: string, clip: KeyframeClipboard, atUs: Us): Project {
+  const f = mustFind(p, itemId)
+  assertUnlocked(f.track)
+  const local = Math.round(atUs) - f.item.startUs
+  if (local < 0 || local > f.item.durationUs) throw new EditError('bounds', 'Instante fora do item')
+  const changes: [AnimPath, Anim<number>][] = []
+  for (const [pt, keys] of Object.entries(clip.keys) as [AnimPath, Keyframe<number>[]][]) {
+    const a = getAnim(f.item, pt)
+    if (a && keys.length) changes.push([pt, pasteKeys(a, keys, local, f.item.durationUs)])
+  }
+  if (changes.length === 0) return p
+  return edit(p, (d) => {
+    const it = d.tracks[f.trackIndex].items[f.itemIndex]
+    for (const [pt, a] of changes) assignAnim(it, pt, a)
   })
 }
 

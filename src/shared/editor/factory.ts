@@ -7,7 +7,7 @@ export function defaultTransform(): Transform {
 }
 
 export function defaultVisual(): VisualProps {
-  return { transform: defaultTransform(), crop: { l: 0, t: 0, r: 0, b: 0 }, fit: 'contain', fadeInUs: 0, fadeOutUs: 0 }
+  return { transform: defaultTransform(), crop: { l: { value: 0 }, t: { value: 0 }, r: { value: 0 }, b: { value: 0 } }, fit: 'contain', fadeInUs: 0, fadeOutUs: 0 }
 }
 
 export function defaultAudio(): AudioProps {

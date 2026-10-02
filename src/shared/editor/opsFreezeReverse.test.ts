@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { evalAnim } from './anim'
 import { createEmptyProject, defaultVisual } from './factory'
 import { MIN_ITEM_US, type Asset, type EffectItem, type Item, type MediaItem, type Project, type ShapeItem } from './project'
 import * as ops from './ops'
@@ -130,7 +131,7 @@ describe('freezeFrameAt', () => {
     const q = ops.freezeFrameAt(added.project, b.v, 4 * S, 2 * S)
     const logo = it_(q, added.itemIds[0])
     expect([logo.startUs, end(logo)]).toEqual([2 * S, 9 * S])
-    // efeito com keys: o resto do trecho 'in' depois do parado continua 'in'
+    // efeito com keys: o resto do trecho 'in' depois do parado continua no pedaço exato da mesma curva
     const e = ops.addEffect(b.p, 'blur', 0, { durationUs: 10 * S })
     let pe = ops.toggleKeyframe(e.project, e.itemId, 'region.x', 0)
     pe = ops.toggleKeyframe(pe, e.itemId, 'region.x', 10 * S)
@@ -138,7 +139,15 @@ describe('freezeFrameAt', () => {
     pe = ops.updateItem<EffectItem>(pe, e.itemId, (d) => { d.region.x.keys![0].ease = 'in' })
     const fq = ops.freezeFrameAt(pe, pe.tracks[0].items[0].id, 4 * S, 2 * S)
     const keys = fx(fq, e.itemId).region.x.keys!
-    expect(keys.map((k) => [k.tUs, k.ease])).toEqual([[0, 'in'], [4 * S, 'linear'], [6 * S, 'in']])
+    expect(keys.map((k) => k.tUs)).toEqual([0, 4 * S, 6 * S])
+    expect(keys[1].ease).toBe('linear') // o trecho parado
+    // pedaço da esquerda [0,6) e o da direita [6,12) (grupo da direita): juntos, a curva original com 2 s parados
+    const orig = fx(pe, e.itemId).region.x
+    const right = fq.tracks.flatMap((t) => t.items).find((i): i is EffectItem => i.type === 'effect' && i.startUs === 6 * S)!
+    for (let t = 0; t <= 10 * S; t += S / 2) {
+      const got = t <= 4 * S ? evalAnim(fx(fq, e.itemId).region.x, t) : evalAnim(right.region.x, t - 4 * S)
+      expect(got).toBeCloseTo(evalAnim(orig, t), 6)
+    }
   })
   it('revisão 2: forma vinculada com fades dividida no corte como o splitInPlace — nenhum pedaço faz fade no corte', () => {
     const b = base()

@@ -116,3 +116,73 @@ describe('privacyWarnings: mídia acima do efeito (covered)', () => {
     expect(kinds(stack(moving, { scale: 0.25, x: 0.125, y: 0.125 }))).toEqual(['covered'])
   })
 })
+
+describe('privacyWarnings: clipe se move sob efeito vinculado (transformedUnderEffect)', () => {
+  const vid: Asset = { id: 'v', name: 'v', kind: 'video', source: { type: 'file', path: 'C:/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 10 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, status: 'ready' }
+  const lin = (a: number, b: number) => ({ value: a, keys: [{ tUs: 0, value: a, ease: 'linear' as const }, { tUs: 10 * S, value: b, ease: 'linear' as const }] })
+  type Edit = (m: MediaItem, fx: EffectItem) => void
+  /** Clipe 10 s na faixa 0 + blur vinculado (região 0,3/0,3 de 0,1×0,1) na faixa de efeitos acima. */
+  function scene(edit?: Edit, link = true): Project {
+    const p = createEmptyProject('t')
+    p.assets = [vid]
+    const m = { ...createMediaItem(vid, 0, 'video'), id: 'm', ...(link ? { linkId: 'l1' } : {}) } as MediaItem
+    const base = createEffectItem('blur', 0, 10 * S)
+    const fx: EffectItem = { ...base, id: 'fx', ...(link ? { linkId: 'l1' } : {}), region: { ...base.region, x: { value: 0.3 }, y: { value: 0.3 }, w: { value: 0.1 }, h: { value: 0.1 }, rotation: { value: 0 } } }
+    edit?.(m, fx)
+    p.tracks = [
+      { id: 'tv', kind: 'video', name: 'Vídeo 1', muted: false, hidden: false, locked: false, volume: 1, items: [m] },
+      { id: 'tf', kind: 'video', name: 'Efeitos', role: 'effects', muted: false, hidden: false, locked: false, volume: 1, items: [fx] }
+    ]
+    return p
+  }
+  const tue = (p: Project, from = 0, to = 10 * S) => privacyWarnings(p, from, to).filter((w) => w.kind === 'transformedUnderEffect')
+
+  it('dispara: zoom (escala animada) com região parada', () => {
+    const w = tue(scene((m) => { m.visual!.transform.scale = lin(1, 2) }))
+    expect(w).toHaveLength(1)
+    expect(w[0].itemId).toBe('fx')
+    expect(w[0].tUs).toBeGreaterThan(0)
+    // a 0,3/0,3 (440 px do centro), 1 % do quadro (19,2 px) sai em s = 1 + 19,2/440,6 → t ≈ 0,436 s (bisseção)
+    expect(Math.abs(w[0].tUs - 435_800)).toBeLessThan(2000)
+    expect(w[0].message).toMatch(/movimento|zoom/i)
+  })
+  it('dispara: zoom centrado com região no centro (o conteúdo cresce além da região)', () => {
+    expect(tue(scene((m, fx) => { m.visual!.transform.scale = lin(1, 2); fx.region.x = { value: 0.5 }; fx.region.y = { value: 0.5 } }))).toHaveLength(1)
+  })
+  it('dispara: pan (x/y), rotação e animação de entrada com movimento (slide)', () => {
+    expect(tue(scene((m) => { m.visual!.transform.x = lin(0.5, 0.7) }))).toHaveLength(1)
+    expect(tue(scene((m) => { m.visual!.transform.y = lin(0.5, 0.4) }))).toHaveLength(1)
+    expect(tue(scene((m) => { m.visual!.transform.rotation = lin(0, 20) }))).toHaveLength(1)
+    const slide = tue(scene((m) => { m.visual!.animIn = { preset: 'slideL', durationUs: S } }))
+    expect(slide).toHaveLength(1)
+    expect(slide[0].tUs).toBeLessThan(S)
+  })
+  it('dispara: região animada que não acompanha o clipe (keys "não ajustados")', () => {
+    expect(tue(scene((m, fx) => { m.visual!.transform.scale = lin(1, 2); fx.region.x = lin(0.3, 0.6) }))).toHaveLength(1)
+  })
+  it('não dispara: região que acompanha o zoom (centro e tamanho seguem o mesmo ponto do conteúdo)', () => {
+    // zoom 1→2 em torno do centro: o ponto 0,3 vai para 0,5 + s·(0,3 − 0,5); a região dobra junto
+    expect(tue(scene((m, fx) => {
+      m.visual!.transform.scale = lin(1, 2)
+      fx.region.x = lin(0.3, 0.1); fx.region.y = lin(0.3, 0.1); fx.region.w = lin(0.1, 0.2); fx.region.h = lin(0.1, 0.2)
+    }))).toEqual([])
+  })
+  it('não dispara: região que acompanha o pan', () => {
+    expect(tue(scene((m, fx) => { m.visual!.transform.x = lin(0.5, 0.7); fx.region.x = lin(0.3, 0.5) }))).toEqual([])
+  })
+  it('não dispara: clipe parado, só fade, efeito sem vínculo, fora do trecho ou desativado', () => {
+    expect(tue(scene())).toEqual([])
+    expect(tue(scene((m) => { m.visual!.animIn = { preset: 'fade', durationUs: S }; m.visual!.animOut = { preset: 'fade', durationUs: S } }))).toEqual([])
+    expect(tue(scene((m) => { m.visual!.transform.scale = lin(1, 2) }, false))).toEqual([])
+    // movimento só em [8,10) s, consulta em [0,2) s
+    const late = scene((m) => { m.visual!.transform.x = { value: 0.5, keys: [{ tUs: 8 * S, value: 0.5, ease: 'linear' }, { tUs: 10 * S, value: 0.8, ease: 'linear' }] } })
+    expect(tue(late, 0, 2 * S)).toEqual([])
+    expect(tue(late, 0, 10 * S)).toHaveLength(1)
+    // a referência é o início do trecho em comum: consultar só o fim (já deslocado) também avisa
+    expect(tue(late, 9 * S, 10 * S)).toEqual([expect.objectContaining({ tUs: 9 * S })])
+    const off = scene((m, fx) => { m.visual!.transform.scale = lin(1, 2); fx.enabled = false })
+    expect(privacyWarnings(off, 0, 10 * S).map((w) => w.kind)).toEqual(['disabled'])
+    // opacidade animada não move o conteúdo
+    expect(tue(scene((m) => { m.visual!.transform.opacity = lin(1, 0.2) }))).toEqual([])
+  })
+})

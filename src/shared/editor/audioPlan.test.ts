@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from './factory'
+import { evalAnim } from './anim'
 import type { Asset, MediaItem, Project } from './project'
 import * as ops from './ops'
 import { abPlan, audioProcessPending, gainAt, pendingAudioProcessing, planAudio, shuttleSegments, SHUTTLE_AUDIO_MAX_RATE, type AudioSegment } from './audioPlan'
@@ -40,6 +41,27 @@ describe('planAudio', () => {
     const q = ops.updateItem<MediaItem>(p, a, (d) => { d.audio.volume = { value: 1, keys: [{ tUs: 2 * S, value: 0.2, ease: 'linear' }] } })
     const s = planAudio(q)[0]
     expect(s.gain.some((g) => g.tUs === 2 * S && Math.abs(g.gain - 0.2) < 1e-9)).toBe(true)
+  })
+  it('envelope respeita o ease do key (in, out, hold, bezier) com o volume da faixa e fades', () => {
+    const { p, a } = base()
+    const env = (ease: import('./project').Ease, from = 0, to = 1) => planAudio(ops.updateItem<MediaItem>(p, a, (d) => {
+      d.audio.volume = { value: 1, keys: [{ tUs: 0, value: from, ease }, { tUs: 4 * S, value: to, ease: 'linear' }] }
+    }))[0]
+    // 'in' (p³): em 2 s (p = ½) o ganho é 0,125, não 0,5
+    const sIn = env('in')
+    expect(gainAt(sIn, 2 * S)).toBeCloseTo(0.125, 3)
+    expect(gainAt(sIn, 1 * S)).toBeCloseTo(1 / 64, 3)
+    expect(gainAt(sIn, 3 * S)).toBeCloseTo(27 / 64, 3)
+    expect(gainAt(env('out'), 2 * S)).toBeCloseTo(0.875, 3)
+    // hold: segura até o key seguinte (degrau, sem rampa)
+    const sHold = env('hold', 1, 0)
+    expect(gainAt(sHold, 4 * S - 2)).toBeCloseTo(1, 6)
+    expect(gainAt(sHold, 4 * S)).toBe(0)
+    // em qualquer instante o envelope fica a < 0,2 % da curva (segmentos lineares entre amostras)
+    const bz = env({ bezier: [0.6, 0, 0.2, 1] })
+    for (let t = 0; t <= 4 * S; t += 37_000) expect(Math.abs(gainAt(bz, t) - evalAnim({ value: 0, keys: [{ tUs: 0, value: 0, ease: { bezier: [0.6, 0, 0.2, 1] } }, { tUs: 4 * S, value: 1, ease: 'linear' }] }, t))).toBeLessThan(0.002)
+    // linear continua só com os pontos dos keys
+    expect(env('linear').gain.map((g) => g.tUs)).toEqual([0, 4 * S, 10 * S])
   })
   it('vídeo com audio.enabled=false não gera segmento', () => {
     const { p } = base()

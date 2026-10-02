@@ -114,3 +114,40 @@ describe('resolveFrame', () => {
     expect(resolveFrame(ops.setItemEnabled(off, [r.itemId], true), 2 * S).some((l) => l.kind === 'effect')).toBe(true)
   })
 })
+
+describe('resolveFrame: propriedades animáveis da F4', () => {
+  const k = (a: number, b: number, ease: import('./project').Ease = 'linear') => ({ value: a, keys: [{ tUs: 0, value: a, ease }, { tUs: 10 * S, value: b, ease: 'linear' as const }] })
+  it('corte, ajuste e raio avaliados no instante (com o ease do key)', () => {
+    const { p, v } = base()
+    const q = ops.updateItem<MediaItem>(p, v, (d) => {
+      d.visual!.crop = { l: k(0, 0.2), t: { value: 0.1 }, r: k(0, 0.4, 'in'), b: { value: 0 } }
+      d.visual!.adjust = { brightness: k(0, 1), contrast: { value: 0.3 }, saturation: k(-1, 1, 'out') }
+      d.visual!.radius = k(0, 20)
+    })
+    const m = resolveFrame(q, 5 * S).find((l): l is MediaLayer => l.kind === 'media')!
+    expect(m.crop.l).toBeCloseTo(0.1)
+    expect(m.crop.t).toBe(0.1)
+    expect(m.crop.r).toBeCloseTo(0.05) // 0,4 × ½³
+    expect(m.adjust).toEqual({ brightness: expect.closeTo(0.5, 6), contrast: 0.3, saturation: expect.closeTo(0.75, 6) })
+    expect(m.radius).toBeCloseTo(10)
+  })
+  it('overshoot de curva: escala presa a ≥ 0, opacidade a [0,1], raio a ≥ 0', () => {
+    const { p, v } = base()
+    const back: import('./project').Ease = { bezier: [0.3, -1.5, 0.7, 1] } // desce abaixo de 0 antes de subir
+    const q = ops.updateItem<MediaItem>(p, v, (d) => {
+      d.visual!.transform.scale = k(0, 1, back)
+      d.visual!.transform.opacity = k(0, 1, back)
+      d.visual!.radius = k(0, 10, back)
+    })
+    const m = resolveFrame(q, 2 * S).find((l): l is MediaLayer => l.kind === 'media')!
+    expect(m.rect.scale).toBe(0)
+    expect(m.opacity).toBe(0)
+    expect(m.radius).toBe(0)
+  })
+  it('texto: tamanho animado avaliado no estilo da camada', () => {
+    const p = createEmptyProject('t')
+    p.tracks[0].items = [{ id: 'tx', type: 'text', startUs: 0, durationUs: 10 * S, text: 'a', style: { font: 'Inter', size: k(10, 30), weight: 400, color: '#fff', align: 'left', lineHeight: 1 }, visual: defaultVisual() }]
+    const l = resolveFrame(p, 5 * S)[0]
+    expect(l.kind === 'text' && l.style.size).toBeCloseTo(20)
+  })
+})

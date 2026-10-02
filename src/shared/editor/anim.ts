@@ -1,16 +1,17 @@
 import type { Anim, Ease, Keyframe, Us } from './project'
 
-/** Bezier cúbico estilo CSS cubic-bezier: Newton-Raphson (8 iterações) com bisseção de reserva. */
-function cubicBezier(x1: number, y1: number, x2: number, y2: number, x: number): number {
-  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx
-  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by
-  const sx = (t: number): number => ((ax * t + bx) * t + cx) * t
-  const sy = (t: number): number => ((ay * t + by) * t + cy) * t
-  const dx = (t: number): number => (3 * ax * t + 2 * bx) * t + cx
+type Bez = [number, number, number, number]
+const bx = (b: Bez, t: number): number => { const c = 3 * b[0], e = 3 * (b[2] - b[0]) - c; return (((1 - c - e) * t + e) * t + c) * t }
+const by = (b: Bez, t: number): number => { const c = 3 * b[1], e = 3 * (b[3] - b[1]) - c; return (((1 - c - e) * t + e) * t + c) * t }
+
+/** Parâmetro t da curva com x(t) = x: Newton-Raphson (8 iterações) com bisseção de reserva. */
+function bezierT(b: Bez, x: number): number {
+  const cx = 3 * b[0], ex = 3 * (b[2] - b[0]) - cx, ax = 1 - cx - ex
+  const dx = (t: number): number => (3 * ax * t + 2 * ex) * t + cx
   let t = x
   for (let i = 0; i < 8; i++) {
-    const err = sx(t) - x
-    if (Math.abs(err) < 1e-7) return sy(t)
+    const err = bx(b, t) - x
+    if (Math.abs(err) < 1e-7) return t
     const d = dx(t)
     if (Math.abs(d) < 1e-6) break
     t -= err / d
@@ -18,20 +19,23 @@ function cubicBezier(x1: number, y1: number, x2: number, y2: number, x: number):
   let lo = 0, hi = 1
   t = x
   for (let i = 0; i < 40; i++) {
-    const v = sx(t)
+    const v = bx(b, t)
     if (Math.abs(v - x) < 1e-7) break
     if (x > v) lo = t
     else hi = t
     t = (hi - lo) / 2 + lo
   }
-  return sy(t)
+  return t
 }
+
+/** Bezier cúbico estilo CSS cubic-bezier. */
+const cubicBezier = (b: Bez, x: number): number => by(b, bezierT(b, x))
 
 /** p∈[0,1] → [0,1]; 'hold' fica em 0 até p<1. */
 export function easeValue(ease: Ease, p: number): number {
   if (p <= 0) return 0
   if (p >= 1) return 1
-  if (typeof ease === 'object') return cubicBezier(ease.bezier[0], ease.bezier[1], ease.bezier[2], ease.bezier[3], p)
+  if (typeof ease === 'object') return cubicBezier(ease.bezier, p)
   switch (ease) {
     case 'hold': return 0
     case 'in': return p * p * p
@@ -87,19 +91,154 @@ export function shiftKeys<T>(a: Anim<T>, deltaUs: Us): Anim<T> {
   return { ...a, keys: a.keys.map((k): Keyframe<T> => ({ ...k, tUs: k.tUs + deltaUs })) }
 }
 
-/** Mantém keys em [from,to], reancora em 0 e insere keys de borda avaliados se houver keys fora. */
+
+// ---------------------------------------------------------------- corte exato de curvas
+
+/** Ponto de controle de uma curva de Bézier (x, y). */
+type Pt = [number, number]
+const lerpPt = (a: Pt, b: Pt, t: number): Pt => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+/** De Casteljau: as duas metades da curva [p0..p3] cortada no parâmetro t. */
+function splitBez(p: Pt[], t: number): [Pt[], Pt[]] {
+  const a = lerpPt(p[0], p[1], t), b = lerpPt(p[1], p[2], t), c = lerpPt(p[2], p[3], t)
+  const d = lerpPt(a, b, t), e = lerpPt(b, c, t), f = lerpPt(d, e, t)
+  return [[p[0], a, d, f], [f, e, c, p[3]]]
+}
+const clamp01 = (v: number): number => Math.min(1, Math.max(0, v))
+
+/**
+ * Ease do pedaço [p0,p1] (0 ≤ p0 < p1 ≤ 1) de um trecho com `e`, renormalizado para [0,1] nos dois eixos: o trecho
+ * cortado ali, com os valores das pontas, reproduz a curva original. Exato para linear, hold, in, out, bezier e para
+ * cada metade de inOut (polinômios cúbicos viram bezier com x em terços); um pedaço de inOut que cruza o meio é
+ * aproximado (insertKeyExact corta no meio antes). Pedaço sem variação (y igual nas pontas) mantém `e`.
+ */
+export function subEase(e: Ease, p0: number, p1: number): Ease {
+  if (e === 'linear' || e === 'hold' || (p0 <= 0 && p1 >= 1)) return e
+  if (typeof e === 'object') {
+    const b = e.bezier
+    const u0 = p0 <= 0 ? 0 : bezierT(b, p0), u1 = p1 >= 1 ? 1 : bezierT(b, p1)
+    let seg: Pt[] = [[0, 0], [b[0], b[1]], [b[2], b[3]], [1, 1]]
+    if (u0 > 0) seg = splitBez(seg, u0)[1]
+    if (u1 < 1) seg = splitBez(seg, (u1 - u0) / (1 - u0))[0]
+    const [x0, y0] = seg[0], [x3, y3] = seg[3]
+    if (!(x3 - x0 > 1e-12) || Math.abs(y3 - y0) < 1e-12) return e
+    const nx = (x: number): number => clamp01((x - x0) / (x3 - x0))
+    const ny = (y: number): number => (y - y0) / (y3 - y0)
+    return { bezier: [nx(seg[1][0]), ny(seg[1][1]), nx(seg[2][0]), ny(seg[2][1])] }
+  }
+  // polinômio cúbico g no pedaço: f(q) = (g(p0 + d·q) − g(p0)) / (g(p1) − g(p0)) = c1·q + c2·q² + (1 − c1 − c2)·q³,
+  // que é o bezier [1/3, c1/3, 2/3, (c2 + 2·c1)/3] (x em terços ⇒ x(u) = u); c1 e c2 saem de f(1/3) e f(2/3)
+  const g0 = easeValue(e, p0), g1 = easeValue(e, p1)
+  if (Math.abs(g1 - g0) < 1e-12) return e
+  const f = (q: number): number => (easeValue(e, p0 + (p1 - p0) * q) - g0) / (g1 - g0)
+  const A1 = 27 * f(1 / 3) - 1, A2 = 27 * f(2 / 3) - 8
+  const c1 = (2 * A1 - A2) / 6, c2 = (A1 - 8 * c1) / 2
+  return { bezier: [1 / 3, c1 / 3, 2 / 3, (c2 + 2 * c1) / 3] }
+}
+
+/** Insere o key na posição pelo tempo (sem tirar vizinhos a ±1 µs, ao contrário de setKey). */
+function insertAt<T>(keys: Keyframe<T>[], key: Keyframe<T>): Keyframe<T>[] {
+  const i = keys.findIndex((k) => k.tUs > key.tUs)
+  return i < 0 ? [...keys, key] : [...keys.slice(0, i), key, ...keys.slice(i)]
+}
+
+/**
+ * Key novo em tUs sem mudar a curva: o valor é o avaliado ali e o trecho que o contém é repartido com subEase (inOut
+ * é cortado no meio antes, para cada pedaço ser uma cúbica só). Já existe key exatamente em tUs ou não há keys →
+ * igual. Antes do 1º / depois do último: key com o valor da ponta (trecho constante).
+ */
+export function insertKeyExact(a: Anim<number>, tUs: Us): Anim<number> {
+  const k = a.keys
+  if (!k || k.length === 0 || k.some((x) => x.tUs === tUs)) return a
+  const value = evalAnim(a, tUs)
+  if (tUs < k[0].tUs || tUs > k[k.length - 1].tUs) return { ...a, keys: insertAt(k, { tUs, value, ease: 'linear' }) }
+  const i = k.findIndex((x) => x.tUs > tUs) - 1
+  const k0 = k[i], k1 = k[i + 1]
+  if (k0.ease === 'inOut') {
+    const mid = k0.tUs + Math.round((k1.tUs - k0.tUs) / 2)
+    if (mid > k0.tUs && mid < k1.tUs && mid !== tUs) return insertKeyExact(insertKeyExact(a, mid), tUs)
+  }
+  const p = (tUs - k0.tUs) / (k1.tUs - k0.tUs)
+  const keys = k.map((x) => (x === k0 ? { ...x, ease: subEase(k0.ease, 0, p) } : x))
+  return { ...a, keys: insertAt(keys, { tUs, value, ease: subEase(k0.ease, p, 1) }) }
+}
+
+/**
+ * Mantém keys em [from,to] e reancora em 0. Havendo keys fora, a borda ganha um key exato (insertKeyExact): valor
+ * contínuo e forma da curva preservada — dividir um item não muda a animação.
+ */
 export function sliceKeys(a: Anim<number>, fromUs: Us, toUs: Us): Anim<number> {
   const k = a.keys
   if (!k || k.length === 0) return a
-  const inside = k.filter((x) => x.tUs >= fromUs && x.tUs <= toUs)
-  const out: Keyframe<number>[] = inside.map((x) => ({ ...x, tUs: x.tUs - fromUs }))
-  const before = k.filter((x) => x.tUs < fromUs)
-  if (before.length > 0 && !inside.some((x) => x.tUs === fromUs)) {
-    out.unshift({ tUs: 0, value: evalAnim(a, fromUs), ease: before[before.length - 1].ease })
-  }
-  if (k.some((x) => x.tUs > toUs) && !inside.some((x) => x.tUs === toUs)) {
-    out.push({ tUs: toUs - fromUs, value: evalAnim(a, toUs), ease: 'linear' })
-  }
+  let b = a
+  if (k.some((x) => x.tUs < fromUs)) b = insertKeyExact(b, fromUs)
+  if (k.some((x) => x.tUs > toUs)) b = insertKeyExact(b, toUs)
+  const out = b.keys!.filter((x) => x.tUs >= fromUs && x.tUs <= toUs).map((x) => ({ ...x, tUs: x.tUs - fromUs }))
   if (out.length === 0) return { value: evalAnim(a, fromUs) }
   return { ...a, keys: out }
+}
+
+// ---------------------------------------------------------------- ease por key, copiar/colar
+
+/** Troca o ease do key a ±1 µs de tUs (o do trecho que começa nele); sem key → igual. */
+export function setEase(a: Anim<number>, tUs: Us, ease: Ease): Anim<number> {
+  const key = a.keys?.find((k) => Math.abs(k.tUs - tUs) <= 1)
+  if (!key) return a
+  return { ...a, keys: a.keys!.map((k) => (k === key ? { ...k, ease } : k)) }
+}
+
+/** Ease do key a ±1 µs de tUs; senão o do trecho que contém tUs; null fora dos keys (ou sem keys). */
+export function easeAt(a: Anim<number>, tUs: Us): Ease | null {
+  const k = a.keys ?? []
+  const at = k.find((x) => Math.abs(x.tUs - tUs) <= 1)
+  if (at) return at.ease
+  const i = k.findIndex((x) => x.tUs > tUs)
+  return i > 0 ? k[i - 1].ease : null
+}
+
+/** Keys em [fromUs,toUs] com o tempo relativo a fromUs (área de transferência). */
+export function copyKeys(a: Anim<number>, fromUs: Us, toUs: Us): Keyframe<number>[] {
+  return (a.keys ?? []).filter((k) => k.tUs >= fromUs && k.tUs <= toUs).map((k) => ({ ...k, tUs: k.tUs - fromUs }))
+}
+
+/**
+ * Cola keys (tempos relativos) a partir de atUs, presos a [0, maxUs]: os tempos relativos são mantidos e o que cair
+ * fora é cortado com um key de borda exato (valor e forma da curva colada naquele ponto, sem salto). Os keys
+ * existentes dentro do trecho colado (±1 µs) saem; os de fora ficam.
+ */
+export function pasteKeys(a: Anim<number>, keys: readonly Keyframe<number>[], atUs: Us, maxUs: Us): Anim<number> {
+  if (keys.length === 0) return a
+  const shifted = keys.map((k) => ({ ...k, tUs: Math.round(atUs + k.tUs) })).sort((x, y) => x.tUs - y.tUs)
+  let pasted: Anim<number> = { value: shifted[0].value, keys: shifted }
+  if (shifted.some((k) => k.tUs < 0)) pasted = insertKeyExact(pasted, 0)
+  if (shifted.some((k) => k.tUs > maxUs)) pasted = insertKeyExact(pasted, maxUs)
+  const inside = pasted.keys!.filter((k) => k.tUs >= 0 && k.tUs <= maxUs)
+  if (inside.length === 0) return a
+  const lo = inside[0].tUs, hi = inside[inside.length - 1].tUs
+  const kept = (a.keys ?? []).filter((k) => k.tUs < lo - 1 || k.tUs > hi + 1)
+  return { ...a, keys: [...kept, ...inside].sort((x, y) => x.tUs - y.tUs) }
+}
+
+/**
+ * Instantes (µs, ordenados, sem repetição) para seguir a curva com segmentos lineares: os keys e, nos trechos não
+ * lineares, pontos internos a cada ~maxStepUs (no mínimo 8 e no máximo 64 por trecho); 'hold' ganha o ponto 1 µs
+ * antes do key seguinte (degrau). Sem keys → [].
+ */
+export function curveSampleTimesUs(a: Anim<number>, maxStepUs: Us): Us[] {
+  const k = a.keys ?? []
+  const out: Us[] = []
+  for (let i = 0; i < k.length; i++) {
+    out.push(k[i].tUs)
+    const n = k[i + 1]
+    if (!n) break
+    const span = n.tUs - k[i].tUs
+    const e = k[i].ease
+    if (e === 'linear' || span < 2) continue
+    if (e === 'hold') {
+      out.push(n.tUs - 1)
+      continue
+    }
+    const steps = Math.min(span, 64, Math.max(8, Math.ceil(span / maxStepUs)))
+    for (let j = 1; j < steps; j++) out.push(k[i].tUs + Math.round((span * j) / steps))
+  }
+  return out.filter((t, i) => i === 0 || t > out[i - 1])
 }

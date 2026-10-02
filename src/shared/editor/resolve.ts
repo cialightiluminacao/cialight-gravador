@@ -6,15 +6,20 @@ import type { Anim, AnimPreset, Asset, EffectItem, Item, MediaItem, Project, Sha
 import { frameDurUs } from './time'
 
 export interface Rect { cx: number; cy: number; scale: number; rotation: number }
+/** Corte e ajuste já avaliados no instante (o modelo guarda Anim). */
+export interface CropValues { l: number; t: number; r: number; b: number }
+export interface AdjustValues { brightness: number; contrast: number; saturation: number }
+/** Estilo do texto com o tamanho avaliado no instante. */
+export type ResolvedTextStyle = Omit<TextStyle, 'size'> & { size: number }
 
 export interface MediaLayer {
   kind: 'media'; itemId: string; trackId: string; assetId: string
   srcUs: Us | null // null = imagem
   rect: Rect // já com animações de entrada/saída aplicadas
   opacity: number // transform.opacity × fades × animIn/Out
-  crop: VisualProps['crop']; fit: VisualProps['fit']
+  crop: CropValues; fit: VisualProps['fit']
   shape: 'rect' | 'rounded' | 'circle'; radius: number
-  border?: { width: number; color: string }; adjust?: VisualProps['adjust']; mirror: boolean
+  border?: { width: number; color: string }; adjust?: AdjustValues; mirror: boolean
 }
 export interface AnnotationsLayer { kind: 'annotations'; itemId: string; trackId: string; sessionId: string; sessionMs: number; autoFadeMs: number | null }
 export interface EffectLayer {
@@ -27,7 +32,7 @@ export interface EffectLayer {
   region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }
   strength: number; feather: number; color: string; invert: boolean; scope: 'below' | 'track'
 }
-export interface TextLayer { kind: 'text'; itemId: string; text: string; style: TextStyle; rect: Rect; opacity: number }
+export interface TextLayer { kind: 'text'; itemId: string; text: string; style: ResolvedTextStyle; rect: Rect; opacity: number }
 export interface ShapeLayer { kind: 'shape'; itemId: string; item: ShapeItem; rect: Rect; opacity: number }
 // Em F1 só o tipo existe; a geração de transições vem na F5.
 export interface TransitionLayer { kind: 'transition'; transition: TransitionKind; progress: number; from: Layer[]; to: Layer[] }
@@ -71,7 +76,11 @@ function presetEffect(preset: AnimPreset, p: number, isIn: boolean): { opacity: 
   }
 }
 
-function visualState(v: VisualProps, itemDur: Us, local: Us): { rect: Rect; opacity: number } {
+/**
+ * Retângulo e opacidade do item no instante local: transform avaliado + fades + animações de entrada/saída. Escala
+ * presa a ≥ 0 e opacidade a [0,1] (curvas com overshoot). Também é a geometria que a privacidade confere.
+ */
+export function visualStateAt(v: VisualProps, itemDur: Us, local: Us): { rect: Rect; opacity: number } {
   const t = v.transform
   let cx = evalAnim(t.x, local)
   let cy = evalAnim(t.y, local)
@@ -87,10 +96,12 @@ function visualState(v: VisualProps, itemDur: Us, local: Us): { rect: Rect; opac
     const r = presetEffect(v.animOut.preset, 1 - remaining / v.animOut.durationUs, false)
     opacity *= r.opacity; cx += r.dx; cy += r.dy
   }
-  return { rect: { cx, cy, scale: evalAnim(t.scale, local), rotation: evalAnim(t.rotation, local) }, opacity: clamp(opacity, 0, 1) }
+  return { rect: { cx, cy, scale: Math.max(0, evalAnim(t.scale, local)), rotation: evalAnim(t.rotation, local) }, opacity: clamp(opacity, 0, 1) }
 }
 
 const ev = (a: Anim<number>, local: Us): number => evalAnim(a, local)
+const cropAt = (c: VisualProps['crop'], local: Us): CropValues => ({ l: ev(c.l, local), t: ev(c.t, local), r: ev(c.r, local), b: ev(c.b, local) })
+const adjustAt = (a: NonNullable<VisualProps['adjust']>, local: Us): AdjustValues => ({ brightness: ev(a.brightness, local), contrast: ev(a.contrast, local), saturation: ev(a.saturation, local) })
 
 /**
  * O efeito layers[i] age no quadro? Escopo `below`: sempre. Escopo `track`: só se, pulando os outros efeitos `track`
@@ -133,13 +144,13 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
         const asset = p.assets.find((a) => a.id === item.assetId)
         if (!asset) break
         const v = item.visual ?? defaultVisual()
-        const s = visualState(v, item.durationUs, local)
+        const s = visualStateAt(v, item.durationUs, local)
         layers.push({
           kind: 'media', itemId: item.id, trackId: track.id, assetId: asset.id,
           srcUs: asset.kind === 'image' ? null : sourceTimeUs(item, asset, tUs),
-          rect: s.rect, opacity: s.opacity, crop: v.crop, fit: v.fit,
-          shape: v.shape ?? 'rect', radius: v.radius ?? 0,
-          ...(v.border ? { border: v.border } : {}), ...(v.adjust ? { adjust: v.adjust } : {}),
+          rect: s.rect, opacity: s.opacity, crop: cropAt(v.crop, local), fit: v.fit,
+          shape: v.shape ?? 'rect', radius: v.radius ? Math.max(0, ev(v.radius, local)) : 0,
+          ...(v.border ? { border: v.border } : {}), ...(v.adjust ? { adjust: adjustAt(v.adjust, local) } : {}),
           mirror: v.mirror ?? false
         })
         break
@@ -148,12 +159,12 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
         layers.push({ kind: 'annotations', itemId: item.id, trackId: track.id, sessionId: item.sessionId, sessionMs: (item.inUs + local) / 1000, autoFadeMs: item.autoFadeMs ?? null })
         break
       case 'text': {
-        const s = visualState(item.visual, item.durationUs, local)
-        layers.push({ kind: 'text', itemId: item.id, text: item.text, style: item.style, rect: s.rect, opacity: s.opacity })
+        const s = visualStateAt(item.visual, item.durationUs, local)
+        layers.push({ kind: 'text', itemId: item.id, text: item.text, style: { ...item.style, size: Math.max(0, ev(item.style.size, local)) }, rect: s.rect, opacity: s.opacity })
         break
       }
       case 'shape': {
-        const s = visualState(item.visual, item.durationUs, local)
+        const s = visualStateAt(item.visual, item.durationUs, local)
         layers.push({ kind: 'shape', itemId: item.id, item, rect: s.rect, opacity: s.opacity })
         break
       }

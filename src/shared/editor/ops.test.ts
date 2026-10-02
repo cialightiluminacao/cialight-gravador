@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { evalAnim } from './anim'
 import { createEmptyProject } from './factory'
 import { MIN_ITEM_US, type Asset, type EffectItem, type Item, type MediaItem, type Project } from './project'
 import * as ops from './ops'
@@ -80,7 +81,7 @@ describe('ops', () => {
     expect(l.transitionIn).toBeDefined(); expect(r.transitionIn).toBeUndefined()
     expect(validateProject(q)).toEqual([])
   })
-  it('splitAt em item reverso pega o fim da fonte no 1º pedaço; ease bezier sobrevive', () => {
+  it('splitAt em item reverso pega o fim da fonte no 1º pedaço; a curva bezier continua a mesma nos dois pedaços', () => {
     const { p, v } = base()
     const q0 = ops.updateItem<MediaItem>(p, v, (d) => {
       d.reverse = true
@@ -89,7 +90,13 @@ describe('ops', () => {
     const q = ops.splitAt(q0, [v], 4 * S)
     expect(items(q, 0).map((i) => i.inUs)).toEqual([6 * S, 0])
     expect(items(q, 0)[1].visual!.transform.x.keys!.at(-1)).toMatchObject({ tUs: 6 * S, value: 1 })
-    expect(items(q, 0)[0].visual!.transform.x.keys![0].ease).toEqual({ bezier: [0.4, 0, 0.2, 1] })
+    // cada pedaço leva o trecho exato do bezier (subEase): a animação não muda com o corte
+    const orig = q0.tracks[0].items[0] as MediaItem
+    const [l, r] = items(q, 0)
+    for (let t = 0; t <= 10 * S; t += S / 4) {
+      const got = t <= 4 * S ? evalAnim(l.visual!.transform.x, t) : evalAnim(r.visual!.transform.x, t - 4 * S)
+      expect(got).toBeCloseTo(evalAnim(orig.visual!.transform.x, t), 5)
+    }
     expect(Object.isFrozen(items(q, 0)[1])).toBe(true)
   })
   it("splitAt 'all' divide todas as faixas desbloqueadas", () => {

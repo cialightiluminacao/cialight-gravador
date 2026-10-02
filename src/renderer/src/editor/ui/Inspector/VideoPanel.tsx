@@ -8,7 +8,7 @@ import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
 
 // Inspetor de vídeo do item de mídia: transformação (animável: ◇ liga o keyframe no playhead; com keys,
-// editar grava no key do playhead), corte, ajuste, forma/borda (PiP), espelhar e fades.
+// editar grava no key do playhead; corte e raio também são animáveis — editados no playhead), corte, ajuste, forma/borda (PiP), espelhar e fades.
 
 type TKey = keyof VisualProps['transform']
 type V = MediaItem & { visual: VisualProps }
@@ -33,7 +33,7 @@ export function VideoPanel({ item }: { item: V }): React.JSX.Element {
   const id = item.id
 
   const setT = (key: TKey, value: number): void => editItemTransient<V>(id, (d) => { d.visual.transform[key] = withValue(d.visual.transform[key], local, value) })
-  const setCrop = (side: keyof VisualProps['crop'], pct: number): void => editItemTransient<V>(id, (d) => { d.visual.crop[side] = pct / 100 })
+  const setCrop = (side: keyof VisualProps['crop'], pct: number): void => editItemTransient<V>(id, (d) => { d.visual.crop[side] = withValue(d.visual.crop[side], local, pct / 100) })
   const halfSec = usToSec2(item.durationUs / 2)
   const shape = v.shape ?? 'rect'
 
@@ -58,10 +58,10 @@ export function VideoPanel({ item }: { item: V }): React.JSX.Element {
 
       <PanelSection title="Corte">
         <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-          <NumberField compact label="Esquerda" value={v.crop.l * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('l', n)} />
-          <NumberField compact label="Direita" value={v.crop.r * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('r', n)} />
-          <NumberField compact label="Topo" value={v.crop.t * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('t', n)} />
-          <NumberField compact label="Base" value={v.crop.b * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('b', n)} />
+          <NumberField compact label="Esquerda" value={animAt(v.crop.l, local) * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('l', n)} />
+          <NumberField compact label="Direita" value={animAt(v.crop.r, local) * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('r', n)} />
+          <NumberField compact label="Topo" value={animAt(v.crop.t, local) * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('t', n)} />
+          <NumberField compact label="Base" value={animAt(v.crop.b, local) * 100} min={0} max={95} precision={1} step={0.2} unit="%" onChange={(n) => setCrop('b', n)} />
         </div>
         <FieldRow label="Ajuste">
           <Segmented size="sm" className="w-full [&>*]:flex-1" value={v.fit} options={FIT_OPTIONS} onValueChange={(fit) => editItem<V>(id, (d) => { d.visual.fit = fit })} />
@@ -70,7 +70,7 @@ export function VideoPanel({ item }: { item: V }): React.JSX.Element {
 
       <PanelSection title="Forma e borda">
         <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={shape} options={SHAPE_OPTIONS} onValueChange={(sh) => editItem<V>(id, (d) => { d.visual.shape = sh })} />
-        {shape === 'rounded' ? <NumberField label="Raio" value={v.radius ?? 0} min={0} max={1000} step={0.5} unit="px" onChange={(n) => editItemTransient<V>(id, (d) => { d.visual.radius = n })} title="0 = arredondamento automático" /> : null}
+        {shape === 'rounded' ? <NumberField label="Raio" value={v.radius ? animAt(v.radius, local) : 0} min={0} max={1000} step={0.5} unit="px" onChange={(n) => editItemTransient<V>(id, (d) => { d.visual.radius = withValue(d.visual.radius ?? { value: 0 }, local, n) })} title="0 = arredondamento automático" /> : null}
         <NumberField label="Borda" value={v.border?.width ?? 0} min={0} max={100} step={0.2} unit="px" onChange={(n) => editItemTransient<V>(id, (d) => { d.visual.border = n > 0 ? { width: n, color: d.visual.border?.color ?? '#ffffff' } : undefined })} />
         {v.border ? (
           <FieldRow label="Cor da borda">

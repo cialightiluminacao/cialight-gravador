@@ -106,7 +106,7 @@ function webcamVisual(session: Session, pipRaw: PipKeyframe[], totalUs: Us): Vis
       scale: anim(times, pip.map((k) => (byWidth ? k.w : k.h)), totalUs),
       opacity: opacityKeys.length ? { value: first.visible ? 1 : 0, keys: opacityKeys } : { value: first.visible ? 1 : 0 }
     },
-    crop,
+    crop: { l: { value: crop.l }, t: { value: crop.t }, r: { value: crop.r }, b: { value: crop.b } },
     fit: 'contain',
     shape: first.shape === 'circle' ? 'circle' : 'rounded',
     mirror: session.webcam?.mirrored ?? false

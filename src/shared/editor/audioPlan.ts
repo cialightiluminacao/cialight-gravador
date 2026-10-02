@@ -1,5 +1,5 @@
 // Plano de áudio: segmentos com envelope de ganho em tempo absoluto de timeline. Puro.
-import { evalAnim } from './anim'
+import { curveSampleTimesUs, evalAnim } from './anim'
 import { audioProcessKey, audioSourceKey, parseAudioProcessKey, type AudioProcessOpts } from './audioProcess'
 import type { AudioMix, Project, Us } from './project'
 import type { SpeechInterval } from './speech'
@@ -41,6 +41,8 @@ export interface PlanAudioOpts {
 /** Padrões da mixagem do projeto (Project.audioMix ausente). */
 export const AUDIO_MIX_DEFAULTS: AudioMix = { enabled: true, duckingDb: -12, attackMs: 250, releaseMs: 400, holdMs: 300 }
 export const audioMixOf = (p: Project): AudioMix => ({ ...AUDIO_MIX_DEFAULTS, ...p.audioMix })
+/** Passo desejado da amostragem das curvas de volume no envelope (anim.curveSampleTimesUs limita a 8–64 pontos por trecho). */
+const VOLUME_CURVE_STEP_US = 10_000
 /** Rampas de ducking nunca menores que isto (degrau = clique). */
 const MIN_RAMP_US = 10_000
 
@@ -78,7 +80,9 @@ export function planAudio(p: Project, opts: PlanAudioOpts = {}): AudioSegment[] 
       const times = new Set<number>([0, dur])
       if (fin > 0) times.add(fin)
       if (fout > 0) times.add(dur - fout)
-      for (const k of a.volume.keys ?? []) if (k.tUs > 0 && k.tUs < dur) times.add(k.tUs)
+      // keys de volume e, nos trechos com curva (ease do key), pontos internos (8 a 64 por trecho, ~10 ms entre eles
+      // quando cabe): o envelope é linear entre pontos
+      for (const t of curveSampleTimesUs(a.volume, VOLUME_CURVE_STEP_US)) if (t > 0 && t < dur) times.add(t)
       const gain = [...times].sort((x, y) => x - y).map((local): GainPoint => {
         let g = track.volume * evalAnim(a.volume, local)
         if (fin > 0 && local < fin) g *= local / fin
