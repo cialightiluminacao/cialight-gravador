@@ -10,7 +10,9 @@
 // privacidade no diálogo de exportação (Pixelizar fraco → "Revisar" seleciona e leva o playhead) e exporta
 // "Alta 1080p" (Esconder texto a 60, o piso). No arquivo exportado, com o ffmpeg: contraste local da linha de texto
 // (p99−p1 após caixa 3 px) < 0,15 da fonte e energia de alta frequência (variância do laplaciano) na
-// caixa do texto cai para < 0,2 da fonte em vários instantes e a tarja tem a cor exata (±3).
+// caixa do texto cai para < 0,2 da fonte em vários instantes (inclusive o 1º e o último quadro do item) e a tarja tem
+// a cor exata (±3). Depois muda a velocidade do clipe para 0,5× (os efeitos criados sobre ele são vinculados e
+// acompanham: início, duração e keyframes escalados) e exporta de novo: o CPF segue ilegível nos 12 s inteiros.
 //
 // uso (depois de `npm run build`):  node scripts/qa/editor-f2-e2e.mjs
 // Tudo em test-out/e2e-f2 (CIALIGHT_RAW_DIR=test-out/e2e-f2/raw → projeto em test-out/e2e-f2/Projetos,
@@ -36,7 +38,8 @@ const W = 1920
 const H = 1080
 const FPS = 30
 const DUR_S = 6
-const LAST_FRAME = DUR_S * FPS - 2 // último quadro com folga (o item termina em 6 s, fim exclusivo)
+const LAST_FRAME = DUR_S * FPS - 2 // quadro do 2º keyframe (o item termina em 6 s, fim exclusivo)
+const END_FRAME = DUR_S * FPS - 1 // último quadro coberto pelo item
 const TARJA = [0xe1, 0x1d, 0x48]
 // intensidade do "Esconder texto" na exportação: 60 é o piso que tem de deixar ilegível um texto de 47 px
 // (o preset é 80); F2_TEXT_STRENGTH troca o valor para calibrar
@@ -93,7 +96,6 @@ function textBox(gray, band, xr) {
   }
   return x1 < 0 ? null : { x0, y0, x1, y1, cx: (x0 + x1 + 1) / 2 / W, cy: (y0 + y1 + 1) / 2 / H, w: (x1 - x0 + 1) / W, h: (y1 - y0 + 1) / H }
 }
-/** Variância do laplaciano (4-vizinhos) dentro da caixa (inflada de `pad` px). */
 /**
  * Contraste local máximo da linha de texto (mais perto da leitura humana que o laplaciano): filtro de caixa
  * 3×3 na luminância e p99 − p1 dentro da caixa (inflada de `pad` px). Letras nítidas: ≈ 200 níveis; borrado
@@ -113,6 +115,7 @@ function localContrast(gray, b, pad = 4) {
   const at = (q) => vals[Math.min(vals.length - 1, Math.floor(q * (vals.length - 1)))]
   return at(0.99) - at(0.01)
 }
+/** Variância do laplaciano (4-vizinhos) dentro da caixa (inflada de `pad` px). */
 function lapVar(gray, b, pad = 4) {
   const xa = Math.max(1, b.x0 - pad), xb = Math.min(W - 2, b.x1 + pad), ya = Math.max(1, b.y0 - pad), yb = Math.min(H - 2, b.y1 + pad)
   let n = 0, s = 0, s2 = 0
@@ -316,6 +319,9 @@ async function main() {
   check('blur na faixa "Efeitos" em 0, até o fim do clipe', hide.effect === 'blur' && hide.track === 'Efeitos' && hide.start === 0 && near(hide.dur, DUR_S * 1e6, 40_000), hide)
   check('região centrada no ponto solto (preset 0,4 × 0,08)', hide.region && near(hide.region.x, cpf0.cx, 0.004) && near(hide.region.y, cpf0.cy, 0.004) && near(hide.region.w, 0.4, 1e-6) && near(hide.region.h, 0.08, 1e-6), { region: hide.region, cpf0 })
   check('preset Esconder texto com intensidade 80', (await ev(`return T.fx('${hideId}').strength.value`)) === 80, null)
+  const link = await ev(`const f = T.fx('${hideId}'); const clip = T.items().find((i) => i.assetId === '${assetId}' && i.kind === 'video'); await T.wait(100)
+    return { fx: f.linkId ?? null, clip: clip.linkId ?? null, icon: !!document.querySelector('[data-item-id="${hideId}"] [aria-label="Vinculado"]') }`)
+  check('criado sobre o clipe: efeito vinculado a ele, com o ícone de vínculo na linha do tempo', !!link.fx && link.fx === link.clip && link.icon, link)
   const RW = +((cpf0.w + PADW) * 100).toFixed(1), RH = +((cpf0.h + PADH) * 100).toFixed(1)
   await ev(`await T.setField('Largura', ${RW}); await T.setField('Altura', ${RH}); await T.setField('Intensidade', ${TEXT_STRENGTH}); return 1`)
   check(`intensidade ${TEXT_STRENGTH} (o piso verificado abaixo)`, (await ev(`return T.fx('${hideId}').strength.value`)) === TEXT_STRENGTH, null)
@@ -397,7 +403,7 @@ async function main() {
 
   // CPF: caixa do texto na fonte em vários quadros; variância do laplaciano na saída / na fonte
   const ratios = []
-  for (const n of [5, 40, 75, 90, 120, 160, LAST_FRAME]) {
+  for (const n of [0, 5, 40, 75, 90, 120, 160, LAST_FRAME, END_FRAME]) {
     const src = frame(video, n)
     const dst = frame(out, n)
     const box = textBox(src, TEXTS.cpf.band, TEXTS.cpf.xr)
@@ -408,8 +414,8 @@ async function main() {
     ratios.push({ n, src: Math.round(vs0), out: Math.round(vd), ratio: +(vd / vs0).toFixed(4), cSrc: +c0.toFixed(1), cOut: +c1.toFixed(1), cRatio: +(c1 / c0).toFixed(3) })
   }
   console.log(`  CPF a ${TEXT_STRENGTH} (laplaciano e contraste local): ${JSON.stringify(ratios)}`)
-  check('texto do CPF sem detalhe em 7 instantes (variância do laplaciano saída/fonte < 0,2; fonte com texto nítido)', ratios.every((r) => r.ratio < 0.2 && r.src > 1000), ratios.map((r) => r.ratio))
-  check('texto do CPF ilegível em 7 instantes (contraste local p99−p1 após caixa 3 px: saída < 0,15 × fonte)', ratios.every((r) => r.cRatio < 0.15 && r.cSrc > 150), ratios.map((r) => [r.cSrc, r.cOut, r.cRatio]))
+  check('texto do CPF sem detalhe em 9 instantes, do 1º ao último quadro do item (variância do laplaciano saída/fonte < 0,2; fonte com texto nítido)', ratios.every((r) => r.ratio < 0.2 && r.src > 1000), ratios.map((r) => r.ratio))
+  check('texto do CPF ilegível em 9 instantes, do 1º ao último quadro do item (contraste local p99−p1 após caixa 3 px: saída < 0,15 × fonte)', ratios.every((r) => r.cRatio < 0.15 && r.cSrc > 150), ratios.map((r) => [r.cSrc, r.cOut, r.cRatio]))
   const pixR = (() => {
     const src = frame(video, 90)
     const dst = frame(out, 90)
@@ -448,7 +454,65 @@ async function main() {
   execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', out, '-vf', 'select=eq(n\\,90),scale=960:-2', '-frames:v', '1', '-update', '1', join(SHOTS, 'e2e-09-quadro-exportado.png')])
   execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', video, '-vf', 'select=eq(n\\,90),scale=960:-2', '-frames:v', '1', '-update', '1', join(SHOTS, 'e2e-09-quadro-fonte.png')])
   console.log('  📷 e2e-09-quadro-fonte.png / e2e-09-quadro-exportado.png')
-  writeFileSync(join(E2E, 'e2e-f2-result.json'), JSON.stringify({ file: files[0], ratios, pixR, ctrl, cpf0, cpfL, conta, senha, textStrength: TEXT_STRENGTH }, null, 2))
+
+  // ---- velocidade 0,5 no clipe: os efeitos vinculados acompanham (revisão final F2, I3) ----
+  console.log('velocidade 0,5× no clipe (Inspetor → Velocidade)')
+  const sp = await ev(`if (T.dialog()) { await T.clickEl(T.button('Fechar', T.dialog())); await T.wait(300) }
+    T.st().select([]); await T.seek(0); const v = T.items().find((i) => i.assetId === '${assetId}' && i.kind === 'video'); T.st().select([v.id]); await T.settle(); await T.wait(200)
+    const insp = T.el('[aria-label="Inspetor"]'); await T.clickEl([...insp.querySelectorAll('[role="tab"]')].find((t) => t.textContent.trim() === 'Velocidade')); await T.wait(200)
+    await T.clickEl(T.button('0,5×', insp)); await T.wait(300)
+    const c = T.items().find((i) => i.id === v.id); T.st().select([]); await T.settle()
+    return { clip: { start: c.startUs, end: c.startUs + c.durationUs, speed: c.speed, link: c.linkId }, fxs: T.effects().map((f) => ({ id: f.id, effect: f.effect, start: f.startUs, end: f.startUs + f.durationUs, link: f.linkId, keys: (f.region.x.keys || []).map((k) => k.tUs) })) }`)
+  console.log(`  ${JSON.stringify(sp)}`)
+  check('clipe a 0,5×: 12 s', sp.clip.speed === 0.5 && sp.clip.start === 0 && near(sp.clip.end, 2 * DUR_S * 1e6, 80_000), sp.clip)
+  check('os 3 efeitos (vinculados ao clipe) cobrem o clipe inteiro: 0 → fim do clipe', sp.fxs.length === 3 && sp.fxs.every((f) => f.link === sp.clip.link && f.start === 0 && f.end === sp.clip.end), sp.fxs)
+  const hideSp = sp.fxs.find((f) => f.id === hideId)
+  check('keyframes do Esconder texto escalados (0 e 2 × o último quadro)', !!hideSp && hideSp.keys.length === 2 && hideSp.keys[0] === 0 && near(hideSp.keys[1], 2 * tlUs, 2), hideSp)
+  await ev(`await T.seek(${Math.round(1.5 * DUR_S * 1e6)}); return 1`)
+  await shot('e2e-10-velocidade-meia.png')
+  const OUT2 = join(E2E, 'export-velocidade')
+  mkdirSync(OUT2, { recursive: true })
+  const out2 = await exportHigh(OUT2)
+  if (!out2) return
+  const p2 = JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_format', '-of', 'json', out2], { encoding: 'utf8' }))
+  check('exportação a 0,5×: ≈ 12 s', near(Number(p2.format.duration), 2 * DUR_S, 0.2), p2.format.duration)
+  // quadro n da saída mostra o quadro ⌊n/2⌋ da fonte (a caixa + 4 px cobre o meio quadro de diferença: 1,7 px)
+  const slow = []
+  for (const n of [0, 60, 150, 200, 260, 300, 340, 2 * DUR_S * FPS - 1]) {
+    const src = frame(video, Math.floor(n / 2))
+    const dst = frame(out2, n)
+    const box = textBox(src, TEXTS.cpf.band, TEXTS.cpf.xr)
+    slow.push({ n, ratio: +(lapVar(dst, box) / lapVar(src, box)).toFixed(4), cRatio: +(localContrast(dst, box) / localContrast(src, box)).toFixed(3) })
+  }
+  console.log(`  CPF a 0,5×: ${JSON.stringify(slow)}`)
+  check('a 0,5× o CPF segue ilegível nos 12 s, inclusive na 2ª metade e no último quadro (contraste < 0,15; laplaciano < 0,2)', slow.every((r) => r.cRatio < 0.15 && r.ratio < 0.2), slow)
+  const rgb2 = frame(out2, 300, 'rgb24')
+  const ci = ((Math.round(conta.cy * H)) * W + Math.round(conta.cx * W)) * 3
+  const tarja2 = [rgb2[ci], rgb2[ci + 1], rgb2[ci + 2]]
+  check(`a 0,5× a tarja segue na 2ª metade (quadro 300: ${tarja2}; esperado ${TARJA} ± 3)`, tarja2.every((v, c) => Math.abs(v - TARJA[c]) <= 3), tarja2)
+  execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', out2, '-vf', 'select=eq(n\\,300),scale=960:-2', '-frames:v', '1', '-update', '1', join(SHOTS, 'e2e-11-quadro-exportado-meia.png')])
+  console.log('  📷 e2e-11-quadro-exportado-meia.png')
+  writeFileSync(join(E2E, 'e2e-f2-result.json'), JSON.stringify({ file: files[0], ratios, pixR, ctrl, cpf0, cpfL, conta, senha, textStrength: TEXT_STRENGTH, speed: { sp, slow, tarja2 } }, null, 2))
+}
+
+/** Exporta "Alta 1080p" pelo diálogo para `dir` (vazia); devolve o .mp4 ou null (com o check de falha). */
+async function exportHigh(dir) {
+  await ev(`window.__qaEditor.exportDir = ${JSON.stringify(dir)}; await T.clickEl([...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar'))); await T.wait(500)
+    await T.clickEl([...T.dialog().querySelectorAll('[role="radio"]')].find((b) => b.textContent.startsWith('Alta 1080p'))); return 1`)
+  const privacy = await ev(`return T.dialog()?.querySelector('[data-privacy-warnings]')?.textContent ?? null`)
+  check('nova exportação sem avisos de privacidade', privacy === null, privacy)
+  await ev(`await T.clickEl(T.button('Exportar', T.dialog())); return 1`)
+  let text = ''
+  for (let i = 0; i < 1500; i++) {
+    text = await ev(`return T.dialog()?.textContent ?? ''`)
+    if (text.includes('Vídeo exportado') || text.includes('falhou')) break
+    await sleep(200)
+  }
+  check('exportação concluída', text.includes('Vídeo exportado'), text.slice(0, 300))
+  await ev(`if (T.dialog()) { await T.clickEl(T.button('Fechar', T.dialog())); await T.wait(300) } return 1`)
+  const files = readdirSync(dir).filter((x) => x.endsWith('.mp4'))
+  check('um .mp4 na pasta', files.length === 1, readdirSync(dir))
+  return files.length === 1 ? join(dir, files[0]) : null
 }
 
 try {

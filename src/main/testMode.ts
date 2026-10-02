@@ -60,7 +60,26 @@ async function runExport(store: SessionStore, session: Session, presetId: Export
   })
 }
 
+/**
+ * test:ffmpeg força o probe de encoders, que grava o cache (lastEncoderProbe/encoderProbeV2) no settings.json do
+ * usuário — a mesma pasta userData do app instalado. Guarda os bytes antes e devolve no fim (sempre, mesmo com falha).
+ */
 async function testFfmpeg(store: SessionStore): Promise<number> {
+  const file = join(app.getPath('userData'), 'settings.json')
+  const before = existsSync(file) ? readFileSync(file) : null
+  try {
+    return await testFfmpegRun(store)
+  } finally {
+    const now = existsSync(file) ? readFileSync(file) : null
+    if (before && (!now || !now.equals(before))) {
+      writeFileSync(file, before)
+      console.log('settings.json restaurado (o probe de encoders tinha atualizado o cache)')
+    }
+    console.log(`settings.json do usuário ${before && readFileSync(file).equals(before) ? 'igual ao de antes' : before ? 'DIFERENTE' : 'inexistente antes do teste'}`)
+  }
+}
+
+async function testFfmpegRun(store: SessionStore): Promise<number> {
   const failures: string[] = []
   mkdirSync(outDir, { recursive: true })
   const probe = await probeEncoders(true)
