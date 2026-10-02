@@ -5,13 +5,14 @@ import { NO_HOLE, toScreen, type RegionValues } from './contentPose'
 import { evalAnim } from './anim'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
 import { attachCandidate, attachEffects, detachEffect, effectsOverClip } from './followTransform'
-import { deleteItems, duplicateItems, findItem, setItemEnabled, updateAsset, updateItem } from './ops'
+import { deleteItems, deleteRanges, duplicateItems, findItem, freezeFrameAt, setItemEnabled, setReverse, updateAsset, updateItem } from './ops'
 import { privacyWarnings } from './privacy'
-import type { Anim, Asset, Ease, EffectItem, MediaItem, PresetAnim, Project, Us } from './project'
+import type { Anim, AnimPreset, Asset, Ease, EffectItem, Item, MediaItem, PresetAnim, Project, Us } from './project'
 import { clipFrameAt, effectRegionAt } from './resolve'
-import { parseProject, toDiskProject } from './schema'
-import { frameToUs } from './time'
-import { applyKenBurns } from './zoom'
+import { reframeProject } from './reframe'
+import { parseProject, toDiskProject, V13_DISK_PRESET, validateProject } from './schema'
+import { frameToUs, itemEndUs } from './time'
+import { applyKenBurns, applyZoom } from './zoom'
 
 // Revisão do modelo de âncora (F4 Task 4): formato do disco legível sem vazamento pela v1.3, clipe desativado, efeito
 // sem caixa de reserva, efeito além do clipe e a oferta do zoom.
@@ -461,5 +462,126 @@ describe('animações de entrada/saída: a região ancorada acompanha o conteúd
     // sem âncora (região parada no quadro, vinculada) o mesmo clipe dá o aviso transformedUnderEffect
     expect(warn(scene((m) => { Object.assign(m.visual!, anims) }), 'transformedUnderEffect')).toHaveLength(1)
     expect(warn(q, 'transformedUnderEffect')).toEqual([])
+  })
+})
+
+// Revisão final da F4 (M-4): o sentido "projeto novo → disco → v1.3" com TODAS as adições da F4 num projeto só
+// (os testes acima conferem cada uma separada). Variantes: como montado; reenquadrado 9:16 Preencher com foco; 1:1
+// Caber inteiro; sem as keys de corte do PiP e reenquadrado 4:5 com dois pontos de foco.
+describe('disco: todas as adições da F4 num projeto só (v1.3 e ida e volta sem perda)', { timeout: 120_000 }, () => {
+  const cam: Asset = { ...vid, id: 'c', name: 'webcam', video: { ...vid.video!, width: 1280, height: 720 } }
+  const tk = (id: string, items: Item[], fx = false): Project['tracks'][number] => ({ id, kind: 'video', name: id, ...(fx ? { role: 'effects' as const } : {}), muted: false, hidden: false, locked: false, volume: 1, items })
+  const all = (p: Project): Item[] => p.tracks.flatMap((t) => t.items)
+  const mains = (p: Project): MediaItem[] => p.tracks.find((t) => t.id === 'tv')!.items as MediaItem[]
+
+  function build(): Project {
+    const p = createEmptyProject('F4 completo')
+    p.assets = [vid, cam]
+    const m = { ...createMediaItem(vid, 0, 'video'), id: 'm', durationUs: 12 * S, linkId: 'l1' } as MediaItem
+    m.visual!.animIn = { preset: 'bounce', durationUs: 0.6 * S, ease: 'out' }
+    m.visual!.animOut = { preset: 'rotate', durationUs: 0.5 * S }
+    const pip = { ...createMediaItem(cam, 2 * S, 'video'), id: 'pip', durationUs: 8 * S, inUs: 0 } as MediaItem
+    pip.visual!.transform.x = { value: 0.82 }
+    pip.visual!.transform.y = { value: 0.78 }
+    pip.visual!.transform.scale = { value: 0.3 }
+    pip.visual!.animIn = { preset: 'blur', durationUs: 0.4 * S }
+    const fx1 = { ...createEffectItem('blur', 0, 12 * S, { x: 0.3, y: 0.3, w: 0.12, h: 0.1 }), id: 'fx1', linkId: 'l1' } as EffectItem
+    const fx2 = { ...createEffectItem('pixelate', 0, 12 * S, { x: 0.45, y: 0.5, w: 0.3, h: 0.3, shape: 'ellipse' }), id: 'fx2', linkId: 'l1', invert: true } as EffectItem
+    const solid = { ...createEffectItem('solid', 3 * S, 4 * S, { x: 0.82, y: 0.78, w: 0.1, h: 0.08 }), id: 'solid' } as EffectItem
+    p.tracks = [tk('tv', [m]), tk('tf', [fx1], true), tk('tg', [fx2], true), tk('tp', [pip]), tk('ts', [solid], true)]
+    let q = applyKenBurns(p, 'pip', 'tr').project // PiP: Ken Burns por corte
+    q = applyZoom(q, 'm', { x: 0.3, y: 0.3, w: 0.4, h: 0.4 }, 4 * S, 0.5 * S, 1 * S, 'inOut', { clamp: true }).project
+    q = attachEffects(q, 'm', ['fx1', 'fx2'])
+    q = freezeFrameAt(q, 'm', 1.5 * S, 1 * S)
+    q = deleteRanges(q, [{ fromUs: 7 * S, toUs: 7.5 * S }])
+    const last = mains(q)[mains(q).length - 1]
+    return setReverse(q, [last.id], true)
+  }
+  const noCropKeys = (p: Project): Project => ({
+    ...p,
+    tracks: p.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.type === 'media' && i.visual && i.assetId === 'c' ? { ...i, visual: { ...i.visual, crop: { l: { value: 0 }, t: { value: 0 }, r: { value: 0 }, b: { value: 0 } } } } : i)) }))
+  })
+  const variants: [string, () => Project][] = [
+    ['como montado', build],
+    ['9:16 Preencher com foco', () => {
+      const p = build()
+      return reframeProject(p, '9:16', { mode: 'cover', focus: { [mains(p)[0].id]: [{ localUs: 0, x: 0.6, y: 0.5 }] } }).project
+    }],
+    ['1:1 Caber inteiro', () => reframeProject(build(), '1:1', { mode: 'contain' }).project],
+    ['PiP sem keys de corte, 4:5 com dois pontos', () => {
+      const p = noCropKeys(build())
+      const id = mains(p)[0].id
+      return reframeProject(p, '4:5', { mode: 'cover', focus: { [id]: [{ localUs: 0, x: 0.35, y: 0.5 }, { localUs: 0.8 * S, x: 0.65, y: 0.45 }] } }).project
+    }]
+  ]
+  /** A v1.3 só recusa keys nos campos que viraram animáveis na F4: corte, ajustes, raio, tamanho do texto. */
+  const newKeys = (p: Project): boolean => all(p).some((i) => {
+    const v = 'visual' in i ? i.visual : undefined
+    const keyed = (a?: Anim<number>): boolean => (a?.keys?.length ?? 0) > 0
+    return (!!v && (Object.values(v.crop).some(keyed) || (!!v.adjust && Object.values(v.adjust).some(keyed)) || keyed(v.radius))) || (i.type === 'text' && keyed(i.style.size))
+  })
+  /** Contenção no quadro do projeto (W×H dele): `inner` (girado) dentro de `outer` (parado), retângulo ou elipse. */
+  const insideOn = (q: Project, outer: RegionValues, inner: RegionValues, shape: 'rect' | 'ellipse'): boolean => {
+    const Wq = q.canvas.width, Hq = q.canvas.height
+    const th = (inner.rotation * Math.PI) / 180, c = Math.cos(th), sn = Math.sin(th)
+    const hw = (Math.abs(inner.w) * Wq) / 2, hh = (Math.abs(inner.h) * Hq) / 2
+    const pts: [number, number][] = shape === 'rect'
+      ? [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]
+      : Array.from({ length: 48 }, (_, i): [number, number] => [hw * Math.cos((i / 48) * 2 * Math.PI), hh * Math.sin((i / 48) * 2 * Math.PI)])
+    const ox = outer.x * Wq, oy = outer.y * Hq, a = (outer.w * Wq) / 2, b = (outer.h * Hq) / 2
+    return pts.every(([x0, y0]) => {
+      const x = inner.x * Wq + c * x0 - sn * y0, y = inner.y * Hq + sn * x0 + c * y0
+      return shape === 'rect' ? Math.abs(x - ox) <= a + 1e-6 && Math.abs(y - oy) <= b + 1e-6 : ((x - ox) / a) ** 2 + ((y - oy) / b) ** 2 <= 1 + 1e-9
+    })
+  }
+  type DiskAnim = { preset: AnimPreset; presetV14?: AnimPreset }
+
+  it.each(variants)('%s', (_n, make) => {
+    const p = make()
+    // 1. válido; 2. ida e volta pelo disco sem perda
+    expect(validateProject(p)).toEqual([])
+    const disk = JSON.parse(JSON.stringify(toDiskProject(p)))
+    expect(parseProject(disk)).toEqual(p)
+    // 3. a v1.3 só recusa com keys de corte/ajustes/raio/tamanho — e só por eles
+    const v13 = parseProjectV13(disk)
+    if (!newKeys(p)) expect(v13.success).toBe(true)
+    if (!v13.success) {
+      expect(newKeys(p)).toBe(true)
+      for (const issue of v13.error.issues) expect(issue.path.some((k) => k === 'crop' || k === 'adjust' || k === 'radius' || k === 'size')).toBe(true)
+    }
+    const diskItems = new Map((disk.tracks as { items: Record<string, unknown>[] }[]).flatMap((t) => t.items).map((i) => [i.id as string, i]))
+    for (const it of all(p)) {
+      const d = diskItems.get(it.id)!
+      if (it.type === 'effect') {
+        const region = valuesOf(d.region as DiskRegion)
+        if (it.attach && !it.invert) {
+          // 4. a caixa estática do disco contém o que o build novo desenha, a cada 1/240 s
+          expect(region.rotation).toBe(0)
+          for (let t = it.startUs; t < itemEndUs(it); t += Math.round(S / 240)) {
+            const r = effectRegionAt(p, it, t)
+            if (!insideOn(p, region, r, it.region.shape)) throw new Error(`${it.id} fora da caixa do disco em ${t}: ${JSON.stringify(r)} ⊄ ${JSON.stringify(region)}`)
+          }
+        }
+        // 5. invertido: ancorado → buraco nulo no disco; solto (desancorado pelo reenquadrar) → as keys do build novo
+        if (it.invert) {
+          if (it.attach) expect([region.w, region.h]).toEqual([0, 0])
+          else expect(d.region).toEqual(it.region)
+        }
+      }
+      // 6. presets no disco: os que a v1.3 conhece, o real em presetV14
+      const vis = d.visual as { animIn?: DiskAnim; animOut?: DiskAnim } | undefined
+      for (const a of [vis?.animIn, vis?.animOut]) if (a) expect(a.preset).toBe(V13_DISK_PRESET[a.presetV14 ?? a.preset])
+    }
+  })
+
+  it('as variantes exercitam o que prometem (presets novos, ancorados normal e invertido, congelar, inverter, PiP com e sem keys de corte)', () => {
+    const [built, cover, contain, noCrop] = variants.map(([, make]) => make())
+    const presets = all(built).flatMap((i) => ('visual' in i && i.visual ? [i.visual.animIn?.preset, i.visual.animOut?.preset] : []))
+    expect(presets).toEqual(expect.arrayContaining(['bounce', 'rotate', 'blur']))
+    const fxs = (p: Project): EffectItem[] => all(p).filter((i): i is EffectItem => i.type === 'effect')
+    expect(fxs(built).some((f) => f.attach && f.invert) && fxs(built).some((f) => f.attach && !f.invert) && fxs(built).some((f) => !f.attach)).toBe(true)
+    expect(all(built).some((i) => i.type === 'media' && !!i.freeze) && all(built).some((i) => i.type === 'media' && i.reverse)).toBe(true)
+    expect([newKeys(built), newKeys(cover), newKeys(contain), newKeys(noCrop)]).toEqual([true, true, true, false])
+    expect([cover.canvas.height, contain.canvas.width, noCrop.canvas.height]).toEqual([1920, 1080, 1350])
   })
 })
