@@ -22,6 +22,10 @@ if (params.get('test') === 'capture') {
   // teste de integração da exportação do editor (CIALIGHT_TEST=editor-export): só o harness, sem UI
   const params = JSON.parse(decodeURIComponent(location.hash.slice('#editor-export-test/'.length)))
   void import('./editor/test/exportHarness').then(({ runExportHarness }) => runExportHarness(params))
+} else if (location.hash.startsWith('#editor-formats-test/')) {
+  // teste de integração dos formatos extras (CIALIGHT_TEST=editor-formats): GIF, PNG e só áudio
+  const params = JSON.parse(decodeURIComponent(location.hash.slice('#editor-formats-test/'.length)))
+  void import('./editor/test/formatsHarness').then(({ runFormatsHarness }) => runFormatsHarness(params))
 } else {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>

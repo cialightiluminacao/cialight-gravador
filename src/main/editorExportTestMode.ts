@@ -43,7 +43,7 @@ const FPS = 30
 const FRAME_MS = 1000 / FPS
 // fonte marcada como BT.709 (como as gravações do app): sem a marcação, o Chromium e o ffmpeg convertem o
 // YUV para RGB com matrizes diferentes e a comparação de pixels mediria a matriz, não a exportação
-const BT709 = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv']
+export const BT709 = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv']
 // como as gravações de tela da v1 (WebCodecs): BT.601 marcado
 const BT601 = ['-colorspace', 'smpte170m', '-color_primaries', 'smpte170m', '-color_trc', 'smpte170m', '-color_range', 'tv']
 const COLOR_601 = 'p-editor-export-cor-601'
@@ -51,13 +51,13 @@ const COLOR_UNTAGGED = 'p-editor-export-cor-sem-marcacao'
 const COLOR_UNTAGGED_SD = 'p-editor-export-cor-sem-marcacao-sd'
 // efeitos (F2): projeto 1920×1080 (ruído + blur + tarja) exportado em 1280×720
 const EFFECTS_ID = 'p-editor-export-efeitos'
-const FX_BLOCK = 16
+export const FX_BLOCK = 16
 const FX_T_US = 1_000_000
-const FX_TARJA = [0x12, 0x34, 0x56]
-const FX_SOLID = { x: 0.72, y: 0.5, w: 0.3, h: 0.4 }
-const FX_BLUR = { x: 0.3, y: 0.5, w: 0.3, h: 0.4 }
+export const FX_TARJA = [0x12, 0x34, 0x56]
+export const FX_SOLID = { x: 0.72, y: 0.5, w: 0.3, h: 0.4 }
+export const FX_BLUR = { x: 0.3, y: 0.5, w: 0.3, h: 0.4 }
 // trecho só de ruído, longe do blur e da tarja (energia de detalhe de referência)
-const FX_OUTSIDE = { x: 0.065, y: 0.5, w: 0.11, h: 0.8 }
+export const FX_OUTSIDE = { x: 0.065, y: 0.5, w: 0.11, h: 0.8 }
 // velocidade (F3): testsrc2 + voz sintética de 6 s a 2× com tom preservado
 const SPEED_ID = 'p-editor-export-velocidade'
 const VOICE_HZ = 220
@@ -170,20 +170,20 @@ function duckingCheck(levels: number[], speech: SpeechInterval[]): DuckingResult
   return out
 }
 
-function check(cond: boolean, msg: string, failures: string[]): void {
+export function check(cond: boolean, msg: string, failures: string[]): void {
   if (!cond) failures.push(msg)
   console.log(`${cond ? 'OK ' : 'FAIL'} ${msg}`)
 }
 
-function settingsHash(): string | null {
+export function settingsHash(): string | null {
   const f = join(app.getPath('userData'), 'settings.json')
   return existsSync(f) ? createHash('sha1').update(readFileSync(f)).digest('hex') : null
 }
 
-const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
+export const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
 
 /** Quadro em tSec (decodificação exata a partir do keyframe anterior), recortado, como RGB24. */
-async function frameRgb(file: string, tSec: number, out: string, crop?: { x: number; y: number; w: number; h: number }): Promise<Uint8Array> {
+export async function frameRgb(file: string, tSec: number, out: string, crop?: { x: number; y: number; w: number; h: number }): Promise<Uint8Array> {
   const vf = crop ? ['-vf', `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`] : []
   await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', tSec.toFixed(3), '-i', file, '-frames:v', '1', ...vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', out], { label: 'teste: quadro' })
   return new Uint8Array(readFileSync(out))
@@ -230,21 +230,21 @@ function psnr(a: Uint8Array, b: Uint8Array): number {
 }
 
 /** RMS geral (dB) do áudio em [from, to) s pelo astats. */
-async function rmsDb(file: string, from: number, to: number): Promise<number> {
+export async function rmsDb(file: string, from: number, to: number): Promise<number> {
   const r = await runFfmpeg(['-hide_banner', '-nostdin', '-i', file, '-vn', '-af', `atrim=start=${from}:end=${to},astats=measure_perchannel=none`, '-f', 'null', '-'], { label: 'teste: astats' })
   const m = /RMS level dB:\s*(-?[\d.]+|-inf)/.exec(r.stderrTail.split('Overall').pop() ?? '')
   return m ? (m[1] === '-inf' ? -Infinity : Number(m[1])) : NaN
 }
 
 /** Áudio do arquivo como PCM float 48 kHz intercalado (ffmpeg → f32le); mono por padrão. */
-async function pcmOf(file: string, out: string, channels = 1): Promise<Float32Array> {
+export async function pcmOf(file: string, out: string, channels = 1): Promise<Float32Array> {
   await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-vn', '-ac', String(channels), '-ar', '48000', '-f', 'f32le', out], { label: 'teste: pcm' })
   const b = readFileSync(out)
   return new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength))
 }
 
 /** Quadros decodificados da faixa de vídeo (ffprobe -count_frames). */
-function countFrames(file: string): Promise<number> {
+export function countFrames(file: string): Promise<number> {
   return new Promise((resolve) => {
     execFile(ffprobePath(), ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', file], { windowsHide: true }, (err, stdout) => {
       resolve(err ? -1 : Number(String(stdout).trim().replace(/,$/, '')))
@@ -255,7 +255,7 @@ function countFrames(file: string): Promise<number> {
 interface EffectsOut { export?: ExportOut; width?: number; height?: number; blurCrop?: Region; outsideCrop?: Region; previewBlockVar?: number[]; previewBlurRgb?: number[]; previewEnergy?: { blur: number; outside: number }; error?: string }
 
 /** Energia de detalhe: média de (ΔL)² entre vizinhos (horizontal + vertical) de uma imagem RGB24 w×h. */
-function detailEnergy(d: Uint8Array, w: number, h: number): number {
+export function detailEnergy(d: Uint8Array, w: number, h: number): number {
   const L = (x: number, y: number): number => {
     const i = (y * w + x) * 3
     return 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
@@ -273,7 +273,7 @@ function detailEnergy(d: Uint8Array, w: number, h: number): number {
 }
 
 /** Faixa de vídeo pelo ffprobe (codec, tag, taxa de quadros, resolução). */
-function streamInfo(file: string): Promise<{ codec_name?: string; codec_tag_string?: string; r_frame_rate?: string; avg_frame_rate?: string; width?: number; height?: number } | null> {
+export function streamInfo(file: string): Promise<{ codec_name?: string; codec_tag_string?: string; r_frame_rate?: string; avg_frame_rate?: string; width?: number; height?: number } | null> {
   return new Promise((resolve) => {
     execFile(ffprobePath(), ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,codec_tag_string,r_frame_rate,avg_frame_rate,width,height', '-of', 'json', file], { windowsHide: true }, (err, stdout) => {
       if (err) return resolve(null)
