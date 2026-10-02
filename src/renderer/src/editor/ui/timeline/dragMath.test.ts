@@ -109,6 +109,31 @@ describe('planMove', () => {
   })
 })
 
+describe('gesto e transições', () => {
+  // useTimelineDrag recalcula cada evento a partir de txBase (o projeto do início do gesto): afastar e voltar no mesmo
+  // gesto não perde a transição (só o estado final do gesto conta)
+  function encostados(): { base: Project; v0: string; v1: string } {
+    const { p, v0, v1 } = fixture()
+    const base = ops.addTransition(ops.moveItems(p, [v1], -2 * S), v1, 'crossfade', S)
+    return { base, v0, v1 }
+  }
+  const trIn = (p: Project, id: string) => (at(p, id).item as MediaItem).transitionIn
+  it('mover B para longe e de volta no mesmo gesto mantém a transição', () => {
+    const { base, v1 } = encostados()
+    const away = planMove(base, { draggedId: v1, ids: [v1], deltaUs: 2 * S, zone: null, includeLinked: true, snap: noSnap, preview: true })
+    expect(trIn(away.project!, v1)).toBeUndefined()
+    const back = planMove(base, { draggedId: v1, ids: [v1], deltaUs: 0, zone: null, includeLinked: true, snap: noSnap, preview: true })
+    expect(trIn(back.project ?? base, v1)).toEqual({ kind: 'crossfade', durationUs: S })
+  })
+  it('encolher A e voltar no mesmo gesto de trim mantém a transição', () => {
+    const { base, v0, v1 } = encostados()
+    const shrink = planTrim(base, { itemId: v0, edge: 'end', deltaUs: -S, ripple: false, includeLinked: true, snap: noSnap })
+    expect(trIn(shrink.project!, v1)).toBeUndefined()
+    const back = planTrim(base, { itemId: v0, edge: 'end', deltaUs: 0, ripple: false, includeLinked: true, snap: noSnap })
+    expect(trIn(back.project ?? base, v1)).toEqual({ kind: 'crossfade', durationUs: S })
+  })
+})
+
 describe('canChangeTrack', () => {
   it('só quando a seleção está na faixa do arrastado (ou vinculada a ele)', () => {
     const { p, v0, a0, v1, a1 } = fixture()

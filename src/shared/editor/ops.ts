@@ -9,7 +9,8 @@ import type { EffectPresetId, EffectRegionInit } from './factory'
 import { newId } from './ids'
 import { frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
-import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, Track, TrackKind, Us } from './project'
+import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, Track, TrackKind, TransitionKind, Us } from './project'
+import { canTransition, DEFAULT_TRANSITION_US, maxTransitionUs, MIN_TRANSITION_US, transitionPairOk } from './transitions'
 
 export { getAnim, type AnimPath } from './animPaths'
 
@@ -51,10 +52,42 @@ function stampLegacyTargets(d: Project): void {
  * efeitos mantidas depois (maintainAttachments: pedaço certo do clipe e caixa de reserva).
  */
 function edit(p: Project, recipe: (d: Project) => void): Project {
-  return produce(p, (d) => {
+  const next = produce(p, (d) => {
     stampLegacyTargets(d)
     recipe(d)
     maintainAttachments(d)
+  })
+  return normalizeTransitions(p, next)
+}
+
+/**
+ * Passada única O(itens) depois de toda edição (via edit/deleteRanges): nas faixas que a edição mudou (e não
+ * bloqueadas), a transição de entrada de cada item sai se o anterior não estiver encostado/elegível ou se o máximo do
+ * par ficar abaixo do mínimo, e é limitada ao máximo (floor(min/2)). Cobre split/trim/move/apagar/velocidade/congelar/
+ * ripple/duplicar sem lógica em cada op. Faixas não mudadas ficam intactas (o mesmo objeto).
+ */
+function normalizeTransitions(prev: Project, next: Project): Project {
+  if (prev === next) return next
+  const before = new Map(prev.tracks.map((t) => [t.id, t]))
+  const fixes: { ti: number; ii: number; d: Us | null }[] = []
+  next.tracks.forEach((t, ti) => {
+    if (t.locked || before.get(t.id) === t) return
+    for (let ii = 0; ii < t.items.length; ii++) {
+      const b = t.items[ii]
+      if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) continue
+      const a = ii > 0 ? t.items[ii - 1] : undefined
+      const max = transitionPairOk(t, a, b) ? maxTransitionUs(a, b) : -1
+      if (max < MIN_TRANSITION_US) fixes.push({ ti, ii, d: null })
+      else if (b.transitionIn.durationUs > max) fixes.push({ ti, ii, d: max })
+    }
+  })
+  if (!fixes.length) return next
+  return produce(next, (d) => {
+    for (const f of fixes) {
+      const it = d.tracks[f.ti].items[f.ii] as MediaItem
+      if (f.d === null) delete it.transitionIn
+      else it.transitionIn!.durationUs = f.d
+    }
   })
 }
 
@@ -1050,7 +1083,7 @@ export function deleteRanges(p: Project, ranges: readonly { fromUs: Us; toUs: Us
     }
     return removedBefore[lo]
   }
-  return produce(base, (d) => {
+  const out = produce(base, (d) => {
     base.tracks.forEach((t, ti) => {
       const cut = cutTracks.has(t.id)
       const nodes = [...done[ti], ...pending[ti]]
@@ -1070,6 +1103,7 @@ export function deleteRanges(p: Project, ranges: readonly { fromUs: Us; toUs: Us
     finalize(d)
     maintainAttachments(d)
   })
+  return normalizeTransitions(p, out)
 }
 
 // ---------------------------------------------------------------- vínculo / áudio
@@ -1173,7 +1207,8 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
     const dur = Math.round(f.item.durationUs * ratio)
     if (dur < MIN_ITEM_US) throw new EditError('invalid', 'Duração resultante menor que o mínimo')
     const scaled = mapAnims(f.item, (a) => (a.keys ? { ...a, keys: a.keys.map((k) => ({ ...k, tUs: Math.round(k.tUs * ratio) })) } : a))
-    // fades, animações e transição acompanham a escala de tempo, limitados à nova duração
+    // fades e animações acompanham a escala de tempo, limitados à nova duração (a transição de entrada é da timeline:
+    // não escala; normalizeTransitions a limita ao novo máximo do par)
     const fit = (us: Us, max: Us): Us => Math.min(max, Math.round(us * ratio))
     // fadeIn + fadeOut nunca passam da duração (o arredondamento de cada um poderia somar 1 µs a mais)
     const fades = (fin: Us, fout: Us): { fadeInUs: Us; fadeOutUs: Us } => {
@@ -1193,7 +1228,6 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
         }
       }
     }
-    if (n.transitionIn) n = { ...n, transitionIn: { ...n.transitionIn, durationUs: fit(n.transitionIn.durationUs, Math.floor(dur / 2)) } }
     changes.push({ id, item: n, oldEnd: end(f.item) })
   }
   if (!changes.some((c) => !c.fx)) return p
@@ -1888,4 +1922,52 @@ export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { d
     fx.linkId = linkId
   })
   return { project: q, itemId: item.id }
+}
+
+// ---------------------------------------------------------------- transições
+
+/** B (o item da direita, que guarda a transição) e o anterior A na faixa; lança se a faixa estiver bloqueada. */
+function transitionPair(p: Project, rightItemId: string): { track: Track; a: Item | undefined; b: Item } {
+  const f = mustFind(p, rightItemId)
+  assertUnlocked(f.track)
+  // itens ficam ordenados por startUs (finalize)
+  return { track: f.track, a: f.itemIndex > 0 ? f.track.items[f.itemIndex - 1] : undefined, b: f.item }
+}
+
+/**
+ * Transição de entrada em B (rightItemId) a partir do item anterior encostado na mesma faixa de vídeo (modelo em
+ * transitions.ts). durationUs ausente = DEFAULT_TRANSITION_US; sempre limitada a [MIN_TRANSITION_US, máximo do par].
+ * Substituir uma transição existente é esta mesma operação.
+ */
+export function addTransition(p: Project, rightItemId: string, kind: TransitionKind, durationUs?: Us): Project {
+  const { track, a, b } = transitionPair(p, rightItemId)
+  const why = canTransition(p, track.id, a?.id, b.id)
+  if (why) throw new EditError('invalid', why)
+  const d = clamp(Math.round(durationUs ?? DEFAULT_TRANSITION_US), MIN_TRANSITION_US, maxTransitionUs(a!, b))
+  return edit(p, (dr) => {
+    const it = mustFind(dr, rightItemId).item as MediaItem
+    it.transitionIn = { kind, durationUs: d }
+  })
+}
+
+/** Remove a transição de entrada de B (nada a fazer = o mesmo projeto). */
+export function removeTransition(p: Project, rightItemId: string): Project {
+  const { b } = transitionPair(p, rightItemId)
+  if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) return p
+  return edit(p, (d) => {
+    delete (mustFind(d, rightItemId).item as MediaItem).transitionIn
+  })
+}
+
+/** Nova duração da transição de B, limitada a [MIN_TRANSITION_US, máximo do par] (gesto de arrastar: em transação). */
+export function setTransitionDuration(p: Project, rightItemId: string, durationUs: Us): Project {
+  const { track, a, b } = transitionPair(p, rightItemId)
+  if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) throw new EditError('invalid', 'Este clipe não tem transição de entrada')
+  const why = canTransition(p, track.id, a?.id, b.id)
+  if (why) throw new EditError('invalid', why)
+  const d = clamp(Math.round(durationUs), MIN_TRANSITION_US, maxTransitionUs(a!, b))
+  if (d === b.transitionIn.durationUs) return p
+  return edit(p, (dr) => {
+    ;(mustFind(dr, rightItemId).item as MediaItem).transitionIn!.durationUs = d
+  })
 }

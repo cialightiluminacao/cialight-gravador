@@ -6,6 +6,7 @@ import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
 import { conservativeRegion } from './contentPose'
 import { itemAnimEntries, type AnimPath } from './animPaths'
+import { maxTransitionUs, MIN_TRANSITION_US, transitionPairOk } from './transitions'
 
 const us = z.number().int()
 const unit = z.number().min(0).max(1)
@@ -346,6 +347,16 @@ export function validateProject(p: Project): string[] {
     for (const cur of sorted) {
       if (maxEndItem && cur.startUs < itemEndUs(maxEndItem)) errs.push(`Faixa "${tr.name}": item ${cur.id} sobrepõe o item ${maxEndItem.id}`)
       if (!maxEndItem || itemEndUs(cur) > itemEndUs(maxEndItem)) maxEndItem = cur
+    }
+    for (let i = 0; i < sorted.length; i++) {
+      const b = sorted[i]
+      if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) continue
+      const tag = `Faixa "${tr.name}", item ${b.id}`
+      const a = sorted[i - 1]
+      const d = b.transitionIn.durationUs
+      if (!transitionPairOk(tr, a, b)) errs.push(`${tag}: transição sem clipe anterior encostado e elegível na mesma faixa de vídeo`)
+      else if (d < MIN_TRANSITION_US) errs.push(`${tag}: transição menor que o mínimo (${MIN_TRANSITION_US} µs)`)
+      else if (d > maxTransitionUs(a, b)) errs.push(`${tag}: transição maior que metade do clipe mais curto`)
     }
     for (const it of tr.items) {
       const tag = `Faixa "${tr.name}", item ${it.id}`

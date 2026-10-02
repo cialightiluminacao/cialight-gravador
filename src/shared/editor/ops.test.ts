@@ -12,6 +12,12 @@ function base(): { p: Project; v: string; a: string } {
   return { p, v: r.itemIds[0], a: r.itemIds[1] }
 }
 const items = (p: Project, ti: number) => p.tracks[ti].items as MediaItem[]
+/** Como base(), mas com um clipe de 10 s antes de v (0–10 s; v em 10–20 s): a transição de entrada de v tem anterior. */
+function withPrev(): { p: Project; v: string } {
+  const { p, v } = base()
+  const moved = ops.moveItems(p, [v], 10 * S)
+  return { p: ops.addMediaFromAsset(moved, 'a1', 0).project, v }
+}
 describe('ops', () => {
   it('addMediaFromAsset cria vídeo + áudio vinculados', () => {
     const { p } = base()
@@ -69,13 +75,14 @@ describe('ops', () => {
     expect(ops.linkedIds(p, 'nada')).toEqual([])
   })
   it('splitAt reparte keyframes e mantém transitionIn só no 1º pedaço', () => {
-    const { p, v } = base()
+    // a transição de entrada precisa de um clipe anterior encostado (sem ele a normalização a remove)
+    const { p, v } = withPrev()
     const q0 = ops.updateItem<MediaItem>(p, v, (d) => {
       d.visual!.transform.opacity = { value: 1, keys: [{ tUs: 0, value: 0, ease: 'linear' }, { tUs: 10 * S, value: 1, ease: 'linear' }] }
       d.transitionIn = { kind: 'crossfade', durationUs: S }
     })
-    const q = ops.splitAt(q0, [v], 4 * S)
-    const [l, r] = items(q, 0)
+    const q = ops.splitAt(q0, [v], 14 * S)
+    const [, l, r] = items(q, 0)
     expect(l.visual!.transform.opacity.keys!.map((k) => [k.tUs, k.value])).toEqual([[0, 0], [4 * S, 0.4]])
     expect(r.visual!.transform.opacity.keys!.map((k) => [k.tUs, k.value])).toEqual([[0, 0.4], [6 * S, 1]])
     expect(l.transitionIn).toBeDefined(); expect(r.transitionIn).toBeUndefined()
@@ -210,18 +217,19 @@ describe('ops', () => {
   })
 
   // --- correções da revisão ---
-  it('setSpeed escala fades, animações e transição e limita à nova duração', () => {
-    const { p, v } = base()
+  it('setSpeed escala fades e animações e limita à nova duração; a transição é limitada ao novo máximo do par', () => {
+    // a transição de entrada precisa de um clipe anterior encostado (sem ele a normalização a remove)
+    const { p, v } = withPrev()
     const q0 = ops.updateItem<MediaItem>(p, v, (d) => {
       d.visual!.fadeInUs = S; d.visual!.fadeOutUs = S; d.audio.fadeInUs = S; d.audio.fadeOutUs = S
       d.visual!.animIn = { preset: 'fade', durationUs: 2 * S }; d.visual!.animOut = { preset: 'zoom', durationUs: 20 * S }
       d.transitionIn = { kind: 'crossfade', durationUs: 8 * S }
     })
-    const it = items(ops.setSpeed(q0, v, 16), 0)[0]
+    const it = ops.findItem(ops.setSpeed(q0, v, 16), v)!.item as MediaItem
     expect([it.visual!.fadeInUs, it.visual!.fadeOutUs, it.audio.fadeInUs, it.audio.fadeOutUs]).toEqual([62_500, 62_500, 62_500, 62_500])
     expect(it.visual!.animIn!.durationUs).toBe(125_000)
     expect(it.visual!.animOut!.durationUs).toBe(625_000) // 1_250_000 limitado à duração
-    expect(it.transitionIn!.durationUs).toBe(312_500) // 500_000 limitado à metade da duração
+    expect(it.transitionIn!.durationUs).toBe(312_500) // metade da nova duração (625 ms): floor(min(10 s, 625 ms) / 2)
   })
   it('setSpeed mantém fadeIn + fadeOut ≤ duração (vídeo e áudio) apesar do arredondamento', () => {
     const { p, v } = base()
