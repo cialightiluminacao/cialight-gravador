@@ -55,3 +55,14 @@ Marcar a cada release. Máquinas: PC de desenvolvimento (Win11, 2 monitores) e p
 - [ ] Exportação usa a GPU quando disponível (NVIDIA/Intel/AMD) e cai para software sem erro quando o encoder falha.
 - [ ] Projeto com 20+ cortes e 3 faixas de vídeo continua fluido (preview e arraste na linha do tempo).
 - [ ] O app instalado (v1.0.x) e o de desenvolvimento podem dividir o mesmo `settings.json` sem perder configurações.
+
+## Editor — efeitos de privacidade (F2)
+- [ ] Ferramenta Desenhar região (`B`): arrastar no quadro cria Blur/Pixelizar/Tarja (escolha na barra lateral) em retângulo ou elipse (Shift; Alt = a partir do centro); o efeito entra na faixa "Efeitos" no playhead e fica selecionado; Esc sai da ferramenta.
+- [ ] Mover, redimensionar (Shift mantém a proporção, Alt a partir do centro) e girar a região, com guias do quadro; cada gesto é 1 passo de desfazer; clicar fora da região seleciona a mídia por baixo.
+- [ ] Aba **Efeitos** da biblioteca: as 6 predefinições (Blur, Pixelizar, Tarja, Esconder rosto, Esconder texto, Borrar tudo menos…) arrastadas para a linha do tempo (no ponto; na faixa de vídeo livre sob o ponteiro ou na "Efeitos") e para o visualizador (no playhead, região centrada onde soltou); duplo clique/Enter/"+" adicionam no playhead.
+- [ ] Inspetor do efeito: tipo (converter para Tarja zera a borda suave), cor da tarja, intensidade, borda suave, inverter, forma, posição/tamanho/rotação; ativar/desativar (`Shift+E`, menu, chave do inspetor) mostra "Desativado" no visualizador.
+- [ ] Keyframes: ◇ por propriedade no inspetor, `Alt+K` no playhead, `[`/`]` entre keyframes, losangos no item da timeline (arrastar move, Delete apaga); a região acompanha um texto que se move sem "piscar" sem blur entre os keyframes.
+- [ ] Região parcialmente fora do quadro borra só a parte visível, sem borda estranha; blur + tarja sobrepostos respeitam a ordem das faixas (tarja por cima cobre tudo).
+- [ ] Exportar com efeitos (Alta 1080p e WhatsApp 720p): mesmo resultado do preview (lugar e intensidade); a tarja sai com a cor exata; nenhum quadro do trecho sai sem o efeito.
+- [ ] Diálogo de exportação: efeito fraco (Blur < 35, Pixelizar < 30), borda suave > 40 % com intensidade < 50, ou desativado/faixa oculta no trecho aparece em **Privacidade** com "Revisar" (seleciona o efeito, leva o playhead e fecha o diálogo); o aviso nunca impede exportar.
+
