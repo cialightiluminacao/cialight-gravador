@@ -109,15 +109,13 @@ export async function importSession(projectId: string, sessionId: string, label:
   }
 }
 
-/** Mídia ausente: o usuário escolhe o novo caminho; o asset volta a processar. */
-export async function relinkAsset(projectId: string, a: Asset): Promise<void> {
-  const [path] = await window.api.project.pickMedia()
-  if (!path) return
-  try {
-    const next = await window.api.media.relink(projectId, a.id, path)
-    useEditorStore.getState().applyAssetPatch(a.id, next)
-    await enqueueAsset(projectId, next)
-  } catch (e) {
-    toast.error(`Não foi possível localizar a mídia: ${errMsg(e)}`)
-  }
+/**
+ * Reaponta o asset ausente `a` para `path` pelo media.relink (probe, mesmo tipo, derivados zerados) e o põe para
+ * processar. Lança se o main recusar (o chamador mostra o erro). Usado pelo "Localizar" e pelo relink automático.
+ */
+export async function relinkTo(projectId: string, a: Asset, path: string): Promise<Asset> {
+  const next = await window.api.media.relink(projectId, a.id, path)
+  useEditorStore.getState().applyAssetPatch(a.id, next)
+  await enqueueAsset(projectId, next)
+  return next
 }

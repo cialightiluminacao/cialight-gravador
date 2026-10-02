@@ -50,6 +50,8 @@ export interface ProjectSummary {
  * item entra. Some quando o renderer salva o projeto com o asset; se a janela/o app cair antes, o arquivo parcial é
  * recuperado ao abrir o projeto.
  */
+/** Relink automático: arquivo achado para a mídia ausente `assetId` (mesmo nome + tamanho; nunca aplicado sem confirmar). */
+export interface RelinkCandidate { assetId: string; path: string; confidence: 'exact' }
 export interface GeneratedMeta { kind: 'narration'; startUs: Us; inUs: Us; createdAt: string }
 export interface PendingGenerated { rel: string; meta: GeneratedMeta; bytes: number }
 export type GeneratedExt = 'm4a'
@@ -245,6 +247,12 @@ export interface IpcApi {
     /** Diálogo de abrir arquivos de mídia (multi-seleção); [] se cancelado. */
     pickMedia(): Promise<string[]>
     /**
+     * Relink automático: procura no disco as mídias importadas ausentes do projeto (mesmo nome + tamanho; pasta original,
+     * irmãs, pasta-mãe, pastas dos outros assets, `extraRoots`). Nada é reapontado: o renderer confirma e aplica cada uma
+     * por media.relink. `extraRoots` só vale para pastas de assets presentes do projeto (ex.: a do arquivo localizado).
+     */
+    findRelinks(projectId: string, opts?: { extraRoots?: string[] }): Promise<RelinkCandidate[]>
+    /**
      * Gravação direto em generated/ (narração), no padrão de session.write*: `writeGeneratedOpen` cria
      * `generated/<base>-<n>.<ext>` (n livre) e o marcador com `meta`; `writeGenerated` grava por posição;
      * `writeGeneratedMeta` atualiza o meta (o início exato só se sabe depois que a reprodução começa);
@@ -423,6 +431,7 @@ export const IPC = {
     duplicate: 'project:duplicate',
     fromSession: 'project:fromSession',
     pickMedia: 'project:pickMedia',
+    findRelinks: 'project:findRelinks',
     writeGeneratedOpen: 'project:writeGeneratedOpen',
     writeGenerated: 'project:writeGenerated',
     writeGeneratedMeta: 'project:writeGeneratedMeta',

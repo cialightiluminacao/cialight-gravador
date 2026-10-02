@@ -8,6 +8,8 @@ import { CURVE_EDITOR_ACTIONS, shortcutFor, TRANSPORT_ACTIONS } from '../shortcu
 import { createEditorEngine, type EditorEngine } from './editorEngine'
 import { registerExportOpen, runShortcut, seekTo } from './editorActions'
 import { enqueuePending, importPaths } from './mediaImport'
+import { closeRelinkPrompt, offerRelinks } from './relinkFlow'
+import { RelinkDialog } from './RelinkDialog'
 import { startAudioProcessing } from './audioProcessing'
 import { audioSourceKey } from '@shared/editor/audioProcess'
 import { TopBar } from './TopBar'
@@ -133,6 +135,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         await api.media.setOpenProject(project.id)
         if (!alive) return
         enqueuePending(project.id, project.assets)
+        // mídia importada ausente (pasta movida/renomeada): procura em segundo plano e pergunta antes de reapontar
+        void offerRelinks(project.id)
         // narrações que a janela/o app não chegaram a inserir (queda no meio da gravação): entram com aviso
         void recoverNarrations(project.id)
         // redução de ruído/normalização pedidas e sem o arquivo em cache (ex.: projeto vindo de outro PC): reprocessa
@@ -152,6 +156,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       offDone()
       // gravando narração ao desmontar sem passar por "Voltar": fecha o arquivo; o projeto a recupera ao abrir
       abandonNarration()
+      closeRelinkPrompt()
       eng.playback.pause()
       useSilencePreview.getState().close()
       engineRef.current = null
@@ -286,6 +291,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       {loaded ? <CurveEditor /> : null}
       {loaded ? <NarrationOverlay /> : null}
       <QueueLeaveDialog />
+      {loaded ? <RelinkDialog /> : null}
       {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} onSeek={(us) => seekTo(engineRef.current?.playback ?? null, us)} /> : null}
     </div>
   )

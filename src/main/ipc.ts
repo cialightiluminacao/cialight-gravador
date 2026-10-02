@@ -13,6 +13,7 @@ import { projectFromSession } from '@shared/editor/fromSession'
 import { newId, newProjectId } from '@shared/editor/ids'
 import { parseProject } from '@shared/editor/schema'
 import { IngestQueue, assetFromInfo, type IngestInput } from './media/ingest'
+import { findRelinkCandidates, relinkQuery } from './project/relinkSearch'
 import { IMAGE_EXTENSIONS, probe } from './media/probe'
 import { getRecorderWindow, showRecorder, displayIdOfWindow, setEditorMode } from './windows/recorderWindow'
 import { hideBar, showBar, toggleBar, updateBar, isBarHiddenByUser } from './windows/barWindow'
@@ -95,6 +96,9 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ingest.on('done', (projectId, assetId, patch) => {
     const owners = BrowserWindow.getAllWindows().filter((w) => !w.webContents.isDestroyed() && openProjects.get(w.webContents.id) === projectId)
     if (owners.length) {
+      // o cache em memória recebe o patch já: o renderer passa a pedir o proxy novo (ex.: depois de reapontar) antes
+      // do próximo autosave, e o protocolo media/ resolve pelo cache
+      projects.cacheAssetPatch(projectId, assetId, patch)
       for (const w of owners) w.webContents.send(IPC.media.done, { projectId, assetId, patch })
       return
     }
@@ -231,6 +235,13 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     }
     const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
     return r.canceled ? [] : r.filePaths
+  })
+
+  // relink automático: status conferido no disco agora (o cache guarda o do carregamento/último relink)
+  ipcMain.handle(IPC.project.findRelinks, async (_e, projectId: string, opts?: { extraRoots?: unknown }) => {
+    const q = relinkQuery(projects.withMediaStatus(projects.cached(projectId)), Array.isArray(opts?.extraRoots) ? opts.extraRoots.filter((r): r is string => typeof r === 'string') : [])
+    if (q.missing.length === 0) return []
+    return findRelinkCandidates(q.missing, { otherAssetDirs: q.otherAssetDirs, extraRoots: q.extraRoots })
   })
 
   // ---- gravações em generated/ (narração), no padrão de session.write* ----
