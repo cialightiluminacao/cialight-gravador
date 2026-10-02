@@ -8,7 +8,7 @@
 import * as twgl from 'twgl.js'
 import type { EffectLayer } from '@shared/editor/resolve'
 import { parseColor } from './color'
-import { blurRadiusPx, downsampleFactor, gaussianWeights, pixelBlockPx, featherPx, regionScissor, type PxRect } from './effectsMath'
+import { downsampleFactor, effectBlurRadiusPx, effectPixelBlockPx, gaussianWeights, featherPx, regionScissor, type PxRect } from './effectsMath'
 import { BLUR_MAX_TAPS, FS_APPLY, FS_BLUR, FS_COPY, FS_DOWN, VS_FULL } from './shaders'
 
 const MODE = { blur: 0, pixelate: 1, solid: 2 } as const
@@ -71,7 +71,8 @@ export class EffectPass {
     const s = this.ensure(W, H)
     const area: PxRect = fx.invert ? { x: 0, y: 0, w: W, h: H } : regionScissor(fx.region, fx.feather, W, H)
     if (area.w <= 0 || area.h <= 0) return
-    const radius = fx.effect === 'blur' ? blurRadiusPx(fx.strength, H) : 0
+    const radius = fx.effect === 'blur' ? effectBlurRadiusPx(fx.strength, fx.region, W, H, fx.invert) : 0
+    const cell = effectPixelBlockPx(fx.strength, fx.region, W, H, fx.invert)
     if (fx.effect === 'blur' && radius < MIN_BLUR_PX) return
     gl.disable(gl.BLEND)
     gl.enable(gl.SCISSOR_TEST)
@@ -108,7 +109,7 @@ export class EffectPass {
       fxScale = [1 / (ds * dw), 1 / (ds * dh)]
     } else {
       // pixelização: blocos que cruzam a borda da área amostram até um bloco além dela
-      const margin = fx.effect === 'pixelate' ? Math.ceil(pixelBlockPx(fx.strength, H)) + 2 : 0
+      const margin = fx.effect === 'pixelate' ? Math.ceil(cell) + 2 : 0
       copyRect = clampRect({ x: area.x - margin, y: area.y - margin, w: area.w + 2 * margin, h: area.h + 2 * margin }, W, H)
       this.snap(target, s.snapshot, copyRect)
     }
@@ -122,7 +123,7 @@ export class EffectPass {
       u_fxScale: fxScale,
       u_frame: [W, H],
       u_mode: MODE[fx.effect],
-      u_cell: pixelBlockPx(fx.strength, H),
+      u_cell: cell,
       u_color: parseColor(fx.color).slice(0, 3),
       u_center: [fx.region.x * W, fx.region.y * H],
       u_half: [(Math.abs(fx.region.w) * W) / 2, (Math.abs(fx.region.h) * H) / 2],

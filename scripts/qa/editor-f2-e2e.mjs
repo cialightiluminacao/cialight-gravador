@@ -8,7 +8,8 @@
 // arrasta a região até o CPF (2 keyframes acompanhando o texto); solta uma Tarja na linha do tempo e um
 // Pixelizar por duplo clique, posicionados pelo inspetor (cor da tarja #e11d48). Confere o aviso de
 // privacidade no diálogo de exportação (Pixelizar fraco → "Revisar" seleciona e leva o playhead) e exporta
-// "Alta 1080p". No arquivo exportado, com o ffmpeg: a energia de alta frequência (variância do laplaciano) na
+// "Alta 1080p" (Esconder texto a 60, o piso). No arquivo exportado, com o ffmpeg: contraste local da linha de texto
+// (p99−p1 após caixa 3 px) < 0,15 da fonte e energia de alta frequência (variância do laplaciano) na
 // caixa do texto cai para < 0,2 da fonte em vários instantes e a tarja tem a cor exata (±3).
 //
 // uso (depois de `npm run build`):  node scripts/qa/editor-f2-e2e.mjs
@@ -37,6 +38,9 @@ const FPS = 30
 const DUR_S = 6
 const LAST_FRAME = DUR_S * FPS - 2 // último quadro com folga (o item termina em 6 s, fim exclusivo)
 const TARJA = [0xe1, 0x1d, 0x48]
+// intensidade do "Esconder texto" na exportação: 60 é o piso que tem de deixar ilegível um texto de 47 px
+// (o preset é 80); F2_TEXT_STRENGTH troca o valor para calibrar
+const TEXT_STRENGTH = Number(process.env.F2_TEXT_STRENGTH ?? 60)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const sha = (b) => (b ? createHash('sha256').update(b).digest('hex') : null)
@@ -90,6 +94,25 @@ function textBox(gray, band, xr) {
   return x1 < 0 ? null : { x0, y0, x1, y1, cx: (x0 + x1 + 1) / 2 / W, cy: (y0 + y1 + 1) / 2 / H, w: (x1 - x0 + 1) / W, h: (y1 - y0 + 1) / H }
 }
 /** Variância do laplaciano (4-vizinhos) dentro da caixa (inflada de `pad` px). */
+/**
+ * Contraste local máximo da linha de texto (mais perto da leitura humana que o laplaciano): filtro de caixa
+ * 3×3 na luminância e p99 − p1 dentro da caixa (inflada de `pad` px). Letras nítidas: ≈ 200 níveis; borrado
+ * ilegível: só resta a "mancha" suave.
+ */
+function localContrast(gray, b, pad = 4) {
+  const xa = Math.max(1, b.x0 - pad), xb = Math.min(W - 2, b.x1 + pad), ya = Math.max(1, b.y0 - pad), yb = Math.min(H - 2, b.y1 + pad)
+  const vals = []
+  for (let y = ya; y <= yb; y++) {
+    for (let x = xa; x <= xb; x++) {
+      let s = 0
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += gray[(y + dy) * W + x + dx]
+      vals.push(s / 9)
+    }
+  }
+  vals.sort((p, q) => p - q)
+  const at = (q) => vals[Math.min(vals.length - 1, Math.floor(q * (vals.length - 1)))]
+  return at(0.99) - at(0.01)
+}
 function lapVar(gray, b, pad = 4) {
   const xa = Math.max(1, b.x0 - pad), xb = Math.min(W - 2, b.x1 + pad), ya = Math.max(1, b.y0 - pad), yb = Math.min(H - 2, b.y1 + pad)
   let n = 0, s = 0, s2 = 0
@@ -292,8 +315,10 @@ async function main() {
   check('drop aceito no visualizador; 1 passo de desfazer; selecionado', hide.ok && hide.dp === 1 && hide.sel[0] === hideId, hide)
   check('blur na faixa "Efeitos" em 0, até o fim do clipe', hide.effect === 'blur' && hide.track === 'Efeitos' && hide.start === 0 && near(hide.dur, DUR_S * 1e6, 40_000), hide)
   check('região centrada no ponto solto (preset 0,4 × 0,08)', hide.region && near(hide.region.x, cpf0.cx, 0.004) && near(hide.region.y, cpf0.cy, 0.004) && near(hide.region.w, 0.4, 1e-6) && near(hide.region.h, 0.08, 1e-6), { region: hide.region, cpf0 })
+  check('preset Esconder texto com intensidade 80', (await ev(`return T.fx('${hideId}').strength.value`)) === 80, null)
   const RW = +((cpf0.w + PADW) * 100).toFixed(1), RH = +((cpf0.h + PADH) * 100).toFixed(1)
-  await ev(`await T.setField('Largura', ${RW}); await T.setField('Altura', ${RH}); return 1`)
+  await ev(`await T.setField('Largura', ${RW}); await T.setField('Altura', ${RH}); await T.setField('Intensidade', ${TEXT_STRENGTH}); return 1`)
+  check(`intensidade ${TEXT_STRENGTH} (o piso verificado abaixo)`, (await ev(`return T.fx('${hideId}').strength.value`)) === TEXT_STRENGTH, null)
   await shot('e2e-02-esconder-texto.png')
 
   console.log('keyframes: Alt+K no quadro 0, arrastar a região no último quadro')
@@ -378,16 +403,19 @@ async function main() {
     const box = textBox(src, TEXTS.cpf.band, TEXTS.cpf.xr)
     const vs0 = lapVar(src, box)
     const vd = lapVar(dst, box)
-    ratios.push({ n, src: Math.round(vs0), out: Math.round(vd), ratio: +(vd / vs0).toFixed(4) })
+    const c0 = localContrast(src, box)
+    const c1 = localContrast(dst, box)
+    ratios.push({ n, src: Math.round(vs0), out: Math.round(vd), ratio: +(vd / vs0).toFixed(4), cSrc: +c0.toFixed(1), cOut: +c1.toFixed(1), cRatio: +(c1 / c0).toFixed(3) })
   }
-  console.log(`  CPF (laplaciano): ${JSON.stringify(ratios)}`)
-  check('texto do CPF ilegível em 7 instantes (variância do laplaciano saída/fonte < 0,2; fonte com texto nítido)', ratios.every((r) => r.ratio < 0.2 && r.src > 1000), ratios)
+  console.log(`  CPF a ${TEXT_STRENGTH} (laplaciano e contraste local): ${JSON.stringify(ratios)}`)
+  check('texto do CPF sem detalhe em 7 instantes (variância do laplaciano saída/fonte < 0,2; fonte com texto nítido)', ratios.every((r) => r.ratio < 0.2 && r.src > 1000), ratios.map((r) => r.ratio))
+  check('texto do CPF ilegível em 7 instantes (contraste local p99−p1 após caixa 3 px: saída < 0,15 × fonte)', ratios.every((r) => r.cRatio < 0.15 && r.cSrc > 150), ratios.map((r) => [r.cSrc, r.cOut, r.cRatio]))
   const pixR = (() => {
     const src = frame(video, 90)
     const dst = frame(out, 90)
     return +(lapVar(dst, senha) / lapVar(src, senha)).toFixed(4)
   })()
-  console.log(`  senha pixelizada (laplaciano saída/fonte): ${pixR}`)
+  console.log(`  senha pixelizada (laplaciano saída/fonte): ${pixR}; contraste local saída/fonte ${(localContrast(frame(out, 90), senha) / localContrast(frame(video, 90), senha)).toFixed(3)} (só informativo: os blocos têm bordas duras)`)
   check('senha pixelizada (variância do laplaciano saída/fonte < 0,2)', pixR < 0.2, pixR)
   // fora dos efeitos o quadro segue nítido (o teste não passa por borrar tudo)
   const ctrl = (() => {
@@ -420,7 +448,7 @@ async function main() {
   execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', out, '-vf', 'select=eq(n\\,90),scale=960:-2', '-frames:v', '1', '-update', '1', join(SHOTS, 'e2e-09-quadro-exportado.png')])
   execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', video, '-vf', 'select=eq(n\\,90),scale=960:-2', '-frames:v', '1', '-update', '1', join(SHOTS, 'e2e-09-quadro-fonte.png')])
   console.log('  📷 e2e-09-quadro-fonte.png / e2e-09-quadro-exportado.png')
-  writeFileSync(join(E2E, 'e2e-f2-result.json'), JSON.stringify({ file: files[0], ratios, pixR, ctrl, cpf0, cpfL, conta, senha }, null, 2))
+  writeFileSync(join(E2E, 'e2e-f2-result.json'), JSON.stringify({ file: files[0], ratios, pixR, ctrl, cpf0, cpfL, conta, senha, textStrength: TEXT_STRENGTH }, null, 2))
 }
 
 try {

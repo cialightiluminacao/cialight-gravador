@@ -2,7 +2,7 @@ import { createEffectItem, createMediaItem, type EffectPresetId, type EffectRegi
 import type { EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
-import { featherPx, pixelBlockPx, regionScissor } from '../engine/compositor/effectsMath'
+import { effectPixelBlockPx, featherPx, regionDistPx, regionScissor } from '../engine/compositor/effectsMath'
 
 // Cenários de pixel do passe de efeitos (F2) para o teste de render (CIALIGHT_TEST=editor-render).
 // Projeto base p-editor-effects-test (testsrc2 1080p + ruído + PNG vermelho, criado pelo main); as variantes
@@ -136,8 +136,8 @@ export async function effectsCheck(): Promise<Record<string, unknown>> {
     out.outsideMaxDiff = maxDiff(ref, quad, 0, 0, W, H, (x, y) => boxes.some((b) => x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1))
 
     // pixelização: grade presa ao quadro (célula pelo centro do pixel), só blocos inteiros dentro da região
-    const cell = pixelBlockPx(pix.strength.value, H)
     const rp = regionOf(pix)
+    const cell = effectPixelBlockPx(pix.strength.value, rp, W, H, pix.invert)
     const px0 = (rp.x - rp.w / 2) * W
     const px1 = (rp.x + rp.w / 2) * W
     const py0 = (rp.y - rp.h / 2) * H
@@ -258,19 +258,24 @@ export async function effectsCheck(): Promise<Record<string, unknown>> {
     const rotRect = effect('blur', { x: 0.3, y: 0.35, w: 0.25, h: 0.12, rotation: 30 }, { feather: 0.4, strength: { value: 100 } })
     const ellF = effect('blur', { x: 0.7, y: 0.65, w: 0.35, h: 0.06, rotation: 25, shape: 'ellipse' }, { feather: 0.8, strength: { value: 100 } })
     const tailImg = await frame(withTracks(fxTrack('t_rot', rotRect), fxTrack('t_ellf', ellF)), 1_000_000)
-    const ring = (e: EffectItem): number => {
+    const ring = (e: EffectItem, other: EffectItem): number => {
       const sc = regionScissor({ ...regionOf(e), shape: e.region.shape }, e.feather, W, H)
       const x0 = sc.x
       const x1 = sc.x + sc.w
       const y0 = H - (sc.y + sc.h)
       const y1 = H - sc.y
+      // as caixas das duas regiões se cruzam: pixels dentro da outra região + feather são efeito legítimo dela
+      // (com o raio pela região, o blur forte do retângulo muda a cor ali), não corte da cauda
+      const ro = { ...regionOf(other), shape: other.region.shape }
+      const fo = featherPx(ro, other.feather, W, H)
+      const skip = (x: number, y: number): boolean => regionDistPx(ro, x + 0.5, y + 0.5, W, H) < fo + 1
       // 1ª e última linha/coluna dentro da caixa (onde um corte da cauda apareceria como degrau)
-      return Math.max(maxDiff(ref, tailImg, x0, y0, x1, y0 + 1), maxDiff(ref, tailImg, x0, y1 - 1, x1, y1), maxDiff(ref, tailImg, x0, y0, x0 + 1, y1), maxDiff(ref, tailImg, x1 - 1, y0, x1, y1))
+      return Math.max(maxDiff(ref, tailImg, x0, y0, x1, y0 + 1, skip), maxDiff(ref, tailImg, x0, y1 - 1, x1, y1, skip), maxDiff(ref, tailImg, x0, y0, x0 + 1, y1, skip), maxDiff(ref, tailImg, x1 - 1, y0, x1, y1, skip))
     }
     const tailBoxes = [rotRect, ellF].map((e) => boxTopDown({ ...regionOf(e), shape: e.region.shape }, e.feather, 0))
     out.featherTail = {
-      rectRing: ring(rotRect),
-      ellipseRing: ring(ellF),
+      rectRing: ring(rotRect, ellF),
+      ellipseRing: ring(ellF, rotRect),
       outsideMaxDiff: maxDiff(ref, tailImg, 0, 0, W, H, (x, y) => tailBoxes.some((b) => x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1)),
       // o efeito agiu dentro de cada caixa (bordas das barras do testsrc2 borradas)
       changed: tailBoxes.map((b) => maxDiff(ref, tailImg, b.x0, b.y0, b.x1, b.y1))

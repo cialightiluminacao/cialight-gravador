@@ -6,7 +6,7 @@ import { itemEndUs } from './time'
 export interface PrivacyWarning { itemId: string; kind: 'weakBlur' | 'weakPixelate' | 'disabled' | 'feather'; message: string }
 
 const MSG = {
-  weakBlur: 'Blur fraco pode ser revertido; use intensidade ≥ 35 ou Tarja',
+  weakBlur: 'Blur fraco pode ser revertido; use intensidade ≥ 50 ou Tarja',
   weakPixelate: 'Pixelado fraco pode ser revertido; use intensidade ≥ 30 ou Tarja',
   disabled: 'Efeito de privacidade desativado neste trecho: o conteúdo aparece sem proteção',
   feather: 'Borda muito suave com intensidade baixa: as bordas podem revelar o conteúdo'
@@ -30,7 +30,7 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
       const lo = Math.max(s, fromUs) - s, up = Math.max(lo, Math.min(e, toUs) - s)
       const times = [lo, up, ...(it.strength.keys ?? []).map((k) => k.tUs).filter((t) => t >= lo && t <= up)]
       const min = Math.min(...times.map((t) => evalAnim(it.strength, t)))
-      if (it.effect === 'blur' && min < 35) out.push({ itemId: it.id, kind: 'weakBlur', message: MSG.weakBlur })
+      if (it.effect === 'blur' && min < 50) out.push({ itemId: it.id, kind: 'weakBlur', message: MSG.weakBlur })
       if (it.effect === 'pixelate' && min < 30) out.push({ itemId: it.id, kind: 'weakPixelate', message: MSG.weakPixelate })
       if (it.feather > 0.4 && min < 50) out.push({ itemId: it.id, kind: 'feather', message: MSG.feather })
     }

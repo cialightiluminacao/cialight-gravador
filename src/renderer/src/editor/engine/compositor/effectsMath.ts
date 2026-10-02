@@ -20,6 +20,36 @@ export function pixelBlockPx(strength: number, outH: number): number {
   return 2 + clampStrength(strength) * (max - 2)
 }
 
+/**
+ * Fração do menor lado da região usada como raio mínimo do blur (× intensidade) e como bloco mínimo da pixelização.
+ * Blur 1,25: medido no E2E F2 (texto de 47 px em 1080p, região justa): a 60 o contraste local cai a 0,08 da fonte
+ * (0,5 → 0,34 e 1,0 → 0,135, com os grupos de dígitos ainda distinguíveis).
+ */
+export const REGION_BLUR_K = 1.25
+export const REGION_PIXEL_K = 0.35
+
+/** Menor lado da região em px de saída, limitado ao quadro. */
+function regionMinSidePx(region: { w: number; h: number }, W: number, H: number): number {
+  return Math.min(Math.min(Math.abs(region.w), 1) * W, Math.min(Math.abs(region.h), 1) * H)
+}
+
+/**
+ * Raio efetivo do blur (preview e exportação): o maior entre o raio pela altura do quadro e
+ * REGION_BLUR_K × menor lado da região × intensidade. Uma região justa num texto grande borra na escala das
+ * letras (só pela altura, 60 deixava legível um texto de 47 px em 1080p). Invertido: a região é a parte nítida,
+ * então vale só o raio pela altura.
+ */
+export function effectBlurRadiusPx(strength: number, region: { w: number; h: number }, W: number, H: number, invert = false): number {
+  const base = blurRadiusPx(strength, H)
+  return invert ? base : Math.max(base, REGION_BLUR_K * regionMinSidePx(region, W, H) * clampStrength(strength))
+}
+
+/** Lado efetivo do bloco da pixelização: maior entre o bloco pela altura e REGION_PIXEL_K × menor lado × intensidade. */
+export function effectPixelBlockPx(strength: number, region: { w: number; h: number }, W: number, H: number, invert = false): number {
+  const base = pixelBlockPx(strength, H)
+  return invert ? base : Math.max(base, REGION_PIXEL_K * regionMinSidePx(region, W, H) * clampStrength(strength))
+}
+
 /** Redução da resolução antes do blur (ruling F0: sempre ≥ 2×). */
 export function downsampleFactor(radiusPx: number): 2 | 4 | 8 {
   if (radiusPx > 64) return 8

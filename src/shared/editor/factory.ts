@@ -58,8 +58,8 @@ export function createEffectItem(preset: EffectPresetId, startUs: Us, durationUs
     blur: { effect: 'blur', shape: 'rect', w: 0.4, h: 0.3, strength: 60, feather: 0.15, invert: false },
     pixelate: { effect: 'pixelate', shape: 'rect', w: 0.4, h: 0.3, strength: 50, feather: 0, invert: false },
     solid: { effect: 'solid', shape: 'rect', w: 0.4, h: 0.3, strength: 100, feather: 0, invert: false },
-    blurFace: { effect: 'blur', shape: 'ellipse', w: 0.18, h: 0.32, strength: 70, feather: 0.3, invert: false },
-    blurText: { effect: 'blur', shape: 'rect', w: 0.4, h: 0.08, strength: 60, feather: 0, invert: false },
+    blurFace: { effect: 'blur', shape: 'ellipse', w: 0.18, h: 0.32, strength: 80, feather: 0.3, invert: false },
+    blurText: { effect: 'blur', shape: 'rect', w: 0.4, h: 0.08, strength: 80, feather: 0, invert: false },
     blurAllExcept: { effect: 'blur', shape: 'rect', w: 0.5, h: 0.5, strength: 60, feather: 0.2, invert: true }
   } as const
   const c = cfg[preset]

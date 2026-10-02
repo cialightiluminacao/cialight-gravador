@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { blurRadiusPx, downsampleFactor, featherPx, gaussianWeights, pixelBlockPx, regionDistPx, regionScissor } from './effectsMath'
+import { blurRadiusPx, downsampleFactor, effectBlurRadiusPx, effectPixelBlockPx, featherPx, gaussianWeights, pixelBlockPx, REGION_BLUR_K, regionDistPx, regionScissor } from './effectsMath'
 
 describe('blurRadiusPx', () => {
   it('0–100 → 0…4 % da altura de saída; 60 em 1080p ≈ 26 px', () => {
@@ -27,6 +27,37 @@ describe('pixelBlockPx', () => {
     expect(pixelBlockPx(100, 720)).toBe(60)
     expect(pixelBlockPx(0, 12)).toBe(2)
     expect(pixelBlockPx(100, 12)).toBe(2)
+  })
+})
+
+describe('effectBlurRadiusPx (raio também proporcional à região)', () => {
+  // faixa de texto: 0,4 × 0,094 do quadro 1080p → menor lado 101,5 px
+  const text = { w: 0.4, h: 0.094 }
+  it('max(raio pela altura, 1,25 × menor lado da região × intensidade)', () => {
+    // k = 1,25 medido no E2E F2: texto de 47 px a 60 → contraste local 0,08 da fonte (0,5 deixava 0,34, legível)
+    expect(REGION_BLUR_K).toBe(1.25)
+    expect(effectBlurRadiusPx(80, text, 1920, 1080)).toBeCloseTo(Math.max(blurRadiusPx(80, 1080), 1.25 * 101.52 * 0.8), 5)
+    expect(effectBlurRadiusPx(80, text, 1920, 1080)).toBeCloseTo(101.52, 3)
+    // região muito estreita: vale o raio pela altura (nunca menor que antes)
+    expect(effectBlurRadiusPx(60, { w: 0.4, h: 0.02 }, 1920, 1080)).toBeCloseTo(blurRadiusPx(60, 1080), 10)
+    expect(effectBlurRadiusPx(0, text, 1920, 1080)).toBe(0)
+  })
+  it('mesma aparência em qualquer resolução (escala com a saída)', () => {
+    expect(effectBlurRadiusPx(80, text, 1280, 720) / 720).toBeCloseTo(effectBlurRadiusPx(80, text, 1920, 1080) / 1080, 10)
+  })
+  it('lado da região limitado ao quadro; inverter usa só o raio pela altura (a região é a parte nítida)', () => {
+    expect(effectBlurRadiusPx(100, { w: 4, h: 4 }, 1920, 1080)).toBeCloseTo(1.25 * 1080, 5)
+    expect(effectBlurRadiusPx(60, { w: 0.5, h: 0.5 }, 1920, 1080, true)).toBeCloseTo(blurRadiusPx(60, 1080), 10)
+    expect(effectBlurRadiusPx(60, { w: -0.4, h: -0.3 }, 1920, 1080)).toBeCloseTo(1.25 * 324 * 0.6, 5)
+  })
+})
+
+describe('effectPixelBlockPx (bloco também proporcional à região)', () => {
+  it('max(bloco pela altura, 0,35 × menor lado da região × intensidade)', () => {
+    expect(effectPixelBlockPx(50, { w: 0.3, h: 0.3 }, 1920, 1080)).toBeCloseTo(Math.max(pixelBlockPx(50, 1080), 0.35 * 324 * 0.5), 5)
+    expect(effectPixelBlockPx(50, { w: 0.2, h: 0.1 }, 1920, 1080)).toBeCloseTo(pixelBlockPx(50, 1080), 10)
+    expect(effectPixelBlockPx(0, { w: 1, h: 1 }, 1920, 1080)).toBe(2)
+    expect(effectPixelBlockPx(100, { w: 0.6, h: 0.6 }, 1920, 1080, true)).toBe(pixelBlockPx(100, 1080))
   })
 })
 
