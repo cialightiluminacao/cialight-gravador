@@ -1,6 +1,8 @@
 // QA da exportação completa do editor (F7, Task 1) via CDP: Ctrl+E abre o diálogo, cada preset (com o motivo
 // quando indisponível), "Personalizar" aberto, estado do HEVC (habilitado só com hardware), bloqueio de tamanho
 // alvo pequeno demais, uma exportação pequena personalizada (640×360) e a tela de concluído (codec/resolução).
+// Task 2: formatos GIF (exportado, I–O), Quadro (PNG) e Só áudio (MP3 exportado), o botão "Quadro" da barra e
+// Ctrl+Shift+E (PNG direto na pasta, toast com "Abrir pasta", nome numerado).
 // Teclas e cliques são sintéticos (CDP Input.dispatchKeyEvent / element.click), nunca entrada do SO.
 //
 // uso (depois de `npm run build`, sob o lock):
@@ -229,6 +231,92 @@ async function main() {
   await key('Escape', 'Escape', 27)
   await sleep(400)
   check('Esc fecha o diálogo', (await ev(`return !${DLG}`)) === true, null)
+
+  // ---- F7 Task 2: formatos GIF / Quadro (PNG) / Só áudio ----
+  // I–O de 2 s a 5 s (o diálogo abre no trecho) e o cursor em 3 s (o quadro do PNG)
+  await ev(`const s = window.__qaEditor.store.getState(); s.setInOut(2000000, 5000000); s.setPlayhead(3000000); return 1`)
+  await sleep(300)
+  await ev(`document.activeElement?.blur?.(); return 1`)
+  await key('e', 'KeyE', 69, 2)
+  await sleep(500)
+  const formats = await ev(`const g = ${DLG}.querySelector('[aria-label="Formato da exportação"]'); return g ? [...g.querySelectorAll('button')].map((b) => b.textContent.trim()) : null`)
+  check('seletor de formato: Vídeo, GIF, Quadro (PNG), Só áudio', JSON.stringify(formats) === JSON.stringify(['Vídeo', 'GIF', 'Quadro (PNG)', 'Só áudio']), formats)
+
+  // GIF
+  await ev(`${clickText('GIF')}; return 1`)
+  await sleep(300)
+  text = await ev(dialogText)
+  const gifEst = await ev(`return ${DLG}.querySelector('[data-export-estimate]')?.textContent ?? ''`)
+  const gifName = await ev(`return ${DLG}.querySelector('[data-export-name]').value`)
+  const widths = await ev(`const g = ${DLG}.querySelector('[aria-label="Largura do GIF"]'); return [...g.querySelectorAll('button')].map((b) => b.textContent.trim())`)
+  check('GIF: título, larguras 320/480/640 (480 padrão), fps 12, estimativa aproximada, nome .gif, I–O', text.includes('Exportar GIF') && JSON.stringify(widths) === JSON.stringify(['320 px', '480 px', '640 px']) && /estimativa aproximada/.test(gifEst) && /GIF 480×270 · 12 fps/.test(gifEst) && gifName.endsWith('.gif') && /0:03/.test(gifEst), { gifEst, gifName, widths })
+  await shot('f7-09-gif.png')
+  await ev(`${exportBtn}.click(); return 1`)
+  for (let i = 0; i < 600; i++) {
+    text = await ev(dialogText)
+    if (text.includes('GIF exportado') || text.includes('falhou')) break
+    await sleep(100)
+  }
+  const gifInfo = await ev(`return ${DLG}.querySelector('[data-export-done-info]')?.textContent ?? ''`)
+  check('GIF exportado: concluído "GIF · 480×270 · 12 fps · 36 quadros"', text.includes('GIF exportado') && gifInfo.includes('GIF · 480×270 · 12 fps · 36 quadros'), { gifInfo, text: text.slice(0, 300) })
+  await shot('f7-10-gif-concluido.png')
+  await ev(`${clickText('Fechar')}; return 1`)
+  await sleep(400)
+
+  // Quadro (PNG) no diálogo
+  await key('e', 'KeyE', 69, 2)
+  await sleep(500)
+  await ev(`${clickText('Quadro (PNG)')}; return 1`)
+  await sleep(300)
+  text = await ev(dialogText)
+  const pngName = await ev(`return ${DLG}.querySelector('[data-export-name]').value`)
+  check('Quadro (PNG): título, posição do cursor 0:03.0, tamanho do projeto, sem intervalo, nome "<projeto> - 00m03s.png"', text.includes('Exportar quadro (PNG)') && /0:03.0/.test(text) && text.includes(`${canvas.width}×${canvas.height}`) && !text.includes('Intervalo') && / - 00m03s\.png$/.test(pngName), { pngName, text: text.slice(0, 400) })
+  await shot('f7-11-quadro-png.png')
+
+  // Só áudio
+  await ev(`${clickText('Só áudio')}; return 1`)
+  await sleep(300)
+  text = await ev(dialogText)
+  const audioEst = await ev(`return ${DLG}.querySelector('[data-export-estimate]')?.textContent ?? ''`)
+  const audioName = await ev(`return ${DLG}.querySelector('[data-export-name]').value`)
+  check('Só áudio: título, formato MP3 192 kbps padrão, 48 kHz estéreo, nome .mp3', text.includes('Exportar áudio') && /MP3 · 192 kbps · 48 kHz estéreo/.test(audioEst) && audioName.endsWith('.mp3') && !!(await ev(`return !!${DLG}.querySelector('[aria-label="Formato do áudio"]')`)), { audioEst, audioName })
+  await shot('f7-12-so-audio.png')
+  await ev(`${exportBtn}.click(); return 1`)
+  for (let i = 0; i < 600; i++) {
+    text = await ev(dialogText)
+    if (text.includes('Áudio exportado') || text.includes('falhou')) break
+    await sleep(100)
+  }
+  const audioInfo = await ev(`return ${DLG}.querySelector('[data-export-done-info]')?.textContent ?? ''`)
+  check('Só áudio exportado: concluído "MP3 · 192 kbps · 48 kHz estéreo"', text.includes('Áudio exportado') && audioInfo.includes('MP3 · 192 kbps · 48 kHz estéreo'), { audioInfo, text: text.slice(0, 300) })
+  await shot('f7-13-audio-concluido.png')
+  // volta ao Vídeo para não deixar o próximo Ctrl+E em outro formato
+  await ev(`${clickText('Fechar')}; return 1`)
+  await sleep(400)
+
+  // ação "Quadro" da barra superior e Ctrl+Shift+E: PNG direto na pasta, com toast "Abrir pasta"
+  const before = readdirSync(OUT).filter((f) => f.endsWith('.png'))
+  await ev(`document.querySelector('[data-export-frame]').click(); return 1`)
+  let toastText = ''
+  for (let i = 0; i < 100; i++) {
+    toastText = await ev(`return [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.textContent).join(' | ')`)
+    if (/Quadro exportado/.test(toastText)) break
+    await sleep(100)
+  }
+  check('botão "Quadro": toast "Quadro exportado" com "Abrir pasta"', /Quadro exportado: .* - 00m03s\.png/.test(toastText) && toastText.includes('Abrir pasta'), toastText)
+  await sleep(700) // o toast termina de entrar
+  await shot('f7-14-quadro-toast.png')
+  await sleep(300)
+  await ev(`document.activeElement?.blur?.(); return 1`)
+  await key('E', 'KeyE', 69, 10)
+  for (let i = 0; i < 100; i++) {
+    if (readdirSync(OUT).filter((f) => f.endsWith('.png')).length >= before.length + 2) break
+    await sleep(100)
+  }
+  const pngs = readdirSync(OUT).filter((f) => f.endsWith('.png'))
+  check('Ctrl+Shift+E exporta outro quadro (nome numerado, nunca sobrescreve)', pngs.length === before.length + 2 && pngs.some((f) => / - 00m03s \(2\)\.png$/.test(f)), pngs)
+  const all = readdirSync(OUT)
+  check('pasta do QA: .gif, .mp3 e os PNGs, sem .part', all.some((f) => f.endsWith('.gif')) && all.some((f) => f.endsWith('.mp3')) && all.every((f) => !f.endsWith('.part')), all)
 }
 
 try {

@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, Progress, Segmented, Select } from '@/components/ui/primitives'
 import { PathField } from '@/components/ui/PathField'
 import { useAppStore } from '@/app/store'
-import { formatBytes, formatClock } from '@/lib/format'
+import { formatBytes, formatClock, formatTimecode } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { ipcErrorMessage } from '@/lib/ipcError'
 import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
@@ -442,7 +442,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
 
             {isPng ? (
               <div className="rounded-xl border border-border px-3 py-2.5 text-[12px] text-fg-2" data-export-png="">
-                Quadro na posição do cursor (<span className="font-mono tabular-nums text-fg">{formatClock(playheadUs / 1000, true)}</span>), no tamanho do projeto ({canvas.width}×{canvas.height}). Atalho no editor: Ctrl+Shift+E.
+                Quadro na posição do cursor (<span className="font-mono tabular-nums text-fg">{formatTimecode(playheadUs / 1000)}</span>), no tamanho do projeto ({canvas.width}×{canvas.height}). Atalho no editor: Ctrl+Shift+E.
               </div>
             ) : (
               <div className="flex items-center justify-between gap-3">
@@ -514,7 +514,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               ) : null}
               {isPng ? (
                 <span className="block">
-                  PNG {canvas.width}×{canvas.height} · sem perdas · em {formatClock(playheadUs / 1000, true)}
+                  PNG {canvas.width}×{canvas.height} · sem perdas · em {formatTimecode(playheadUs / 1000)}
                 </span>
               ) : null}
               {formatWarnings.length ? (
