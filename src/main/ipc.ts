@@ -453,12 +453,14 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   }
   // só a janela dona do job grava/finaliza (a mesma posse do open/cancel)
   ipcMain.handle(IPC.editorExport.pipeWrite, (e, jobId: string, data: Uint8Array) => cancelAware(jobId, editorExports.pipeWrite(jobId, data, e.sender.id)))
-  ipcMain.handle(IPC.editorExport.pipeFinish, (e, jobId: string) => {
+  ipcMain.handle(IPC.editorExport.pipeFinish, (e, jobId: string, opts?: { maxBytes?: number }) => {
     const wc = e.sender
+    const maxBytes = Number(opts?.maxBytes)
     return cancelAware(
       jobId,
       editorExports.pipeFinish(jobId, {
         owner: wc.id,
+        maxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : undefined,
         onProgress: (fraction) => {
           if (!wc.isDestroyed()) wc.send(IPC.editorExport.finalizeProgress, { jobId, fraction })
         }

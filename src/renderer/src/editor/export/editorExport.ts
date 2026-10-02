@@ -3,8 +3,11 @@
 // intocado. Os bytes do MP4 vão para `<saída>.part` via IPC (editorExport.write) com contrapressão (chunkAck
 // depois de gravar); no fim o main remuxa com faststart. Falha do CODIFICADOR de hardware antes do 1º pacote →
 // nova tentativa com `prefer-software` (outras falhas mostram a causa real); HEVC (só hardware) que falha antes
-// do 1º pacote → a mesma exportação em H.264 (hardware → software), com aviso. Tamanho-alvo (qualquer): saída acima do alvo
+// do 1º pacote → a mesma exportação em H.264 (hardware → software), com aviso. O software também falhou antes do
+// 1º pacote (ou o H.264 não existe no tamanho) → codificador de reserva: libx264 no main, alimentado por pipe com o
+// PCM do trecho (antes) e os quadros RGBA do mesmo compositor (encodeChain.ts). Tamanho-alvo (qualquer): saída acima do alvo
 // é refeita uma vez com bitrate × (alvo/obtido) × 0,97 ("Ajustando tamanho…"). Uma exportação por vez.
+import { canEncodeVideo, Quality } from 'mediabunny'
 import { planAudio } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
@@ -13,7 +16,9 @@ import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
 import { audioRateWarning, KEYFRAME_INTERVAL_S, missingMediaWarnings, resizeBitrate } from './exportPlan'
 import type { VideoCodecChoice } from './exportPresets'
-import { EditorExportCancelled, finalizeOrCancel, type Finalized } from './finalize'
+import { EditorExportCancelled, finalizeOrCancel, isCancelledReply, settleOrCancel, type Finalized } from './finalize'
+import { firstEncodeStep, needsAvcCheck, nextEncodeStep, X264_FALLBACK_WARNING, X264_VIDEO_CODEC, x264PipeSpec, type EncodeStep } from './encodeChain'
+import { pipeAudioBlocks, pipeFrames } from './formatExport'
 import { editorExportRunning, withExportLock } from './exportLock'
 import { ipcErrorMessage } from '@/lib/ipcError'
 
@@ -38,6 +43,8 @@ export interface EditorExportRequest {
   targetBytes?: number
   /** Testes: simula a falha do encoder de hardware (exercita a nova tentativa em software). */
   simulateHwFailure?: boolean
+  /** Testes: simula a falha do encoder H.264 em software antes do 1º pacote (exercita o codificador de reserva). */
+  simulateSoftwareFailure?: boolean
   /** Testes: simula a falha do encoder HEVC (exercita a volta para H.264). */
   simulateHevcFailure?: boolean
   /** Testes: a 1ª passada usa 4× o bitrate pedido (passa do tamanho alvo → exercita a 2ª passada). */
@@ -55,6 +62,8 @@ export interface EditorExportProgress {
   speed: number | null
   /** Segundos restantes estimados (null antes do 1º quadro codificado). */
   etaS: number | null
+  /** Codificando pelo codificador de reserva (libx264 no main): a interface mostra "Codificador de reserva". */
+  reserve?: boolean
 }
 
 export interface EditorExportResult {
@@ -75,6 +84,8 @@ export interface EditorExportResult {
   fellBackToSoftware: boolean
   /** HEVC falhou e a exportação foi refeita em H.264. */
   fellBackFromHevc: boolean
+  /** O H.264 do WebCodecs (hardware e software) falhou: saiu pelo codificador de reserva (libx264). */
+  fellBackToX264: boolean
   /** Passadas de codificação (2 = refeita para caber no tamanho-alvo). */
   passes: number
   /** Avisos para a tela de concluído (mídia de áudio que falhou, alvo de tamanho não atingido). */
@@ -105,27 +116,30 @@ async function runLocked(req: EditorExportRequest, opts: { onProgress?: OnProgre
   const signal = opts.signal ?? new AbortController().signal
   const durationUs = req.toUs - req.fromUs
   let videoBitrate = req.simulateFirstPassOvershoot ? req.videoBitrate * 4 : req.videoBitrate
-  let hw: HwPref = 'prefer-hardware'
-  let codec: VideoCodecChoice = req.codec ?? 'h264'
+  let step: EncodeStep = firstEncodeStep(req.codec ?? 'h264')
   let fellBack = false
   let fellBackFromHevc = false
   const warnings = new Set<string>()
   for (let pass = 1; ; pass++) {
     const stage = pass === 1 ? 'render' : 'resize'
-    const enc = await encode({ ...req, videoBitrate }, codec, hw, stage, signal, opts.onProgress)
-    hw = enc.hardware
-    codec = enc.codec
+    const enc = await encode({ ...req, videoBitrate }, step, stage, signal, opts.onProgress)
+    step = enc.step
     fellBack ||= enc.fellBack
     fellBackFromHevc ||= enc.fellBackFromHevc
     for (const w of enc.warnings) warnings.add(w)
-    // remux: progresso real do ffmpeg nos últimos 2 %
+    // remux (WebCodecs) / fim do ffmpeg (reserva): progresso real do ffmpeg nos últimos 2 %
     const off = api.editorExport.onFinalizeProgress((p) => {
       if (p.jobId === enc.jobId) opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98 + 2 * p.fraction, speed: null, etaS: null })
     })
     let out: Finalized
     try {
       opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98, speed: null, etaS: null })
-      out = await finalizeOrCancel(api.editorExport, enc.jobId, { durationUs, maxBytes: pass === 1 ? req.targetBytes : undefined }, signal)
+      const maxBytes = pass === 1 ? req.targetBytes : undefined
+      const jobId = enc.jobId
+      out =
+        step.kind === 'x264'
+          ? await settleOrCancel(() => api.editorExport.pipeFinish(jobId, { maxBytes }), () => api.editorExport.cancel(jobId), signal)
+          : await finalizeOrCancel(api.editorExport, jobId, { durationUs, maxBytes }, signal)
     } finally {
       off()
     }
@@ -144,13 +158,14 @@ async function runLocked(req: EditorExportRequest, opts: { onProgress?: OnProgre
       width: req.width,
       height: req.height,
       fps: req.fps,
-      codec,
+      codec: step.kind === 'x264' ? 'h264' : step.codec,
       videoCodec: enc.videoCodec,
       audioCodec: enc.audioCodec,
       audioBitrate: enc.audioBitrate,
-      hardware: hw,
+      hardware: step.kind === 'x264' ? 'prefer-software' : step.hw,
       fellBackToSoftware: fellBack,
       fellBackFromHevc,
+      fellBackToX264: step.kind === 'x264',
       passes: pass,
       warnings: [...warnings]
     }
@@ -163,52 +178,115 @@ interface Encoded {
   videoCodec: string
   audioCodec: 'aac' | 'opus' | null
   audioBitrate: number
-  hardware: HwPref
-  codec: VideoCodecChoice
+  /** Passo da cadeia que codificou (a 2ª passada do tamanho-alvo começa nele). */
+  step: EncodeStep
   fellBack: boolean
   fellBackFromHevc: boolean
   warnings: string[]
 }
 
+type EncodedBase = Omit<Encoded, 'step' | 'fellBack' | 'fellBackFromHevc'>
+
 /** Aviso da tela de concluído quando o HEVC falha. */
 export const HEVC_FALLBACK_WARNING = 'HEVC falhou; exportado em H.264.'
 
+/** O H.264 do WebCodecs em software existe neste tamanho/bitrate? Erro na consulta = não. */
+async function avcEncodable(req: EditorExportRequest): Promise<boolean> {
+  try {
+    return await canEncodeVideo('avc', { width: req.width, height: req.height, quality: new Quality({ bitrate: req.videoBitrate }), hardwareAcceleration: 'prefer-software' })
+  } catch {
+    return false
+  }
+}
+
 /**
- * Codifica para um .part novo. Falha do codificador antes do 1º pacote: HEVC → H.264 (hardware), e H.264 de
- * hardware → software.
+ * Codifica para um .part novo, a partir de `start` na cadeia (encodeChain.ts): falha do codificador antes do 1º
+ * pacote passa ao próximo passo (HEVC → H.264 hardware → software → libx264 por pipe).
  */
-async function encode(req: EditorExportRequest, codec: VideoCodecChoice, hw: HwPref, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<Encoded> {
+async function encode(req: EditorExportRequest, start: EncodeStep, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<Encoded> {
   const api = window.api
+  let step = start
   let fellBack = false
   let fellBackFromHevc = false
+  const advance = (why: string): void => {
+    const next = nextEncodeStep(step)
+    if (!next) throw new Error(`Não foi possível codificar o vídeo neste computador (${why}).`)
+    const from = step.kind === 'x264' ? '' : step.codec === 'hevc' ? 'encoder HEVC' : step.hw === 'prefer-hardware' ? 'encoder de hardware' : 'H.264 em software'
+    console.warn(`exportação: ${from} falhou (${why}); tentando ${next.kind === 'x264' ? 'o codificador de reserva (libx264)' : next.hw === 'prefer-software' ? 'em software' : 'em H.264'}`)
+    if (step.kind === 'webcodecs' && step.codec === 'hevc') fellBackFromHevc = true
+    if (next.kind === 'x264' || next.hw === 'prefer-software') fellBack = true
+    step = next
+  }
+  const withFlags = (done: EncodedBase): Encoded => ({
+    ...done,
+    warnings: [...(fellBackFromHevc ? [HEVC_FALLBACK_WARNING] : []), ...(step.kind === 'x264' ? [X264_FALLBACK_WARNING] : []), ...done.warnings],
+    step,
+    fellBack,
+    fellBackFromHevc
+  })
   for (;;) {
     if (signal.aborted) throw new EditorExportCancelled()
+    if (needsAvcCheck(step) && !(await avcEncodable(req))) {
+      advance(`H.264 indisponível em ${req.width}×${req.height}`)
+      continue
+    }
+    if (step.kind === 'x264') {
+      try {
+        return withFlags(await encodeX264(req, stage, signal, onProgress))
+      } catch (e) {
+        if (e instanceof EditorExportCancelled || signal.aborted) throw new EditorExportCancelled()
+        throw new Error(`Não foi possível codificar o vídeo neste computador, nem com o codificador de reserva (${ipcErrorMessage(e)}).`)
+      }
+    }
     const { jobId } = await api.editorExport.open(req.outputDir, req.fileName, { estimateBytes: req.estimateBytes })
     try {
-      const done = await attempt(req, jobId, codec, hw, stage, signal, onProgress)
-      const warnings = fellBackFromHevc ? [HEVC_FALLBACK_WARNING, ...done.warnings] : done.warnings
-      return { jobId, ...done, warnings, hardware: hw, codec, fellBack, fellBackFromHevc }
+      const done = await attempt(req, jobId, step.codec, step.hw, stage, signal, onProgress)
+      return withFlags({ jobId, ...done })
     } catch (e) {
       await api.editorExport.cancel(jobId).catch(() => {})
       if (e instanceof EditorExportCancelled || signal.aborted) throw new EditorExportCancelled()
       if (e instanceof AttemptError && e.retryInSoftware) {
-        if (codec === 'hevc') {
-          console.warn(`exportação: encoder HEVC falhou (${e.message}); refazendo em H.264`)
-          codec = 'h264'
-          hw = 'prefer-hardware'
-          fellBackFromHevc = true
-          continue
-        }
-        if (hw === 'prefer-hardware') {
-          console.warn(`exportação: encoder de hardware falhou (${e.message}); tentando em software`)
-          hw = 'prefer-software'
-          fellBack = true
-          continue
-        }
-        throw new Error(`Não foi possível codificar o vídeo neste computador (${e.message}). Tente o preset WhatsApp (720p) ou atualize o driver de vídeo.`)
+        advance(e.message)
+        continue
       }
       throw e
     }
+  }
+}
+
+/** Parte do progresso da passada ocupada pelo áudio no codificador de reserva (o resto são os quadros). */
+const X264_AUDIO_SHARE = 4
+
+/**
+ * Codificador de reserva: abre o job x264 no main, manda o PCM do trecho (mesmo mixer e grade da exportação de
+ * vídeo) e depois os quadros RGBA do mesmo compositor (t = n/fps) com contrapressão. O fim (pipeFinish) é do laço
+ * das passadas. Falha ou cancelamento cancelam o job (o main apaga .part e o áudio temporário).
+ */
+async function encodeX264(req: EditorExportRequest, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<EncodedBase> {
+  const api = window.api.editorExport
+  const hasAudio = planAudio(req.project).some((s) => s.mode !== 'mute')
+  const spec = x264PipeSpec({ ...req, keyFrameIntervalS: req.keyFrameIntervalS ?? KEYFRAME_INTERVAL_S }, hasAudio)
+  if (signal.aborted) throw new EditorExportCancelled()
+  // espaço: + o PCM temporário (f32 estéreo)
+  const estimateBytes = req.estimateBytes ? req.estimateBytes + (spec.audio?.samples ?? 0) * 8 : undefined
+  const { jobId } = await api.openPipe(req.outputDir, req.fileName, spec, { estimateBytes })
+  try {
+    const warnings: string[] = []
+    if (spec.audio) {
+      const audio = await pipeAudioBlocks(req, jobId, signal, (done, total) =>
+        onProgress?.({ stage, frame: 0, total: 0, percent: (done / total) * X264_AUDIO_SHARE, speed: null, etaS: null, reserve: true })
+      )
+      warnings.push(...audio.warnings)
+    }
+    const frames = await pipeFrames(req, jobId, signal, (frame, total, speed, etaS) =>
+      onProgress?.({ stage, frame, total, percent: X264_AUDIO_SHARE + (frame / total) * (98 - X264_AUDIO_SHARE), speed, etaS, reserve: true })
+    )
+    warnings.push(...frames.warnings)
+    return { jobId, total: frames.frames, videoCodec: X264_VIDEO_CODEC, audioCodec: spec.audio ? 'aac' : null, audioBitrate: spec.audio ? spec.audio.kbps * 1000 : 0, warnings }
+  } catch (e) {
+    await api.cancel(jobId).catch(() => {})
+    if (e instanceof EditorExportCancelled || signal.aborted) throw new EditorExportCancelled()
+    throw e
   }
 }
 
@@ -249,6 +327,7 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
     video: { codec: codec === 'hevc' ? 'hevc' : 'avc', bitrate: req.videoBitrate, hw, keyFrameIntervalS: req.keyFrameIntervalS ?? KEYFRAME_INTERVAL_S },
     audio: hasAudio ? { bitrate: req.audioBitrate } : null,
     ...(req.simulateHwFailure ? { simulateHwFailure: true } : {}),
+    ...(req.simulateSoftwareFailure ? { simulateSoftwareFailure: true } : {}),
     ...(req.simulateHevcFailure ? { simulateHevcFailure: true } : {})
   }
 
@@ -293,7 +372,15 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
           writes = writes
             .then(() => api.editorExport.write(jobId, m.data, m.position))
             .then(
-              () => render.chunkAck(jobId, m.seq),
+              (reply) => {
+                // o main já cancelou o job (janela/saída): cancelamento, não erro
+                if (isCancelledReply(reply)) {
+                  render.exportCancel(jobId)
+                  finish({ ok: false, error: new EditorExportCancelled() })
+                  return
+                }
+                render.chunkAck(jobId, m.seq)
+              },
               (e: unknown) => {
                 render.exportCancel(jobId)
                 finish({ ok: false, error: new Error(`Falha ao gravar o arquivo: ${ipcErrorMessage(e)}`) })

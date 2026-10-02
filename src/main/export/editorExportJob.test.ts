@@ -375,3 +375,103 @@ describe('EditorExportJobs.writeStill', () => {
     expect(jobs.busy).toBe(false)
   })
 })
+
+describe('EditorExportJobs — fallback libx264 (x264)', () => {
+  // 2 amostras de áudio estéreo f32 = 16 bytes; quadros RGBA 4×2 = 32 bytes
+  const x264 = { kind: 'x264', width: 4, height: 2, fps: 30, videoBitrate: 1_000_000, keyFrameInterval: 60, audio: { kbps: 128, samples: 2 } } as const
+  let pipes: ReturnType<typeof fakePipe>[]
+  const deps = () => ({
+    ...plenty,
+    openPipe: (args: string[]) => {
+      const p = fakePipe(args)
+      pipes.push(p)
+      return p
+    }
+  })
+  beforeEach(() => {
+    pipes = []
+  })
+
+  it('áudio primeiro no temporário, depois o ffmpeg lê os quadros e o PCM → .mp4; temporário apagado', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId, path } = await jobs.openPipe(dir, 'Vídeo.mp4', x264)
+    expect(path).toBe(join(dir, 'Vídeo.mp4'))
+    // o ffmpeg só abre com o áudio completo (ele lê o arquivo de áudio como 2ª entrada)
+    expect(pipes).toHaveLength(0)
+    const audio = join(dir, 'Vídeo.mp4.audio.part')
+    await jobs.pipeWrite(jobId, new Uint8Array(8).fill(1))
+    expect(pipes).toHaveLength(0)
+    await jobs.pipeWrite(jobId, new Uint8Array(8).fill(2))
+    expect(pipes).toHaveLength(1)
+    expect([...readFileSync(audio)]).toEqual([...new Array(8).fill(1), ...new Array(8).fill(2)])
+    const args = pipes[0].args
+    expect(args.slice(args.indexOf('f32le') - 1, args.indexOf('f32le') + 7)).toEqual(['-f', 'f32le', '-ar', '48000', '-ac', '2', '-i', audio])
+    expect(args[args.length - 1]).toBe(join(dir, 'Vídeo.mp4.part'))
+    expect(args).toEqual(expect.arrayContaining(['-c:v', 'libx264', '-b:a', '128k']))
+    await jobs.pipeWrite(jobId, new Uint8Array(32).fill(3))
+    await jobs.pipeWrite(jobId, new Uint8Array(32).fill(4))
+    expect(pipes[0].write).toHaveBeenCalledTimes(2)
+    const r = await jobs.pipeFinish(jobId)
+    expect(r).toEqual({ path, size: 64 })
+    expect(readdirSync(dir)).toEqual(['Vídeo.mp4'])
+    expect(jobs.busy).toBe(false)
+  })
+
+  it('sem áudio: o ffmpeg abre já no openPipe e recebe só os quadros', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId } = await jobs.openPipe(dir, 'mudo', { ...x264, audio: null })
+    expect(pipes).toHaveLength(1)
+    expect(pipes[0].args).toContain('-an')
+    await jobs.pipeWrite(jobId, new Uint8Array(32))
+    await expect(jobs.pipeFinish(jobId)).resolves.toMatchObject({ path: join(dir, 'mudo.mp4'), size: 32 })
+    expect(readdirSync(dir)).toEqual(['mudo.mp4'])
+  })
+
+  it('pedaço que atravessa o fim do áudio declarado é recusado; áudio incompleto no fim é erro (sem sobras)', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const a = await jobs.openPipe(dir, 'a', x264)
+    await jobs.pipeWrite(a.jobId, new Uint8Array(8))
+    await expect(jobs.pipeWrite(a.jobId, new Uint8Array(16))).rejects.toThrow(/áudio/)
+    await jobs.cancel(a.jobId)
+    const b = await jobs.openPipe(dir, 'b', x264)
+    await jobs.pipeWrite(b.jobId, new Uint8Array(8))
+    await expect(jobs.pipeFinish(b.jobId)).rejects.toThrow(/áudio incompleto/)
+    expect(readdirSync(dir)).toEqual([])
+    expect(jobs.busy).toBe(false)
+  })
+
+  it('cancelar no áudio: fecha e apaga o temporário (ffmpeg nem abriu)', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId } = await jobs.openPipe(dir, 'c', x264)
+    await jobs.pipeWrite(jobId, new Uint8Array(8))
+    expect(readdirSync(dir).sort()).toEqual(['c.mp4.audio.part'])
+    await jobs.cancel(jobId)
+    expect(pipes).toHaveLength(0)
+    expect(readdirSync(dir)).toEqual([])
+    expect(jobs.busy).toBe(false)
+  })
+
+  it('janela fechada nos quadros (cancelOwnedBy): mata o ffmpeg e apaga .part e áudio temporário', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId } = await jobs.openPipe(dir, 'd', x264, 5)
+    await jobs.pipeWrite(jobId, new Uint8Array(16), 5)
+    await jobs.pipeWrite(jobId, new Uint8Array(32), 5)
+    writeFileSync(join(dir, 'd.mp4.part'), 'meio vídeo')
+    await jobs.cancelOwnedBy(6)
+    expect(jobs.busy).toBe(true)
+    await jobs.cancelOwnedBy(5)
+    expect(pipes[0].abort).toHaveBeenCalled()
+    expect(readdirSync(dir)).toEqual([])
+    expect(jobs.busy).toBe(false)
+    await expect(jobs.pipeWrite(jobId, new Uint8Array(32), 5)).rejects.toBeInstanceOf(ExportCancelledError)
+  })
+
+  it('maxBytes (tamanho alvo): saída maior é apagada e volta oversize', async () => {
+    const jobs = new EditorExportJobs(deps())
+    const { jobId, path } = await jobs.openPipe(dir, 'e', { ...x264, audio: null })
+    await jobs.pipeWrite(jobId, new Uint8Array(32))
+    await expect(jobs.pipeFinish(jobId, { maxBytes: 10 })).resolves.toEqual({ path, size: 32, oversize: true })
+    expect(readdirSync(dir)).toEqual([])
+    expect(jobs.busy).toBe(false)
+  })
+})

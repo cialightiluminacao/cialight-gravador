@@ -807,7 +807,11 @@ function VideoDoneInfo({ result }: { result: EditorExportResult }): React.JSX.El
         {result.passes > 1 ? ` · ${result.passes} passadas (refeito para caber no tamanho alvo)` : ''}
       </span>
       {result.fellBackFromHevc ? <span className="block text-[11px] text-warn">O HEVC falhou neste computador; o vídeo saiu em H.264.</span> : null}
-      {result.fellBackToSoftware ? <span className="block text-[11px] text-muted">Codificado em software (o encoder de hardware falhou).</span> : null}
+      {result.fellBackToX264 ? (
+        <span className="block text-[11px] text-muted">Codificado com o codificador de reserva (libx264): os codificadores de vídeo do sistema falharam.</span>
+      ) : result.fellBackToSoftware ? (
+        <span className="block text-[11px] text-muted">Codificado em software (o encoder de hardware falhou).</span>
+      ) : null}
     </>
   )
 }
@@ -830,6 +834,10 @@ function FormatDoneInfo({ result }: { result: FormatExportResult }): React.JSX.E
 function stageLabel(format: ExportFormat, progress: EditorExportProgress | null): string {
   if (!progress) return 'Preparando…'
   if (progress.stage === 'finalize') return format === 'gif' ? 'Gerando a paleta do GIF…' : 'Finalizando o arquivo…'
+  if (progress.reserve) {
+    const what = progress.stage === 'resize' ? 'ajustando tamanho' : progress.total ? `quadro ${progress.frame} de ${progress.total}` : 'preparando o áudio'
+    return `Codificador de reserva… ${what}`
+  }
   if (progress.stage === 'resize') return `Ajustando tamanho… quadro ${progress.frame} de ${progress.total}`
   if (format === 'audio') return 'Mixando o áudio…'
   return `Quadro ${progress.frame} de ${progress.total}`

@@ -39,7 +39,8 @@ function stateText(it: QueueItem, position: number): string {
       if (!p) return 'Preparando…'
       if (p.stage === 'finalize') return `Finalizando… ${pct(p.percent)}`
       const eta = p.etaS != null ? ` · faltam ${formatClock(p.etaS * 1000, false)}` : ''
-      return `${p.stage === 'resize' ? 'Ajustando tamanho' : 'Exportando'} ${pct(p.percent)}${eta}`
+      const what = p.reserve ? 'Codificador de reserva' : p.stage === 'resize' ? 'Ajustando tamanho' : 'Exportando'
+      return `${what} ${pct(p.percent)}${eta}`
     }
     case 'done':
       return `Concluída · ${it.result?.path.split(/[\\/]/).pop() ?? ''}`

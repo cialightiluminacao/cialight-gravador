@@ -4,7 +4,7 @@ import { numberedName, sanitizeFileName } from '@shared/filenames'
 import type { PipeSpec } from '@shared/ipc'
 import { runFfmpeg } from './ffmpegRunner'
 import { openFfmpegPipe, type FfmpegPipe } from './ffmpegPipe'
-import { audioPipeArgs, gifCapturePipeArgs, gifPaletteArgs, gifPaletteUseArgs, pipeExtension, validatePipeSpec } from './pipeSpec'
+import { audioPipeArgs, gifCapturePipeArgs, gifPaletteArgs, gifPaletteUseArgs, pipeExtension, validatePipeSpec, x264PipeArgs } from './pipeSpec'
 import { log } from '../log'
 
 // Arquivo de saída da exportação do editor (main). O render worker gera o MP4 (mdat antes do moov) e o
@@ -19,6 +19,9 @@ import { log } from '../log'
 // argumentos. GIF: passada 1 → FFV1 temporário `<nome>.gif.ffv1.part`; `pipeFinish` gera a paleta
 // (`<nome>.gif.palette.part`) e aplica → `<nome>.gif.part` → nome final. Os temporários ficam ao lado do .part
 // (a limpeza de .part antigos os alcança) e são apagados sempre — fim, falha ou cancelamento.
+// Fallback libx264 (`x264`): com áudio, os primeiros `samples` × 8 bytes são o PCM f32 estéreo do trecho, gravado
+// em `<nome>.audio.part`; completo o áudio, o ffmpeg abre (quadros do stdin + esse arquivo) e os bytes seguintes
+// são os quadros RGBA → `<nome>.part` (MP4 com faststart) → nome final. Sem áudio, o ffmpeg abre já no openPipe.
 // `writeStill` (quadro PNG): `.part` e rename, atômico.
 
 /** Espaço livre exigido = estimativa × isto (o .part e a cópia do remux coexistem no fim). */
@@ -26,7 +29,12 @@ export const FREE_SPACE_FACTOR = 2.1
 
 interface PipeState {
   spec: PipeSpec
-  ff: FfmpegPipe
+  /** null enquanto o x264 recebe o áudio (o ffmpeg só abre com o PCM completo no temporário). */
+  ff: FfmpegPipe | null
+  /** x264 com áudio: PCM f32 estéreo do trecho, gravado antes dos quadros no temporário `file`. */
+  audio?: { file: string; fh: fsp.FileHandle | null; need: number; queued: number; written: number }
+  /** Abre o ffmpeg (x264: depois do áudio). */
+  start?: () => FfmpegPipe
   /** Bytes aceitos pelo ffmpeg (GIF: quadros × w·h·4). */
   bytes: number
   /** Temporários deste job (apagados no fim, na falha e no cancelamento). */
@@ -48,8 +56,10 @@ interface Job {
   remux: { abort: AbortController; done: Promise<void> } | null
   /** Saída criada por este job (só ela pode ser apagada num cancelamento/falha). */
   createdOut: string | null
-  /** Saída por pipe (GIF / só áudio). */
+  /** Saída por pipe (GIF / só áudio / x264). */
   pipe?: PipeState
+  /** cancel() em curso: o fim do áudio do x264 não abre mais o ffmpeg. */
+  cancelled?: boolean
 }
 
 export interface EditorExportOpened {
@@ -262,10 +272,19 @@ export class EditorExportJobs {
     const spec = validatePipeSpec(rawSpec)
     const job = await this.reserve(outputDir, estimateBytes, owner, editorExportFileName(fileName, pipeExtension(spec)))
     const { id, name, part } = job
-    const temps = spec.kind === 'gif' ? [join(outputDir, `${name}.ffv1.part`), join(outputDir, `${name}.palette.part`)] : []
-    const args = spec.kind === 'gif' ? gifCapturePipeArgs(spec, temps[0]) : audioPipeArgs(spec, part)
     try {
-      job.pipe = { spec, ff: this.openFfmpegPipe(args, { label: spec.kind === 'gif' ? 'editor: GIF (quadros)' : `editor: áudio ${spec.format}` }), bytes: 0, temps }
+      if (spec.kind === 'x264') {
+        const audioFile = spec.audio ? join(outputDir, `${name}.audio.part`) : null
+        const start = (): FfmpegPipe => this.openFfmpegPipe(x264PipeArgs(spec, part, audioFile), { label: 'editor: libx264 (reserva)' })
+        if (audioFile && spec.audio) {
+          const fh = await fsp.open(audioFile, 'w')
+          job.pipe = { spec, ff: null, audio: { file: audioFile, fh, need: spec.audio.samples * 8, queued: 0, written: 0 }, start, bytes: 0, temps: [audioFile] }
+        } else job.pipe = { spec, ff: start(), bytes: 0, temps: [] }
+      } else {
+        const temps = spec.kind === 'gif' ? [join(outputDir, `${name}.ffv1.part`), join(outputDir, `${name}.palette.part`)] : []
+        const args = spec.kind === 'gif' ? gifCapturePipeArgs(spec, temps[0]) : audioPipeArgs(spec, part)
+        job.pipe = { spec, ff: this.openFfmpegPipe(args, { label: spec.kind === 'gif' ? 'editor: GIF (quadros)' : `editor: áudio ${spec.format}` }), bytes: 0, temps }
+      }
     } catch (e) {
       this.jobs.delete(id)
       throw e
@@ -284,6 +303,22 @@ export class EditorExportJobs {
     if (!pipe) throw new Error('exportação sem pipe')
     if (job.remux) throw new Error('finalização já em andamento')
     if (job.writes.size >= PIPE_MAX_INFLIGHT) throw new Error(`gravações demais em andamento na exportação (máximo ${PIPE_MAX_INFLIGHT}): espere cada pipeWrite`)
+    const a = pipe.audio
+    if (a && a.queued < a.need) {
+      // x264: PCM do áudio (antes dos quadros), por posição no temporário
+      if (a.queued + data.byteLength > a.need) throw new Error('bytes de áudio além do declarado na exportação')
+      const position = a.queued
+      a.queued += data.byteLength
+      const p = this.writeAudio(job, a, data, position)
+      job.writes.add(p)
+      try {
+        await p
+      } finally {
+        job.writes.delete(p)
+      }
+      return
+    }
+    if (!pipe.ff) throw new Error('áudio da exportação ainda sendo gravado')
     const p = pipe.ff.write(data)
     job.writes.add(p)
     try {
@@ -294,11 +329,27 @@ export class EditorExportJobs {
     }
   }
 
+  /** Grava um pedaço do áudio do x264; com o áudio completo, fecha o temporário e abre o ffmpeg. */
+  private async writeAudio(job: Job, a: NonNullable<PipeState['audio']>, data: Uint8Array, position: number): Promise<void> {
+    const fh = a.fh
+    if (!fh) throw new Error('áudio da exportação já fechado')
+    let off = 0
+    while (off < data.byteLength) off += (await fh.write(data, off, data.byteLength - off, position + off)).bytesWritten
+    a.written += data.byteLength
+    const pipe = job.pipe!
+    if (a.written === a.need && !pipe.ff && !job.cancelled) {
+      a.fh = null
+      await fh.close()
+      if (job.cancelled) return // cancelado enquanto fechava
+      pipe.ff = pipe.start!()
+    }
+  }
+
   /**
    * Fecha o stdin e espera o ffmpeg; GIF: paleta + paletteuse (onProgress 0–1 pela duração). Renomeia o .part
    * para o nome final. Temporários apagados sempre; falha/cancelamento apaga o .part.
    */
-  async pipeFinish(jobId: string, opts: { onProgress?: (fraction: number) => void; owner?: number } = {}): Promise<EditorExportFinalized> {
+  async pipeFinish(jobId: string, opts: { onProgress?: (fraction: number) => void; owner?: number; maxBytes?: number } = {}): Promise<EditorExportFinalized> {
     const job = this.must(jobId, opts.owner)
     const pipe = job.pipe
     if (!pipe) throw new Error('exportação sem pipe')
@@ -306,10 +357,13 @@ export class EditorExportJobs {
     const abort = new AbortController()
     let release: () => void = () => {}
     job.remux = { abort, done: new Promise<void>((r) => (release = r)) }
-    abort.signal.addEventListener('abort', () => void pipe.ff.abort())
+    abort.signal.addEventListener('abort', () => void pipe.ff?.abort())
     let ok = false
     try {
       await Promise.allSettled([...job.writes])
+      if (abort.signal.aborted) throw new ExportCancelledError()
+      if (pipe.audio && pipe.audio.written !== pipe.audio.need) throw new Error(`áudio incompleto na exportação (${pipe.audio.written} de ${pipe.audio.need} bytes)`)
+      if (!pipe.ff) throw new Error('exportação sem ffmpeg')
       const r = await pipe.ff.end()
       if (r.cancelled || abort.signal.aborted) throw new ExportCancelledError()
       if (pipe.spec.kind === 'gif') {
@@ -331,8 +385,14 @@ export class EditorExportJobs {
       const size = statSync(out).size
       opts.onProgress?.(1)
       ok = true
+      if (opts.maxBytes && size > opts.maxBytes) {
+        safeRm(out)
+        log.info(`exportação do editor ${jobId}: ${size} bytes > alvo ${opts.maxBytes}; saída apagada`)
+        return { path: out, size, oversize: true }
+      }
       return { path: out, size }
     } finally {
+      await this.closeAudio(pipe)
       for (const t of pipe.temps) safeRm(t)
       if (!ok) safeRm(job.part)
       this.jobs.delete(jobId)
@@ -380,6 +440,7 @@ export class EditorExportJobs {
   async cancel(jobId: string): Promise<void> {
     const job = this.jobs.get(jobId)
     if (!job) return
+    job.cancelled = true
     this.cancelledIds.add(jobId)
     if (this.cancelledIds.size > 32) this.cancelledIds.delete(this.cancelledIds.values().next().value!)
     if (job.remux) {
@@ -388,7 +449,9 @@ export class EditorExportJobs {
       await done
     }
     if (job.pipe) {
-      await job.pipe.ff.abort()
+      await job.pipe.ff?.abort()
+      await Promise.allSettled([...job.writes])
+      await this.closeAudio(job.pipe)
       for (const t of job.pipe.temps) safeRm(t)
     }
     await this.closeHandle(job)
@@ -401,6 +464,12 @@ export class EditorExportJobs {
   /** Janela fechada/recarregada ou app saindo (owner null = todos): nada de .part órfão. */
   async cancelOwnedBy(owner: number | null): Promise<void> {
     await Promise.all([...this.jobs.values()].filter((j) => owner === null || j.owner === owner).map((j) => this.cancel(j.id)))
+  }
+
+  private async closeAudio(pipe: PipeState): Promise<void> {
+    const fh = pipe.audio?.fh
+    if (pipe.audio) pipe.audio.fh = null
+    if (fh) await fh.close().catch(() => {})
   }
 
   private async closeHandle(job: Job): Promise<void> {

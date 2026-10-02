@@ -218,7 +218,7 @@ function blockVar(d: Uint8Array, w: number, h: number, b: number): number[] {
 }
 
 /** PSNR (dB) entre duas imagens RGB24 do mesmo tamanho. */
-function psnr(a: Uint8Array, b: Uint8Array): number {
+export function psnr(a: Uint8Array, b: Uint8Array): number {
   if (a.length !== b.length || a.length === 0) return -1
   let se = 0
   for (let i = 0; i < a.length; i++) {

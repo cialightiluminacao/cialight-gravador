@@ -596,6 +596,7 @@ async function runExport(
     await encoderCall(() => output.start())
     if (job.simulateHevcFailure && hevc) throw new EncoderError('falha simulada do encoder HEVC')
     if (job.simulateHwFailure && job.video.hw === 'prefer-hardware') throw new EncoderError('falha simulada do encoder de hardware')
+    if (job.simulateSoftwareFailure && job.video.hw === 'prefer-software') throw new EncoderError('falha simulada do encoder em software')
     const frameDur = 1 / job.fps
     let lastReport = 0
     // fontes que falharam (arquivo ausente, decoder que quebrou no meio…): o quadro sai com o placeholder,

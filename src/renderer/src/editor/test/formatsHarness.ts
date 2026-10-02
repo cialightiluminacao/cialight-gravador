@@ -2,8 +2,8 @@ import { contentEndUs } from '@shared/editor/ops'
 import type { Project } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
-import { exportRange, frameCount } from '../export/exportPlan'
-import { runEditorExport } from '../export/editorExport'
+import { exportRange, frameCount, targetBitrate } from '../export/exportPlan'
+import { runEditorExport, type EditorExportProgress, type EditorExportRequest } from '../export/editorExport'
 import { EditorExportCancelled } from '../export/finalize'
 import { exportStill, renderStill, runAudioExport, runGifExport } from '../export/formatExport'
 import { audioEstimateBytes, audioOnlyBlocker, gifDiskBytes, gifSize, stillFileName, type AudioFormat } from '../export/formatPlan'
@@ -22,6 +22,9 @@ import { effectsPreviewRef } from './exportHarness'
 // com o MESMO nome do primeiro, enfileirados a partir do projeto aberto no store do editor; depois de enfileirar,
 // os efeitos são apagados do projeto do editor (o item tem de exportar o instantâneo, com os efeitos). Depois, uma
 // 2ª fila: o item rodando é cancelado no meio e o seguinte termina.
+// Codificador de reserva (F7 Task 5): o trecho I–O em 1920×1080 / 12 Mbps pelo WebCodecs (A) e com as falhas de
+// hardware E software simuladas (B → libx264 por pipe), B cancelado no meio e refeito, e o projeto de 20 s com
+// tamanho alvo de 4 MB pelo libx264 (1ª passada inflada → 2ª passada).
 
 type Region = { x: number; y: number; w: number; h: number }
 interface Params {
@@ -43,6 +46,11 @@ interface Params {
   queueCancelDir: string
   block: number
   outside: Region
+  /** Codificador de reserva: pastas e o projeto de 20 s do tamanho alvo. */
+  x264Dir: string
+  x264CancelDir: string
+  longProjectId: string
+  targetMB: number
 }
 
 export async function runFormatsHarness(params: Params): Promise<void> {
@@ -95,6 +103,9 @@ export async function runFormatsHarness(params: Params): Promise<void> {
       blocker: audioOnlyBlocker(mutedProject),
       run: await settle(() => runAudioExport({ project: mutedProject, fromUs: range.fromUs, toUs: range.toUs, format: 'wav', outputDir: params.cancelDir, fileName: 'mudo' }))
     }
+
+    // ---- codificador de reserva (libx264 por pipe) ----
+    await x264Cases(project, range, params, report)
 
     // ---- fila de exportações ----
     await queueCases(project, range, params, report)
@@ -208,6 +219,77 @@ async function pngCase(project: Project, tUs: number, outputDir: string, params:
     return { file, sha256: await sha256(again.png), bytes: again.png.byteLength, warnings: again.warnings, vsPreview: { maxDiff, diffPixels: diffCount, blurMaxDiff: blurMax, alphaMin, tarja } }
   } catch (e) {
     return { error: e instanceof Error ? (e.stack ?? e.message) : String(e) }
+  }
+}
+
+/** Exportação de vídeo com tempo, progresso (etapas e "reserva") e cancelamento opcional (quando `cancelWhen` vale). */
+async function timedExport(req: EditorExportRequest, cancelWhen?: (p: EditorExportProgress) => boolean): Promise<Record<string, unknown>> {
+  const ac = new AbortController()
+  const t0 = performance.now()
+  let reserveFrames = 0
+  let tFirstFrame: number | null = null
+  let tLastFrame: number | null = null
+  let audioMs: number | null = null
+  let at: { frame: number; percent: number } | null = null
+  const stages = new Set<string>()
+  const percents: number[] = []
+  try {
+    const r = await runEditorExport(req, {
+      signal: ac.signal,
+      onProgress: (p) => {
+        stages.add(`${p.stage}${p.reserve ? '+reserva' : ''}`)
+        percents.push(p.percent)
+        if (p.reserve && p.total > 0) {
+          const now = performance.now()
+          if (tFirstFrame === null) {
+            tFirstFrame = now
+            audioMs = now - t0
+          }
+          tLastFrame = now
+          reserveFrames = Math.max(reserveFrames, p.frame)
+        }
+        if (cancelWhen && !at && cancelWhen(p)) {
+          at = { frame: p.frame, percent: +p.percent.toFixed(1) }
+          ac.abort()
+        }
+      }
+    })
+    const ms = performance.now() - t0
+    // vazão dos quadros pelo pipe (do 1º ao último quadro aceito pelo main)
+    const fps = tFirstFrame !== null && tLastFrame !== null && reserveFrames > 1 ? +((reserveFrames - 1) / ((tLastFrame - tFirstFrame) / 1000)).toFixed(1) : null
+    return { ...r, ms: Math.round(ms), stages: [...stages], percentMonotonic: percents.every((v, i) => i === 0 || v >= percents[i - 1]), lastPercent: percents[percents.length - 1] ?? null, reserveFps: fps, audioMs: audioMs === null ? null : Math.round(audioMs) }
+  } catch (e) {
+    return { cancelled: e instanceof EditorExportCancelled, at, ...(e instanceof EditorExportCancelled ? {} : { error: e instanceof Error ? e.message : String(e) }) }
+  }
+}
+
+/**
+ * Codificador de reserva: A (WebCodecs) × B (libx264 por falhas simuladas de hardware e software) do trecho I–O
+ * em 1920×1080 / 12 Mbps; referência de privacidade do preview no quadro 1 s do arquivo; B cancelado no meio e uma
+ * nova exportação pela reserva na mesma pasta; e o projeto de 20 s com tamanho alvo (2ª passada pela reserva).
+ */
+async function x264Cases(project: Project, range: { fromUs: number; toUs: number }, params: Params, report: Record<string, unknown>): Promise<void> {
+  const base: EditorExportRequest = { project, width: 1920, height: 1080, fps: 30, fromUs: range.fromUs, toUs: range.toUs, videoBitrate: 12_000_000, audioBitrate: 128_000, outputDir: params.x264Dir, fileName: 'webcodecs.mp4' }
+  const fail = { simulateHwFailure: true, simulateSoftwareFailure: true }
+  report.x264A = await timedExport(base)
+  report.x264B = await timedExport({ ...base, ...fail, fileName: 'reserva.mp4' })
+  report.x264Effects = await settle(() => effectsPreviewRef(project, range.fromUs + 1_000_000, 1920, 1080, { block: params.block, blur: params.blur, outside: params.outside }))
+  // cancelado no meio dos quadros; depois, uma exportação nova pela reserva na mesma pasta termina
+  report.x264Cancel = await timedExport({ ...base, ...fail, outputDir: params.x264CancelDir, fileName: 'cancelada.mp4' }, (p) => !!p.reserve && p.stage === 'render' && p.frame >= 10)
+  report.x264AfterCancel = await timedExport({ ...base, ...fail, width: 640, height: 360, videoBitrate: 2_000_000, outputDir: params.x264CancelDir, fileName: 'depois.mp4' })
+  // tamanho alvo pela reserva: projeto de 20 s em 1280×720, alvo de params.targetMB (1ª passada a 4× → 2ª passada)
+  try {
+    const long = await window.api.project.load(params.longProjectId)
+    const lr = exportRange(contentEndUs(long), 0, 0, 'all')
+    const durUs = lr.toUs - lr.fromUs
+    report.x264Target = await timedExport({
+      project: long, width: 1280, height: 720, fps: 30, fromUs: lr.fromUs, toUs: lr.toUs, audioBitrate: 128_000,
+      videoBitrate: targetBitrate(params.targetMB, durUs, 128), targetBytes: Math.round(params.targetMB * 1024 * 1024),
+      outputDir: params.x264Dir, fileName: 'alvo.mp4', simulateFirstPassOvershoot: true, ...fail
+    })
+    report.x264TargetDurUs = durUs
+  } catch (e) {
+    report.x264Target = { error: e instanceof Error ? e.message : String(e) }
   }
 }
 

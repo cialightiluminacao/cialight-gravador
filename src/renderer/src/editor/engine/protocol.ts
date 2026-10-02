@@ -19,6 +19,8 @@ export interface ExportJobSpec {
   audio: { bitrate: number } | null
   /** Testes: simula falha do encoder de hardware antes do 1º pacote. */
   simulateHwFailure?: boolean
+  /** Testes: simula falha do encoder H.264 em software antes do 1º pacote (exercita o codificador de reserva). */
+  simulateSoftwareFailure?: boolean
   /** Testes: simula falha do encoder HEVC antes do 1º pacote (exercita a volta para H.264). */
   simulateHevcFailure?: boolean
 }

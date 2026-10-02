@@ -29,6 +29,12 @@ export type Unsubscribe = () => void
 export type PipeSpec =
   | { kind: 'gif'; width: number; height: number; fps: number; loop: true }
   | { kind: 'audio'; format: 'wav' | 'mp3' | 'm4a'; sampleRate: 48000; channels: 2; kbps?: number }
+  /**
+   * Fallback libx264 da exportação de vídeo: com `audio`, o job recebe PRIMEIRO exatamente `samples` quadros de
+   * PCM f32 estéreo 48 kHz (temporário no main) e, depois, os quadros RGBA width×height a `fps` (fps do projeto;
+   * o main usa a forma racional, ex.: 29,97 → 30000/1001). videoBitrate em bps; keyFrameInterval em quadros.
+   */
+  | { kind: 'x264'; width: number; height: number; fps: number; videoBitrate: number; keyFrameInterval: number; audio: { kbps: number; samples: number } | null }
 
 export interface ProjectSummary {
   id: string
@@ -303,7 +309,7 @@ export interface IpcApi {
    * com `estimateBytes`, exige estimativa × 2,1 livres), `write` grava bytes por posição, `close` fecha,
    * `finalize` fecha + remuxa com faststart no nome final (apaga o .part; com `maxBytes`, saída maior é
    * apagada e volta `oversize`) e `cancel` apaga o parcial (interrompendo o remux, se houver). Uma por vez.
-   * Formatos por pipe (GIF, só áudio): `openPipe` abre o ffmpeg lendo bytes crus (PipeSpec validado no main),
+   * Formatos por pipe (GIF, só áudio, fallback libx264 do vídeo): `openPipe` abre o ffmpeg lendo bytes crus (PipeSpec validado no main),
    * `pipeWrite` resolve quando o ffmpeg aceitou os bytes (contrapressão: espere cada um), `pipeFinish` termina
    * (GIF: paleta; progresso em onFinalizeProgress) e `cancel` mata o ffmpeg e apaga parcial e temporários.
    * `writeStill` grava um PNG (atômico, nunca sobrescreve).
@@ -319,7 +325,8 @@ export interface IpcApi {
     openPipe(outputDir: string, fileName: string, spec: PipeSpec, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
     /** { cancelled: true }: o job já tinha sido cancelado (cancelamento esperado, não erro). */
     pipeWrite(jobId: string, data: Uint8Array): Promise<void | { cancelled: true }>
-    pipeFinish(jobId: string): Promise<{ path: string; size: number; warning?: string } | { cancelled: true }>
+    /** maxBytes (tamanho alvo): saída maior é apagada e volta `oversize` (como no finalize). */
+    pipeFinish(jobId: string, opts?: { maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string } | { cancelled: true }>
     writeStill(outputDir: string, fileName: string, png: Uint8Array): Promise<{ path: string; size: number }>
     /** "Salvar como" de um .txt (capítulos): UTF-8 sem BOM, CRLF. Devolve o caminho ou null se o usuário cancelou. */
     saveText(defaultPath: string, text: string): Promise<string | null>

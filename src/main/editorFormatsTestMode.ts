@@ -5,15 +5,15 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { basename, join } from 'path'
 import type { Asset, EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import { createEffectItem, createEmptyProject, createMediaItem } from '@shared/editor/factory'
-import { addAsset } from '@shared/editor/ops'
+import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
 import type { ProjectStore } from './project/projectStore'
 import { probeFile, runFfmpeg } from './export/ffmpegRunner'
 import { ffprobePath } from './export/ffmpegPath'
 import { probe } from './media/probe'
 import { assetFromInfo } from './media/ingest'
-import { isFastStart } from './testFixtures'
+import { crossCorrelationLag, isFastStart } from './testFixtures'
 import { loadPage, preloadPath } from './windows/recorderWindow'
-import { check, checkEffects, countFrames, detailEnergy, FX_BLOCK, FX_BLUR, FX_OUTSIDE, FX_SOLID, FX_TARJA, gen, pcmOf, rmsDb, settingsHash, streamInfo, type EffectsOut } from './editorExportTestMode'
+import { BT709, check, checkEffects, countFrames, detailEnergy, frameRgb, FX_BLOCK, FX_BLUR, FX_OUTSIDE, FX_SOLID, FX_TARJA, gen, pcmOf, psnr, rmsDb, settingsHash, streamInfo, type EffectsOut, type ExportOut } from './editorExportTestMode'
 import { editorExportCounts } from './quitGuard'
 
 // Teste de integração dos formatos extras da exportação do editor (CIALIGHT_TEST=editor-formats,
@@ -32,7 +32,15 @@ import { editorExportCounts } from './quitGuard'
 //     os efeitos foram apagados do editor depois de enfileirar), o estado da fila no main (confirmação de saída)
 //     visto com 1 rodando + 3 na fila e zerado no fim; 2ª fila com o item rodando cancelado no meio: sem parcial e
 //     o seguinte concluído.
-//  5. settings.json intocado.
+//  5. Codificador de reserva (F7 Task 5): o trecho I–O em 1920×1080 / 12 Mbps pelo WebCodecs (A) e com falhas
+//     simuladas de hardware E software (B → libx264 por pipe): B fellBackToX264, H.264 High yuv420p BT.709 tv
+//     (marcado como A), quadros = frameCount = A, duração = A ± 1 quadro, AAC 48 kHz estéreo, faststart; pixels A × B
+//     em 6 instantes (PSNR ≥ 35 dB, média |dif.| ≤ 3 por canal) e sem deslocamento de quadro (1º quadro nítido do
+//     buraco do invertido = 60 nos dois); privacidade em B (checkEffects da variante 1080p/12 Mbps, tarja ±3 em todo
+//     bloco e blur/invertido em cada instante, tarja ±3 em TODO quadro de 1–3 s); áudio A × B (RMS dos tons ≤ 0,5 dB,
+//     atraso 0 ± 1 ms); B cancelado no meio sem .mp4/.part/áudio temporário e uma nova exportação terminando; tamanho
+//     alvo de 4 MB no projeto de 20 s pela reserva (2 passadas, final ≤ alvo).
+//  6. settings.json intocado.
 
 const PROJECT_ID = 'p-editor-formats'
 const W = 1920
@@ -61,6 +69,17 @@ const BLUR_GIF_MARGIN = 1
 // Bordas em pixels inteiros a 480×270 (x 96–192, y 27–54) e a 1920×1080.
 const MARKER = { x: 0.3, y: 0.15, w: 0.2, h: 0.1 }
 const MARKER_RGB = [0xa0, 0x50, 0x30]
+// codificador de reserva
+const LONG_ID = 'p-editor-formats-20s'
+const X264_TARGET_MB = 4
+const X264_FRAMES = 120
+// quadros comparados A × B (no meio do quadro: t = (n + 0,5)/30); < 60 = blur, ≥ 60 = invertido
+const X264_SAMPLES = [6, 27, 45, 66, 90, 114]
+const X264_PSNR_MIN = 35
+const X264_MEAN_DIFF_MAX = 3
+// tarja densa: todo quadro de 1–3 s do arquivo
+const DENSE_FROM = 30
+const DENSE_TO = 89
 
 type Region = { x: number; y: number; w: number; h: number }
 interface FileOut { path?: string; size?: number; error?: string; warnings?: string[]; frames?: number; width?: number; height?: number }
@@ -83,7 +102,15 @@ interface Report {
   queue?: { items: QueueOut[]; maxRunning: number; fractionMonotonic: boolean; lastFraction: number | null }
   queueEffects?: EffectsOut
   queueCancel?: { at: { frame: number; percent: number } | null; maxRunning: number; items: QueueOut[] }
+  x264A?: X264Out
+  x264B?: X264Out
+  x264Effects?: Omit<EffectsOut, 'export'>
+  x264Cancel?: X264Out
+  x264AfterCancel?: X264Out
+  x264Target?: X264Out
+  x264TargetDurUs?: number
 }
+type X264Out = ExportOut & { fellBackToX264?: boolean; stages?: string[]; percentMonotonic?: boolean; lastPercent?: number | null; reserveFps?: number | null; audioMs?: number | null; cancelled?: boolean; at?: unknown }
 interface QueueOut { id: string; label: string; kind: string; state: string; path: string | null; message: string | null; startedAt: number | null; endedAt: number | null }
 
 /** Recorte em pixels (par) de uma região normalizada, com `inset` px de margem para dentro. */
@@ -141,6 +168,65 @@ function probeAudio(file: string): Promise<{ codec_name?: string; sample_rate?: 
   })
 }
 
+/** Marcações de cor e perfil da faixa de vídeo (ffprobe). */
+function videoTags(file: string): Promise<Record<string, string | number> | null> {
+  return new Promise((resolve) => {
+    execFile(ffprobePath(), ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,profile,pix_fmt,color_space,color_primaries,color_transfer,color_range,duration,width,height', '-of', 'json', file], { windowsHide: true }, (err, stdout) => {
+      if (err) return resolve(null)
+      try {
+        resolve((JSON.parse(String(stdout)) as { streams?: Record<string, never>[] }).streams?.[0] ?? null)
+      } catch {
+        resolve(null)
+      }
+    })
+  })
+}
+
+/** Quadros [from, to] (índice de decodificação) recortados em `c`, como RGB24 (um Uint8Array por quadro). */
+async function framesRgb(file: string, from: number, to: number, c: Region, out: string): Promise<Uint8Array[]> {
+  await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-vf', `select=between(n\\,${from}\\,${to}),crop=${c.w}:${c.h}:${c.x}:${c.y}`, '-fps_mode', 'passthrough', '-an', '-f', 'rawvideo', '-pix_fmt', 'rgb24', out], { label: 'teste: quadros recortados' })
+  const b = new Uint8Array(readFileSync(out))
+  const n = c.w * c.h * 3
+  const frames: Uint8Array[] = []
+  for (let i = 0; i + n <= b.length; i += n) frames.push(b.subarray(i, i + n))
+  return frames
+}
+
+/** Macroblocos 16×16 inteiros dentro da tarja (a mesma grade do checkEffects) no quadro w×h. */
+function tarjaGrid(w: number, h: number): { bx0: number; by0: number; bx1: number; by1: number } {
+  return {
+    by0: Math.ceil(((FX_SOLID.y - FX_SOLID.h / 2) * h) / FX_BLOCK),
+    bx0: Math.ceil(((FX_SOLID.x - FX_SOLID.w / 2) * w) / FX_BLOCK),
+    by1: Math.floor(((FX_SOLID.y + FX_SOLID.h / 2) * h) / FX_BLOCK) - 1,
+    bx1: Math.floor(((FX_SOLID.x + FX_SOLID.w / 2) * w) / FX_BLOCK) - 1
+  }
+}
+
+/** Pior desvio da cor da tarja no centro de cada macrobloco (miolo e anel) de uma imagem RGB24 `iw` de largura cuja origem é (ox, oy) no quadro. */
+function tarjaWorst(img: Uint8Array, iw: number, ox: number, oy: number, g: ReturnType<typeof tarjaGrid>): { inner: number; ring: number; n: number } {
+  const out = { inner: 0, ring: 0, n: 0 }
+  for (let by = g.by0; by <= g.by1; by++) {
+    for (let bx = g.bx0; bx <= g.bx1; bx++) {
+      const x = bx * FX_BLOCK + FX_BLOCK / 2 - ox
+      const y = by * FX_BLOCK + FX_BLOCK / 2 - oy
+      const i = (y * iw + x) * 3
+      const d = Math.max(Math.abs(img[i] - FX_TARJA[0]), Math.abs(img[i + 1] - FX_TARJA[1]), Math.abs(img[i + 2] - FX_TARJA[2]))
+      out.n++
+      if (by === g.by0 || by === g.by1 || bx === g.bx0 || bx === g.bx1) out.ring = Math.max(out.ring, d)
+      else out.inner = Math.max(out.inner, d)
+    }
+  }
+  return out
+}
+
+async function buildLongProject(dir: string, projects: ProjectStore): Promise<void> {
+  const src = join(dir, 'vinte.mp4')
+  await gen(['-f', 'lavfi', '-i', `testsrc2=size=1280x720:rate=${FPS}`, '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '20', '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', ...BT709, '-c:a', 'aac', '-b:a', '128k', '-ac', '2', src], 'formatos: 20 s')
+  const a: Asset = { ...assetFromInfo('a_vinte', src, statSync(src), await probe(src)), status: 'ready' }
+  rmSync(projects.dirOf(LONG_ID), { recursive: true, force: true })
+  projects.create(addMediaFromAsset(addAsset({ ...createEmptyProject('Vinte segundos', { width: 1280, height: 720, fps: FPS, background: '#000000' }), id: LONG_ID }, a), a.id, 0).project)
+}
+
 async function buildProject(dir: string, projects: ProjectStore): Promise<void> {
   const noise = join(dir, 'ruido.png')
   await gen(['-f', 'lavfi', '-i', `nullsrc=s=480x270,format=gray,geq=lum=random(1)*255,scale=${W}:${H}:flags=neighbor`, '-frames:v', '1', '-update', '1', noise], 'formatos: ruído')
@@ -189,9 +275,12 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
   const cancelPaletteDir = join(dir, 'cancelado-paleta')
   const queueDir = join(dir, 'fila')
   const queueCancelDir = join(dir, 'fila-cancelada')
+  const x264Dir = join(dir, 'reserva')
+  const x264CancelDir = join(dir, 'reserva-cancelada')
   rmSync(dir, { recursive: true, force: true })
-  for (const d of [exportsDir, cancelDir, cancelPaletteDir, queueDir, queueCancelDir]) mkdirSync(d, { recursive: true })
+  for (const d of [exportsDir, cancelDir, cancelPaletteDir, queueDir, queueCancelDir, x264Dir, x264CancelDir]) mkdirSync(d, { recursive: true })
   await buildProject(dir, projects)
+  await buildLongProject(dir, projects)
 
   const win = new BrowserWindow({ width: 800, height: 600, show: false, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
   // estado da fila no main (o mesmo que a confirmação de saída lê), amostrado durante o harness
@@ -202,7 +291,7 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
     seen.pending = Math.max(seen.pending, c.pending)
   }, 20)
   const result = await new Promise<{ ok: boolean; report: Report }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 480 s'] } }), 480_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 900 s'] } }), 900_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: Report }) => {
       clearTimeout(timer)
       resolve(r)
@@ -210,13 +299,13 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = { projectId: PROJECT_ID, outputDir: exportsDir, cancelDir, cancelPaletteDir, inUs: IN_US, outUs: OUT_US, pngUs: PNG_US, pngInvUs: PNG_INV_US, pngBackgroundUs: PNG_BG_US, solid: FX_SOLID, blur: FX_BLUR, queueDir, queueCancelDir, block: FX_BLOCK, outside: FX_OUTSIDE }
+    const params = { projectId: PROJECT_ID, outputDir: exportsDir, cancelDir, cancelPaletteDir, inUs: IN_US, outUs: OUT_US, pngUs: PNG_US, pngInvUs: PNG_INV_US, pngBackgroundUs: PNG_BG_US, solid: FX_SOLID, blur: FX_BLUR, queueDir, queueCancelDir, block: FX_BLOCK, outside: FX_OUTSIDE, x264Dir, x264CancelDir, longProjectId: LONG_ID, targetMB: X264_TARGET_MB }
     loadPage(win, `index.html#editor-formats-test/${encodeURIComponent(JSON.stringify(params))}`)
   })
   clearInterval(poll)
   const r = result.report
   // a referência do preview da fila (variância por bloco, RGB do miolo) é grande: fora do log
-  console.log(`relatório do harness: ${JSON.stringify({ ...r, queueEffects: r.queueEffects ? { export: r.queueEffects.export, error: r.queueEffects.error } : undefined })}`)
+  console.log(`relatório do harness: ${JSON.stringify({ ...r, queueEffects: r.queueEffects ? { export: r.queueEffects.export, error: r.queueEffects.error } : undefined, x264Effects: r.x264Effects ? { error: r.x264Effects.error } : undefined })}`)
   check(result.ok && r.errors.length === 0, `harness sem exceção (${JSON.stringify(r.errors)})`, failures)
   check(r.range?.fromUs === IN_US && r.range?.toUs === OUT_US, `trecho I–O = [1 s, 5 s) (${JSON.stringify(r.range)})`, failures)
   const durS = (OUT_US - IN_US) / 1e6
@@ -427,6 +516,8 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
   check(!!qc?.at && qc.items[0]?.state === 'cancelled' && qc.items[1]?.state === 'done' && qc.maxRunning === 1, `fila: item rodando cancelado no meio (${JSON.stringify(qc?.at)}) e o seguinte concluído (${JSON.stringify(qc?.items.map((i) => [i.label, i.state, i.message]))})`, failures)
   check(cancelLeft.length === 1 && cancelLeft[0] === 'fila-depois.wav', `fila: cancelado sem parcial (.part/.mp4) e o seguinte gravado (${cancelLeft.join(', ') || 'pasta vazia'})`, failures)
 
+  await checkX264(r, dir, x264Dir, x264CancelDir, failures)
+
   check(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
   win.destroy()
   writeFileSync(join(outDir, 'editor-formats-report.json'), JSON.stringify({ result, failures }, null, 2))
@@ -434,3 +525,132 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
   return failures.length ? 1 : 0
 }
 
+
+/** 5. Codificador de reserva: A (WebCodecs) × B (libx264 por pipe), privacidade, áudio, cancelamento e tamanho alvo. */
+async function checkX264(r: Report, dir: string, x264Dir: string, x264CancelDir: string, failures: string[]): Promise<void> {
+  const A = r.x264A
+  const B = r.x264B
+  const fa = A?.path
+  const fb = B?.path
+  check(!!fa && existsSync(fa) && A?.fellBackToX264 === false && A?.fellBackToSoftware === false, `reserva: A (WebCodecs, sem falha) exportado (${fa ?? A?.error}; ${A?.videoCodec}, hw ${A?.hardware})`, failures)
+  check(
+    !!fb && existsSync(fb) && B?.fellBackToX264 === true && B.fellBackToSoftware === true && /libx264/.test(B.videoCodec ?? '') && !!B.warnings?.includes('Exportado com o codificador de reserva (mais lento)'),
+    `reserva: B com falhas simuladas de hardware e software → fellBackToX264, ${B?.videoCodec}, aviso ${JSON.stringify(B?.warnings)} (${fb ?? B?.error})`,
+    failures
+  )
+  console.log(`reserva: A ${A?.ms} ms; B ${B?.ms} ms (áudio ${B?.audioMs} ms; quadros pelo pipe ${B?.reserveFps} fps a 1920×1080); etapas B ${JSON.stringify(B?.stages)}`)
+  check(!!B?.stages?.includes('render+reserva') && !!B.percentMonotonic && B.lastPercent === 100, `reserva: progresso de B com a etapa "Codificador de reserva" (reserve), crescente até 100 % (${JSON.stringify(B?.stages)}; último ${B?.lastPercent})`, failures)
+  if (!fa || !fb || !existsSync(fa) || !existsSync(fb)) return
+  const ta = await videoTags(fa)
+  const tb = await videoTags(fb)
+  console.log(`reserva: marcações A ${JSON.stringify(ta)} | B ${JSON.stringify(tb)}`)
+  check(
+    tb?.codec_name === 'h264' && tb.profile === 'High' && tb.pix_fmt === 'yuv420p' && tb.color_space === 'bt709' && tb.color_primaries === 'bt709' && tb.color_transfer === 'bt709' && tb.color_range === 'tv' && tb.width === 1920 && tb.height === 1080,
+    `reserva: B H.264 High yuv420p BT.709 faixa limitada 1920×1080 (${JSON.stringify(tb)})`,
+    failures
+  )
+  check(!!ta && ta.color_space === tb?.color_space && ta.color_primaries === tb?.color_primaries && ta.color_transfer === tb?.color_transfer && ta.color_range === tb?.color_range, `reserva: mesma marcação de cor que A (${ta?.color_space}/${ta?.color_primaries}/${ta?.color_transfer}/${ta?.color_range})`, failures)
+  const na = await countFrames(fa)
+  const nb = await countFrames(fb)
+  check(nb === X264_FRAMES && na === nb, `reserva: quadros de B = frameCount(I–O, 30 fps) = ${X264_FRAMES} = A (B ${nb}, A ${na})`, failures)
+  const da = Number(ta?.duration)
+  const db = Number(tb?.duration)
+  check(Math.abs(da - db) <= 1 / 30 + 1e-6, `reserva: duração do vídeo B = A ± 1 quadro (${db} × ${da} s)`, failures)
+  const aa = await probeAudio(fb)
+  check(aa?.codec_name === 'aac' && aa.sample_rate === '48000' && aa.channels === 2, `reserva: áudio de B AAC 48 kHz estéreo (${JSON.stringify(aa)})`, failures)
+  check(isFastStart(fb), 'reserva: B com faststart (moov antes do mdat)', failures)
+
+  // ---- pixels A × B ----
+  const parity: string[] = []
+  let worstPsnr = Infinity
+  let worstMean = 0
+  for (const n of X264_SAMPLES) {
+    const t = (n + 0.5) / 30
+    const ia = await frameRgb(fa, t, join(dir, `reserva-a-${n}.rgb`))
+    const ib = await frameRgb(fb, t, join(dir, `reserva-b-${n}.rgb`))
+    const p = psnr(ia, ib)
+    const mean = [0, 0, 0]
+    for (let i = 0; i < ia.length; i++) mean[i % 3] += Math.abs(ia[i] - ib[i])
+    const m = mean.map((v) => v / (ia.length / 3))
+    worstPsnr = Math.min(worstPsnr, p)
+    worstMean = Math.max(worstMean, ...m)
+    parity.push(`q${n}: ${p.toFixed(1)} dB, |dif.| ${m.map((v) => v.toFixed(2)).join('/')}`)
+  }
+  check(worstPsnr >= X264_PSNR_MIN && worstMean <= X264_MEAN_DIFF_MAX, `reserva: pixels A × B em ${X264_SAMPLES.length} instantes — PSNR ≥ ${X264_PSNR_MIN} dB e média |dif.| ≤ ${X264_MEAN_DIFF_MAX} por canal (${parity.join('; ')})`, failures)
+  // sem deslocamento de quadro: o 1º quadro com o buraco do invertido nítido (energia > metade da máxima) é o 60 nos dois
+  const hole = pxRegion(FX_BLUR, 1920, 1080, 64)
+  const firstSharp = async (f: string, tag: string): Promise<{ first: number; e: string }> => {
+    const frames = await framesRgb(f, 54, 65, hole, join(dir, `reserva-buraco-${tag}.rgb`))
+    const e = frames.map((d) => detailEnergy(d, hole.w, hole.h))
+    const max = Math.max(...e)
+    return { first: e.length === 12 ? 54 + e.findIndex((v) => v > max / 2) : -1, e: e.map((v) => v.toFixed(0)).join(' ') }
+  }
+  const sa = await firstSharp(fa, 'a')
+  const sb = await firstSharp(fb, 'b')
+  check(sa.first === 60 && sb.first === 60, `reserva: sem deslocamento de quadro — 1º quadro do buraco nítido A ${sa.first} / B ${sb.first} (= 60; energia 54–65: A ${sa.e} | B ${sb.e})`, failures)
+
+  // ---- privacidade em B ----
+  const fx: EffectsOut | undefined = r.x264Effects ? { ...r.x264Effects, export: { path: fb } } : undefined
+  await checkEffects('reserva B', 'codificador de reserva 1080p / 12 Mbps', fx, { w: 1920, h: 1080, codec: 'h264' }, dir, failures)
+  const grid = tarjaGrid(1920, 1080)
+  const blurIn = pxRegion(FX_BLUR, 1920, 1080, 64)
+  const outside = pxRegion(FX_OUTSIDE, 1920, 1080, 0)
+  const priv: string[] = []
+  let privOk = true
+  for (const n of X264_SAMPLES) {
+    const img = await frameRgb(fb, (n + 0.5) / 30, join(dir, `reserva-b-${n}.rgb`))
+    const tj = tarjaWorst(img, 1920, 0, 0, grid)
+    const eIn = detailEnergy(crop(img, 1920, blurIn), blurIn.w, blurIn.h)
+    const eOut = detailEnergy(crop(img, 1920, outside), outside.w, outside.h)
+    // blur (< 60): a região borrada ≪ o ruído de fora; invertido (≥ 60): o de fora borrado ≪ o buraco nítido
+    const hidden = n < 60 ? eIn < 0.1 * eOut : eOut < 0.1 * eIn
+    const ok = tj.inner <= 3 && tj.ring <= 3 && tj.n > 100 && hidden
+    privOk &&= ok
+    priv.push(`q${n}: tarja ${tj.inner}/${tj.ring} (${tj.n} blocos), ${n < 60 ? 'blur' : 'invertido'} região ${eIn.toFixed(1)} × fora ${eOut.toFixed(1)}${ok ? '' : ' FALHA'}`)
+  }
+  check(privOk, `reserva: privacidade em B em cada instante — tarja ±3 em todo macrobloco (miolo/anel) e blur/invertido escondendo (energia < 10 %): ${priv.join('; ')}`, failures)
+  const tc: Region = { x: grid.bx0 * FX_BLOCK, y: grid.by0 * FX_BLOCK, w: (grid.bx1 - grid.bx0 + 1) * FX_BLOCK, h: (grid.by1 - grid.by0 + 1) * FX_BLOCK }
+  const dense = await framesRgb(fb, DENSE_FROM, DENSE_TO, tc, join(dir, 'reserva-tarja-densa.rgb'))
+  let dWorst = 0
+  let dAt = -1
+  for (let k = 0; k < dense.length; k++) {
+    const w = tarjaWorst(dense[k], tc.w, tc.x, tc.y, grid)
+    const d = Math.max(w.inner, w.ring)
+    if (d > dWorst || dAt < 0) {
+      dWorst = Math.max(dWorst, d)
+      dAt = DENSE_FROM + k
+    }
+  }
+  check(dense.length === DENSE_TO - DENSE_FROM + 1 && dWorst <= 3, `reserva: tarja ±3 em todo macrobloco de TODO quadro de 1–3 s de B (${dense.length} quadros; pior desvio ${dWorst} no quadro ${dAt})`, failures)
+
+  // ---- áudio A × B ----
+  const la = { t1: await rmsDb(fa, ...TONE1), t2: await rmsDb(fa, ...TONE2) }
+  const lb = { t1: await rmsDb(fb, ...TONE1), t2: await rmsDb(fb, ...TONE2) }
+  const d1 = Math.abs(la.t1 - lb.t1)
+  const d2 = Math.abs(la.t2 - lb.t2)
+  check(d1 <= 0.5 && d2 <= 0.5, `reserva: RMS dos tons B × A (440 Hz ${lb.t1} × ${la.t1} dB; 660 Hz ${lb.t2} × ${la.t2} dB; dif. ${d1.toFixed(2)} / ${d2.toFixed(2)} ≤ 0,5)`, failures)
+  const lag = crossCorrelationLag(await pcmOf(fa, join(dir, 'reserva-a.f32')), await pcmOf(fb, join(dir, 'reserva-b.f32')), 96, 1)
+  check(Math.abs(lag) <= 48, `reserva: áudio de B alinhado com A — atraso ${lag} amostras (${((lag / 48000) * 1000).toFixed(2)} ms; 0 ± 1 ms)`, failures)
+
+  // ---- cancelamento e nova exportação ----
+  const c = r.x264Cancel
+  const after = r.x264AfterCancel
+  const left = existsSync(x264CancelDir) ? readdirSync(x264CancelDir) : []
+  check(!!c?.cancelled && !!c.at, `reserva: B cancelado no meio dos quadros (${JSON.stringify(c?.at)}) ${c?.error ?? ''}`, failures)
+  check(!!after?.path && after.fellBackToX264 === true && left.length === 1 && left[0] === 'depois.mp4', `reserva: sem .mp4, .part nem áudio temporário do cancelado; a exportação seguinte pela reserva terminou (${left.join(', ') || 'pasta vazia'}; ${after?.path ?? after?.error})`, failures)
+  if (after?.path && existsSync(after.path)) {
+    const st = await streamInfo(after.path)
+    check(st?.codec_name === 'h264' && st.width === 640 && st.height === 360, `reserva: depois.mp4 válido — h264 640×360 (${JSON.stringify(st)})`, failures)
+  }
+
+  // ---- tamanho alvo pela reserva ----
+  const tg = r.x264Target
+  const target = Math.round(X264_TARGET_MB * 1024 * 1024)
+  check(!!tg?.path && existsSync(tg.path) && tg.fellBackToX264 === true && tg.passes === 2 && (tg.size ?? Infinity) <= target, `reserva: tamanho alvo ${X264_TARGET_MB} MB em ${(r.x264TargetDurUs ?? 0) / 1e6} s — ${tg?.size} bytes ≤ ${target} em ${tg?.passes} passadas (${tg?.path ?? tg?.error})`, failures)
+  if (tg?.path && existsSync(tg.path)) {
+    const st = await streamInfo(tg.path)
+    check(st?.codec_name === 'h264' && st.width === 1280 && st.height === 720 && (await countFrames(tg.path)) === 600, `reserva: alvo.mp4 válido — h264 1280×720, 600 quadros (${JSON.stringify(st)})`, failures)
+  }
+  const files = readdirSync(x264Dir)
+  check(files.every((f) => !f.endsWith('.part')), `reserva: nenhum .part/temporário na pasta (${files.join(', ')})`, failures)
+}
