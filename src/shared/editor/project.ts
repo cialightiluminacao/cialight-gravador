@@ -106,7 +106,9 @@ export function textContentAt(item: TextItem, localUs: Us): string {
   if (!c) return item.text
   const dur = item.durationUs
   const local = Math.min(dur, Math.max(0, localUs))
-  const v = dur > 0 ? c.from + ((c.to - c.from) * local) / dur : c.from
+  const raw = dur > 0 ? c.from + ((c.to - c.from) * local) / dur : c.from
+  // contagem rebaseada num corte (from/to fracionários): resíduo de ponto flutuante num inteiro exato não vira ±1
+  const v = Math.abs(raw - Math.round(raw)) < 1e-9 ? Math.round(raw) : raw
   const n = c.from > c.to ? Math.ceil(v) : Math.floor(v)
   return String(n === 0 ? 0 : n) // sem "-0"
 }

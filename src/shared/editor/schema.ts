@@ -406,6 +406,22 @@ export function validateProject(p: Project): string[] {
       } else if (tr.kind !== 'video') {
         errs.push(`${tag}: item visual só pode ficar em faixa de vídeo`)
       }
+      // faixas dos campos da v1.5 (fora do zod: recusar no parse perderia o projeto inteiro)
+      const out = (name: string, v: number | undefined, lo: number, hi: number): void => {
+        if (v !== undefined && !(v >= lo && v <= hi)) errs.push(`${tag}: ${name} fora do intervalo ${lo}–${hi}`)
+      }
+      if (it.type === 'text') {
+        const st = it.style
+        out('maxWidth', st.maxWidth, 0.01, 1)
+        out('padding', st.padding, 0, 10)
+        out('backgroundRadius', st.backgroundRadius, 0, 10)
+        out('sombra (desfoque)', st.shadowStyle?.blur, 0, 10)
+      } else if (it.type === 'shape') {
+        out('cornerRadius', it.cornerRadius, 0, 0.5)
+        out('spotlight.dim', it.spotlight?.dim, 0, 1)
+        out('box.w', it.box?.w, 0.001, 10)
+        out('box.h', it.box?.h, 0.001, 10)
+      }
       for (const [pt, an] of itemAnimEntries(it)) {
         const name = animLabel(pt)
         const keys = an.keys ?? []

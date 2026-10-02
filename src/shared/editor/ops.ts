@@ -42,6 +42,15 @@ export const isOverlayTrack = (t: Track): boolean =>
   t.kind === 'video' && t.role === undefined && t.items.length > 0 && t.items.every((i) => i.type === 'text' || i.type === 'shape')
 /** Faixa de vídeo com conteúdo visual (mídia, anotações ou vazia) — nem efeitos, nem legendas, nem sobreposição. */
 const isContentTrack = (t: Track): boolean => t.kind === 'video' && !isFxTrack(t) && !isCaptionsTrack(t) && !isOverlayTrack(t)
+/**
+ * A faixa no índice i está acima de alguma faixa de efeitos ou da de legendas? Colocação AUTOMÁTICA de mídia nunca usa
+ * nem cria faixa nessa posição (ficaria por cima dos efeitos de privacidade) — inclusive uma faixa "Texto" que ficou
+ * vazia. Mover explicitamente continua livre (privacyWarnings 'covered' avisa).
+ */
+function aboveGuard(p: Project, i: number): boolean {
+  const g = p.tracks.findIndex((t) => isFxTrack(t) || isCaptionsTrack(t))
+  return g >= 0 && i > g
+}
 
 /**
  * Efeito "só a faixa abaixo" sem targetTrackId (projeto antigo): grava a faixa a que ele está ligado agora pela
@@ -604,9 +613,11 @@ function createTrack(d: Project, kind: TrackKind, index?: number, name?: string,
   if (at === undefined) {
     if (kind === 'audio') at = d.tracks.length
     else {
-      // abaixo do bloco do topo: efeitos, sobreposições (texto/forma) e legendas
+      // abaixo do bloco do topo: efeitos, sobreposições (texto/forma), legendas e qualquer faixa de vídeo acima de
+      // efeitos/legendas (ex.: "Texto" vazia)
       at = aboveLastVideo(d)
-      while (at > 0 && (isFxTrack(d.tracks[at - 1]) || isOverlayTrack(d.tracks[at - 1]) || isCaptionsTrack(d.tracks[at - 1]))) at--
+      const up = (t: Track, i: number): boolean => isFxTrack(t) || isOverlayTrack(t) || isCaptionsTrack(t) || (t.kind === 'video' && aboveGuard(d, i))
+      while (at > 0 && up(d.tracks[at - 1], at - 1)) at--
     }
   }
   // nenhuma faixa de vídeo acima da de legendas
@@ -669,10 +680,13 @@ export function moveTrack(p: Project, trackId: string, toIndex: number): Project
   if (from < 0) throw new EditError('notFound', `Faixa não encontrada: ${trackId}`)
   const to = clamp(Math.round(toIndex), 0, p.tracks.length - 1)
   if (to === from) return p
+  // só a relação da faixa movida com a de legendas (um projeto já fora da regra não trava todos os movimentos)
   const order = [...p.tracks]
-  order.splice(to, 0, ...order.splice(from, 1))
+  const [moved] = order.splice(from, 1)
+  order.splice(to, 0, moved)
   const cap = order.findIndex(isCaptionsTrack)
-  if (cap >= 0 && order.some((t, i) => i > cap && t.kind === 'video')) throw new EditError('invalid', 'A faixa de legendas fica sempre no topo')
+  const bad = isCaptionsTrack(moved) ? order.some((t, i) => i > to && t.kind === 'video') : moved.kind === 'video' && cap >= 0 && to > cap
+  if (bad) throw new EditError('invalid', 'A faixa de legendas fica sempre no topo')
   return edit(p, (d) => {
     const [t] = d.tracks.splice(from, 1)
     d.tracks.splice(to, 0, t)
@@ -683,6 +697,8 @@ export function moveTrack(p: Project, trackId: string, toIndex: number): Project
 export function updateTrack(p: Project, trackId: string, patch: Partial<Omit<Track, 'id' | 'items' | 'kind'>>): Project {
   const i = p.tracks.findIndex((t) => t.id === trackId)
   if (i < 0) throw new EditError('notFound', `Faixa não encontrada: ${trackId}`)
+  // o papel de legendas só nasce em ensureCaptionsTrack (uma faixa, no topo, só textos)
+  if (patch.role === 'captions' && !isCaptionsTrack(p.tracks[i])) throw new EditError('invalid', 'Use "Legendas" para criar a faixa de legendas')
   return edit(p, (d) => { Object.assign(d.tracks[i], patch) })
 }
 
@@ -736,7 +752,7 @@ function pickTrack(p: Project, kind: TrackKind, explicitId: string | undefined, 
     if (t.kind !== kind) throw new EditError('invalid', `Faixa ${t.name} não é de ${kind === 'video' ? 'vídeo' : 'áudio'}`)
     return { project: p, trackId: t.id, mode: mode ?? 'overwrite' }
   }
-  const candidates = p.tracks.filter((t) => t.kind === kind && !t.locked && !isFxTrack(t) && !isCaptionsTrack(t) && !isOverlayTrack(t) && (kind !== 'audio' || (t.role === 'music') === music))
+  const candidates = p.tracks.filter((t, i) => t.kind === kind && !t.locked && !isFxTrack(t) && !isCaptionsTrack(t) && !isOverlayTrack(t) && !(kind === 'video' && aboveGuard(p, i)) && (kind !== 'audio' || (t.role === 'music') === music))
   const chosen = mode ? candidates[0] : candidates.find((t) => isFree(t, s, e))
   if (chosen) return { project: p, trackId: chosen.id, mode: mode ?? 'overwrite' }
   const r = music ? addTrack(p, 'audio', undefined, musicTrackName(p), 'music') : addTrack(p, kind)
@@ -2053,7 +2069,8 @@ function addOverlayItem(p: Project, item: TextItem | ShapeItem, baseName: string
     let t = trackId ? mustTrack(d, trackId) : undefined
     for (let i = d.tracks.length - 1; !t && i >= 0; i--) {
       const x = d.tracks[i]
-      if (isOverlayTrack(x) && !x.locked && !x.hidden && isFree(x, s, e)) t = x
+      // só sobreposições sem faixa de efeitos acima (abaixo de uma, o texto novo seria desfocado)
+      if (isOverlayTrack(x) && !x.locked && !x.hidden && isFree(x, s, e) && !d.tracks.some((y, j) => j > i && isFxTrack(y))) t = x
     }
     if (!t) t = mustTrack(d, createTrack(d, 'video', overlayInsertIndex(d), freeTrackName(d, baseName)))
     t.items.push(item)
@@ -2100,7 +2117,7 @@ export function addCaption(p: Project, atUs: Us, text: string, opts?: { duration
   assertUnlocked(t)
   if (t.items.some((i) => i.startUs <= at && at < end(i))) throw new EditError('overlap', 'Já há uma legenda neste ponto')
   const next = Math.min(Infinity, ...t.items.filter((i) => i.startUs > at).map((i) => i.startUs))
-  const want = opts?.durationUs === undefined ? CAPTION_DEFAULT_US : Math.round(opts.durationUs)
+  const want = opts?.durationUs === undefined ? CAPTION_DEFAULT_US : Math.max(MIN_ITEM_US, Math.round(opts.durationUs))
   const dur = Math.min(want, next - at)
   if (dur < MIN_ITEM_US) throw new EditError('overlap', 'Não há espaço para uma legenda aqui: a próxima começa logo em seguida')
   const dist = (i: Item): number => (i.startUs > at ? i.startUs - at : at - end(i))

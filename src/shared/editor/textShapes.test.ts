@@ -19,7 +19,6 @@ function withClip(): { p: Project; clip: string } {
 const item = <T extends Item = Item>(p: Project, id: string): T => ops.findItem(p, id)!.item as T
 const trackOf = (p: Project, id: string): Track => ops.findItem(p, id)!.track
 const idx = (p: Project, trackId: string): number => p.tracks.findIndex((t) => t.id === trackId)
-const videoNames = (p: Project): string[] => p.tracks.filter((t) => t.kind === 'video').map((t) => t.name)
 const code = (fn: () => unknown): string => {
   try { fn() } catch (e) { return `${(e as ops.EditError).code}: ${(e as Error).message}` }
   return 'ok'
@@ -406,10 +405,91 @@ describe('compatibilidade com a v1.3 (invariante 1)', () => {
     expect(parseProject(raw)).toEqual(q)
     expect(parseProjectV13(raw).success).toBe(false)
   })
-  it('videoNames: sanity da ordem (mídia, texto, legendas)', () => {
-    const p = full()
-    const names = videoNames(p)
-    expect(names[0]).toBe('Vídeo 1')
-    expect(names.at(-1)).toBe('Legendas')
+})
+
+describe('revisão 1: mídia nunca é colocada automaticamente acima dos efeitos', () => {
+  /** V1 [0,10) com áudio, blur em Efeitos sobre ele, "Texto" acima de Efeitos com um título em [0,3). */
+  function scene(): { p: Project; fxTrack: string; textTrack: string; title: string } {
+    const { p } = withClip()
+    const fx = ops.addEffect(p, 'blur', 0)
+    const t = ops.addText(ops.addAsset(fx.project, vid('b')), 'title', 0)
+    const q = t.project
+    const fxTrack = trackOf(q, fx.itemId).id, textTrack = trackOf(q, t.itemId).id
+    expect(idx(q, textTrack)).toBeGreaterThan(idx(q, fxTrack))
+    return { p: q, fxTrack, textTrack, title: t.itemId }
+  }
+  it('"Texto" esvaziada (texto apagado ou movido): mídia nova vai para uma faixa abaixo dos efeitos', () => {
+    const { p, fxTrack, textTrack, title } = scene()
+    const low = ops.addTrack(p, 'video', 0, 'Baixo')
+    for (const empty of [ops.deleteItems(p, [title]), ops.moveItems(low.project, [title], 0, { toTrackId: low.trackId })]) {
+      expect(empty.tracks.find((t) => t.id === textTrack)!.items).toEqual([])
+      const m = ops.addMediaFromAsset(empty, 'b', 5 * S)
+      const q = m.project
+      const mt = trackOf(q, m.itemIds[0]).id
+      expect(mt).not.toBe(textTrack)
+      expect(idx(q, mt)).toBeLessThan(idx(q, fxTrack))
+      // e uma faixa de vídeo nova sem índice também fica abaixo dos efeitos
+      const nt = ops.addTrack(empty, 'video')
+      expect(idx(nt.project, nt.trackId)).toBeLessThan(idx(nt.project, fxTrack))
+    }
+  })
+  it('"Texto" com itens: colocação de mídia inalterada (faixa nova abaixo dos efeitos e do texto)', () => {
+    const { p, fxTrack, textTrack } = scene()
+    const m = ops.addMediaFromAsset(p, 'b', 5 * S)
+    const q = m.project
+    const mt = trackOf(q, m.itemIds[0]).id
+    expect(mt).not.toBe(textTrack)
+    expect(idx(q, mt)).toBeLessThan(idx(q, fxTrack))
+    expect(idx(q, mt)).toBeLessThan(idx(q, textTrack))
+  })
+  it('texto novo não reaproveita faixa de sobreposição que está abaixo de uma faixa de efeitos', () => {
+    const { p, fxTrack, textTrack } = scene()
+    const moved = ops.moveTrack(p, textTrack, idx(p, fxTrack))
+    expect(idx(moved, textTrack)).toBeLessThan(idx(moved, fxTrack))
+    const t = ops.addText(moved, 'subtitle', 5 * S)
+    const tt = trackOf(t.project, t.itemId).id
+    expect(tt).not.toBe(textTrack)
+    expect(idx(t.project, tt)).toBeGreaterThan(idx(t.project, fxTrack))
+  })
+})
+
+describe('revisão 1: achados menores', () => {
+  it('addCaption: durationUs ≤ 0 ou menor que o mínimo vira MIN_ITEM_US', () => {
+    const { p } = withClip()
+    for (const d of [0, -5, 1]) {
+      const r = ops.addCaption(p, 0, 'A', { durationUs: d })
+      expect(item(r.project, r.itemId).durationUs).toBe(MIN_ITEM_US)
+    }
+  })
+  it('textContentAt: from/to fracionários de um corte não erram ±1 num inteiro exato', () => {
+    // from = 0.30000000000000004: em 30% do item v ≈ 5,5e-17 (deveria ser 0) e ceil daria "1"
+    const t: TextItem = { ...createTextItem('countdown', 0), counter: { from: 0.1 + 0.2, to: -0.7 }, durationUs: S }
+    expect(textContentAt(t, 0.3 * S)).toBe('0')
+    expect(textContentAt(t, 0.29 * S)).toBe('1')
+  })
+  it('moveTrack só confere a faixa movida; updateTrack não cria papel de legendas', () => {
+    const { p } = withClip()
+    const cap = ops.ensureCaptionsTrack(p)
+    // estado fora da regra (projeto antigo/manual): legendas não no topo — mover outras faixas continua possível
+    const broken: Project = { ...cap.project, tracks: [...cap.project.tracks] }
+    const ci = idx(broken, cap.trackId)
+    broken.tracks.splice(ci, 1)
+    broken.tracks.splice(0, 0, cap.project.tracks[ci])
+    const audio = broken.tracks.find((t) => t.kind === 'audio')!.id
+    expect(code(() => ops.moveTrack(broken, audio, 0))).toBe('ok')
+    expect(code(() => ops.moveTrack(broken, cap.trackId, broken.tracks.length - 1))).toBe('ok')
+    const v1 = p.tracks.find((t) => t.name === 'Vídeo 1')!.id
+    expect(code(() => ops.updateTrack(p, v1, { role: 'captions' }))).toMatch(/^invalid: /)
+    expect(code(() => ops.updateTrack(cap.project, cap.trackId, { role: 'captions', name: 'Subs' }))).toBe('ok')
+  })
+  it('validateProject confere as faixas dos campos numéricos novos', () => {
+    const { p } = withClip()
+    const t = ops.addText(p, 'caption', 0)
+    const s = ops.addShape(t.project, 'spotlight', 0)
+    let q = ops.updateItem<TextItem>(s.project, t.itemId, (it) => { it.style.maxWidth = 2; it.style.padding = -1 })
+    q = ops.updateItem<ShapeItem>(q, s.itemId, (it) => { it.cornerRadius = 0.9; it.spotlight = { dim: 1.5 }; it.box = { w: 0, h: 0.2 } })
+    const errs = validateProject(q).join('\n')
+    for (const k of ['maxWidth', 'padding', 'cornerRadius', 'spotlight.dim', 'box.w']) expect(errs).toContain(k)
+    expect(validateProject(s.project)).toEqual([])
   })
 })
