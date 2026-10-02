@@ -57,12 +57,18 @@ export interface EffectRegion { shape: 'rect' | 'ellipse'; x: Anim<number>; y: A
 export interface EffectItem extends ItemBase {
   type: 'effect'; effect: 'blur' | 'pixelate' | 'solid'; region: EffectRegion
   strength: Anim<number>; feather: number; color: string; invert: boolean; scope: 'below' | 'track'
+  /**
+   * Faixa cuja camada o escopo `track` ("só a faixa abaixo") afeta — ligação explícita, nunca pela posição. Ausente
+   * (projetos antigos) = faixa de vídeo visível logo abaixo do efeito; qualquer edição grava a faixa atual aqui.
+   */
+  targetTrackId?: string
 }
 /** autoFadeMs: sumiço automático dos traços (como settings.annotations.autoFadeSec da v1); null/ausente = ficam até apagar. */
 export interface AnnotationsItem extends ItemBase { type: 'annotations'; sessionId: string; inUs: Us; autoFadeMs?: number | null }
 export type Item = MediaItem | TextItem | ShapeItem | EffectItem | AnnotationsItem
 export type TrackKind = 'video' | 'audio'
-export interface Track { id: string; kind: TrackKind; name: string; muted: boolean; hidden: boolean; locked: boolean; volume: number; role?: 'voice' | 'music' | 'sfx'; items: Item[] }
+/** role 'effects': faixa de efeitos de privacidade (só recebe efeitos; identificada pelo papel, não pelo nome). */
+export interface Track { id: string; kind: TrackKind; name: string; muted: boolean; hidden: boolean; locked: boolean; volume: number; role?: 'voice' | 'music' | 'sfx' | 'effects'; items: Item[] }
 export interface Marker { id: string; tUs: Us; label: string; color: string }
 export interface ProjectCanvas { width: number; height: number; fps: number; background: string }
 export interface Project {

@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { Maximize, ShieldAlert } from 'lucide-react'
-import { convertEffects, setAnimValue, setItemEnabled, type AnimPath } from '@shared/editor/ops'
+import { convertEffects, setAnimValue, setEffectScope, setItemEnabled, type AnimPath } from '@shared/editor/ops'
 import { privacyWarnings } from '@shared/editor/privacy'
 import type { EffectItem, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
@@ -81,7 +81,7 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
         </div>
         <div className="space-y-1 pt-0.5 text-[11px]">
           <span className="text-muted">Escopo</span>
-          <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={item.scope} options={lock(SCOPE_OPTIONS)} onValueChange={(scope) => editItem<EffectItem>(id, (d) => { d.scope = scope })} />
+          <Segmented size="sm" className="flex w-full [&>*]:flex-1" value={item.scope} options={lock(SCOPE_OPTIONS)} onValueChange={(scope) => apply((p) => setEffectScope(p, id, scope))} />
         </div>
       </PanelSection>
 

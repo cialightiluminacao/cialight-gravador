@@ -94,7 +94,8 @@ const effectItem = z.object({
   feather: z.number(),
   color: z.string(),
   invert: z.boolean(),
-  scope: z.enum(['below', 'track'])
+  scope: z.enum(['below', 'track']),
+  targetTrackId: z.string().optional()
 })
 const annotationsItem = z.object({ ...itemBase, type: z.literal('annotations'), sessionId: z.string(), inUs: us, autoFadeMs: z.number().nonnegative().nullable().optional() })
 const item = z.discriminatedUnion('type', [mediaItem, textItem, shapeItem, effectItem, annotationsItem])
@@ -142,7 +143,7 @@ const track = z.object({
   hidden: z.boolean(),
   locked: z.boolean(),
   volume: z.number(),
-  role: z.enum(['voice', 'music', 'sfx']).optional(),
+  role: z.enum(['voice', 'music', 'sfx', 'effects']).optional(),
   items: z.array(item)
 })
 
@@ -159,11 +160,23 @@ export const ProjectSchema: z.ZodType<Project> = z.object({
   originSessionId: z.string().optional()
 })
 
-/** Hoje identidade para version 1; lança se a versão for maior que a suportada. */
+/**
+ * Version 1; lança se a versão for maior que a suportada. Faixas de efeitos anteriores ao papel (F2 até a revisão
+ * final): faixa de vídeo sem papel chamada "Efeitos"/"Efeitos N" e só com efeitos (ou vazia) ganha role 'effects'.
+ * Não muda o objeto recebido.
+ */
 export function migrateProject(json: unknown): unknown {
   const v = (json as { version?: unknown } | null)?.version
   if (typeof v === 'number' && v > 1) throw new Error(`Versão de projeto não suportada: ${v}`)
-  return json
+  const tracks = (json as { tracks?: unknown } | null)?.tracks
+  if (!Array.isArray(tracks)) return json
+  const isLegacyFx = (t: unknown): boolean => {
+    const x = t as { kind?: unknown; name?: unknown; role?: unknown; items?: unknown }
+    return x?.kind === 'video' && x.role === undefined && typeof x.name === 'string' && /^Efeitos( \d+)?$/.test(x.name) &&
+      Array.isArray(x.items) && x.items.every((i) => (i as { type?: unknown })?.type === 'effect')
+  }
+  if (!tracks.some(isLegacyFx)) return json
+  return { ...(json as object), tracks: tracks.map((t) => (isLegacyFx(t) ? { ...(t as object), role: 'effects' } : t)) }
 }
 
 export function parseProject(json: unknown): Project {

@@ -1,6 +1,7 @@
 import { produce } from 'immer'
 import { evalAnim, removeKey, setKey, setValue, sliceKeys } from './anim'
 import { createEffectItem, createMediaItem } from './factory'
+import { visualTrackBelow } from './resolve'
 import type { EffectPresetId, EffectRegionInit } from './factory'
 import { newId } from './ids'
 import { frameDurUs, itemEndUs } from './time'
@@ -23,10 +24,30 @@ export type InsertMode = 'overwrite' | 'insert'
 
 const end = itemEndUs
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
-/** Nome das faixas de efeitos criadas por addEffect ("Efeitos", "Efeitos 2", …). */
-const FX_TRACK = /^Efeitos( \d+)?$/
-/** Faixa de efeitos (só recebe efeitos; mídia nunca entra nela)? */
-export const isFxTrack = (t: Track): boolean => t.kind === 'video' && FX_TRACK.test(t.name)
+/** Faixa de efeitos (role 'effects': só recebe efeitos; mídia nunca entra nela)? Pelo papel, nunca pelo nome. */
+export const isFxTrack = (t: Track): boolean => t.kind === 'video' && t.role === 'effects'
+
+/**
+ * Efeito "só a faixa abaixo" sem targetTrackId (projeto antigo): grava a faixa a que ele está ligado agora pela
+ * posição (visualTrackBelow), antes de qualquer edição mexer na ordem das faixas. Daí em diante a ligação é explícita.
+ */
+function stampLegacyTargets(d: Project): void {
+  for (const t of d.tracks) {
+    for (const it of t.items) {
+      if (it.type !== 'effect' || it.scope !== 'track' || it.targetTrackId) continue
+      const below = visualTrackBelow(d, t.id)
+      if (below) it.targetTrackId = below
+    }
+  }
+}
+
+/** produce do immer com stampLegacyTargets antes da receita (toda edição grava as ligações antigas). */
+function edit(p: Project, recipe: (d: Project) => void): Project {
+  return produce(p, (d) => {
+    stampLegacyTargets(d)
+    recipe(d)
+  })
+}
 
 // ---------------------------------------------------------------- consultas
 
@@ -323,47 +344,63 @@ function nextFxName(p: Project): string {
   return name
 }
 
-/** Índice da faixa de vídeo visível com o clipe do grupo do efeito (o que cruza o intervalo dele, se houver); −1 = nenhum. */
-function targetTrackIndex(d: Project, it: Item): number {
-  if (!it.linkId) return -1
-  let best = -1
-  d.tracks.forEach((t, i) => {
-    if (t.kind !== 'video' || t.hidden) return
+/**
+ * Põe o efeito `it` (já fora de qualquer faixa) numa faixa: `prefer` se estiver livre e desbloqueada; senão uma
+ * faixa de efeitos existente acima de toda a mídia, visível, desbloqueada e livre no intervalo; senão uma "Efeitos N"
+ * nova no topo do bloco de efeitos — nunca abaixo de mídia. A ligação do escopo `track` é explícita
+ * (targetTrackId), então a faixa do efeito não importa para ela.
+ */
+function placeEffect(d: Project, it: Item, prefer?: Track): void {
+  const s = it.startUs, e = end(it)
+  if (prefer && !prefer.locked && isFree(prefer, s, e)) { prefer.items.push(it); return }
+  const lastMedia = d.tracks.reduce((m, t, i) => (t.kind === 'video' && !isFxTrack(t) ? i : m), -1)
+  const t = d.tracks.find((x, i) => i > lastMedia && isFxTrack(x) && !x.locked && !x.hidden && isFree(x, s, e))
+  ;(t ?? mustTrack(d, createTrack(d, 'video', aboveLastVideo(d), nextFxName(d), 'effects'))).items.push(it)
+}
+
+/** Faixa do clipe de vídeo do grupo do efeito (o que cruza o intervalo dele, se houver); null = sem clipe vinculado. */
+function linkedClipTrack(p: Project, it: Item): string | null {
+  if (!it.linkId) return null
+  let best: string | null = null
+  for (const t of p.tracks) {
+    if (t.kind !== 'video') continue
     for (const m of t.items) {
       if (m.linkId !== it.linkId || m.type !== 'media' || !m.visual) continue
-      if (best < 0 || (m.startUs < end(it) && end(m) > it.startUs)) best = i
+      if (!best || (m.startUs < end(it) && end(m) > it.startUs)) best = t.id
     }
-  })
+  }
   return best
 }
 
-/**
- * Põe o efeito `it` (já fora de qualquer faixa) numa faixa: `prefer` se estiver livre e desbloqueada; senão uma
- * faixa "Efeitos" existente acima de toda a mídia, visível, desbloqueada e livre no intervalo; senão uma "Efeitos N"
- * nova logo acima do bloco de efeitos (topo das faixas de vídeo) — nunca abaixo de mídia.
- * Escopo `track` (só a faixa logo abaixo): precisa ficar logo acima da faixa do seu clipe — numa faixa "Efeitos"
- * livre ali, ou numa nova ali se o clipe estiver na faixa de mídia mais alta. Sem isso ele não acharia a camada e
- * não esconderia nada; então passa a valer para tudo abaixo (cobre a mais, nunca a menos). Devolve true nesse caso.
- */
-function placeEffect(d: Project, it: Item, prefer?: Track): boolean {
-  const s = it.startUs, e = end(it)
-  if (prefer && !prefer.locked && isFree(prefer, s, e)) { prefer.items.push(it); return false }
-  let downgraded = false
-  if (it.type === 'effect' && it.scope === 'track') {
-    const ti = targetTrackIndex(d, it)
-    if (ti >= 0) {
-      const above = d.tracks[ti + 1]
-      if (above && above.kind === 'video' && FX_TRACK.test(above.name) && !above.locked && !above.hidden && isFree(above, s, e)) { above.items.push(it); return false }
-      const topMedia = d.tracks.every((t, i) => i <= ti || t.kind !== 'video' || FX_TRACK.test(t.name))
-      if (topMedia) { mustTrack(d, createTrack(d, 'video', ti + 1, nextFxName(d))).items.push(it); return false }
-    }
-    it.scope = 'below'
-    downgraded = true
+/** Faixa de mídia visível mais próxima abaixo de trackId (pula ocultas, de áudio e de efeitos); null = nenhuma. */
+function mediaTrackBelow(p: Project, trackId: string): string | null {
+  for (let i = p.tracks.findIndex((t) => t.id === trackId) - 1; i >= 0; i--) {
+    const t = p.tracks[i]
+    if (t.kind === 'video' && !t.hidden && !isFxTrack(t)) return t.id
   }
-  const lastMedia = d.tracks.reduce((m, t, i) => (t.kind === 'video' && !FX_TRACK.test(t.name) ? i : m), -1)
-  const t = d.tracks.find((x, i) => x.kind === 'video' && i > lastMedia && FX_TRACK.test(x.name) && !x.locked && !x.hidden && isFree(x, s, e))
-  ;(t ?? mustTrack(d, createTrack(d, 'video', aboveLastVideo(d), nextFxName(d)))).items.push(it)
-  return downgraded
+  return null
+}
+
+/** Alvo do escopo `track` de um efeito na faixa effectTrackId: a faixa do clipe vinculado, senão a mídia logo abaixo. */
+function scopeTarget(p: Project, it: Item, effectTrackId: string): string | undefined {
+  return linkedClipTrack(p, it) ?? mediaTrackBelow(p, effectTrackId) ?? undefined
+}
+
+/**
+ * Escopo do efeito. "Só a faixa abaixo" (`track`) grava targetTrackId: a faixa do clipe vinculado, senão a de mídia
+ * visível mais próxima abaixo do efeito. "Tudo abaixo" apaga a ligação.
+ */
+export function setEffectScope(p: Project, itemId: string, scope: EffectItem['scope']): Project {
+  const f = mustFind(p, itemId)
+  if (f.item.type !== 'effect') throw new EditError('invalid', 'Só efeitos têm escopo')
+  assertUnlocked(f.track)
+  const target = scope === 'track' ? scopeTarget(p, f.item, f.track.id) : undefined
+  return edit(p, (d) => {
+    const it = mustFind(d, itemId).item as EffectItem
+    it.scope = scope
+    if (target) it.targetTrackId = target
+    else delete it.targetTrackId
+  })
 }
 
 /**
@@ -372,7 +409,7 @@ function placeEffect(d: Project, it: Item, prefer?: Track): boolean {
  */
 function overwriteIn(d: Project, t: Track, s: Us, e: Us): Item[] {
   let lifted: Item[] = []
-  if (FX_TRACK.test(t.name)) {
+  if (isFxTrack(t)) {
     lifted = t.items.filter((i) => isFollower(d, i) && i.startUs < e && end(i) > s)
     if (lifted.length) t.items = t.items.filter((i) => !lifted.includes(i))
   }
@@ -386,7 +423,7 @@ function overwriteIn(d: Project, t: Track, s: Us, e: Us): Item[] {
 
 /** Mídia (não-efeito) não entra em faixa "Efeitos": ficaria por cima dos efeitos das faixas de baixo. */
 function assertNotFxTrackFor(it: Item, t: Track): void {
-  if (it.type !== 'effect' && t.kind === 'video' && FX_TRACK.test(t.name)) throw new EditError('invalid', `A faixa "${t.name}" é só para efeitos`)
+  if (it.type !== 'effect' && isFxTrack(t)) throw new EditError('invalid', `A faixa "${t.name}" é só para efeitos`)
 }
 
 /**
@@ -400,12 +437,6 @@ function relocateFollowers(d: Project, ids: Iterable<string>): void {
     f.track.items.splice(f.itemIndex, 1)
     placeEffect(d, f.item)
   }
-}
-
-/** Quantos efeitos passaram de "só a faixa abaixo" para "tudo abaixo" entre `before` e `after` (mesmo id). */
-export function scopeDowngrades(before: Project, after: Project): number {
-  const was = new Set(before.tracks.flatMap((t) => t.items.filter((i) => i.type === 'effect' && i.scope === 'track').map((i) => i.id)))
-  return after.tracks.reduce((n, t) => n + t.items.filter((i) => i.type === 'effect' && i.scope === 'below' && was.has(i.id)).length, 0)
 }
 
 /** Grupos de `links` que ficaram sem mídia: os efeitos que sobraram perdem o vínculo (não seguem mais nada). */
@@ -445,7 +476,7 @@ function finalize(d: Project): void {
 
 function defaultTrackName(p: Project, kind: TrackKind): string {
   const prefix = kind === 'video' ? 'Vídeo' : 'Áudio'
-  let n = p.tracks.filter((t) => t.kind === kind && !FX_TRACK.test(t.name)).length + 1
+  let n = p.tracks.filter((t) => t.kind === kind && !isFxTrack(t)).length + 1
   while (p.tracks.some((t) => t.name === `${prefix} ${n}`)) n++
   return `${prefix} ${n}`
 }
@@ -461,18 +492,18 @@ function aboveLastVideo(p: Project): number {
  * Cria faixa no draft. Índice padrão: vídeo logo acima da última faixa de vídeo, mas abaixo do bloco de faixas
  * "Efeitos" do topo (mídia nova nunca fica por cima dos efeitos de privacidade); áudio no fim.
  */
-function createTrack(d: Project, kind: TrackKind, index?: number, name?: string): string {
+function createTrack(d: Project, kind: TrackKind, index?: number, name?: string, role?: Track['role']): string {
   let at = index
   if (at === undefined) {
     if (kind === 'audio') at = d.tracks.length
     else {
       at = aboveLastVideo(d)
-      while (at > 0 && d.tracks[at - 1].kind === 'video' && FX_TRACK.test(d.tracks[at - 1].name)) at--
+      while (at > 0 && isFxTrack(d.tracks[at - 1])) at--
     }
   }
   const id = newId('t_')
   d.tracks.splice(clamp(at, 0, d.tracks.length), 0, {
-    id, kind, name: name ?? defaultTrackName(d, kind), muted: false, hidden: false, locked: false, volume: 1, items: []
+    id, kind, name: name ?? defaultTrackName(d, kind), muted: false, hidden: false, locked: false, volume: 1, ...(role ? { role } : {}), items: []
   })
   return id
 }
@@ -481,19 +512,19 @@ function createTrack(d: Project, kind: TrackKind, index?: number, name?: string)
 
 export function addAsset(p: Project, a: Asset): Project {
   if (p.assets.some((x) => x.id === a.id)) throw new EditError('invalid', `Asset já existe: ${a.id}`)
-  return produce(p, (d) => { d.assets.push(a) })
+  return edit(p, (d) => { d.assets.push(a) })
 }
 
 export function updateAsset(p: Project, id: string, patch: Partial<Asset>): Project {
   const i = p.assets.findIndex((x) => x.id === id)
   if (i < 0) throw new EditError('notFound', `Asset não encontrado: ${id}`)
-  return produce(p, (d) => { Object.assign(d.assets[i], omit(patch, 'id')) })
+  return edit(p, (d) => { Object.assign(d.assets[i], omit(patch, 'id')) })
 }
 
 /** Remove o asset e todos os itens que o usam (inclusive em faixas bloqueadas). */
 export function removeAsset(p: Project, id: string): Project {
   if (!p.assets.some((x) => x.id === id)) throw new EditError('notFound', `Asset não encontrado: ${id}`)
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     d.assets = d.assets.filter((x) => x.id !== id)
     const links = d.tracks.flatMap((t) => t.items.filter((i) => i.type === 'media' && i.assetId === id && i.linkId).map((i) => i.linkId!))
     for (const t of d.tracks) {
@@ -506,16 +537,16 @@ export function removeAsset(p: Project, id: string): Project {
 
 // ---------------------------------------------------------------- faixas
 
-export function addTrack(p: Project, kind: TrackKind, index?: number, name?: string): { project: Project; trackId: string } {
+export function addTrack(p: Project, kind: TrackKind, index?: number, name?: string, role?: Track['role']): { project: Project; trackId: string } {
   let trackId = ''
-  const project = produce(p, (d) => { trackId = createTrack(d, kind, index, name) })
+  const project = edit(p, (d) => { trackId = createTrack(d, kind, index, name, role) })
   return { project, trackId }
 }
 
 export function removeTrack(p: Project, trackId: string): Project {
   assertUnlocked(mustTrack(p, trackId))
   const links = mediaLinks(p, mustTrack(p, trackId).items.map((i) => i.id))
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     d.tracks = d.tracks.filter((t) => t.id !== trackId)
     dropOrphanLinks(d, links)
     finalize(d)
@@ -527,7 +558,7 @@ export function moveTrack(p: Project, trackId: string, toIndex: number): Project
   if (from < 0) throw new EditError('notFound', `Faixa não encontrada: ${trackId}`)
   const to = clamp(Math.round(toIndex), 0, p.tracks.length - 1)
   if (to === from) return p
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const [t] = d.tracks.splice(from, 1)
     d.tracks.splice(to, 0, t)
   })
@@ -537,7 +568,7 @@ export function moveTrack(p: Project, trackId: string, toIndex: number): Project
 export function updateTrack(p: Project, trackId: string, patch: Partial<Omit<Track, 'id' | 'items' | 'kind'>>): Project {
   const i = p.tracks.findIndex((t) => t.id === trackId)
   if (i < 0) throw new EditError('notFound', `Faixa não encontrada: ${trackId}`)
-  return produce(p, (d) => { Object.assign(d.tracks[i], patch) })
+  return edit(p, (d) => { Object.assign(d.tracks[i], patch) })
 }
 
 // ---------------------------------------------------------------- inserção
@@ -559,7 +590,7 @@ export function insertItems(p: Project, trackId: string, items: Item[], mode: In
   const ids = items.map((i) => i.id)
   if (new Set(ids).size !== ids.length || ids.some((id) => findItem(p, id))) throw new EditError('invalid', 'Id de item repetido')
   const sorted = [...items].sort((a, b) => a.startUs - b.startUs)
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const t = mustTrack(d, trackId)
     let placed = sorted
     let lifted: Item[] = []
@@ -588,7 +619,7 @@ function pickTrack(p: Project, kind: TrackKind, explicitId: string | undefined, 
     if (t.kind !== kind) throw new EditError('invalid', `Faixa ${t.name} não é de ${kind === 'video' ? 'vídeo' : 'áudio'}`)
     return { project: p, trackId: t.id, mode: mode ?? 'overwrite' }
   }
-  const candidates = p.tracks.filter((t) => t.kind === kind && !t.locked && !FX_TRACK.test(t.name))
+  const candidates = p.tracks.filter((t) => t.kind === kind && !t.locked && !isFxTrack(t))
   const chosen = mode ? candidates[0] : candidates.find((t) => isFree(t, s, e))
   if (chosen) return { project: p, trackId: chosen.id, mode: mode ?? 'overwrite' }
   const r = addTrack(p, kind)
@@ -640,7 +671,7 @@ export function splitAt(p: Project, itemIds: string[] | 'all', atUs: Us): Projec
     t.items.some((i) => (targets === 'all' ? !t.locked : targets.has(i.id)) && at - i.startUs >= MIN_ITEM_US && end(i) - at >= MIN_ITEM_US)
   )
   if (!would) return p
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     splitInPlace(d, targets, at)
     finalize(d)
   })
@@ -704,7 +735,7 @@ export function trimItem(p: Project, itemId: string, edge: 'start' | 'end', toUs
   }
   delta = lo > hi ? 0 : clamp(delta, lo, hi)
   if (delta === 0) return p
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const forced = new Set<string>()
     for (const id of ids) {
       const f = mustFind(d, id)
@@ -767,7 +798,7 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
   const delta = Math.max(Math.round(deltaUs), -minStart)
   if (delta === 0 && plan.every((x) => x.fromTrackId === x.toTrackId)) return p
   const idSet = new Set(ids)
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     for (const t of d.tracks) if (t.items.some((i) => idSet.has(i.id))) t.items = t.items.filter((i) => !idSet.has(i.id))
     let moved = plan.map((x) => ({ ...x, item: { ...x.item, startUs: x.item.startUs + delta } as Item }))
     const lifted: Item[] = []
@@ -788,6 +819,11 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
     }
     for (const x of moved) mustTrack(d, x.toTrackId).items.push(x.item)
     for (const it of lifted) placeEffect(d, it)
+    // clipe que mudou de faixa: os efeitos vinculados a ele passam a mirar a faixa nova
+    for (const x of moved) {
+      if (x.fromTrackId === x.toTrackId || x.item.type === 'effect' || !x.item.linkId) continue
+      for (const t of d.tracks) for (const it of t.items) if (it.type === 'effect' && it.linkId === x.item.linkId && it.targetTrackId === x.fromTrackId) it.targetTrackId = x.toTrackId
+    }
     relocateFollowers(d, moved.map((x) => x.id))
     finalize(d)
   })
@@ -809,7 +845,7 @@ export function deleteItems(p: Project, itemIds: string[], opts?: { ripple?: boo
   }
   const idSet = new Set(ids)
   const links = mediaLinks(p, ids)
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     for (const t of d.tracks) if (t.items.some((i) => idSet.has(i.id))) t.items = t.items.filter((i) => !idSet.has(i.id))
     // apagar o clipe sem os vinculados (Alt): os efeitos que eram dele perdem o vínculo
     dropOrphanLinks(d, links)
@@ -840,7 +876,7 @@ export function deleteRange(p: Project, fromUs: Us, toUs: Us, opts?: { trackIds?
   const trackIds = opts?.trackIds
     ? opts.trackIds.map((id) => { const t = mustTrack(p, id); assertUnlocked(t); return id })
     : p.tracks.filter((t) => !t.locked).map((t) => t.id)
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const cut = new Set<string>()
     const before = mediaLinks(d, trackIds.flatMap((id) => mustTrack(d, id).items.map((i) => i.id)))
     for (const id of trackIds) overwriteRange(mustTrack(d, id), from, to, cut)
@@ -863,7 +899,7 @@ export function linkItems(p: Project, itemIds: string[]): Project {
   if (ids.length < 2) throw new EditError('invalid', 'Selecione ao menos dois itens para vincular')
   for (const id of ids) mustFind(p, id)
   const linkId = newId('l_')
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     for (const id of ids) mustFind(d, id).item.linkId = linkId
     finalize(d)
   })
@@ -871,7 +907,7 @@ export function linkItems(p: Project, itemIds: string[]): Project {
 
 export function unlinkItems(p: Project, itemIds: string[]): Project {
   for (const id of itemIds) mustFind(p, id)
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     for (const id of itemIds) delete mustFind(d, id).item.linkId
     finalize(d)
   })
@@ -912,7 +948,7 @@ export function detachAudio(p: Project, itemId: string): Project {
   assertUnlocked(f.track)
   const linkId = it.linkId ?? newId('l_')
   const audioItem: MediaItem = { ...omit(it, 'visual', 'transitionIn'), id: newId('i_'), linkId, audio: { ...it.audio, enabled: true } }
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const target = d.tracks.find((t) => t.kind === 'audio' && !t.locked && isFree(t, it.startUs, end(it)))
     const trackId = target ? target.id : createTrack(d, 'audio')
     const v = mustFind(d, itemId).item as MediaItem
@@ -990,7 +1026,7 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
     if (end(c.item) > next) collision = true
   }
   if (collision && opts?.ripple === false) throw new EditError('overlap', 'A nova duração colide com o próximo item')
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     for (const c of changes) {
       const f = mustFind(d, c.id)
       f.track.items[f.itemIndex] = c.item
@@ -1011,7 +1047,7 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
 export function updateItem<T extends Item>(p: Project, itemId: string, recipe: (draft: T) => void): Project {
   const f = mustFind(p, itemId)
   assertUnlocked(f.track)
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const it = d.tracks[f.trackIndex].items[f.itemIndex]
     recipe(it as unknown as T)
     if (it.durationUs < MIN_ITEM_US) throw new EditError('invalid', `Duração menor que o mínimo (${MIN_ITEM_US} µs)`)
@@ -1025,31 +1061,37 @@ export function updateItem<T extends Item>(p: Project, itemId: string, recipe: (
  * recriados entre as cópias. Se não couber na faixa de origem, cria uma faixa do mesmo tipo logo acima; efeito
  * copiado que não cabe vai para outra faixa de efeitos (placeEffect), nunca para uma "Vídeo N".
  */
-export function duplicateItems(p: Project, itemIds: string[], atUs?: Us): { project: Project; itemIds: string[]; downgraded: number } {
+export function duplicateItems(p: Project, itemIds: string[], atUs?: Us): { project: Project; itemIds: string[] } {
   const ids = expand(p, itemIds, true)
-  if (ids.length === 0) return { project: p, itemIds: [], downgraded: 0 }
+  if (ids.length === 0) return { project: p, itemIds: [] }
   const found = ids.map((id) => mustFind(p, id))
   const blockStart = Math.min(...found.map((f) => f.item.startUs))
   const at = Math.max(0, Math.round(atUs ?? Math.max(...found.map((f) => end(f.item)))))
   const linkMap = new Map<string, string>()
-  let downgraded = 0
   const copies = found.map((f) => ({
     trackId: f.track.id,
     item: withLink({ ...f.item, id: newId('i_'), startUs: f.item.startUs + at - blockStart }, mapLink(linkMap, f.item.linkId))
   }))
-  const project = produce(p, (d) => {
+  const movedTrack = new Map<string, string>()
+  const project = edit(p, (d) => {
     for (const trackId of [...new Set(copies.filter((c) => c.item.type !== 'effect').map((c) => c.trackId))]) {
       const group = copies.filter((c) => c.trackId === trackId && c.item.type !== 'effect').map((c) => c.item)
       const src = mustTrack(d, trackId)
       const fits = !src.locked && group.every((i) => isFree(src, i.startUs, end(i)))
       const target = fits ? src : mustTrack(d, createTrack(d, src.kind, d.tracks.indexOf(src) + 1))
       target.items.push(...group)
+      movedTrack.set(trackId, target.id)
     }
-    // efeitos depois da mídia: o de escopo `track` procura a faixa do clipe copiado
-    for (const c of copies) if (c.item.type === 'effect' && placeEffect(d, c.item, mustTrack(d, c.trackId))) downgraded++
+    for (const c of copies) {
+      if (c.item.type !== 'effect') continue
+      // a cópia do efeito mira a faixa onde a cópia do clipe foi parar
+      const tgt = c.item.targetTrackId
+      if (tgt && movedTrack.has(tgt)) c.item.targetTrackId = movedTrack.get(tgt)
+      placeEffect(d, c.item, mustTrack(d, c.trackId))
+    }
     finalize(d)
   })
-  return { project, itemIds: copies.map((c) => c.item.id), downgraded }
+  return { project, itemIds: copies.map((c) => c.item.id) }
 }
 
 /**
@@ -1058,7 +1100,7 @@ export function duplicateItems(p: Project, itemIds: string[], atUs?: Us): { proj
  */
 export function closeGaps(p: Project, trackId: string): Project {
   assertUnlocked(mustTrack(p, trackId))
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const t = mustTrack(d, trackId)
     t.items = [...t.items].sort((a, b) => a.startUs - b.startUs)
     const deltas = new Map<string, Us>()
@@ -1087,7 +1129,7 @@ export function closeGaps(p: Project, trackId: string): Project {
 }
 
 export function addMarker(p: Project, tUs: Us, label = ''): Project {
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     d.markers.push({ id: newId('m_'), tUs: Math.max(0, Math.round(tUs)), label, color: '#f59e0b' })
     d.markers.sort((a, b) => a.tUs - b.tUs)
   })
@@ -1134,7 +1176,7 @@ function editAnim(p: Project, itemId: string, path: AnimPath, tUs: Us, fn: (a: A
   if (!getAnim(f.item, path)) throw new EditError('invalid', `O item ${itemId} não tem a propriedade ${path}`)
   const local = tUs - f.item.startUs
   if (local < 0 || local > f.item.durationUs) throw new EditError('bounds', 'Instante fora do item')
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const it = d.tracks[f.trackIndex].items[f.itemIndex]
     assignAnim(it, path, fn(getAnim(it, path)!, local))
   })
@@ -1172,7 +1214,7 @@ export function nextKeyframeUs(p: Project, itemId: string, path: AnimPath | 'any
 /** Ativa/desativa itens (enabled só é gravado quando false). */
 export function setItemEnabled(p: Project, itemIds: string[], enabled: boolean): Project {
   for (const id of itemIds) assertUnlocked(mustFind(p, id).track)
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     for (const id of itemIds) {
       const it = findItem(d, id)!.item
       if (enabled) delete it.enabled
@@ -1223,7 +1265,7 @@ function editAllAnims(p: Project, itemId: string, fn: (a: Anim<number>, duration
     if (next) changes.push([pt, next])
   }
   if (changes.length === 0) return p
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     const it = d.tracks[f.trackIndex].items[f.itemIndex]
     for (const [pt, a] of changes) assignAnim(it, pt, a)
   })
@@ -1266,7 +1308,7 @@ export function convertEffects(p: Project, itemIds: string[], effect: EffectItem
   if (ids.length === 0) return p
   for (const id of ids) assertUnlocked(mustFind(p, id).track)
   const presetFeather = createEffectItem(effect, 0, MIN_ITEM_US).feather
-  return produce(p, (d) => {
+  return edit(p, (d) => {
     for (const id of ids) {
       const it = findItem(d, id)!.item as EffectItem
       if (effect === 'solid') {
@@ -1346,23 +1388,28 @@ export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { d
     if (effectTrackAllowed(p, opts.trackId, atUs, atUs + durationUs)) trackId = opts.trackId
   }
   if (!trackId) {
-    const lastMedia = p.tracks.reduce((m, t, i) => (t.kind === 'video' && !FX_TRACK.test(t.name) ? i : m), -1)
-    trackId = p.tracks.find((t, i) => t.kind === 'video' && i > lastMedia && FX_TRACK.test(t.name) && !t.locked && !t.hidden && isFree(t, atUs, atUs + durationUs))?.id
+    const lastMedia = p.tracks.reduce((m, t, i) => (t.kind === 'video' && !isFxTrack(t) ? i : m), -1)
+    trackId = p.tracks.find((t, i) => i > lastMedia && isFxTrack(t) && !t.locked && !t.hidden && isFree(t, atUs, atUs + durationUs))?.id
   }
   if (!trackId) {
-    const r = addTrack(p, 'video', aboveLastVideo(p), nextFxName(p))
+    const r = addTrack(p, 'video', aboveLastVideo(p), nextFxName(p), 'effects')
     q = r.project
     trackId = r.trackId
   }
   q = insertItems(q, trackId, [item], 'overwrite')
   // vínculo com o clipe sob o efeito (o de outra faixa: na mesma faixa o efeito o recortaria)
   const clip = clipUnder(p, atUs)
-  if (clip && clip.item.type === 'media' && clip.track.id !== trackId && !clip.track.locked) {
-    const linkId = clip.item.linkId ?? newId('l_')
-    q = produce(q, (d) => {
-      mustFind(d, clip.item.id).item.linkId = linkId
-      mustFind(d, item.id).item.linkId = linkId
-    })
-  }
+  const linked = !!clip && clip.item.type === 'media' && clip.track.id !== trackId && !clip.track.locked
+  const fxTrackId = trackId
+  // alvo do escopo `track` (se o usuário trocar para "só a faixa abaixo"): a faixa do clipe, senão a mídia logo abaixo
+  const target = linked ? clip!.track.id : mediaTrackBelow(q, fxTrackId)
+  q = edit(q, (d) => {
+    const fx = mustFind(d, item.id).item as EffectItem
+    if (target) fx.targetTrackId = target
+    if (!linked) return
+    const linkId = clip!.item.linkId ?? newId('l_')
+    mustFind(d, clip!.item.id).item.linkId = linkId
+    fx.linkId = linkId
+  })
   return { project: q, itemId: item.id }
 }

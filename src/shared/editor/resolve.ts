@@ -19,8 +19,11 @@ export interface MediaLayer {
 export interface AnnotationsLayer { kind: 'annotations'; itemId: string; trackId: string; sessionId: string; sessionMs: number; autoFadeMs: number | null }
 export interface EffectLayer {
   kind: 'effect'; itemId: string; trackId: string; effect: EffectItem['effect']
-  /** Faixa de vídeo visível imediatamente abaixo (escopo `track` só afeta a camada dela); null = nenhuma. */
-  belowTrackId: string | null
+  /**
+   * Faixa cuja camada o escopo `track` afeta: o targetTrackId do efeito (projeto antigo sem ele: a faixa de vídeo
+   * visível logo abaixo); null = nenhuma. resolveFrame põe o efeito `track` logo depois da camada dessa faixa.
+   */
+  targetTrackId: string | null
   region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }
   strength: number; feather: number; color: string; invert: boolean; scope: 'below' | 'track'
 }
@@ -90,15 +93,22 @@ function visualState(v: VisualProps, itemDur: Us, local: Us): { rect: Rect; opac
 const ev = (a: Anim<number>, local: Us): number => evalAnim(a, local)
 
 /**
- * O efeito layers[i] age no quadro? Escopo `below`: sempre. Escopo `track`: só se a camada logo antes dele for a
- * mídia/anotações da faixa `belowTrackId` (a mesma condição do compositor; sem ela o efeito não esconde nada).
+ * O efeito layers[i] age no quadro? Escopo `below`: sempre. Escopo `track`: só se, pulando os outros efeitos `track`
+ * do mesmo alvo logo antes dele, a camada anterior for a mídia/anotações da faixa `targetTrackId` (a mesma condição do
+ * compositor; sem ela o efeito não esconde nada).
  */
 export function effectBound(layers: Layer[], i: number): boolean {
   const fx = layers[i]
   if (fx?.kind !== 'effect') return false
   if (fx.scope === 'below') return true
-  const prev = layers[i - 1]
-  return !!prev && (prev.kind === 'media' || prev.kind === 'annotations') && prev.trackId === fx.belowTrackId
+  let j = i - 1
+  while (j >= 0) {
+    const l = layers[j]
+    if (l.kind !== 'effect' || l.scope !== 'track' || l.targetTrackId !== fx.targetTrackId) break
+    j--
+  }
+  const prev = layers[j]
+  return !!prev && (prev.kind === 'media' || prev.kind === 'annotations') && prev.trackId === fx.targetTrackId
 }
 
 /** Faixa de vídeo não oculta imediatamente abaixo de trackId (faixas de áudio e ocultas são puladas). */
@@ -150,7 +160,7 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
       case 'effect': {
         const r = item.region
         layers.push({
-          kind: 'effect', itemId: item.id, trackId: track.id, effect: item.effect, belowTrackId: visualTrackBelow(p, track.id),
+          kind: 'effect', itemId: item.id, trackId: track.id, effect: item.effect, targetTrackId: item.targetTrackId ?? visualTrackBelow(p, track.id),
           region: { shape: r.shape, x: ev(r.x, local), y: ev(r.y, local), w: ev(r.w, local), h: ev(r.h, local), rotation: ev(r.rotation, local) },
           strength: ev(item.strength, local), feather: item.feather, color: item.color, invert: item.invert, scope: item.scope
         })
@@ -158,5 +168,16 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
       }
     }
   }
-  return layers
+  // escopo `track`: o efeito vai para logo depois da camada da faixa-alvo (e dos outros efeitos dela), seja qual for a
+  // posição da faixa do próprio efeito; sem camada da faixa-alvo neste instante ele fica no fim, sem efeito
+  const trackFx = layers.filter((l): l is EffectLayer => l.kind === 'effect' && l.scope === 'track')
+  if (trackFx.length === 0) return layers
+  const out = layers.filter((l) => !(l.kind === 'effect' && l.scope === 'track'))
+  for (const fx of trackFx) {
+    let at = out.findIndex((l) => (l.kind === 'media' || l.kind === 'annotations') && l.trackId === fx.targetTrackId)
+    if (at < 0) { out.push(fx); continue }
+    while (out[at + 1]?.kind === 'effect' && (out[at + 1] as EffectLayer).scope === 'track' && (out[at + 1] as EffectLayer).targetTrackId === fx.targetTrackId) at++
+    out.splice(at + 1, 0, fx)
+  }
+  return out
 }

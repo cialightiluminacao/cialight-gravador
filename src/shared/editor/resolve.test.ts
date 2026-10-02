@@ -87,7 +87,7 @@ describe('resolveFrame', () => {
     const l = resolveFrame(p, 31 * S)[0]
     expect(l).toMatchObject({ kind: 'effect', strength: 8, region: { x: 0.5 } })
   })
-  it('effect: trackId e belowTrackId = faixa de vídeo visível logo abaixo (pula ocultas e de áudio)', () => {
+  it('effect: trackId e targetTrackId (sem alvo gravado) = faixa de vídeo visível logo abaixo (pula ocultas e de áudio)', () => {
     const { p: p0 } = base()
     const bottom = p0.tracks.find((t) => t.kind === 'video')!.id
     let p = p0
@@ -100,10 +100,10 @@ describe('resolveFrame', () => {
       region: { shape: 'rect', x: { value: 0.5 }, y: { value: 0.5 }, w: { value: 0.2 }, h: { value: 0.2 }, rotation: { value: 0 } }, strength: { value: 100 }
     }
     p = ops.insertItems(p, top.trackId, [fx], 'overwrite')
-    expect(resolveFrame(p, S).find((l) => l.kind === 'effect')).toMatchObject({ trackId: top.trackId, belowTrackId: bottom })
+    expect(resolveFrame(p, S).find((l) => l.kind === 'effect')).toMatchObject({ trackId: top.trackId, targetTrackId: bottom })
     // na faixa de vídeo mais baixa: nada abaixo
     const low = ops.insertItems(p0, bottom, [{ ...fx, id: 'fx2', startUs: 20 * S }], 'overwrite')
-    expect(resolveFrame(low, 21 * S)).toEqual([expect.objectContaining({ kind: 'effect', trackId: bottom, belowTrackId: null })])
+    expect(resolveFrame(low, 21 * S)).toEqual([expect.objectContaining({ kind: 'effect', trackId: bottom, targetTrackId: null })])
   })
   it('enabled:false some do resolveFrame; reativar volta', () => {
     const { p: p0 } = base()

@@ -97,19 +97,20 @@ export class Compositor {
         if (fx && layer.scope === 'below') this.applyEffect(fx.accum, layer, W, H)
         continue
       }
-      // efeito de escopo `track` logo acima, da faixa imediatamente acima desta: a camada é desenhada isolada no
-      // FBO auxiliar, recebe o efeito e só então é composta sobre o acumulado
-      const next = layers[i + 1]
-      if (fx && next?.kind === 'effect' && next.scope === 'track' && effectBound(layers, i + 1)) {
+      // efeitos de escopo `track` desta faixa (resolveFrame os põe logo depois dela, pelo targetTrackId): a camada é
+      // desenhada isolada no FBO auxiliar, recebe todos eles e só então é composta sobre o acumulado
+      let last = i
+      while (fx && layers[last + 1]?.kind === 'effect' && (layers[last + 1] as EffectLayer).scope === 'track' && effectBound(layers, last + 1)) last++
+      if (fx && last > i) {
         const aux = this.effects.aux(W, H)
         this.bindTarget(aux)
         gl.clearColor(0, 0, 0, 0)
         gl.clear(gl.COLOR_BUFFER_BIT)
         this.drawLayer(layer, ctx)
-        this.applyEffect(aux, next, W, H)
+        for (let j = i + 1; j <= last; j++) this.applyEffect(aux, layers[j] as EffectLayer, W, H)
         this.bindTarget(fx.accum)
         this.effects.composite(aux)
-        i++
+        i = last
         continue
       }
       this.drawLayer(layer, ctx)

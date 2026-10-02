@@ -1,6 +1,6 @@
 // Avisos de privacidade: efeitos fracos demais, desativados ou com mídia por cima, num intervalo da timeline. Puro.
 import { evalAnim } from './anim'
-import type { Anim, EffectItem, MediaItem, Project, Us } from './project'
+import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
 import { visualTrackBelow } from './resolve'
 
@@ -28,14 +28,16 @@ const MSG = {
 } as const
 
 /**
- * Escopo `track`: primeiro instante de [a, b) em que a faixa logo abaixo (visualTrackBelow) não tem mídia/anotações
- * visíveis e ativas — ali o efeito não acha camada e não esconde nada. null = coberto o trecho todo.
+ * Escopo `track`: primeiro instante de [a, b) em que a faixa-alvo (targetTrackId; projeto antigo: visualTrackBelow)
+ * não tem camada que resolveFrame desenharia — faixa apagada ou oculta, ou sem mídia (com asset) / anotações ativas.
+ * Ali o efeito não acha camada e não esconde nada. null = coberto o trecho todo.
  */
-function noTargetAt(p: Project, trackId: string, a: Us, b: Us): Us | null {
-  const below = visualTrackBelow(p, trackId)
-  const t = below ? p.tracks.find((x) => x.id === below) : undefined
-  if (!t) return a
-  const items = t.items.filter((i) => (i.type === 'media' || i.type === 'annotations') && i.enabled !== false && i.startUs < b && itemEndUs(i) > a).sort((x, y) => x.startUs - y.startUs)
+function noTargetAt(p: Project, fx: EffectItem, trackId: string, a: Us, b: Us): Us | null {
+  const target = fx.targetTrackId ?? visualTrackBelow(p, trackId)
+  const t = target ? p.tracks.find((x) => x.id === target) : undefined
+  if (!t || t.hidden || t.kind !== 'video') return a
+  const drawn = (i: Item): boolean => i.enabled !== false && (i.type === 'annotations' || (i.type === 'media' && p.assets.some((x) => x.id === i.assetId)))
+  const items = t.items.filter((i) => drawn(i) && i.startUs < b && itemEndUs(i) > a).sort((x, y) => x.startUs - y.startUs)
   let cursor = a
   for (const i of items) {
     if (i.startUs > cursor) return cursor
@@ -128,7 +130,7 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
       }
       if (cover !== null) out.push({ itemId: it.id, kind: 'covered', message: MSG.covered, tUs: cover })
       if (it.scope === 'track') {
-        const gap = noTargetAt(p, track.id, from, Math.min(e, hi))
+        const gap = noTargetAt(p, it, track.id, from, Math.min(e, hi))
         if (gap !== null) out.push({ itemId: it.id, kind: 'noTarget', message: MSG.noTarget, tUs: gap })
       }
     }
