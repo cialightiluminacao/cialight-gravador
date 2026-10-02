@@ -7,7 +7,7 @@ import { evalAnim, insertKeyExact } from './anim'
 import { defaultVisual } from './factory'
 import { layerBase, type SourceRotation } from './layerGeometry'
 import { EditError, findItem, linkedIds, updateItem } from './ops'
-import type { Anim, Ease, Keyframe, MediaItem, Project, Us } from './project'
+import type { Anim, Ease, Keyframe, MediaItem, Project, Us, VisualProps } from './project'
 
 /** Retângulo no quadro: centro (x, y) e tamanho (w, h), normalizados (0–1). */
 export interface ZoomRect { x: number; y: number; w: number; h: number }
@@ -15,6 +15,7 @@ export interface ZoomPose { x: number; y: number; scale: number }
 /** Tamanho base da camada (px do quadro, escala 1) e rotação (graus) — para o clamp de bordas. */
 export interface ZoomClampBase { bw: number; bh: number; rotation: number }
 export interface ZoomCanvas { w: number; h: number }
+type Src = { w: number; h: number; rotation: SourceRotation }
 
 /** Duração da ida (e da volta) do zoom na ferramenta: 0,3–3 s. */
 export const ZOOM_MIN_DUR_US = 300_000
@@ -27,9 +28,28 @@ export const KEN_BURNS_SCALE = 1.15
 export type ZoomCorner = 'tl' | 'tr' | 'bl' | 'br'
 
 /**
+ * Retângulo alinhado aos eixos (centrado na camada) em que o centro do quadro pode andar sem descobrir o fundo,
+ * como largura × altura "efetivas" da camada (px). Rotação múltipla de 90°: a própria caixa (90/270 trocam os lados).
+ * Outra rotação: o maior retângulo na proporção do quadro inscrito na caixa girada (conservador: pode prender mais que
+ * o necessário, nunca menos).
+ */
+function coverBox(lw: number, lh: number, rotation: number, canvas: ZoomCanvas): [number, number] {
+  const q = ((rotation % 360) + 360) % 360
+  if (Math.abs(q - Math.round(q / 90) * 90) < 1e-9) {
+    const turned = Math.round(q / 90) % 2 === 1
+    return turned ? [lh, lw] : [lw, lh]
+  }
+  const th = (rotation * Math.PI) / 180
+  const c = Math.abs(Math.cos(th)), s = Math.abs(Math.sin(th))
+  // retângulo t·(W × H) com os cantos dentro da caixa girada: t·(W/2·c + H/2·s) ≤ lw/2 e t·(W/2·s + H/2·c) ≤ lh/2
+  const t = Math.min(lw / (canvas.w * c + canvas.h * s), lh / (canvas.w * s + canvas.h * c))
+  return [t * canvas.w, t * canvas.h]
+}
+
+/**
  * Pose que leva o retângulo ao quadro inteiro (cabe inteiro: k = 1/max(w, h)). clamp: a camada não descobre o fundo —
  * o centro fica onde as bordas da camada continuam fora do quadro (ou, se ela for menor que o quadro num eixo, dentro
- * dele). Só para rotação múltipla de 90° (outras rotações: sem clamp).
+ * dele). Rotação qualquer: clamp conservador pelo retângulo inscrito (coverBox).
  */
 export function zoomPose(cur: ZoomPose, rect: ZoomRect, canvas: ZoomCanvas, clamp?: ZoomClampBase | null): ZoomPose {
   const k = 1 / Math.max(rect.w, rect.h)
@@ -37,20 +57,15 @@ export function zoomPose(cur: ZoomPose, rect: ZoomRect, canvas: ZoomCanvas, clam
   let x = 0.5 + k * (cur.x - rect.x)
   let y = 0.5 + k * (cur.y - rect.y)
   if (clamp) {
-    const q = ((Math.round(clamp.rotation) % 360) + 360) % 360
-    if (Math.abs(clamp.rotation - Math.round(clamp.rotation)) < 1e-9 && q % 90 === 0) {
-      const turned = q === 90 || q === 270
-      const lw = (turned ? clamp.bh : clamp.bw) * scale
-      const lh = (turned ? clamp.bw : clamp.bh) * scale
-      const range = (len: number, full: number): [number, number] => {
-        const a = (full - len / 2) / full, b = len / 2 / full
-        return [Math.min(a, b), Math.max(a, b)]
-      }
-      const [x0, x1] = range(lw, canvas.w)
-      const [y0, y1] = range(lh, canvas.h)
-      x = Math.min(x1, Math.max(x0, x))
-      y = Math.min(y1, Math.max(y0, y))
+    const [lw, lh] = coverBox(clamp.bw * scale, clamp.bh * scale, clamp.rotation, canvas)
+    const range = (len: number, full: number): [number, number] => {
+      const a = (full - len / 2) / full, b = len / 2 / full
+      return [Math.min(a, b), Math.max(a, b)]
     }
+    const [x0, x1] = range(lw, canvas.w)
+    const [y0, y1] = range(lh, canvas.h)
+    x = Math.min(x1, Math.max(x0, x))
+    y = Math.min(y1, Math.max(y0, y))
   }
   return { x, y, scale }
 }
@@ -76,6 +91,9 @@ export function kenBurnsRect(corner: ZoomCorner, amount = KEN_BURNS_SCALE): Zoom
   return { x, y, w: s, h: s }
 }
 
+/** Keys da animação em [from, to] (os que o trecho substitui). */
+const keysIn = (a: Anim<number>, from: Us, to: Us): number => (a.keys ?? []).filter((k) => k.tUs >= from && k.tUs <= to).length
+
 /**
  * Substitui o trecho [from, to] da animação pelos keys dados, sem mudar a curva antes de `from` nem depois de `to`
  * (insertKeyExact nas pontas): o último key herda o ease do pedaço que segue.
@@ -91,11 +109,19 @@ function spliceKeys(a: Anim<number>, keys: Keyframe<number>[]): Anim<number> {
   return { ...a, keys: [...kept, ...own].sort((p, q) => p.tUs - q.tUs) }
 }
 
+export interface ZoomKeys {
+  x: Anim<number>; y: Anim<number>; scale: Anim<number>
+  /** Keys que já existiam no trecho do zoom (x, y e escala somados) e foram substituídos. */
+  replaced: number
+}
+
 /**
  * Keys de x/y/escala do zoom no item (tempos locais): em atUs a pose atual (com `ease` até o enquadramento), em
- * atUs + durUs o enquadramento; holdUs ≠ null = "voltar ao normal depois de N s": segura N s e volta à pose atual em
- * durUs (mesmo ease). Tudo preso à duração do item: a ida termina no fim do item; a volta que não cabe é comprimida e,
- * começando depois do fim, não existe. opts.clampSrc (fonte exibida: largura/altura/rotação) liga o clamp de bordas.
+ * atUs + durUs o enquadramento. holdUs ≠ null = "voltar ao normal depois de N s" (N ≥ 0; 0 = volta logo, sem key de
+ * espera): segura N s e volta em durUs (mesmo ease) ao valor que a animação original tem no fim da volta — a curva
+ * de antes continua dali em diante. Tudo preso à duração do item: a ida termina no fim do item; a volta que não cabe é
+ * comprimida e, começando no fim ou depois, não existe. opts.clampSrc (fonte exibida) liga o clamp de bordas.
+ * Nunca grava dois keys no mesmo instante.
  */
 export function zoomKeys(
   item: MediaItem,
@@ -105,13 +131,14 @@ export function zoomKeys(
   holdUs: Us | null,
   ease: Ease,
   canvas: ZoomCanvas,
-  opts?: { clampSrc?: { w: number; h: number; rotation: SourceRotation } }
-): { x: Anim<number>; y: Anim<number>; scale: Anim<number> } {
+  opts?: { clampSrc?: Src }
+): ZoomKeys {
   const v = item.visual ?? defaultVisual()
   const t = v.transform
   const D = item.durationUs
+  const dur = Math.max(0, Math.round(durUs))
   const at = Math.min(Math.max(0, Math.round(atUs)), D)
-  const end = Math.min(at + Math.max(0, Math.round(durUs)), D)
+  const end = Math.min(at + dur, D)
   if (end <= at) throw new EditError('bounds', 'Não há tempo para o zoom antes do fim do clipe')
   if (!(targetRect.w > 0 && targetRect.h > 0)) throw new EditError('invalid', 'Retângulo de zoom vazio')
   const start: ZoomPose = { x: evalAnim(t.x, at), y: evalAnim(t.y, at), scale: evalAnim(t.scale, at) }
@@ -122,17 +149,26 @@ export function zoomKeys(
     clamp = { bw: g.bw, bh: g.bh, rotation: evalAnim(t.rotation, end) }
   }
   const target = zoomPose(start, targetRect, canvas, clamp)
-  const plan: { tUs: Us; pose: ZoomPose; ease: Ease }[] = [{ tUs: at, pose: start, ease }, { tUs: end, pose: target, ease: 'linear' }]
-  if (holdUs !== null) {
-    const hold = Math.min(end + Math.max(0, Math.round(holdUs)), D)
-    if (hold < D) plan.push({ tUs: hold, pose: target, ease }, { tUs: Math.min(hold + Math.round(durUs), D), pose: start, ease: 'linear' })
+  // passos: pose fixa ou 'orig' (o valor da animação original naquele instante)
+  const plan: { tUs: Us; pose: ZoomPose | 'orig'; ease: Ease }[] = [{ tUs: at, pose: start, ease }]
+  const hold = holdUs === null ? null : Math.min(end + Math.max(0, Math.round(holdUs)), D)
+  if (hold === null || hold >= D) plan.push({ tUs: end, pose: target, ease: 'linear' })
+  else {
+    // espera zero: a volta começa no próprio key do enquadramento (sem key repetido)
+    if (hold > end) plan.push({ tUs: end, pose: target, ease: 'linear' }, { tUs: hold, pose: target, ease })
+    else plan.push({ tUs: end, pose: target, ease })
+    plan.push({ tUs: Math.min(hold + dur, D), pose: 'orig', ease: 'linear' })
   }
-  const keysOf = (k: keyof ZoomPose): Keyframe<number>[] => plan.map((s) => ({ tUs: s.tUs, value: s.pose[k], ease: s.ease }))
-  return { x: spliceKeys(t.x, keysOf('x')), y: spliceKeys(t.y, keysOf('y')), scale: spliceKeys(t.scale, keysOf('scale')) }
+  const last = plan[plan.length - 1].tUs
+  const keysOf = (k: keyof ZoomPose): Keyframe<number>[] => plan.map((s) => ({ tUs: s.tUs, value: s.pose === 'orig' ? evalAnim(t[k], s.tUs) : s.pose[k], ease: s.ease }))
+  return {
+    x: spliceKeys(t.x, keysOf('x')), y: spliceKeys(t.y, keysOf('y')), scale: spliceKeys(t.scale, keysOf('scale')),
+    replaced: keysIn(t.x, at, last) + keysIn(t.y, at, last) + keysIn(t.scale, at, last)
+  }
 }
 
 /** Fonte exibida do item (dimensões e rotação do vídeo; sem dados de vídeo, o próprio quadro). */
-function sourceOf(p: Project, item: MediaItem): { w: number; h: number; rotation: SourceRotation } {
+function sourceOf(p: Project, item: MediaItem): Src {
   const info = p.assets.find((a) => a.id === item.assetId)?.video
   return info && info.width > 0 && info.height > 0 ? { w: info.width, h: info.height, rotation: info.rotation } : { w: p.canvas.width, h: p.canvas.height, rotation: 0 }
 }
@@ -143,28 +179,72 @@ function mustMedia(p: Project, itemId: string): MediaItem {
   return f.item
 }
 
+/** Resultado das operações de zoom: o projeto e quantos keys existentes foram substituídos (aviso na interface). */
+export interface ZoomEdit { project: Project; replaced: number }
+
 /** Zoom no item em atUs (absoluto, playhead): grava os keys de x/y/escala (zoomKeys). Um passo de desfazer. */
-export function applyZoom(p: Project, itemId: string, rect: ZoomRect, atUs: Us, durUs: Us, holdUs: Us | null, ease: Ease, opts: { clamp: boolean }): Project {
+export function applyZoom(p: Project, itemId: string, rect: ZoomRect, atUs: Us, durUs: Us, holdUs: Us | null, ease: Ease, opts: { clamp: boolean }): ZoomEdit {
   const item = mustMedia(p, itemId)
   const k = zoomKeys(item, rect, atUs - item.startUs, durUs, holdUs, ease, { w: p.canvas.width, h: p.canvas.height }, opts.clamp ? { clampSrc: sourceOf(p, item) } : undefined)
-  return updateItem<MediaItem>(p, itemId, (d) => {
+  const project = updateItem<MediaItem>(p, itemId, (d) => {
     const vis = (d.visual ??= defaultVisual())
     vis.transform.x = k.x
     vis.transform.y = k.y
     vis.transform.scale = k.scale
   })
+  return { project, replaced: k.replaced }
 }
 
 /**
- * Ken Burns: aproximação lenta 1 → 1,15 da pose do início ao longo do item inteiro, com o canto escolhido parado (o
- * conteúdo desliza na diagonal), sem bordas (clamp). Substitui a animação de x/y/escala do item.
+ * A camada cobre o quadro inteiro no instante local (bordas fora do quadro, ±½ px; rotação múltipla de 90° — outra
+ * rotação nunca cobre exatamente e cai no Ken Burns por corte).
  */
-export function applyKenBurns(p: Project, itemId: string, corner: ZoomCorner, ease: Ease = 'linear'): Project {
-  const item = mustMedia(p, itemId)
-  return applyZoom(p, itemId, kenBurnsRect(corner), item.startUs, item.durationUs, null, ease, { clamp: true })
+function coversFrame(v: VisualProps, src: Src, canvas: ZoomCanvas, local: Us): boolean {
+  const t = v.transform, c = v.crop
+  const rot = evalAnim(t.rotation, local)
+  const q = ((rot % 360) + 360) % 360
+  if (Math.abs(q - Math.round(q / 90) * 90) > 1e-9) return false
+  const g = layerBase({ l: evalAnim(c.l, local), t: evalAnim(c.t, local), r: evalAnim(c.r, local), b: evalAnim(c.b, local) }, v.fit, src, canvas)
+  const s = evalAnim(t.scale, local)
+  const [lw, lh] = coverBox(g.bw * s, g.bh * s, rot, canvas)
+  const dx = Math.abs(evalAnim(t.x, local) * canvas.w - canvas.w / 2), dy = Math.abs(evalAnim(t.y, local) * canvas.h - canvas.h / 2)
+  return dx <= (lw - canvas.w) / 2 + 0.5 && dy <= (lh - canvas.h) / 2 + 0.5
 }
 
-/** Efeitos de privacidade (região no quadro) vinculados ao clipe: o zoom/pan os deixa para trás. */
-export function linkedRegionEffects(p: Project, itemId: string): string[] {
+/**
+ * Ken Burns: aproximação lenta 1 → 1,15 ao longo do item inteiro com o canto escolhido parado (o conteúdo desliza na
+ * diagonal). Clipe que cobre o quadro: keys de x/y/escala (zoom do quadro com clamp, sem bordas). Clipe menor que o
+ * quadro (PiP, contain com barras, girado): a caixa da camada fica onde está e o conteúdo se aproxima DENTRO dela —
+ * keys de corte, o trecho visível encolhe 1/1,15 na proporção (o tamanho da caixa não muda com o fit) encostado no
+ * canto (na tela: com espelho, esquerda/direita da fonte trocam). Substitui a animação de x/y/escala ou do corte.
+ */
+export function applyKenBurns(p: Project, itemId: string, corner: ZoomCorner, ease: Ease = 'linear'): ZoomEdit {
+  const item = mustMedia(p, itemId)
+  const v = item.visual ?? defaultVisual()
+  const canvas = { w: p.canvas.width, h: p.canvas.height }
+  if (coversFrame(v, sourceOf(p, item), canvas, 0)) return applyZoom(p, itemId, kenBurnsRect(corner), item.startUs, item.durationUs, null, ease, { clamp: true })
+  const D = item.durationUs
+  const c = v.crop
+  const c0 = { l: evalAnim(c.l, 0), t: evalAnim(c.t, 0), r: evalAnim(c.r, 0), b: evalAnim(c.b, 0) }
+  const w = (1 - c0.l - c0.r) / KEN_BURNS_SCALE
+  const h = (1 - c0.t - c0.b) / KEN_BURNS_SCALE
+  const right = (corner === 'tr' || corner === 'br') !== !!v.mirror
+  const bottom = corner === 'bl' || corner === 'br'
+  const c1 = {
+    l: right ? 1 - c0.r - w : c0.l, r: right ? c0.r : 1 - c0.l - w,
+    t: bottom ? 1 - c0.b - h : c0.t, b: bottom ? c0.b : 1 - c0.t - h
+  }
+  const sides = ['l', 't', 'r', 'b'] as const
+  const next = Object.fromEntries(sides.map((sd) => [sd, spliceKeys(c[sd], [{ tUs: 0, value: c0[sd], ease }, { tUs: D, value: c1[sd], ease: 'linear' }])])) as VisualProps['crop']
+  const replaced = sides.reduce((n, sd) => n + keysIn(c[sd], 0, D), 0)
+  const project = updateItem<MediaItem>(p, itemId, (d) => {
+    const vis = (d.visual ??= defaultVisual())
+    vis.crop = next
+  })
+  return { project, replaced }
+}
+
+/** Efeitos de privacidade vinculados ao clipe (o grupo de vínculo dele): o zoom/pan os deixa para trás. */
+export function linkedEffectIds(p: Project, itemId: string): string[] {
   return linkedIds(p, itemId).filter((id) => id !== itemId && findItem(p, id)?.item.type === 'effect')
 }

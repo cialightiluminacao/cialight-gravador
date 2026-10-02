@@ -1,6 +1,7 @@
 import { updateItem } from '@shared/editor/ops'
 import type { MediaItem, Project } from '@shared/editor/project'
 import { applyZoom } from '@shared/editor/zoom'
+import { redBlob, type RedBlob } from '@shared/testing/pixels'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import { runEditorExport } from '../export/editorExport'
@@ -19,28 +20,8 @@ const AT_US = 500_000
 const DUR_US = 1_000_000
 export const ZOOM_END_US = AT_US + DUR_US
 
-export interface RedBlob { cx: number; cy: number; n: number; w: number; h: number }
 export interface ZoomScenario { before: RedBlob | null; after: RedBlob | null; mid: RedBlob | null; error?: string }
 export interface ZoomReport { error?: string; full?: ZoomScenario; cropped?: ZoomScenario; exportPath?: string; exportError?: string }
-
-/** Centro de massa (px, centro do pixel, y para baixo) e caixa dos pixels vermelhos. */
-export function redBlob(d: Uint8Array, w: number, h: number, stride = 4): RedBlob | null {
-  let sx = 0
-  let sy = 0
-  let n = 0
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = (y * w + x) * stride
-      if (d[i] < 150 || d[i + 1] > 90 || d[i + 2] > 90) continue
-      sx += x + 0.5
-      sy += y + 0.5
-      n++
-      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y)
-    }
-  }
-  return n ? { cx: sx / n, cy: sy / n, n, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null
-}
 
 async function frameBlob(client: RenderClient, p: Project, tUs: number): Promise<RedBlob | null> {
   client.setProject(p, mediaUrlsFor(p, 'preview'), true)
@@ -55,7 +36,7 @@ async function scenario(client: RenderClient, p: Project, itemId: string): Promi
     const before = await frameBlob(client, p, AT_US)
     if (!before) return { s: { before, after: null, mid: null, error: 'quadrado vermelho não encontrado antes do zoom' }, zoomed: null }
     const rect = { x: before.cx / W, y: before.cy / H, w: 0.5, h: 0.5 }
-    const zoomed = applyZoom(p, itemId, rect, AT_US, DUR_US, null, 'inOut', { clamp: false })
+    const zoomed = applyZoom(p, itemId, rect, AT_US, DUR_US, null, 'inOut', { clamp: false }).project
     const after = await frameBlob(client, zoomed, ZOOM_END_US)
     const mid = await frameBlob(client, zoomed, AT_US + DUR_US / 2)
     return { s: { before, after, mid }, zoomed }

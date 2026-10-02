@@ -10,7 +10,7 @@
 // ao normal), arraste do enquadramento-alvo com prévia na proporção do quadro, keys de escala/posição no clipe de cima
 // sob o ponto (logo sobre o vídeo), um passo de desfazer, o conteúdo do centro do retângulo no centro do quadro no
 // fim (pixels do visualizador), aviso de privacidade com efeito vinculado ("Ver efeito" seleciona o efeito, que mostra
-// o aviso) e Ken Burns no inspetor. Screenshots em docs/qa/editor-f4/.
+// o aviso), Ken Burns no inspetor (clipe em tela cheia; PiP pelo corte; keys substituídos) e espera 0. Screenshots em docs/qa/editor-f4/.
 import { spawn, execFileSync } from 'child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
@@ -279,7 +279,34 @@ async function main() {
     check('Ken Burns ↘: o centro vai a 0,425 (canto inferior direito da camada parado no do quadro)', Math.abs(r.x[1][1] - 0.425) < 1e-6 && Math.abs(r.y[1][1] - 0.425) < 1e-6, { x: r.x, y: r.y })
     await ev(`await T.seek(9e6); return 1`)
     await shot('f4-zoom-06-ken-burns.png')
+    const again = await ev(`const btn = T.el('button[aria-label="Ken Burns: Aproximar indo para cima e à esquerda"]'); await T.click(btn); await T.wait(300)
+      return { toast: T.toasts().find((t) => t.includes('substituíd')), x: T.keys('${v}', 'x') }`)
+    check('Ken Burns de novo: toast "6 keyframes substituídos" e a nova direção (↖: centro em 0,575)', !!again.toast && again.toast.includes('6 keyframes substituídos') && Math.abs(again.x[1][1] - 0.575) < 1e-6, again)
+    await ev(`await T.key('z', { ctrlKey: true }); await T.key('z', { ctrlKey: true }); return 1`)
+    // PiP (logo a 28 %): a caixa fica parada e o conteúdo se aproxima dentro dela (keys de corte)
+    const pip = await ev(`await T.seek(3e6); T.st().select(['${logo}']); await T.settle(); await T.wait(300)
+      const btn = T.el('button[aria-label="Ken Burns: Aproximar indo para baixo e à direita"]'); btn.scrollIntoView({ block: 'center' }); await T.wait(200)
+      await T.click(btn); await T.wait(150)
+      const it = T.item('${logo}'); const c = it.visual.crop
+      return { tr: ['x', 'y', 'scale'].map((k) => (it.visual.transform[k].keys || []).length), l: (c.l.keys || []).map((k) => [k.tUs, +k.value.toFixed(4)]), r: c.r.keys ? c.r.keys.map((k) => k.value) : c.r.value, dur: it.durationUs }`)
+    check('Ken Burns no logo (PiP): sem keys de posição/escala; corte esquerdo 0 → 0,1304 ao longo do item', pip.tr.every((n) => n === 0) && JSON.stringify(pip.l) === JSON.stringify([[0, 0], [pip.dur, 0.1304]]), pip)
+    await ev(`await T.seek(6.5e6); return 1`)
+    await shot('f4-zoom-07-ken-burns-pip.png')
     await ev(`await T.key('z', { ctrlKey: true }); return 1`)
+  }
+
+  console.log('voltar ao normal com espera 0')
+  {
+    const r = await ev(`T.st().select([]); await T.key('z'); await T.wait(100)
+      await T.click(T.el('[data-viewer-toolbar] button[aria-label="Opções do zoom"]')); await T.wait(300)
+      const pop = T.el('[data-zoom-settings]'); const inputs = [...pop.querySelectorAll('input')]
+      await T.typeInto(inputs[1], '0')
+      document.activeElement?.blur?.(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await T.wait(300)
+      await T.seek(2e6); await T.drag(T.toScreen(240, 165), T.toScreen(720, 380)); await T.wait(150)
+      const s = T.keys('${v}', 'scale')
+      return { s, dup: s.some((k, i) => i > 0 && k[0] <= s[i - 1][0]) }`)
+    check('espera 0: keys 2 s → 2,5 s → 3 s, sem instante repetido; a volta parte do enquadramento', JSON.stringify(r.s.map((k) => k[0])) === JSON.stringify([2e6, 2.5e6, 3e6]) && !r.dup && r.s[1][2] === 'inOut', r)
+    await ev(`await T.key('z', { ctrlKey: true }); await T.key('Escape'); return 1`)
   }
 }
 

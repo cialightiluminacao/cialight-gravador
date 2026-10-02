@@ -3,16 +3,15 @@ import { defaultVisual } from '@shared/editor/factory'
 import type { MediaItem, VisualProps } from '@shared/editor/project'
 import { applyKenBurns, type ZoomCorner } from '@shared/editor/zoom'
 import { Segmented, Tip, Toggle } from '@/components/ui/primitives'
-import { useEditorStore } from '../../state/editorStore'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
-import { warnLinkedEffects } from '../viewer/ZoomTool'
+import { runZoomEdit } from '../viewer/ZoomTool'
 import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
 
 // Inspetor de vídeo do item de mídia: transformação (animável: ◇ liga o keyframe no playhead; com keys,
 // editar grava no key do playhead; corte e raio também são animáveis — editados no playhead), Ken Burns (preset de
-// zoom lento 1 → 1,15 com pan diagonal ao longo do clipe; substitui a animação de posição/escala), corte, ajuste,
+// zoom lento 1 → 1,15 com pan diagonal ao longo do clipe — posição/escala, ou o corte num clipe menor que o quadro), corte, ajuste,
 // forma/borda (PiP), espelhar e fades.
 
 type TKey = keyof VisualProps['transform']
@@ -31,7 +30,7 @@ const KEN_BURNS: { corner: ZoomCorner; label: string; icon: React.ReactNode }[] 
 ]
 
 function kenBurns(itemId: string, corner: ZoomCorner): void {
-  if (useEditorStore.getState().apply((p) => applyKenBurns(p, itemId, corner))) warnLinkedEffects(itemId)
+  runZoomEdit(itemId, (p) => applyKenBurns(p, itemId, corner))
 }
 
 const SHAPE_OPTIONS: { value: NonNullable<VisualProps['shape']>; label: string }[] = [
@@ -76,7 +75,7 @@ export function VideoPanel({ item }: { item: V }): React.JSX.Element {
         <FieldRow label="Direção">
           <div className="flex gap-1" role="group" aria-label="Ken Burns">
             {KEN_BURNS.map((o) => (
-              <Tip key={o.corner} content={`${o.label} (zoom lento 100 → 115 % ao longo do clipe; substitui a animação de posição e escala)`}>
+              <Tip key={o.corner} content={`${o.label} (zoom lento 100 → 115 % ao longo do clipe; clipe menor que o quadro aproxima o conteúdo dentro da própria caixa, pelo corte)`}>
                 <button type="button" aria-label={`Ken Burns: ${o.label}`} onClick={() => kenBurns(id, o.corner)} className="flex h-7 w-8 items-center justify-center rounded-md border border-border-strong bg-surface-2 text-fg-2 hover:bg-surface-3 hover:text-fg">
                   {o.icon}
                 </button>

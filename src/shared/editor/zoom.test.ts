@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { evalAnim } from './anim'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
 import { layerBase } from './layerGeometry'
+import { itemAnimEntries } from './animPaths'
 import { findItem } from './ops'
 import type { Asset, MediaItem, Project } from './project'
 import { privacyWarnings } from './privacy'
-import { applyKenBurns, applyZoom, aspectRect, KEN_BURNS_SCALE, kenBurnsRect, linkedRegionEffects, zoomKeys, zoomPose, type ZoomRect } from './zoom'
+import { validateProject } from './schema'
+import { applyKenBurns, applyZoom, aspectRect, KEN_BURNS_SCALE, kenBurnsRect, linkedEffectIds, zoomKeys, zoomPose, type ZoomRect } from './zoom'
 
 const S = 1_000_000
 const HD = { w: 1920, h: 1080 }
@@ -197,13 +199,13 @@ describe('applyZoom / Ken Burns / privacidade', () => {
   }
   it('applyZoom grava os keys no tempo local (playhead absoluto) e é imutável', () => {
     const p = proj(false)
-    const q = applyZoom(p, 'm', { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, 3 * S, S, null, 'linear', { clamp: true })
+    const q = applyZoom(p, 'm', { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, 3 * S, S, null, 'linear', { clamp: true }).project
     const m = findItem(q, 'm')!.item as MediaItem
     expect(m.visual!.transform.scale.keys!.map((k) => k.tUs)).toEqual([2 * S, 3 * S])
     expect((findItem(p, 'm')!.item as MediaItem).visual!.transform.scale.keys).toBeUndefined()
   })
   it('Ken Burns: 1 → 1,15 ao longo do item, canto escolhido fixo (pan diagonal), sem bordas', () => {
-    const q = applyKenBurns(proj(false), 'm', 'br')
+    const q = applyKenBurns(proj(false), 'm', 'br').project
     const m = findItem(q, 'm')!.item as MediaItem
     const t = m.visual!.transform
     expect(t.scale.keys!.map((k) => k.tUs)).toEqual([0, 10 * S])
@@ -218,9 +220,109 @@ describe('applyZoom / Ken Burns / privacidade', () => {
   })
   it('efeitos de região vinculados ao clipe: listados; o zoom gera o aviso transformedUnderEffect', () => {
     const p = proj(true)
-    expect(linkedRegionEffects(p, 'm')).toEqual(['fx'])
-    expect(linkedRegionEffects(proj(false), 'm')).toEqual([])
-    const q = applyZoom(p, 'm', { x: 0.3, y: 0.3, w: 0.5, h: 0.5 }, 2 * S, S, null, 'linear', { clamp: false })
+    expect(linkedEffectIds(p, 'm')).toEqual(['fx'])
+    expect(linkedEffectIds(proj(false), 'm')).toEqual([])
+    const q = applyZoom(p, 'm', { x: 0.3, y: 0.3, w: 0.5, h: 0.5 }, 2 * S, S, null, 'linear', { clamp: false }).project
     expect(privacyWarnings(q, 0, 11 * S).some((w) => w.kind === 'transformedUnderEffect' && w.itemId === 'fx')).toBe(true)
+  })
+})
+
+describe('revisão: espera zero, volta à curva original, rotação, keys substituídos, Ken Burns em PiP', () => {
+  const r: ZoomRect = { x: 0.7, y: 0.35, w: 0.5, h: 0.5 }
+  /** Nenhuma animação do item com dois keys no mesmo instante (ou fora de ordem). */
+  const strictlyIncreasing = (m: MediaItem): boolean => itemAnimEntries(m).every(([, a]) => (a.keys ?? []).every((k, i, ks) => i === 0 || k.tUs > ks[i - 1].tUs))
+  function proj(edit?: (m: MediaItem) => void): Project {
+    const p = createEmptyProject('z')
+    p.assets = [vid]
+    p.tracks[0].items = [media(edit)]
+    return p
+  }
+  const itemOf = (p: Project): MediaItem => findItem(p, 'm')!.item as MediaItem
+
+  it('voltar ao normal com espera 0: a volta começa no key do enquadramento, sem key repetido', () => {
+    const k = zoomKeys(media(), r, S, 500_000, 0, 'inOut', HD)
+    for (const a of [k.x, k.y, k.scale]) {
+      expect(a.keys!.map((x) => x.tUs)).toEqual([S, 1_500_000, 2 * S])
+      expect(a.keys!.map((x) => x.ease)).toEqual(['inOut', 'inOut', 'linear'])
+    }
+    expect(evalAnim(k.scale, 1_500_000)).toBeCloseTo(2, 9)
+    expect(evalAnim(k.scale, 2 * S)).toBe(1)
+    // espera negativa = 0
+    expect(zoomKeys(media(), r, S, 500_000, -5, 'inOut', HD).scale.keys!.map((x) => x.tUs)).toEqual([S, 1_500_000, 2 * S])
+    const q = applyZoom(proj(), 'm', r, S, 500_000, 0, 'inOut', { clamp: true }).project
+    expect(strictlyIncreasing(itemOf(q))).toBe(true)
+    expect(validateProject(q)).toEqual([])
+  })
+  it('nenhum caso gera keys com o mesmo instante (espera, volta comprimida, sem volta, animação existente)', () => {
+    const lin = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'linear' as const }, { tUs: 1_500_000, value: 1.2, ease: 'linear' as const }, { tUs: 9 * S, value: 1.4, ease: 'linear' as const }] }
+    for (const [at, dur, hold] of [[S, 500_000, 0], [S, 500_000, S], [8 * S, S, 0], [9 * S, S, 0], [9_500_000, S, 2 * S], [0, 3 * S, null]] as const) {
+      for (const m of [media(), media((x) => { x.visual!.transform.scale = lin })]) {
+        const q = applyZoom(proj((x) => Object.assign(x, m)), 'm', r, at, dur, hold, 'out', { clamp: true }).project
+        expect(strictlyIncreasing(itemOf(q))).toBe(true)
+        expect(validateProject(q)).toEqual([])
+      }
+    }
+  })
+  it('a volta termina no valor da curva original naquele instante e ela continua como antes', () => {
+    const lin = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'linear' as const }, { tUs: 6 * S, value: 1.4, ease: 'linear' as const }] }
+    const m = media((x) => { x.visual!.transform.scale = lin })
+    const k = zoomKeys(m, r, S, 500_000, S, 'linear', HD)
+    expect(k.scale.keys!.map((x) => x.tUs)).toEqual([0, S, 1_500_000, 2_500_000, 3 * S, 6 * S])
+    for (const t of [3 * S, 4 * S, 5 * S, 6 * S, 8 * S]) expect(evalAnim(k.scale, t)).toBeCloseTo(evalAnim(lin, t), 12)
+    expect(evalAnim(k.scale, 500_000)).toBeCloseTo(evalAnim(lin, 500_000), 12)
+  })
+  it('rotação fora de 90°: clamp conservador — os cantos do quadro ficam dentro da camada girada', () => {
+    const base = { bw: 1920, bh: 1080, rotation: 30 }
+    const cur = { x: 0.5, y: 0.5, scale: 1 }
+    const corner: ZoomRect = { x: 0.1, y: 0.9, w: 0.5, h: 0.5 }
+    const inside = (p: { x: number; y: number; scale: number }): boolean => {
+      const th = (30 * Math.PI) / 180
+      return [[0, 0], [1920, 0], [0, 1080], [1920, 1080]].every(([fx, fy]) => {
+        const dx = fx - p.x * 1920, dy = fy - p.y * 1080
+        const lx = Math.cos(th) * dx + Math.sin(th) * dy, ly = -Math.sin(th) * dx + Math.cos(th) * dy
+        return Math.abs(lx) <= (1920 * p.scale) / 2 + 1e-6 && Math.abs(ly) <= (1080 * p.scale) / 2 + 1e-6
+      })
+    }
+    expect(inside(zoomPose(cur, corner, HD))).toBe(false) // sem clamp descobre o fundo
+    const c = zoomPose(cur, corner, HD, base)
+    expect(c.scale).toBeCloseTo(2, 9)
+    expect(inside(c)).toBe(true)
+    // no centro, o clamp não mexe
+    expect(zoomPose(cur, { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, HD, base)).toEqual(zoomPose(cur, { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, HD))
+  })
+  it('conta os keys existentes substituídos no trecho', () => {
+    const lin = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'linear' as const }, { tUs: 2 * S, value: 1.2, ease: 'linear' as const }, { tUs: 6 * S, value: 1.4, ease: 'linear' as const }] }
+    const m = media((x) => { x.visual!.transform.scale = lin; x.visual!.transform.x = { value: 0.5, keys: [{ tUs: S, value: 0.5, ease: 'linear' }, { tUs: 7 * S, value: 0.6, ease: 'linear' }] } })
+    expect(zoomKeys(m, r, S, 2 * S, null, 'linear', HD).replaced).toBe(2) // escala@2 s e x@1 s
+    expect(zoomKeys(media(), r, S, 2 * S, null, 'linear', HD).replaced).toBe(0)
+    expect(applyZoom(proj((x) => { x.visual!.transform.scale = lin }), 'm', r, S, 2 * S, null, 'linear', { clamp: false }).replaced).toBe(1)
+  })
+  it('Ken Burns num clipe que não cobre o quadro (PiP): a caixa fica parada e o conteúdo se aproxima dentro dela (corte)', () => {
+    const pip = (mirror: boolean): Project => proj((x) => { x.visual!.transform.scale = { value: 0.3 }; x.visual!.transform.x = { value: 0.8 }; x.visual!.transform.y = { value: 0.2 }; x.visual!.mirror = mirror })
+    const { project, replaced } = applyKenBurns(pip(false), 'm', 'br')
+    expect(replaced).toBe(0)
+    const v = itemOf(project).visual!
+    for (const k of ['x', 'y', 'scale'] as const) expect(v.transform[k].keys).toBeUndefined()
+    const D = 10 * S
+    const s = 1 / KEN_BURNS_SCALE
+    expect(v.crop.l.keys!.map((k) => k.tUs)).toEqual([0, D])
+    expect(evalAnim(v.crop.l, D)).toBeCloseTo(1 - s, 9)
+    expect(evalAnim(v.crop.t, D)).toBeCloseTo(1 - s, 9)
+    expect(evalAnim(v.crop.r, D)).toBe(0)
+    expect(evalAnim(v.crop.b, D)).toBe(0)
+    // tamanho da caixa no quadro igual em todo instante (o trecho visível encolhe na proporção)
+    const box = (t: number): [number, number] => {
+      const g = layerBase({ l: evalAnim(v.crop.l, t), t: evalAnim(v.crop.t, t), r: evalAnim(v.crop.r, t), b: evalAnim(v.crop.b, t) }, v.fit, SRC, HD)
+      return [g.bw, g.bh]
+    }
+    for (const t of [D / 3, D]) {
+      expect(box(t)[0]).toBeCloseTo(box(0)[0], 6)
+      expect(box(t)[1]).toBeCloseTo(box(0)[1], 6)
+    }
+    // espelhado: o canto direito da tela é o esquerdo da fonte
+    const mv = itemOf(applyKenBurns(pip(true), 'm', 'br').project).visual!
+    expect(evalAnim(mv.crop.l, D)).toBe(0)
+    expect(evalAnim(mv.crop.r, D)).toBeCloseTo(1 - s, 9)
+    expect(strictlyIncreasing(itemOf(project))).toBe(true)
   })
 })

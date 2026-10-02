@@ -5,6 +5,7 @@ import { join } from 'path'
 import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
+import { redBlob, type RedBlob } from '@shared/testing/pixels'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -90,28 +91,8 @@ interface SpeedReport {
   paritySd?: Parity
 }
 interface Parity { maxDiff: number; meanDiff: number; neighborMeanDiff: number; markers: number[]; error?: string }
-type RedBlob = { cx: number; cy: number; n: number; w: number; h: number }
 interface ZoomScenario { before: RedBlob | null; after: RedBlob | null; mid: RedBlob | null; error?: string }
 interface ZoomReport { error?: string; full?: ZoomScenario; cropped?: ZoomScenario; exportPath?: string; exportError?: string }
-
-/** Centro de massa (px, centro do pixel) e caixa dos pixels vermelhos (mesmo limiar do zoomHarness). */
-function redBlob(d: Uint8Array, w: number, h: number, stride: number): RedBlob | null {
-  let sx = 0
-  let sy = 0
-  let n = 0
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = (y * w + x) * stride
-      if (d[i] < 150 || d[i + 1] > 90 || d[i + 2] > 90) continue
-      sx += x + 0.5
-      sy += y + 0.5
-      n++
-      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y)
-    }
-  }
-  return n ? { cx: sx / n, cy: sy / n, n, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null
-}
 
 interface StretchReport {
   error?: string

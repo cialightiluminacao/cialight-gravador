@@ -2,8 +2,8 @@ import * as Popover from '@radix-ui/react-popover'
 import { SlidersHorizontal } from 'lucide-react'
 import { toast } from 'sonner'
 import { findItem } from '@shared/editor/ops'
-import type { Ease } from '@shared/editor/project'
-import { applyZoom, aspectRect, linkedRegionEffects, ZOOM_MAX_DUR_US, ZOOM_MIN_DUR_US, type ZoomRect } from '@shared/editor/zoom'
+import type { Ease, Project } from '@shared/editor/project'
+import { applyZoom, aspectRect, linkedEffectIds, ZOOM_MAX_DUR_US, ZOOM_MIN_DUR_US, type ZoomEdit, type ZoomRect } from '@shared/editor/zoom'
 import { Select, Tip, Toggle } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
 import { useViewerTool } from '../../state/viewerTool'
@@ -61,13 +61,25 @@ export function startZoomDraw(e: React.PointerEvent, ctx: GestureCtx, setPreview
   })
 }
 
-/** Aplica o zoom com as opções da ferramenta (um passo de desfazer), seleciona o clipe e avisa sobre efeitos vinculados. */
-function applyZoomTool(itemId: string, rect: ZoomRect, tUs: number): boolean {
+/** Aplica o zoom com as opções da ferramenta (um passo de desfazer) e seleciona o clipe. */
+function applyZoomTool(itemId: string, rect: ZoomRect, tUs: number): void {
   const z = useViewerTool.getState().zoom
-  const st = useEditorStore.getState()
-  const ok = st.apply((q) => applyZoom(q, itemId, rect, tUs, z.durUs, z.returnBack ? z.holdUs : null, z.ease, { clamp: z.clamp }))
+  if (runZoomEdit(itemId, (q) => applyZoom(q, itemId, rect, tUs, z.durUs, z.returnBack ? z.holdUs : null, z.ease, { clamp: z.clamp }))) useEditorStore.getState().select([itemId])
+}
+
+/**
+ * Zoom/Ken Burns como um passo de desfazer; depois avisa quantos keyframes existentes foram substituídos e se o clipe
+ * tem efeitos de privacidade vinculados (warnLinkedEffects). false = não aplicou (o store já mostrou o erro).
+ */
+export function runZoomEdit(itemId: string, edit: (p: Project) => ZoomEdit): boolean {
+  let replaced = 0
+  const ok = useEditorStore.getState().apply((q) => {
+    const r = edit(q)
+    replaced = r.replaced
+    return r.project
+  })
   if (!ok) return false
-  st.select([itemId])
+  if (replaced > 0) toast(replaced === 1 ? '1 keyframe substituído' : `${replaced} keyframes substituídos`, { description: 'Os keyframes que já existiam no trecho do movimento foram trocados. Ctrl+Z desfaz.' })
   warnLinkedEffects(itemId)
   return true
 }
@@ -78,7 +90,7 @@ function applyZoomTool(itemId: string, rect: ZoomRect, tUs: number): boolean {
  */
 export function warnLinkedEffects(itemId: string): void {
   const p = useEditorStore.getState().project
-  const fx = p ? linkedRegionEffects(p, itemId) : []
+  const fx = p ? linkedEffectIds(p, itemId) : []
   if (fx.length === 0) return
   toast.warning(fx.length === 1 ? 'Este clipe tem um efeito de privacidade vinculado' : `Este clipe tem ${fx.length} efeitos de privacidade vinculados`, {
     description: 'A região do efeito não acompanha o zoom: o conteúdo protegido pode sair de baixo dela. Confira o efeito antes de exportar.',
@@ -142,7 +154,7 @@ export function ZoomSettingsButton(): React.JSX.Element {
             Voltar ao normal depois
             <Toggle size="sm" checked={z.returnBack} onCheckedChange={(on) => set({ returnBack: on })} aria-label="Voltar ao normal depois" />
           </label>
-          {z.returnBack ? <NumberField label="Depois de" value={z.holdUs / 1e6} min={0} max={60} step={0.1} precision={1} unit="s" onChange={(n) => set({ holdUs: Math.round(n * 1e6) })} title="Tempo parado no enquadramento antes de voltar" /> : null}
+          {z.returnBack ? <NumberField label="Depois de" value={z.holdUs / 1e6} min={0} max={60} step={0.1} precision={1} unit="s" onChange={(n) => set({ holdUs: Math.round(n * 1e6) })} title="Tempo parado no enquadramento antes de voltar (0 = volta logo depois de chegar)" /> : null}
           <label className="flex min-h-7 items-center justify-between gap-2 text-[11px] text-fg-2">
             Sem bordas pretas
             <Toggle size="sm" checked={z.clamp} onCheckedChange={(on) => set({ clamp: on })} aria-label="Sem bordas pretas" />
