@@ -124,6 +124,15 @@ no início do `.mjs` e o WASM vem **embutido em base64** (sem arquivo `.wasm`). 
 recorte num módulo próprio (`engine/audio/stretchWasm.ts`) com teste, em vez de depender do formato do arquivo publicado.
 Para o AudioWorklet oficial a CSP precisa de `script-src blob: 'wasm-unsafe-eval'`.
 
+**Atualização F3 (implementação):** em vez do recorte do `.mjs`, `scripts/vendor-signalsmith.mjs` extrai só o binário
+WASM e o mapa dos nomes minificados (imports `a.a–a.d`, exports `e–y`) para `engine/audio/signalsmithWasm.ts`
+(sha256 conferido em teste); `engine/audio/stretch.ts` instancia o WASM direto com 4 imports próprios (abort, memcpy,
+resize_heap, random_get determinístico) — sem glue emscripten, blob nem eval; roda no worker, e também no Node (vitest
+com o WASM real). Pré-roll após reset: `seek` com `latencyFrames` de histórico até `base + inputLatency` e descarte de
+`outputLatency` frames de saída (sem isso a saída começa com ~50 ms de rampa). Medida: um stretcher ≈ 50–60× tempo real;
+4 faixas no audio worker ≈ 12×. Atenção: nesta máquina (i5-13400, plano Equilibrado) qualquer carga contínua cai ~10×
+depois de ~2 s (laço puro no Node: 7000 → 600 it/s) — medidas longas refletem esse estrangulamento, não o código.
+
 ## 6. `--disable-features=ReclaimInactiveWebCodecs` — PASSOU (inofensivo; reclaim não reproduzido)
 
 Com a flag (`app.commandLine.getSwitchValue('disable-features')` = `ReclaimInactiveWebCodecs`) todos os testes acima passaram.

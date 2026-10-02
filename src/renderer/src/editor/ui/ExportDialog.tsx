@@ -65,7 +65,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const size = outputSize(preset, project.canvas)
   const fps = project.canvas.fps
   const videoBps = presetVideoBitrate(preset, fps, durationUs)
-  const hasAudio = planAudio(project).length > 0
+  const hasAudio = planAudio(project).some((s) => s.mode !== 'mute')
   const audioBps = hasAudio ? AUDIO_KBPS * 1000 : 0
   const estimate = estimateBytes(videoBps, audioBps, durationUs)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita

@@ -51,4 +51,37 @@ describe('planAudio', () => {
     expect(planAudio(off)).toEqual([])
     expect(planAudio(ops.setItemEnabled(off, [a], true))).toHaveLength(1)
   })
+  describe('modo do segmento', () => {
+    const at = (speed: number, over: { preservePitch?: boolean; keepFastAudio?: boolean; reverse?: boolean } = {}): string => {
+      const { p, a } = base()
+      const q = ops.updateItem<MediaItem>(p, a, (d) => {
+        d.speed = speed
+        d.durationUs = Math.round((10 * S) / speed)
+        d.reverse = over.reverse ?? false
+        d.audio.preservePitch = over.preservePitch ?? true
+        if (over.keepFastAudio !== undefined) d.audio.keepFastAudio = over.keepFastAudio
+      })
+      return planAudio(q)[0].mode
+    }
+    it('1× copia', () => {
+      expect(at(1)).toBe('copy')
+      expect(at(1, { preservePitch: false })).toBe('copy')
+    })
+    it('preservePitch até 4× (inclusive) e câmera lenta → stretch', () => {
+      for (const v of [0.1, 0.5, 1.5, 2, 4]) expect(at(v)).toBe('stretch')
+    })
+    it('acima de 4× com preservePitch → mute, salvo keepFastAudio', () => {
+      expect(at(4.01)).toBe('mute')
+      expect(at(8)).toBe('mute')
+      expect(at(16, { keepFastAudio: false })).toBe('mute')
+      expect(at(8, { keepFastAudio: true })).toBe('stretch')
+    })
+    it('sem preservePitch → resample (o tom muda), em qualquer velocidade', () => {
+      for (const v of [0.5, 2, 8]) expect(at(v, { preservePitch: false })).toBe('resample')
+    })
+    it('reverso: 1× copia, outras velocidades reamostram', () => {
+      expect(at(1, { reverse: true })).toBe('copy')
+      expect(at(2, { reverse: true })).toBe('resample')
+    })
+  })
 })

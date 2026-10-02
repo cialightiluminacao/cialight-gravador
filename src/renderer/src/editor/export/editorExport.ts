@@ -170,7 +170,7 @@ interface AttemptDone {
 /** Uma tentativa completa (workers próprios, descartados no fim). */
 function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<AttemptDone> {
   const api = window.api
-  const hasAudio = planAudio(req.project).length > 0
+  const hasAudio = planAudio(req.project).some((s) => s.mode !== 'mute')
   const urls = mediaUrlsFor(req.project, 'export')
   const render = new RenderClient(new OffscreenCanvas(req.width, req.height), { width: req.width, height: req.height, dpr: 1 })
   const audio = hasAudio ? new AudioClient() : null

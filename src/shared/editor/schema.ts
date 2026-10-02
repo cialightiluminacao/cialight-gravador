@@ -37,7 +37,8 @@ const audio = z.object({
   fadeOutUs: us,
   preservePitch: z.boolean(),
   denoise: z.boolean(),
-  normalize: z.boolean()
+  normalize: z.boolean(),
+  keepFastAudio: z.boolean().optional()
 })
 const transition = z.object({
   kind: z.enum(['crossfade', 'dipBlack', 'dipWhite', 'slideL', 'slideR', 'slideU', 'slideD', 'wipeL', 'wipeR', 'zoomIn', 'blur']),

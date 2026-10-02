@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { AudioSegment } from '@shared/editor/audioPlan'
-import { ChunkedPcm, limit, mixBlock, resampleLinear, SR, type PcmSource } from './mixer'
+import { ChunkedPcm, limit, mixBlock, resampleLinear, SR, StretchBank, type PcmSource } from './mixer'
+import type { Stretcher } from './stretch'
 
 // Fonte sintética: senoide de `hz` com amplitude `amp` no tempo da fonte (os dois canais iguais).
 function sine(hz: number, amp: number): PcmSource {
   return {
+    readStretched(_key, srcFromUs, frames, speed) {
+      return this.read(srcFromUs, frames, speed, false)
+    },
     read(srcFromUs, frames, speed, reverse) {
       const out = new Float32Array(frames * 2)
       const step = (reverse ? -speed : speed) / SR
@@ -22,7 +26,7 @@ function seg(over: Partial<AudioSegment> = {}): AudioSegment {
   const startUs = over.startUs ?? 0
   const durationUs = over.durationUs ?? 2_000_000
   return {
-    itemId: 'i1', assetId: 'a1', startUs, durationUs, srcInUs: 0, speed: 1, reverse: false, preservePitch: true,
+    itemId: 'i1', assetId: 'a1', startUs, durationUs, srcInUs: 0, speed: 1, reverse: false, preservePitch: true, mode: 'copy',
     gain: [{ tUs: startUs, gain: 1 }, { tUs: startUs + durationUs, gain: 1 }],
     ...over
   }
@@ -69,7 +73,8 @@ describe('mixBlock', () => {
       read(from, frames) {
         reads.push([from, frames])
         return new Float32Array(frames * 2).fill(0.25)
-      }
+      },
+      readStretched: () => new Float32Array(0)
     }
     const s = seg({ startUs: 50_000, durationUs: 30_000, srcInUs: 2_000_000 })
     const out = mixBlock([s], 0, 4800, new Map([['a1', src]]))
@@ -86,7 +91,8 @@ describe('mixBlock', () => {
       read(from, frames, speed, reverse) {
         reads.push([from, frames, speed, reverse])
         return new Float32Array(frames * 2)
-      }
+      },
+      readStretched: () => new Float32Array(0)
     }
     mixBlock([seg({ startUs: 1_000_000, srcInUs: 500_000, speed: 2 })], 1_100_000, 4800, new Map([['a1', src]]))
     mixBlock([seg({ startUs: 1_000_000, durationUs: 2_000_000, srcInUs: 500_000, speed: 2, reverse: true })], 1_100_000, 4800, new Map([['a1', src]]))
@@ -188,5 +194,138 @@ describe('ChunkedPcm', () => {
     expect(ChunkedPcm.chunksFor(100_000, SR / 10, 1, true)).toEqual([0])
     expect(ChunkedPcm.chunksFor(-10_000, 600, 1, false)).toEqual([-1, 0])
     expect(ChunkedPcm.chunksFor(-10_000, 100, 1, false)).toEqual([-1])
+  })
+})
+
+describe('mixBlock + StretchBank (fake determinístico)', () => {
+  // fonte rampa: valor = índice absoluto do frame / 1e6 (identifica a posição de fonte entregue ao stretcher)
+  function rampSource(bank: StretchBank, seconds: number): ChunkedPcm {
+    const pcm = new ChunkedPcm(64, bank)
+    for (let k = 0; k < seconds; k++) {
+      const c = new Float32Array(SR * 2)
+      for (let i = 0; i < SR; i++) c[i * 2] = c[i * 2 + 1] = (k * SR + i) / 1e6
+      pcm.put(k, c)
+    }
+    return pcm
+  }
+  const pos = (input: Float32Array, frame: number): number => Math.round(input[frame * 2] * 1e6)
+  type Call = { op: 'reset' } | { op: 'seek'; from: number; to: number; rate: number } | { op: 'process'; from: number; to: number; out: number }
+
+  /** Stretcher falso: latências 30/20 frames; registra o que recebe; saída = entrada reamostrada (vizinho). */
+  function fake(calls: Call[]): Stretcher {
+    return {
+      inputLatency: 30,
+      outputLatency: 20,
+      latencyFrames: 50,
+      reset: () => calls.push({ op: 'reset' }),
+      seek: (input, rate) => calls.push({ op: 'seek', from: pos(input, 0), to: pos(input, input.length / 2 - 1) + 1, rate }),
+      process(input, outFrames) {
+        const n = input.length / 2
+        calls.push({ op: 'process', from: n ? pos(input, 0) : NaN, to: n ? pos(input, n - 1) + 1 : NaN, out: outFrames })
+        const out = new Float32Array(outFrames * 2)
+        for (let j = 0; j < outFrames; j++) out[j * 2] = out[j * 2 + 1] = n ? input[Math.min(n - 1, Math.floor((j * n) / outFrames)) * 2] : 0
+        return out
+      }
+    }
+  }
+
+  function setup(maxLive = 16): { calls: Call[]; created: number[]; bank: StretchBank; srcs: Map<string, PcmSource> } {
+    const calls: Call[] = []
+    const created: number[] = []
+    const bank = new StretchBank(async (rate) => {
+      created.push(rate)
+      return fake(calls)
+    }, maxLive)
+    return { calls, created, bank, srcs: new Map([['a1', rampSource(bank, 20)]]) }
+  }
+  const stretchSeg = (over: Partial<AudioSegment> = {}): AudioSegment => seg({ durationUs: 5_000_000, srcInUs: 2_000_000, speed: 2, mode: 'stretch', ...over })
+  const BASE = 2 * SR // srcIn 2 s
+  const LEAD = 20 * 2 + 30 // outputLatency·speed + inputLatency
+
+  it('blocos consecutivos: um só reset; entrada contínua (sem lacuna nem sobreposição), adiantada pela latência', async () => {
+    const { calls, bank, srcs } = setup()
+    const s = stretchSeg()
+    await bank.ensure('i1', 2)
+    for (let b = 0; b < 3; b++) mixBlock([s], b * 100_000, 4800, srcs)
+    expect(calls.filter((c) => c.op === 'reset')).toHaveLength(1)
+    // pré-roll: histórico de latencyFrames até base + inputLatency; descarte de outputLatency frames de saída
+    expect(calls[1]).toEqual({ op: 'seek', from: BASE + 30 - 50, to: BASE + 30, rate: 2 })
+    expect(calls[2]).toEqual({ op: 'process', from: BASE + 30, to: BASE + LEAD, out: 20 })
+    const blocks = calls.slice(3) as Extract<Call, { op: 'process' }>[]
+    expect(blocks.map((c) => c.out)).toEqual([4800, 4800, 4800])
+    expect(blocks[0].from).toBe(BASE + LEAD)
+    for (let i = 1; i < blocks.length; i++) expect(blocks[i].from).toBe(blocks[i - 1].to)
+    expect(blocks[2].to).toBe(BASE + LEAD + 3 * 4800 * 2)
+  })
+
+  it('seek (bloco fora de sequência) → reset + pré-roll no novo ponto; mudança de velocidade também', async () => {
+    const { calls, bank, srcs } = setup()
+    await bank.ensure('i1', 2)
+    mixBlock([stretchSeg()], 0, 4800, srcs)
+    mixBlock([stretchSeg()], 1_000_000, 4800, srcs) // salto: fonte 2 s + 1 s·2 = 4 s
+    const resets = calls.flatMap((c, i) => (c.op === 'reset' ? [i] : []))
+    expect(resets).toHaveLength(2)
+    expect(calls[resets[1] + 1]).toEqual({ op: 'seek', from: 4 * SR + 30 - 50, to: 4 * SR + 30, rate: 2 })
+    mixBlock([stretchSeg({ speed: 1.5 })], 1_100_000, 4800, srcs)
+    expect(calls.filter((c) => c.op === 'reset')).toHaveLength(3)
+  })
+
+  it('o bloco seguinte continua de onde o anterior parou (fake sem atraso: 1º frame = fonte do bloco + lead)', async () => {
+    const { bank, srcs } = setup()
+    await bank.ensure('i1', 2)
+    mixBlock([stretchSeg()], 0, 4800, srcs)
+    const out = mixBlock([stretchSeg()], 100_000, 4800, srcs)
+    expect(Math.round(out[0] * 1e6)).toBe(BASE + 4800 * 2 + LEAD)
+  })
+
+  it('sem stretcher para o segmento (ensure não chamado) → reamostra (tom muda) em vez de silenciar', () => {
+    const { calls, srcs } = setup()
+    const out = mixBlock([stretchSeg()], 0, 3, srcs)
+    expect([out[0], out[2], out[4]].map((v) => Math.round(v * 1e6))).toEqual([BASE, BASE + 2, BASE + 4])
+    expect(calls).toEqual([])
+  })
+
+  it('modo mute não lê a fonte e sai em silêncio', async () => {
+    const { calls, bank, srcs } = setup()
+    await bank.ensure('i1', 8)
+    expect(peak(mixBlock([stretchSeg({ speed: 8, mode: 'mute' })], 0, 4800, srcs))).toBe(0)
+    expect(calls).toEqual([])
+  })
+
+  it('span cobre tudo o que a leitura pede à fonte (pré-roll e avanço)', async () => {
+    const { calls, bank, srcs } = setup()
+    expect(bank.span(2_000_000, 4800, 2)).toBeNull() // latências desconhecidas antes do 1º stretcher
+    await bank.ensure('i1', 2)
+    const [a, b] = bank.span(2_000_000, 4800, 2)!
+    mixBlock([stretchSeg()], 0, 4800, srcs)
+    const ranges = calls.filter((c): c is Extract<Call, { op: 'seek' | 'process' }> => c.op !== 'reset')
+    expect(Math.min(...ranges.map((c) => c.from))).toBeGreaterThanOrEqual(a)
+    expect(Math.max(...ranges.map((c) => c.to))).toBeLessThanOrEqual(b)
+  })
+
+  it('LRU: acima de maxLive o segmento mais antigo perde o estado e o stretcher é reaproveitado; retain solta os que saíram', async () => {
+    const { created, bank } = setup(2)
+    await bank.ensure('a', 2)
+    await bank.ensure('b', 2)
+    await bank.ensure('a', 2) // a fica mais recente
+    await bank.ensure('c', 2)
+    expect(bank.has('b')).toBe(false)
+    expect(bank.has('a') && bank.has('c')).toBe(true)
+    expect(created).toHaveLength(2) // c reaproveitou o de b
+    bank.retain(new Set(['c']))
+    expect(bank.has('a')).toBe(false)
+    await bank.ensure('d', 2)
+    expect(created).toHaveLength(2)
+  })
+
+  it('falha ao criar o stretcher: ensure rejeita sempre, sem tentar de novo', async () => {
+    let tries = 0
+    const bank = new StretchBank(async () => {
+      tries++
+      throw new Error('sem WASM')
+    })
+    await expect(bank.ensure('i1', 2)).rejects.toThrow('sem WASM')
+    await expect(bank.ensure('i2', 2)).rejects.toThrow('sem WASM')
+    expect(tries).toBe(1)
   })
 })

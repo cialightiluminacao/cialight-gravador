@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AssetPcm, type Opened } from './assetPcm'
+import { StretchBank } from './mixer'
+import type { Stretcher } from './stretch'
 
 // Sample falso no formato do mediabunny: mono, valor constante.
 function fakeSample(timestamp: number, frames: number, value: number): unknown {
@@ -96,5 +98,42 @@ describe('AssetPcm', () => {
     await Promise.all([a, pcm.ensure(0, 4800, 1, false)])
     expect(calls).toBe(1)
     expect(pcm.read(0, 1, 1, false)[0]).toBeCloseTo(0.25)
+  })
+
+  describe('ensureStretched', () => {
+    // stretcher falso com latências de 0,5 s (entrada) e 0,25 s (saída): o pré-roll recua para o chunk anterior
+    const fake = (): Stretcher => ({
+      inputLatency: 24000, outputLatency: 12000, latencyFrames: 36000,
+      reset: () => {}, seek: () => {}, process: (_i, n) => new Float32Array(n * 2)
+    })
+    const decoder = (calls: number[]): Opened => opened(async function* (start) {
+      calls.push(Math.round((start ?? 0) * 10) / 10)
+      for (let t = 0; t < 10; t += 0.1) yield fakeSample(t, 4800, 0.5)
+    })
+
+    it('cria o stretcher do segmento e decodifica os chunks do pré-roll ao avanço da latência', async () => {
+      const calls: number[] = []
+      const bank = new StretchBank(async () => fake())
+      const pcm = new AssetPcm('u', null, { stretch: bank, open: async () => decoder(calls) })
+      // fonte em 3,1 s, 0,1 s de saída a 2×: pré-roll desde 3,1 + 0,5 − 0,75 = 2,85 s; avanço até 3,1 + 1,0 + 0,2 = 4,3 s
+      await pcm.ensureStretched('i1', 3_100_000, 4800, 2)
+      expect(bank.has('i1')).toBe(true)
+      expect(calls.sort()).toEqual([1.8, 2.8, 3.8]) // chunks 2, 3 e 4 (janela com margem de 0,2 s)
+    })
+
+    it('sem WASM: avisa uma vez e prepara a leitura reamostrada', async () => {
+      const calls: number[] = []
+      const onError = vi.fn()
+      const bank = new StretchBank(async () => {
+        throw new Error('sem WASM')
+      })
+      const pcm = new AssetPcm('u', null, { stretch: bank, onError, open: async () => decoder(calls) })
+      await pcm.ensureStretched('i1', 3_100_000, 4800, 2)
+      await pcm.ensureStretched('i1', 3_200_000, 4800, 2)
+      expect(onError).toHaveBeenCalledTimes(1)
+      expect(onError.mock.calls[0][0]).toContain('tom preservado indisponível')
+      expect(calls).toEqual([2.8]) // só o chunk 3 da leitura reamostrada
+      expect(pcm.readStretched('i1', 3_100_000, 4, 2)[0]).toBeCloseTo(0.5)
+    })
   })
 })

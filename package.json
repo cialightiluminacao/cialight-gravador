@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "vendor:signalsmith": "node scripts/vendor-signalsmith.mjs",
     "spike": "cross-env CIALIGHT_SPIKE=1 electron-vite dev",
     "spike:editor": "cross-env CIALIGHT_SPIKE=editor electron-vite dev",
     "dist:win": "electron-vite build && electron-builder --win",

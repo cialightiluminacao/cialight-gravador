@@ -6,7 +6,8 @@ import { join } from 'path'
 import type { Asset, EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import type { ExportOptions } from '@shared/types'
 import { createEffectItem, createEmptyProject, createMediaItem } from '@shared/editor/factory'
-import { addAsset, addMediaFromAsset, deleteRange, updateItem } from '@shared/editor/ops'
+import { addAsset, addMediaFromAsset, deleteRange, setSpeed, updateItem } from '@shared/editor/ops'
+import { dominantHz } from '@shared/audio/pcmAnalysis'
 import { clampPip, pipPixelRect, pipRectAt } from '@shared/compositor/pipMath'
 import { untaggedFamily } from '@shared/editor/sourceColor'
 import type { ProjectStore } from './project/projectStore'
@@ -51,6 +52,9 @@ const FX_SOLID = { x: 0.72, y: 0.5, w: 0.3, h: 0.4 }
 const FX_BLUR = { x: 0.3, y: 0.5, w: 0.3, h: 0.4 }
 // miolo da região borrada na saída (1280×720), 24 px para dentro da borda (longe do feather)
 const FX_BLUR_CROP = { x: Math.round((FX_BLUR.x - FX_BLUR.w / 2) * W) + 24, y: Math.round((FX_BLUR.y - FX_BLUR.h / 2) * H) + 24, w: Math.round(FX_BLUR.w * W) - 48, h: Math.round(FX_BLUR.h * H) - 48 }
+// velocidade (F3): testsrc2 + voz sintética de 6 s a 2× com tom preservado
+const SPEED_ID = 'p-editor-export-velocidade'
+const VOICE_HZ = 220
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
 
@@ -67,6 +71,7 @@ interface HarnessReport {
   color?: Record<string, { export: ExportOut; frame: unknown }>
   v1Composed?: { path?: string; error?: string }
   effects?: { export?: ExportOut; previewBlockVar?: number[]; previewBlurRgb?: number[]; error?: string }
+  speed?: ExportOut
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
 }
 
@@ -134,6 +139,13 @@ async function rmsDb(file: string, from: number, to: number): Promise<number> {
   const r = await runFfmpeg(['-hide_banner', '-nostdin', '-i', file, '-vn', '-af', `atrim=start=${from}:end=${to},astats=measure_perchannel=none`, '-f', 'null', '-'], { label: 'teste: astats' })
   const m = /RMS level dB:\s*(-?[\d.]+|-inf)/.exec(r.stderrTail.split('Overall').pop() ?? '')
   return m ? (m[1] === '-inf' ? -Infinity : Number(m[1])) : NaN
+}
+
+/** Áudio do arquivo como PCM mono float 48 kHz (ffmpeg → f32le). */
+async function monoPcm(file: string, out: string): Promise<Float32Array> {
+  await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-vn', '-ac', '1', '-ar', '48000', '-f', 'f32le', out], { label: 'teste: pcm' })
+  const b = readFileSync(out)
+  return new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength))
 }
 
 /** Quadros decodificados da faixa de vídeo (ffprobe -count_frames). */
@@ -215,6 +227,16 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(EFFECTS_ID), { recursive: true, force: true })
   projects.create(fxp)
 
+  // velocidade: voz sintética (220 Hz + harmônicos ½ e ¼, sílabas a 4 Hz) com vídeo, item inteiro a 2×
+  const voice = join(dir, 'voz-sintetica.mp4')
+  const voiceExpr = `0.3*(0.6+0.4*sin(2*PI*4*t))*(sin(2*PI*${VOICE_HZ}*t)+0.5*sin(4*PI*${VOICE_HZ}*t)+0.25*sin(6*PI*${VOICE_HZ}*t))`
+  await gen(['-f', 'lavfi', '-i', `testsrc2=size=${W}x${H}:rate=${FPS}`, '-f', 'lavfi', '-i', `aevalsrc='${voiceExpr}|${voiceExpr}':s=48000`, '-t', '6', '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', ...BT709, '-c:a', 'aac', '-b:a', '160k', voice], 'editor-export: voz sintética')
+  const aVoice: Asset = { ...assetFromInfo('a_voz', voice, statSync(voice), await probe(voice)), status: 'ready' }
+  const speedAdded = addMediaFromAsset(addAsset({ ...createEmptyProject('Velocidade', { width: W, height: H, fps: FPS, background: '#000000' }), id: SPEED_ID }, aVoice), aVoice.id, 0)
+  const speedProject = setSpeed(speedAdded.project, speedAdded.itemIds[1], 2) // vinculados: vídeo e áudio a 2×
+  rmSync(projects.dirOf(SPEED_ID), { recursive: true, force: true })
+  projects.create(speedProject)
+
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
   const session = await makeSyntheticSession(sessions, SESSION_ID)
@@ -229,7 +251,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -371,6 +393,22 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     const pBlur = psnr(ex, pb)
     check(pBlur > 30, `efeitos: região borrada exportação 720p × preview 1080p reduzido (raio ∝ altura): PSNR ${pBlur.toFixed(1)} dB > 30 (miolo ${FX_BLUR_CROP.w}×${FX_BLUR_CROP.h})`, failures)
     check(pv.length === exportVar.length && union > 100 && iou >= 0.9, `efeitos: área borrada/tarjada no mesmo lugar (IoU ${iou.toFixed(3)} ≥ 0,9; ${inter}/${union} blocos de ${FX_BLOCK}×${FX_BLOCK})`, failures)
+  }
+
+  // ---- velocidade 2× com tom preservado ----
+  const spOut = r.speed?.path
+  check(!!spOut && existsSync(spOut), `velocidade: clipe de 6 s a 2× exportado (${spOut ?? r.speed?.error})`, failures)
+  if (spOut && existsSync(spOut)) {
+    const pr = await probeFile(spOut)
+    check(Math.abs(pr.durationMs - 3000) <= FRAME_MS, `velocidade: duração 3,0 s ± 1 quadro (${pr.durationMs} ms)`, failures)
+    const outPcm = await monoPcm(spOut, join(dir, 'velocidade-saida.f32'))
+    const srcPcm = await monoPcm(voice, join(dir, 'velocidade-fonte.f32'))
+    const hzOut = dominantHz(outPcm, 48000, 48000, 100, 1000)
+    const hzSrc = dominantHz(srcPcm, 2 * 48000, 48000, 100, 1000)
+    let sq = 0
+    for (let i = 48000; i < 2 * 48000 && i < outPcm.length; i++) sq += outPcm[i] * outPcm[i]
+    const rms = Math.sqrt(sq / 48000)
+    check(Math.abs(hzOut - VOICE_HZ) / VOICE_HZ <= 0.02 && Math.abs(hzSrc - VOICE_HZ) / VOICE_HZ <= 0.02 && rms > 0.05, `velocidade: tom mantido a 2× — fundamental ${hzOut} Hz na saída × ${hzSrc} Hz na fonte (${VOICE_HZ} ±2 %; reamostrado daria ${2 * VOICE_HZ}), RMS ${rms.toFixed(3)}`, failures)
   }
 
   // ---- preview intocado durante a exportação ----

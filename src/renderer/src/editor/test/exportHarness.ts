@@ -20,7 +20,7 @@ declare global {
   }
 }
 
-interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; effects: { projectId: string; width: number; height: number; tUs: number; block: number; blurCrop: { x: number; y: number; w: number; h: number } } }
+interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; speedProjectId: string; effects: { projectId: string; width: number; height: number; tUs: number; block: number; blurCrop: { x: number; y: number; w: number; h: number } } }
 
 export async function runExportHarness(params: Params): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
@@ -81,6 +81,9 @@ export async function runExportHarness(params: Params): Promise<void> {
     }
     report.color = color
     report.effects = await effectsParity(params.effects, params.outputDir)
+    // velocidade 2× com tom preservado: voz sintética de 220 Hz (o main confere o tom e a duração)
+    const speedProject = await window.api.project.load(params.speedProjectId)
+    report.speed = await exportOnce(base(speedProject, 'velocidade-2x.mp4'))
 
     if (!report.previewUntouched) {
       try {

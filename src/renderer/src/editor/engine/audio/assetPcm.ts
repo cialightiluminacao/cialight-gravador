@@ -6,7 +6,7 @@
 // do Opus…) são convertidos por copyTo(…, { format: 'f32-planar' }).
 import { ALL_FORMATS, AudioSampleSink, Input, UrlSource, type InputAudioTrack } from 'mediabunny'
 import type { Us } from '@shared/editor/project'
-import { ChunkedPcm, resampleLinear, SR, type PcmSource } from './mixer'
+import { ChunkedPcm, resampleLinear, SR, type PcmSource, type StretchBank } from './mixer'
 
 const MARGIN_S = 0.2
 const CACHE_CHUNKS = 30
@@ -27,10 +27,12 @@ export interface AssetPcmOptions {
   onError?: (message: string) => void
   now?: () => number
   open?: (url: string, trackIndex: number | null) => Promise<Opened>
+  /** Stretchers por segmento (compartilhados pelo worker); sem ele os segmentos 'stretch' reamostram. */
+  stretch?: StretchBank
 }
 
 export class AssetPcm implements PcmSource {
-  private readonly pcm = new ChunkedPcm(CACHE_CHUNKS)
+  private readonly pcm: ChunkedPcm
   private opened!: Promise<Opened | null>
   private openFailedAt: number | null = null
   private readonly failedAt = new Map<number, number>() // chunk → instante da falha (espera RETRY_MS)
@@ -45,6 +47,7 @@ export class AssetPcm implements PcmSource {
   constructor(readonly url: string, readonly trackIndex: number | null, private readonly opts: AssetPcmOptions = {}) {
     this.now = opts.now ?? (() => performance.now())
     this.openFn = opts.open ?? open
+    this.pcm = new ChunkedPcm(CACHE_CHUNKS, opts.stretch)
     this.startOpen()
   }
 
@@ -58,8 +61,30 @@ export class AssetPcm implements PcmSource {
     for (const k of ks) this.pcm.touch(k)
   }
 
+  /**
+   * Para readStretched: garante o stretcher do segmento e os chunks que ele vai ler (com pré-roll e o avanço
+   * da latência). Nunca rejeita; sem stretcher (WASM indisponível) avisa uma vez e prepara a leitura reamostrada.
+   */
+  async ensureStretched(segKey: string, srcFromUs: Us, frames: number, speed: number, stale?: () => boolean): Promise<void> {
+    const bank = this.opts.stretch
+    try {
+      await bank?.ensure(segKey, speed)
+    } catch (err) {
+      this.report(`velocidade com tom preservado indisponível (${errMsg(err)})`)
+    }
+    const span = bank?.span(srcFromUs, frames, speed)
+    if (!span) return this.ensure(srcFromUs, frames, speed, false, stale)
+    const ks = ChunkedPcm.chunksForFrames(span[0], span[1])
+    await Promise.all(ks.map((k) => this.chunk(k, stale)))
+    for (const k of ks) this.pcm.touch(k)
+  }
+
   read(srcFromUs: Us, frames: number, speed: number, reverse: boolean): Float32Array {
     return this.pcm.read(srcFromUs, frames, speed, reverse)
+  }
+
+  readStretched(segKey: string, srcFromUs: Us, frames: number, speed: number): Float32Array {
+    return this.pcm.readStretched(segKey, srcFromUs, frames, speed)
   }
 
   dispose(): void {

@@ -4,7 +4,8 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 // Páginas dos spikes (medições F0) só entram no build quando pedidas (CIALIGHT_SPIKE no build); o instalador
-// não leva o código delas nem o WASM do signalsmith. `npm run spike*` usa o dev server, que serve tudo.
+// não leva o código delas (o WASM do signalsmith do editor vem do módulo vendorizado, não do pacote npm).
+// `npm run spike*` usa o dev server, que serve tudo.
 const spikePages: Record<string, string> = process.env.CIALIGHT_SPIKE
   ? { spike: resolve('src/renderer/spike.html'), 'editor-spike': resolve('src/renderer/editor-spike.html') }
   : {}

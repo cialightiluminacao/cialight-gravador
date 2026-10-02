@@ -7,6 +7,7 @@ import { PlaybackController } from '../engine/PlaybackController'
 import { useEditorStore } from '../state/editorStore'
 import { createEditorEngine } from '../ui/editorEngine'
 import { effectsCheck } from './effectsHarness'
+import { stretchCheck } from './stretchHarness'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -26,6 +27,7 @@ export async function runRenderHarness(projectId: string): Promise<void> {
   const errors = report.errors as string[]
   let ok = false
   try {
+    report.stretch = await stretchCheck()
     const project = await window.api.project.load(projectId)
     const canvas = document.createElement('canvas')
     canvas.width = W

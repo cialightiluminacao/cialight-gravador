@@ -3,12 +3,15 @@
 // bloco, aquece o cache do segundo seguinte (mídia que vai começar já fica decodificada).
 // Exportação: uma instância própria recebe uma MessagePort ('port') e atende pela porta os pedidos do
 // render worker de exportação, em ordem e com memória constante (cache LRU de chunks por asset).
+// Velocidade com tom preservado: um StretchBank do worker guarda o stretcher de cada segmento 'stretch'
+// (chave itemId) com a posição contínua entre blocos — o mesmo caminho no preview e na exportação.
 import { planAudio, type AudioSegment } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 import { AssetPcm } from './assetPcm'
-import { mixBlock, SR, type PcmSource } from './mixer'
+import { mixBlock, SR, StretchBank, type PcmSource } from './mixer'
 import type { AudioIn, AudioOut } from './protocol'
+import { createStretcher } from './stretch'
 
 type RenderMsg = Extract<AudioIn, { t: 'render' }> & { reply: (m: AudioOut, transfer?: Transferable[]) => void }
 
@@ -18,6 +21,7 @@ const post = (m: AudioOut, transfer: Transferable[] = []): void => (self as unkn
 
 let segments: AudioSegment[] = []
 const sources = new Map<string, AssetPcm>()
+const stretch = new StretchBank((rate) => createStretcher(rate, 2))
 const queue: RenderMsg[] = []
 let busy = false
 // muda a cada `cancel`: pedidos e aquecimentos de antes ficam obsoletos
@@ -48,6 +52,7 @@ self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
       case 'dispose':
         queue.length = 0
         segments = []
+        stretch.retain(new Set())
         for (const s of sources.values()) s.dispose()
         sources.clear()
         break
@@ -64,7 +69,8 @@ function enqueue(m: Extract<AudioIn, { t: 'render' }>, reply: RenderMsg['reply']
 
 function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean): void {
   segments = planAudio(project)
-  const used = new Set(segments.map((s) => s.assetId))
+  stretch.retain(new Set(segments.filter((s) => s.mode === 'stretch').map((s) => s.itemId)))
+  const used = new Set(segments.filter((s) => s.mode !== 'mute').map((s) => s.assetId))
   for (const [id, src] of sources) {
     const want = used.has(id) ? sourceFor(project, id, mediaUrls, useProxy) : null
     if (!want || want.url !== src.url || want.trackIndex !== src.trackIndex) {
@@ -75,7 +81,7 @@ function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean): 
   for (const id of used) {
     if (sources.has(id)) continue
     const want = sourceFor(project, id, mediaUrls, useProxy)
-    if (want) sources.set(id, new AssetPcm(want.url, want.trackIndex, { onError: (message) => post({ t: 'error', message, assetId: id }) }))
+    if (want) sources.set(id, new AssetPcm(want.url, want.trackIndex, { stretch, onError: (message) => post({ t: 'error', message, assetId: id }) }))
   }
 }
 
@@ -119,13 +125,15 @@ function prepare(segs: AudioSegment[], fromUs: Us, frames: number, stale: () => 
   const blockEnd = fromUs + Math.round((frames * 1e6) / SR)
   const jobs: Promise<void>[] = []
   for (const seg of segs) {
-    const src = sources.get(seg.assetId)
+    const src = seg.mode === 'mute' ? undefined : sources.get(seg.assetId)
     const a = Math.max(fromUs, seg.startUs)
     const b = Math.min(blockEnd, seg.startUs + seg.durationUs)
     if (!src || b <= a) continue
     const local = a - seg.startUs
     const srcFrom = seg.reverse ? seg.srcInUs + Math.round((seg.durationUs - local) * seg.speed) : seg.srcInUs + Math.round(local * seg.speed)
-    jobs.push(src.ensure(srcFrom, Math.ceil(((b - a) * SR) / 1e6) + 1, seg.speed, seg.reverse, stale))
+    const frames = Math.ceil(((b - a) * SR) / 1e6) + 1
+    if (seg.mode === 'stretch') jobs.push(src.ensureStretched(seg.itemId, srcFrom, frames, seg.speed, stale))
+    else jobs.push(src.ensure(srcFrom, frames, seg.speed, seg.reverse, stale))
   }
   return Promise.all(jobs)
 }

@@ -19,6 +19,8 @@ import { loadPage, preloadPath } from './windows/recorderWindow'
 const PROJECT_ID = 'p-editor-render-test'
 // projeto do passe de efeitos (F2): o harness monta as variantes em memória (mesmos assets)
 const EFFECTS_PROJECT_ID = 'p-editor-effects-test'
+// time-stretch (F3): senoide de 440 Hz; o harness monta as velocidades em memória (stretchHarness.ts)
+const STRETCH_PROJECT_ID = 'p-editor-stretch-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -35,6 +37,7 @@ interface HarnessReport {
   videoDiff?: number
   burst?: string[]
   effects?: EffectsReport
+  stretch?: StretchReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -66,6 +69,11 @@ interface EffectsReport {
   featherTail?: { rectRing: number; ellipseRing: number; outsideMaxDiff: number; changed: number[] }
   realloc?: { maxDiff: number }
   bench?: { renderer?: string; noFx: Stats; fx3: Stats; fx3Frame: Stats; error?: string }
+}
+interface StretchReport {
+  error?: string
+  rows?: { speed: number; hz: number; seam: number; rms: number; durationUs: number; audibleUs: number; errors: string[] }[]
+  perf?: { tracks: number; audioS: number; coldMs: number; warmMs: number; coldX: number; warmX: number; cpuBefore: number; cpuAfter: number }
 }
 
 function check(cond: boolean, msg: string, failures: string[]): void {
@@ -182,6 +190,19 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(EFFECTS_PROJECT_ID), { recursive: true, force: true })
   projects.create(fxProject)
 
+  // time-stretch: senoide de 440 Hz, amplitude 0,5, 10 s (AAC)
+  const sine = join(dir, 'seno-440.m4a')
+  await gen(['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000,volume=4', '-t', '10', '-c:a', 'aac', '-b:a', '192k', '-ac', '2', sine], 'editor: seno 440')
+  const aSine: Asset = { ...assetFromInfo('a_sine', sine, statSync(sine), await probe(sine)), status: 'ready' }
+  const stretchProject: Project = {
+    ...createEmptyProject('Teste de velocidade', { width: 1920, height: 1080, fps: 30, background: '#000000' }),
+    id: STRETCH_PROJECT_ID,
+    assets: [aSine],
+    tracks: [{ id: 't_sine', kind: 'audio', name: 'Seno', muted: false, hidden: false, locked: false, volume: 1, items: [createMediaItem(aSine, 0, 'audio')] }]
+  }
+  rmSync(projects.dirOf(STRETCH_PROJECT_ID), { recursive: true, force: true })
+  projects.create(stretchProject)
+
   const win = new BrowserWindow({ width: 800, height: 600, show: false, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
   const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
     const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 120 s'] } }), 120_000)
@@ -279,6 +300,19 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const bn = fx?.bench
   console.log(`desempenho (${bn?.renderer}): sem efeito ${JSON.stringify(bn?.noFx)} ms; 3 blurs fortes ${JSON.stringify(bn?.fx3)} ms (quadro inteiro ${JSON.stringify(bn?.fx3Frame)})`)
   check(!!bn && !bn.error && bn.fx3.n > 0 && bn.fx3.median < 12, `desempenho: 1080p com 3 blurs fortes < 12 ms/quadro (compositor + GPU: mediana ${bn?.fx3.median} ms, p95 ${bn?.fx3.p95} ms) ${bn?.error ?? ''}`, failures)
+
+  const sx = r.stretch
+  console.log(`time-stretch: ${JSON.stringify(sx)}`)
+  check(!!sx && !sx.error && sx.rows?.length === 4, `time-stretch: harness sem erro (${sx?.error ?? ''})`, failures)
+  for (const row of sx?.rows ?? []) {
+    const tag = `time-stretch ${row.speed}× (worker real + WASM)`
+    check(row.errors.length === 0, `${tag}: sem erro de áudio (${JSON.stringify(row.errors)})`, failures)
+    check(Math.abs(row.hz - 440) / 440 <= 0.02, `${tag}: frequência dominante ${row.hz} Hz = 440 ±2 %`, failures)
+    check(Math.abs(row.audibleUs - row.durationUs) <= 100_000 && row.rms > 0.2, `${tag}: duração ${row.audibleUs} µs = ${row.durationUs} ± 1 bloco, sem buracos (RMS ${row.rms})`, failures)
+    check(row.seam <= 3, `${tag}: emendas entre blocos sem clique (energia da diferença na emenda ${row.seam}× a média ≤ 3)`, failures)
+  }
+  const sp = sx?.perf
+  check(!!sp && sp.warmX >= 10, `time-stretch: 4 faixas esticadas (0,5×/1,5×/2×/4×) no worker ≥ 10× tempo real (${sp?.warmX}× com cache quente; ${sp?.coldX}× decodificando; referência da CPU ${sp?.cpuBefore} → ${sp?.cpuAfter} it/ms)`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

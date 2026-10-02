@@ -3,12 +3,31 @@ import { evalAnim } from './anim'
 import type { Project, Us } from './project'
 
 export interface GainPoint { tUs: Us; gain: number } // linear entre pontos
+/**
+ * Como o mixer lê a fonte: 'copy' (1×), 'resample' (interpolação: o tom acompanha a velocidade), 'stretch'
+ * (time-stretch com tom preservado) ou 'mute' (acelerado demais para soar).
+ */
+export type AudioMode = 'copy' | 'resample' | 'stretch' | 'mute'
 export interface AudioSegment {
   itemId: string; assetId: string; startUs: Us; durationUs: Us; srcInUs: Us
-  speed: number; reverse: boolean; preservePitch: boolean; gain: GainPoint[]
+  speed: number; reverse: boolean; preservePitch: boolean; mode: AudioMode; gain: GainPoint[]
 }
 
-/** Itens de mídia com áudio habilitado em faixas não mudas cujo asset tem áudio (imagens e freeze ficam de fora). */
+/** Acima disso, com tom preservado, o áudio fica mudo (salvo "Manter áudio acelerado"). */
+export const MAX_STRETCH_SPEED = 4
+
+/**
+ * 1× copia; sem preservePitch reamostra; com preservePitch estica até 4× (e em câmera lenta), acima de 4×
+ * silencia salvo keepFastAudio. Reverso fora de 1× reamostra (o stretch só anda para a frente).
+ */
+export function audioMode(speed: number, reverse: boolean, preservePitch: boolean, keepFastAudio: boolean): AudioMode {
+  if (speed === 1) return 'copy'
+  if (!preservePitch || reverse) return 'resample'
+  if (speed > MAX_STRETCH_SPEED && !keepFastAudio) return 'mute'
+  return 'stretch'
+}
+
+/** Itens de mídia com áudio habilitado em faixas não mudas cujo asset tem áudio (imagens e freeze ficam de fora). Itens mudos pela velocidade entram com mode 'mute'. */
 export function planAudio(p: Project): AudioSegment[] {
   const out: AudioSegment[] = []
   for (const track of p.tracks) {
@@ -33,7 +52,8 @@ export function planAudio(p: Project): AudioSegment[] {
       })
       out.push({
         itemId: item.id, assetId: item.assetId, startUs: item.startUs, durationUs: dur, srcInUs: item.inUs,
-        speed: item.speed, reverse: item.reverse, preservePitch: a.preservePitch, gain
+        speed: item.speed, reverse: item.reverse, preservePitch: a.preservePitch,
+        mode: audioMode(item.speed, item.reverse, a.preservePitch, a.keepFastAudio ?? false), gain
       })
     }
   }

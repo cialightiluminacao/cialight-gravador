@@ -40,7 +40,11 @@ export interface VisualProps {
   border?: { width: number; color: string }
   mirror?: boolean
 }
-export interface AudioProps { enabled: boolean; volume: Anim<number>; fadeInUs: Us; fadeOutUs: Us; preservePitch: boolean; denoise: boolean; normalize: boolean }
+export interface AudioProps {
+  enabled: boolean; volume: Anim<number>; fadeInUs: Us; fadeOutUs: Us; preservePitch: boolean; denoise: boolean; normalize: boolean
+  /** "Manter áudio acelerado": com preservePitch acima de 4× o áudio continua (esticado) em vez de ficar mudo. */
+  keepFastAudio?: boolean
+}
 export type TransitionKind = 'crossfade' | 'dipBlack' | 'dipWhite' | 'slideL' | 'slideR' | 'slideU' | 'slideD' | 'wipeL' | 'wipeR' | 'zoomIn' | 'blur'
 export interface Transition { kind: TransitionKind; durationUs: Us }
 /** enabled: ausente = ativo; false = item desativado (não gera camada nem áudio). Só é gravado quando false. */
