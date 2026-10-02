@@ -34,9 +34,14 @@ export function TransitionLibrary(): React.JSX.Element {
             e.dataTransfer.setData(TRANSITION_MIME, k)
             e.dataTransfer.effectAllowed = 'copy'
           }}
-          onDoubleClick={() => addTransitionNearPlayhead(k)}
+          onDoubleClick={(e) => {
+            if (!(e.target as HTMLElement).closest('button')) addTransitionNearPlayhead(k)
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && e.target === e.currentTarget) addTransitionNearPlayhead(k)
+            if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+              e.preventDefault()
+              addTransitionNearPlayhead(k)
+            }
           }}
         >
           <div className="relative">

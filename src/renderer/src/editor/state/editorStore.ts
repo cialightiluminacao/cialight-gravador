@@ -218,13 +218,13 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       return
     }
     if (history.past.length === 0) return
-    set({ ...derive(undoH(history)), dirty: true })
+    set({ ...derive(undoH(history)), dirty: true, selectedTransition: null })
   },
 
   redo: () => {
     const { history, txBase } = get()
     if (txBase || history.future.length === 0) return
-    set({ ...derive(redoH(history)), dirty: true })
+    set({ ...derive(redoH(history)), dirty: true, selectedTransition: null })
   },
 
   markSaved: () => set({ dirty: false, lastSavedAt: Date.now() }),

@@ -564,6 +564,27 @@ async function main() {
       await T.key('z', { ctrlKey: true }); await T.wait(300)
       return { gone, back: T.item('${b}').transitionIn?.kind ?? null, past: T.past() }`)
     check('Delete remove a transição selecionada (os clipes ficam; um passo); Ctrl+Z a devolve', del.gone.tr === null && !del.gone.icon && del.gone.still && del.gone.past === del.gone.p0 + 1 && del.back === 'crossfade' && del.past === del.gone.p0, del)
+    // aparar com uma transição no corte: o ícone não cobre as alças de aparar (A.fim e B.início); cada aparo = UM passo
+    const trim = await ev(`T.st().select([]); await T.settle()
+      const pt = (id, edge) => { const e = document.querySelector('[data-item-id="' + id + '"] [data-edge="' + edge + '"]'); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + 28 } }
+      const dur = (id) => T.item(id).durationUs
+      const out = {}
+      const pa = pt('${a}', 'end'); const ta = T.topAt(pa.x, pa.y); out.hitA = ta.closest('[data-edge]')?.dataset.edge ?? null; out.dbg = { tag: ta.tagName, cls: String(ta.className).slice(0, 80), pt: pa, handle: document.querySelector('[data-item-id="${a}"] [data-edge="end"]')?.getBoundingClientRect().toJSON() }
+      const pb = pt('${b}', 'start'); out.hitB = T.topAt(pb.x, pb.y).closest('[data-edge]')?.dataset.edge ?? null
+      const p0 = T.past(); const a0 = dur('${a}')
+      await T.drag(pa, { x: pa.x - 20, y: pa.y }, { steps: 8, mods: { ctrlKey: true } }); await T.wait(300)
+      out.a = { before: a0, after: dur('${a}'), past: T.past() - p0, keeps: T.item('${b}').transitionIn?.kind ?? null }
+      await T.key('z', { ctrlKey: true }); await T.wait(300)
+      out.aUndo = { dur: dur('${a}'), past: T.past() - p0 }
+      const pb2 = pt('${b}', 'start'); const b0 = dur('${b}'); const q0 = T.past()
+      await T.drag(pb2, { x: pb2.x + 20, y: pb2.y }, { steps: 8, mods: { ctrlKey: true } }); await T.wait(300)
+      out.b = { before: b0, after: dur('${b}'), past: T.past() - q0, keeps: T.item('${b}').transitionIn?.kind ?? null }
+      await T.key('z', { ctrlKey: true }); await T.wait(300)
+      out.bUndo = { dur: dur('${b}'), past: T.past() - q0, icon: !!document.querySelector('[data-transition-id="${b}"] [data-transition-icon]') }
+      return out`)
+    check('com a transição no corte, o ponteiro abaixo do ícone cai nas alças de aparar (fim de A e início de B)', trim.hitA === 'end' && trim.hitB === 'start', trim)
+    check('aparar o fim de A (ripple) funciona com a transição no corte: encurta A em UM passo, a transição fica; Ctrl+Z devolve', trim.a.after < trim.a.before && trim.a.past === 1 && trim.a.keeps === 'crossfade' && trim.aUndo.dur === trim.a.before && trim.aUndo.past === 0, trim)
+    check('aparar o início de B (ripple) funciona com a transição no corte: encurta B em UM passo; Ctrl+Z devolve e o ícone continua', trim.b.after < trim.b.before && trim.b.past === 1 && trim.bUndo.dur === trim.b.before && trim.bUndo.past === 0 && trim.bUndo.icon, trim)
     // menu de contexto
     const menu = await ev(`const icon = document.querySelector('[data-transition-id="${b}"] [data-transition-icon]'); const c = T.center(icon)
       icon.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: c.x, clientY: c.y, button: 2 })); await T.wait(300)

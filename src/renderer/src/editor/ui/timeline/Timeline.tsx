@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MousePointerClick } from 'lucide-react'
 import { toast } from 'sonner'
-import { TEXT_PRESETS, type ShapePresetId, type TextPresetId } from '@shared/editor/factory'
+import { TEXT_DEFAULT_US, TEXT_PRESETS, type ShapePresetId, type TextPresetId } from '@shared/editor/factory'
 import { projectDurationUs } from '@shared/editor/ops'
 import type { Marker } from '@shared/editor/project'
 import { snapDelta, snapPoints } from '@shared/editor/snap'
@@ -39,8 +39,8 @@ import { fitZoom, maxScrollUs, pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 const SCROLLBAR_H = 11
 const NO_ENTRIES: MenuEntry[] = []
-/** Duração com que uma forma solta da biblioteca ocupa a linha do tempo (3 s). */
-const SHAPE_DROP_US = 3_000_000
+/** Duração com que uma forma solta ocupa a linha do tempo: a padrão de createShapeItem. */
+const SHAPE_DROP_US = TEXT_DEFAULT_US
 
 /** Corte-alvo realçado durante o arraste de uma transição (ok = vai entrar; senão, a regra recusa). */
 interface CutHover { toId: string; cutUs: number; y: number; h: number; ok: boolean }

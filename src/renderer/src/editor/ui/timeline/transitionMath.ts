@@ -106,3 +106,31 @@ export function dragDuration(startDurationUs: Us, edge: 'start' | 'end', deltaUs
   const raw = Math.round(startDurationUs + (edge === 'end' ? 2 : -2) * deltaUs)
   return Math.min(maxTransitionUs(a, b), Math.max(MIN_TRANSITION_US, raw))
 }
+
+// ---- zonas de ponteiro do ícone (para o ícone nunca cobrir as alças de aparar do corte)
+
+/** Ícone da transição: círculo no TOPO da faixa; abaixo dele as alças de aparar (A.fim/B.início) ficam livres. */
+export const ICON_SIZE = 18
+export const ICON_TOP = 3
+/** Largura das alças de aparar do ItemView (EDGE_W) de cada lado do corte. */
+export const TRIM_ZONE_PX = 7
+/** Largura das alças de duração nas bordas da janela. */
+export const DURATION_EDGE_PX = 6
+
+export interface Rect { x0: number; y0: number; x1: number; y1: number }
+/** Retângulos (px, x relativo à esquerda da faixa da janela; y do topo da faixa) que capturam o ponteiro. */
+export function markRects(g: { left: number; width: number; cutX: number }, rowH: number): { icon: Rect; start: Rect; end: Rect } {
+  const cx = g.cutX - g.left
+  const h = DURATION_EDGE_PX / 2
+  return {
+    icon: { x0: cx - ICON_SIZE / 2, y0: ICON_TOP, x1: cx + ICON_SIZE / 2, y1: ICON_TOP + ICON_SIZE },
+    start: { x0: -h, y0: 3, x1: h, y1: rowH - 3 },
+    end: { x0: g.width - h, y0: 3, x1: g.width + h, y1: rowH - 3 }
+  }
+}
+/** Alças de aparar do corte (mesmas coordenadas de markRects): A.fim à esquerda e B.início à direita do corte. */
+export function trimRects(g: { left: number; cutX: number }, rowH: number): { aEnd: Rect; bStart: Rect } {
+  const cx = g.cutX - g.left
+  return { aEnd: { x0: cx - TRIM_ZONE_PX, y0: 0, x1: cx, y1: rowH }, bStart: { x0: cx, y0: 0, x1: cx + TRIM_ZONE_PX, y1: rowH } }
+}
+export const rectsOverlap = (a: Rect, b: Rect): boolean => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1

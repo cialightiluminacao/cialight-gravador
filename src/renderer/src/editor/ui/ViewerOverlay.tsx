@@ -59,6 +59,13 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
   }
   const boxes = useMemo(() => (project && !playing ? itemBoxes(project, playheadUs) : []), [project, playheadUs, playing, fontTick])
   const regions = useMemo(() => (project && !playing ? effectBoxes(project, playheadUs) : []), [project, playheadUs, playing])
+  // a caixa do texto em edição sumiu (o playhead saiu do item, o texto foi apagado): encerra com aviso, sem perder em silêncio
+  useEffect(() => {
+    if (editingId && !boxes.some((b) => b.itemId === editingId)) {
+      setEditingId(null)
+      toast('A edição do texto foi encerrada: o texto saiu do quadro. O que foi digitado não foi aplicado.')
+    }
+  }, [editingId, boxes])
   // saindo da tela no meio de um gesto: cancela; a ferramenta não fica ligada para o próximo projeto
   useEffect(
     () => () => {

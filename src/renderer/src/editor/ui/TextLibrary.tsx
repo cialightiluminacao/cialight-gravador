@@ -76,10 +76,15 @@ function Card({ id, kind, label, hint, onAdd, onDragStart, children }: { id: str
       aria-label={`${label}. Enter ou duplo clique adiciona no playhead`}
       title={hint}
       onDragStart={onDragStart}
-      onDoubleClick={onAdd}
+      onDoubleClick={(e) => {
+        if (e.target === e.currentTarget || !(e.target as HTMLElement).closest('button')) onAdd() // duplo clique no "+" já adicionou pelos cliques
+      }}
       onKeyDown={(e) => {
-        // só o cartão em foco: o Enter no botão "+" interno sobe até aqui e o botão já adiciona pelo clique
-        if (e.key === 'Enter' && e.target === e.currentTarget) onAdd()
+        // só o cartão em foco: Enter/Espaço no botão "+" interno já adicionam pelo clique
+        if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+          e.preventDefault()
+          onAdd()
+        }
       }}
     >
       <div className="relative flex aspect-video items-center justify-center overflow-hidden rounded-md border border-border bg-gradient-to-br from-[#1b2130] to-[#0d1017]">

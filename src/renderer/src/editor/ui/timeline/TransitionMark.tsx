@@ -5,8 +5,10 @@ import type { TransitionKind } from '@shared/editor/project'
 import { cn } from '@/lib/cn'
 import { useEditorStore } from '../../state/editorStore'
 import { transitionAria } from '../transitionInfo'
-import { markGeometry } from './transitionMath'
+import { DURATION_EDGE_PX, ICON_SIZE, ICON_TOP, markGeometry } from './transitionMath'
 
+// O ícone fica no TOPO da faixa (18 px) e não cobre as alças de aparar do corte (A.fim e B.início, ItemView EDGE_W): abaixo
+// dele o ponteiro cai nelas, e as bordas da janela (alças de duração) ficam fora delas (transitionMath.markRects/trimRects).
 // Ícone da transição no corte: irmão dos itens em TrackLane (o ItemView corta com overflow-hidden). Mostra a largura
 // da janela em escala; o ícone seleciona (clique) e as bordas mudam a duração (arrastar) — os gestos são delegados ao
 // useTimelineDrag por data-attr: [data-transition-id] (id de B), [data-tedge] (start|end).
@@ -40,8 +42,8 @@ export const TransitionMark = memo(function TransitionMark({ w, pxPerSec, scroll
   return (
     <div data-transition-id={w.toId} className="pointer-events-none absolute top-0 z-[6]" style={{ left: g.left, width: g.width, height: rowH }}>
       <div className={cn('absolute inset-x-0 inset-y-[3px] rounded-[5px] border', selected ? 'border-accent bg-accent/25' : 'border-white/35 bg-white/15')} />
-      <span data-tedge="start" aria-hidden className={cn('pointer-events-auto absolute -left-[3px] inset-y-[3px] w-[6px] rounded-sm', locked ? 'cursor-not-allowed' : 'cursor-ew-resize hover:bg-white/40')} />
-      <span data-tedge="end" aria-hidden className={cn('pointer-events-auto absolute -right-[3px] inset-y-[3px] w-[6px] rounded-sm', locked ? 'cursor-not-allowed' : 'cursor-ew-resize hover:bg-white/40')} />
+      <span data-tedge="start" aria-hidden style={{ left: -DURATION_EDGE_PX / 2, width: DURATION_EDGE_PX }} className={cn('pointer-events-auto absolute inset-y-[3px] rounded-sm', locked ? 'cursor-not-allowed' : 'cursor-ew-resize hover:bg-white/40')} />
+      <span data-tedge="end" aria-hidden style={{ right: -DURATION_EDGE_PX / 2, width: DURATION_EDGE_PX }} className={cn('pointer-events-auto absolute inset-y-[3px] rounded-sm', locked ? 'cursor-not-allowed' : 'cursor-ew-resize hover:bg-white/40')} />
       <div
         role="button"
         tabIndex={0}
@@ -56,8 +58,9 @@ export const TransitionMark = memo(function TransitionMark({ w, pxPerSec, scroll
           }
         }}
         title={transitionAria(w.kind, w.durationUs)}
+        style={{ top: ICON_TOP, width: ICON_SIZE, height: ICON_SIZE }}
         className={cn(
-          'pointer-events-auto absolute left-1/2 top-1/2 flex h-[22px] w-[22px] -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border text-fg shadow-md outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]',
+          'pointer-events-auto absolute left-1/2 flex -translate-x-1/2 cursor-pointer items-center justify-center rounded-full border text-fg shadow-md outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]',
           selected ? 'border-accent bg-accent text-white' : 'border-white/50 bg-surface-3'
         )}
       >

@@ -3,7 +3,7 @@ import { createEmptyProject, defaultVisual } from '@shared/editor/factory'
 import * as ops from '@shared/editor/ops'
 import type { Asset, Project, TextItem } from '@shared/editor/project'
 import { overlayDropTrack } from './dragMath'
-import { cutNear, dragDuration, markGeometry, nearestEligibleCut, transitionDropReason, transitionDropTarget, visibleTransitions, MIN_MARK_W } from './transitionMath'
+import { ICON_SIZE, ICON_TOP, markRects, rectsOverlap, trimRects, cutNear, dragDuration, markGeometry, nearestEligibleCut, transitionDropReason, transitionDropTarget, visibleTransitions, MIN_MARK_W } from './transitionMath'
 import { formatTransitionDuration, transitionAria, transitionLabel, TRANSITION_KINDS, TRANSITION_LABELS } from '../transitionInfo'
 
 const S = 1_000_000
@@ -155,5 +155,25 @@ describe('transitionInfo (pt-BR)', () => {
     expect(formatTransitionDuration(1_250_000)).toBe('1,25 s')
     expect(formatTransitionDuration(2_000_000)).toBe('2 s')
     expect(transitionAria('crossfade', 500_000)).toBe('Transição: Dissolver, 0,5 s')
+  })
+})
+
+describe('zonas de ponteiro: o ícone não cobre as alças de aparar do corte', () => {
+  const ROW = 59 // altura útil da faixa de vídeo
+  it('para qualquer duração e zoom, as bordas de duração ficam fora das alças de aparar e o ícone só cobre o topo', () => {
+    for (const durUs of [100_000, 250_000, 500_000, 2_000_000]) {
+      for (const pps of [20, 60, 200, 800]) {
+        const g = markGeometry({ startUs: 10 * S - durUs / 2, durationUs: durUs, cutUs: 10 * S }, pps, 0)
+        const r = markRects(g, ROW)
+        const t = trimRects(g, ROW)
+        expect(rectsOverlap(r.start, t.aEnd) || rectsOverlap(r.start, t.bStart)).toBe(false)
+        expect(rectsOverlap(r.end, t.aEnd) || rectsOverlap(r.end, t.bStart)).toBe(false)
+        // o ícone cobre o corte só no topo; abaixo dele as duas alças de aparar estão livres
+        expect(rectsOverlap(r.icon, t.aEnd) && rectsOverlap(r.icon, t.bStart)).toBe(true)
+        const below = { x0: t.aEnd.x0, y0: ICON_TOP + ICON_SIZE, x1: t.bStart.x1, y1: ROW }
+        expect(rectsOverlap(r.icon, below)).toBe(false)
+        expect(below.y1 - below.y0).toBeGreaterThan(30) // sobra altura para pegar a alça
+      }
+    }
   })
 })
