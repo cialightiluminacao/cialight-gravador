@@ -47,7 +47,7 @@ const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getS
 const secLabel = (us: Us): string => `${(us / 1e6).toFixed(2).replace('.', ',')} s`
 
 /** Cursor do gesto em toda a janela (styles.css: body[data-drag-cursor] * herda o cursor do body). */
-function setDragCursor(c: string | null): void {
+export function setDragCursor(c: string | null): void {
   document.body.style.cursor = c ?? ''
   if (c) document.body.dataset.dragCursor = ''
   else delete document.body.dataset.dragCursor

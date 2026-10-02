@@ -16,6 +16,7 @@ import { Inspector } from './Inspector/Inspector'
 import { Timeline } from './timeline/Timeline'
 import { invalidatePeaks } from './timeline/peaks'
 import { gestureActive } from './timeline/useTimelineDrag'
+import { viewerGestureActive } from './viewer/viewerGesture'
 
 // Tela do editor (spec §9): [Biblioteca 280 | Visualizador | Inspetor 320] em cima e a linha do
 // tempo embaixo (altura redimensionável, salva no localStorage). Monta o motor (render, áudio,
@@ -134,7 +135,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     const onKey = (e: KeyboardEvent): void => {
       if (e.defaultPrevented || (e.repeat && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
       if (useEditorStore.getState().project?.id !== projectId) return // outro projeto ainda no store (troca em curso)
-      if (gestureActive()) return // arraste na linha do tempo: o teclado é do gesto
+      if (gestureActive() || viewerGestureActive()) return // arraste na linha do tempo/no visualizador: o teclado é do gesto
       if (document.querySelector('[role="dialog"]')) return // diálogo aberto (ex.: exportação): o teclado é dele
       const t = e.target as Element | null
       if (!e.ctrlKey && t?.closest?.(OWN_KEYS)) return

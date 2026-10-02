@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from './factory'
-import type { Asset, EffectItem, Item, MediaItem, Project } from './project'
+import { MIN_ITEM_US, type Asset, type EffectItem, type Item, type MediaItem, type Project } from './project'
 import * as ops from './ops'
 import { validateProject } from './schema'
 const S = 1_000_000
@@ -301,6 +301,20 @@ describe('efeitos de privacidade', () => {
     const fx = r.project.tracks[0].items.find((i) => i.id === r.itemId) as EffectItem
     expect(fx.region.x.value).toBe(0.3)
     expect(fx.region.shape).toBe('ellipse')
+  })
+  it('addEffect explícito: arredonda e prende atUs ≥ 0 e durationUs ≥ MIN_ITEM_US', () => {
+    const p = createEmptyProject('t')
+    const a = fxItems(ops.addEffect(p, 'blur', 1_000_000.6, { durationUs: 2_000_000.4 }).project, 1)[0]
+    expect(a).toMatchObject({ startUs: 1_000_001, durationUs: 2_000_000 })
+    const b = fxItems(ops.addEffect(p, 'blur', -500, { durationUs: 10 }).project, 1)[0]
+    expect(b).toMatchObject({ startUs: 0, durationUs: MIN_ITEM_US })
+    const c = ops.addEffect(p, 'solid', 3.7, { trackId: p.tracks[0].id, durationUs: 5 })
+    expect(c.project.tracks[0].items[0]).toMatchObject({ startUs: 4, durationUs: MIN_ITEM_US })
+  })
+  it('addEffect rejeita trackId explícito que não é faixa de vídeo', () => {
+    const p = createEmptyProject('t')
+    const audio = p.tracks.find((t) => t.kind === 'audio')!
+    expect(() => ops.addEffect(p, 'blur', 0, { trackId: audio.id })).toThrow(expect.objectContaining({ code: 'invalid' }))
   })
   it('setItemEnabled grava false e omite o campo ao reativar', () => {
     const p = ops.addEffect(base().p, 'blur', 0).project

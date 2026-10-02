@@ -17,6 +17,8 @@ describe('shortcutFor', () => {
     expect(shortcutFor(key('End'))).toBe('end')
     expect(shortcutFor(key('s'))).toBe('split')
     expect(shortcutFor(key('b', { ctrlKey: true }))).toBe('split')
+    expect(shortcutFor(key('b'))).toBe('drawRegion')
+    expect(shortcutFor(key('B', { shiftKey: true }))).toBe('drawRegion')
     expect(shortcutFor(key('q'))).toBe('rippleTrimStart')
     expect(shortcutFor(key('w'))).toBe('rippleTrimEnd')
     expect(shortcutFor(key('Delete'))).toBe('delete')

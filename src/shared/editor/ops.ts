@@ -925,8 +925,9 @@ const FX_TRACK = /^Efeitos( \d+)?$/
  * (faixa mais alta, sem contar efeitos) ou 5 s. Faixa: a explícita; senão uma faixa de vídeo "Efeitos"
  * acima de todas as demais faixas de vídeo e livre no intervalo; senão cria uma nova no topo.
  */
-export function addEffect(p: Project, preset: EffectPresetId, atUs: Us, opts?: { durationUs?: Us; trackId?: string; region?: EffectRegionInit }): { project: Project; itemId: string } {
-  let durationUs = opts?.durationUs
+export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { durationUs?: Us; trackId?: string; region?: EffectRegionInit }): { project: Project; itemId: string } {
+  const atUs = Math.max(0, Math.round(at))
+  let durationUs = opts?.durationUs === undefined ? undefined : Math.max(MIN_ITEM_US, Math.round(opts.durationUs))
   if (durationUs === undefined) {
     durationUs = 5_000_000
     for (let i = p.tracks.length - 1; i >= 0; i--) {
@@ -938,7 +939,7 @@ export function addEffect(p: Project, preset: EffectPresetId, atUs: Us, opts?: {
   }
   const item = createEffectItem(preset, atUs, durationUs, opts?.region)
   if (opts?.trackId) {
-    mustTrack(p, opts.trackId)
+    if (mustTrack(p, opts.trackId).kind !== 'video') throw new EditError('invalid', 'Efeitos só podem ficar em faixas de vídeo')
     return { project: insertItems(p, opts.trackId, [item], 'overwrite'), itemId: item.id }
   }
   const lastMedia = p.tracks.reduce((m, t, i) => (t.kind === 'video' && !FX_TRACK.test(t.name) ? i : m), -1)

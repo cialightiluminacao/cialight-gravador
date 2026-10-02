@@ -1,7 +1,10 @@
 // Geometria do visualizador (pura): caixas das camadas de mídia em pixels do canvas do projeto,
-// teste de clique e a matemática da manipulação direta (snap ao centro, escala por canto, rotação).
+// teste de clique e a matemática da manipulação direta (snap ao centro, escala por canto, rotação);
+// regiões dos efeitos de privacidade (desenhar, mover, redimensionar, guias do quadro).
+import { evalAnim } from '@shared/editor/anim'
+import { setAnimValue } from '@shared/editor/ops'
 import { resolveFrame } from '@shared/editor/resolve'
-import type { Project, Us } from '@shared/editor/project'
+import type { EffectItem, Project, Us } from '@shared/editor/project'
 import { layerMatrix, type Rotation } from '../engine/compositor/matrix'
 
 export interface ItemBox {
@@ -91,4 +94,190 @@ export function rotateAngle(center: Pt, from: Pt, to: Pt, start: number, step15:
   let deg = start + ((a1 - a0) * 180) / Math.PI
   deg = ((((deg + 180) % 360) + 360) % 360) - 180 // −180…180
   return step15 ? Math.round(deg / 15) * 15 : deg
+}
+
+// ---------------------------------------------------------------- regiões de efeito
+
+/** Região de efeito em pixels do canvas do projeto (centro, tamanho, rotação horária em graus). */
+export interface RegionBox extends ItemBox {
+  shape: 'rect' | 'ellipse'
+}
+
+/** Menor lado da região: 1 % do quadro. */
+export const MIN_REGION = 0.01
+
+/** Efeitos ativos (e ativados) em tUs nas faixas de vídeo visíveis, de baixo para cima, com a região avaliada em tUs. */
+export function effectBoxes(p: Project, tUs: Us): RegionBox[] {
+  const out: RegionBox[] = []
+  for (const t of p.tracks) {
+    if (t.kind !== 'video' || t.hidden) continue
+    const it = t.items.find((i) => tUs >= i.startUs && tUs < i.startUs + i.durationUs)
+    if (!it || it.type !== 'effect' || it.enabled === false) continue
+    out.push(regionBoxOf(it, tUs - it.startUs, p.canvas.width, p.canvas.height))
+  }
+  return out
+}
+
+/** Região do efeito no instante local (µs desde o início do item), em pixels. */
+export function regionBoxOf(it: EffectItem, localUs: Us, W: number, H: number): RegionBox {
+  const r = it.region
+  return {
+    itemId: it.id,
+    shape: r.shape,
+    cx: evalAnim(r.x, localUs) * W,
+    cy: evalAnim(r.y, localUs) * H,
+    w: evalAnim(r.w, localUs) * W,
+    h: evalAnim(r.h, localUs) * H,
+    rotation: evalAnim(r.rotation, localUs)
+  }
+}
+
+/** (x, y) dentro da região (retângulo ou elipse, rotacionada), com folga em px para fora. */
+export function regionHit(b: RegionBox, x: number, y: number, slackPx = 0): boolean {
+  const l = toLocal(b, x, y)
+  const hw = b.w / 2 + slackPx
+  const hh = b.h / 2 + slackPx
+  if (b.shape === 'ellipse') return (l.x * l.x) / (hw * hw) + (l.y * l.y) / (hh * hh) <= 1
+  return Math.abs(l.x) <= hw && Math.abs(l.y) <= hh
+}
+
+/** Região mais ao topo sob (x, y); null se nenhuma. */
+export function hitTestRegions(boxes: RegionBox[], x: number, y: number, slackPx = 0): string | null {
+  for (let i = boxes.length - 1; i >= 0; i--) if (regionHit(boxes[i], x, y, slackPx)) return boxes[i].itemId
+  return null
+}
+
+/**
+ * Arraste da ferramenta "Desenhar região" (pixels do canvas) → região normalizada. Alt: `from` é o centro;
+ * Shift: elipse (senão a forma escolhida na ferramenta). Lados de no mínimo 1 % do quadro.
+ */
+export function dragToRegion(from: Pt, to: Pt, W: number, H: number, mods: { alt: boolean; shift: boolean; shape: 'rect' | 'ellipse' }): { x: number; y: number; w: number; h: number; shape: 'rect' | 'ellipse' } {
+  const k = mods.alt ? 2 : 1
+  const cx = mods.alt ? from.x : (from.x + to.x) / 2
+  const cy = mods.alt ? from.y : (from.y + to.y) / 2
+  return {
+    x: cx / W,
+    y: cy / H,
+    w: Math.max(MIN_REGION, (Math.abs(to.x - from.x) * k) / W),
+    h: Math.max(MIN_REGION, (Math.abs(to.y - from.y) * k) / H),
+    shape: mods.shift ? 'ellipse' : mods.shape
+  }
+}
+
+/** Alças de redimensionar: cantos e meios das bordas (no referencial da região, antes da rotação). */
+export type RegionHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+export const HANDLE_SIGN: Record<RegionHandle, [number, number]> = { nw: [-1, -1], n: [0, -1], ne: [1, -1], e: [1, 0], se: [1, 1], s: [0, 1], sw: [-1, 1], w: [-1, 0] }
+
+/**
+ * Redimensiona arrastando a alça até `pointer` (pixels do canvas). Sem Alt o lado/canto oposto fica
+ * parado; fromCenter (Alt): os dois lados andam. keepAspect (Shift): mantém a proporção (canto: projeção
+ * na diagonal; borda: o outro lado acompanha, centrado). Lados ≥ minW/minH.
+ */
+export function resizeRegion<B extends ItemBox>(b: B, handle: RegionHandle, pointer: Pt, o: { keepAspect: boolean; fromCenter: boolean; minW: number; minH: number }): B {
+  const [sx, sy] = HANDLE_SIGN[handle]
+  const l = toLocal(b, pointer.x, pointer.y)
+  const k = o.fromCenter ? 2 : 1
+  const ax = o.fromCenter ? 0 : (-sx * b.w) / 2
+  const ay = o.fromCenter ? 0 : (-sy * b.h) / 2
+  let w = sx ? Math.max(o.minW, sx * (l.x - ax) * k) : b.w
+  let h = sy ? Math.max(o.minH, sy * (l.y - ay) * k) : b.h
+  if (o.keepAspect) {
+    let f: number
+    if (sx && sy) f = ((sx * (l.x - ax) * b.w + sy * (l.y - ay) * b.h) * k) / (b.w * b.w + b.h * b.h || 1)
+    else f = sx ? w / b.w : h / b.h
+    f = Math.max(f, o.minW / b.w, o.minH / b.h)
+    w = b.w * f
+    h = b.h * f
+  }
+  const lx = sx && !o.fromCenter ? ax + (sx * w) / 2 : 0
+  const ly = sy && !o.fromCenter ? ay + (sy * h) / 2 : 0
+  const th = (b.rotation * Math.PI) / 180
+  return { ...b, cx: b.cx + lx * Math.cos(th) - ly * Math.sin(th), cy: b.cy + lx * Math.sin(th) + ly * Math.cos(th), w, h }
+}
+
+export interface Guides {
+  /** Linhas verticais (x normalizado) e horizontais (y normalizado) a mostrar. */
+  v: number[]
+  h: number[]
+}
+
+const GUIDE_LINES = [0, 0.5, 1]
+const upright = (deg: number): boolean => Math.abs(deg % 180) < 1e-6
+
+/** Melhor encaixe (a ±1 %) entre os pontos da região e as guias; null se nenhum. */
+function bestSnap(points: { v: number; lines: number[] }[]): { delta: number; line: number } | null {
+  let best: { delta: number; line: number } | null = null
+  for (const pt of points) {
+    for (const line of pt.lines) {
+      const d = line - pt.v
+      if (Math.abs(d) <= SNAP + 1e-9 && (!best || Math.abs(d) < Math.abs(best.delta))) best = { delta: d, line }
+    }
+  }
+  return best
+}
+
+/**
+ * Mover a região (valores normalizados): o centro gruda no centro do quadro e, sem rotação, as bordas
+ * grudam nas bordas e no centro do quadro (±1 %).
+ */
+export function snapRegion(r: { x: number; y: number; w: number; h: number; rotation: number }): { x: number; y: number; guides: Guides } {
+  const edges = upright(r.rotation)
+  const axis = (c: number, size: number): { value: number; guide: number[] } => {
+    const pts = [{ v: c, lines: [0.5] }]
+    if (edges) pts.push({ v: c - size / 2, lines: GUIDE_LINES }, { v: c + size / 2, lines: GUIDE_LINES })
+    const s = bestSnap(pts)
+    return s ? { value: c + s.delta, guide: [s.line] } : { value: c, guide: [] }
+  }
+  const x = axis(r.x, r.w)
+  const y = axis(r.y, r.h)
+  return { x: x.value, y: y.value, guides: { v: x.guide, h: y.guide } }
+}
+
+/**
+ * Depois de redimensionar (pixels; sem Shift): sem rotação, a(s) borda(s) arrastada(s) grudam nas
+ * bordas/centro do quadro (±1 %). Sem Alt o lado oposto continua parado; com Alt a outra borda espelha.
+ */
+export function snapResize<B extends ItemBox>(b: B, handle: RegionHandle, fromCenter: boolean, W: number, H: number): { box: B; guides: Guides } {
+  const guides: Guides = { v: [], h: [] }
+  if (!upright(b.rotation)) return { box: b, guides }
+  // girada 180°: as bordas trocam de lado
+  const flip = Math.abs(b.rotation % 360) > 90 ? -1 : 1
+  const [hx, hy] = HANDLE_SIGN[handle]
+  const axis = (s: number, c: number, size: number, full: number): { c: number; size: number; guide: number | null } => {
+    if (!s) return { c, size, guide: null }
+    const hit = bestSnap([{ v: (c + (s * size) / 2) / full, lines: GUIDE_LINES }])
+    if (!hit) return { c, size, guide: null }
+    const e = hit.line * full
+    if (fromCenter) return { c, size: Math.max(1, 2 * Math.abs(e - c)), guide: hit.line }
+    const anchor = c - (s * size) / 2
+    const n = Math.max(1, s * (e - anchor))
+    return { c: anchor + (s * n) / 2, size: n, guide: hit.line }
+  }
+  const x = axis(hx * flip, b.cx, b.w, W)
+  const y = axis(hy * flip, b.cy, b.h, H)
+  if (x.guide !== null) guides.v.push(x.guide)
+  if (y.guide !== null) guides.h.push(y.guide)
+  return { box: { ...b, cx: x.c, w: x.size, cy: y.c, h: y.size }, guides }
+}
+
+const REGION_KEYS = ['x', 'y', 'w', 'h', 'rotation'] as const
+export type RegionValues = Record<(typeof REGION_KEYS)[number], number>
+
+/**
+ * Grava em tUs (absoluto) só as propriedades da região que mudaram em relação a `from`: propriedade
+ * animada ganha/atualiza o key no playhead; sem keys muda o valor fixo (setAnimValue).
+ */
+export function writeRegion(p: Project, itemId: string, tUs: Us, from: RegionValues, next: Partial<RegionValues>): Project {
+  let q = p
+  for (const k of REGION_KEYS) {
+    const v = next[k]
+    if (v === undefined || Math.abs(v - from[k]) < 1e-9) continue
+    q = setAnimValue(q, itemId, `region.${k}`, tUs, v)
+  }
+  return q
+}
+
+/** Há key de região (x, y, w, h ou rotação) a ±tolUs do instante local. */
+export function keyframeAt(it: EffectItem, localUs: Us, tolUs: Us): boolean {
+  return REGION_KEYS.some((k) => (it.region[k].keys ?? []).some((key) => Math.abs(key.tUs - localUs) <= tolUs))
 }

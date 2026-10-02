@@ -281,7 +281,7 @@ function prefetchUpcoming(p: Project, tUs: number, used: [string, number][]): [s
   for (const track of p.tracks) {
     if (track.hidden) continue
     for (const item of track.items) {
-      if (item.type !== 'media' || item.startUs <= tUs || item.startUs > tUs + PREFETCH_US) continue
+      if (item.type !== 'media' || item.enabled === false || item.startUs <= tUs || item.startUs > tUs + PREFETCH_US) continue
       // slots como em renderFrame: ordem das camadas de vídeo com asset disponível
       const slots = new Map<string, number>()
       for (const layer of resolveFrame(p, item.startUs)) {

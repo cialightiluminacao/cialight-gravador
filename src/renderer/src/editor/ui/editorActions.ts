@@ -7,6 +7,7 @@ import { frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
 import type { PlaybackController } from '../engine/PlaybackController'
 import type { ShortcutAction } from '../shortcuts'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
+import { useViewerTool } from '../state/viewerTool'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 
@@ -179,8 +180,14 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
       s.toggleSnapping()
       toast(st().snapping ? 'Ímã ligado' : 'Ímã desligado', { duration: 1200 })
       return true
+    case 'drawRegion': {
+      const tool = useViewerTool.getState()
+      tool.setDrawing(!tool.drawing)
+      return true
+    }
     case 'deselect':
       if (s.txBase) s.cancelTx()
+      else if (useViewerTool.getState().drawing) useViewerTool.getState().setDrawing(false) // Esc primeiro sai da ferramenta
       else s.select([])
       return true
   }

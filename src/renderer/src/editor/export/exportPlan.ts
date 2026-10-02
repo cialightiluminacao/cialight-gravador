@@ -123,7 +123,7 @@ export interface ExportMediaIssue {
 /**
  * Pré-checagem: assets usados em [fromUs, toUs) que sairiam como "mídia indisponível" (quadriculado) ou
  * silêncio — ausentes, com erro ou ainda em processamento (intermediário/proxy não pronto). Considera
- * faixas de vídeo visíveis, faixas de áudio não mudas e as anotações (gravação ausente). Um por asset.
+ * faixas de vídeo visíveis, faixas de áudio não mudas e as anotações (gravação ausente); itens desativados não contam. Um por asset.
  */
 export function exportMediaIssues(p: Project, fromUs: Us, toUs: Us): ExportMediaIssue[] {
   const out: ExportMediaIssue[] = []
@@ -136,7 +136,7 @@ export function exportMediaIssues(p: Project, fromUs: Us, toUs: Us): ExportMedia
   for (const t of p.tracks) {
     if (t.kind === 'video' ? t.hidden : t.muted) continue
     for (const it of t.items) {
-      if (it.startUs >= toUs || it.startUs + it.durationUs <= fromUs) continue
+      if (it.enabled === false || it.startUs >= toUs || it.startUs + it.durationUs <= fromUs) continue
       if (it.type === 'media') {
         if (t.kind === 'audio' && !it.audio.enabled) continue
         add(p.assets.find((a) => a.id === it.assetId))

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { estimateBytes, exportMediaIssues, exportRange, frameCount, missingMediaWarnings, outputSize, presetVideoBitrate, resizeBitrate, targetBitrate, WHATSAPP_MAX_BPS } from './exportPlan'
-import { addAsset, addMediaFromAsset, updateTrack } from '@shared/editor/ops'
+import { addAsset, addMediaFromAsset, setItemEnabled, updateTrack } from '@shared/editor/ops'
 import { createEmptyProject } from '@shared/editor/factory'
 import type { Asset, Project } from '@shared/editor/project'
 
@@ -115,6 +115,12 @@ describe('exportMediaIssues (pré-checagem da exportação)', () => {
   it('só o intervalo exportado conta', () => {
     expect(exportMediaIssues(project(), 0, 4 * S)).toEqual([])
     expect(exportMediaIssues(project(), 3 * S, 9 * S).map((i) => i.assetId)).toEqual(['gone', 'busy'])
+  })
+  it('itens desativados (enabled: false) não entram', () => {
+    let p = project()
+    const ids = p.tracks.flatMap((t) => t.items.filter((i) => i.startUs === 4 * S).map((i) => i.id))
+    p = setItemEnabled(p, ids, false)
+    expect(exportMediaIssues(p, 0, 20 * S).map((i) => i.assetId)).toEqual(['busy', 'bad', 'late'])
   })
   it('faixas ocultas/mudas não entram', () => {
     let p = project()

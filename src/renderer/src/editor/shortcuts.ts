@@ -32,6 +32,7 @@ export type ShortcutAction =
   | 'save'
   | 'toggleSnap'
   | 'deselect'
+  | 'drawRegion' // B: ferramenta "Desenhar região" do visualizador (Ctrl+B continua sendo dividir)
 
 export interface KeyLike {
   key: string
@@ -64,7 +65,8 @@ export const SHORTCUT_LABELS: Partial<Record<ShortcutAction, string>> = {
   toggleSnap: 'N',
   zoomIn: '+',
   zoomOut: '-',
-  zoomFit: 'Shift+Z'
+  zoomFit: 'Shift+Z',
+  drawRegion: 'B'
 }
 
 /** Foco em campo editável: atalhos de uma tecla não podem roubar a digitação. */
@@ -130,6 +132,8 @@ export function shortcutFor(e: KeyLike): ShortcutAction | null {
       return 'marker'
     case 'n':
       return 'toggleSnap'
+    case 'b':
+      return 'drawRegion'
     case 'z':
       return e.shiftKey ? 'zoomFit' : null
     case '+':
