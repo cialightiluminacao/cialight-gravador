@@ -1,7 +1,7 @@
-import { existsSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { MediaClock } from '@shared/mediaClock'
-import { CURSOR_FILE, normalizeToFrame, type CursorButton, type CursorClick, type CursorSample, type CursorTrackV1, type Rect } from '@shared/cursor'
+import { CURSOR_FILE, normalizeContain, normalizeToFrame, type CursorButton, type CursorClick, type CursorSample, type CursorTrackV1, type Rect } from '@shared/cursor'
 
 // Gravador da trilha do cursor (F6), no processo main. Amostra a posição a cada tick (~60 Hz), carimba com o tempo
 // de MÍDIA de um MediaClock próprio (pausas removidas, mesma semântica do relógio do renderer: começa/pausa/retoma
@@ -29,6 +29,12 @@ export interface CursorRecorderDeps {
   onTickError?: (e: unknown) => void
 }
 
+/**
+ * Como o quadro do instante vira coordenada do vídeo: 'stretch' = direto ao quadro (monitor: tamanho fixo);
+ * 'contain' = pela caixa do encoder no tamanho do vídeo (janela redimensionada durante a gravação).
+ */
+export type FrameMapping = 'stretch' | 'contain'
+
 export class CursorRecorder {
   private clock = new MediaClock()
   private samples: CursorSample[] = []
@@ -43,7 +49,8 @@ export class CursorRecorder {
 
   constructor(
     private deps: CursorRecorderDeps,
-    private video: { width: number; height: number }
+    private video: { width: number; height: number },
+    private mapping: FrameMapping = 'stretch'
   ) {
     this.pollClicks = deps.pollClicks ?? null
   }
@@ -71,13 +78,14 @@ export class CursorRecorder {
     this.clock.start(this.deps.now())
     this.state = 'running'
     this.primeClicks()
-    this.sample()
+    this.boundarySample()
     this.startTimer()
   }
 
   pause(): void {
     if (this.state !== 'running') return
-    this.sample()
+    // amostra de borda protegida: uma leitura que lança não pode deixar o relógio/timer correndo na pausa
+    this.boundarySample()
     this.clock.pause(this.deps.now())
     this.state = 'paused'
     this.stopTimer()
@@ -106,15 +114,16 @@ export class CursorRecorder {
     const p = point ?? this.deps.readPoint()
     const f = this.deps.readFrame()
     if (!p || !f) return
-    const n = normalizeToFrame(p, f)
-    if (!(n.x >= 0 && n.x <= 1 && n.y >= 0 && n.y <= 1)) return
+    const u = normalizeToFrame(p, f)
+    if (!(u.x >= 0 && u.x <= 1 && u.y >= 0 && u.y <= 1)) return
+    const n = this.toVideo(p, f)
     this.clicks.push({ tMs: this.mediaTimeMs(), x: n.x, y: n.y, button })
   }
 
   /** Encerra (amostra final no instante da parada) e devolve a trilha. Idempotente. */
   stop(): CursorTrackV1 {
     if (this.result) return this.result
-    if (this.state === 'running') this.sample()
+    if (this.state === 'running') this.boundarySample()
     this.stopTimer()
     this.clock.stop(this.deps.now())
     if (this.stillTail) this.samples.push(this.stillTail)
@@ -124,11 +133,29 @@ export class CursorRecorder {
     return this.result
   }
 
+  private toVideo(p: { x: number; y: number }, f: Rect): { x: number; y: number } {
+    return this.mapping === 'contain' ? normalizeContain(p, f, this.video) : normalizeToFrame(p, f)
+  }
+
+  private reportTickError(e: unknown): void {
+    if (!this.tickErrorReported) this.deps.onTickError?.(e)
+    this.tickErrorReported = true
+  }
+
+  /** Amostra no início/pausa/parada: nunca lança (as transições de estado vêm depois e precisam acontecer). */
+  private boundarySample(): void {
+    try {
+      this.sample()
+    } catch (e) {
+      this.reportTickError(e)
+    }
+  }
+
   private sample(): void {
     const p = this.deps.readPoint()
     const f = this.deps.readFrame()
     if (!p || !f) return
-    const n = normalizeToFrame(p, f)
+    const n = this.toVideo(p, f)
     if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) return
     const s: CursorSample = { tMs: this.mediaTimeMs(), x: n.x, y: n.y }
     const last = this.samples[this.samples.length - 1]
@@ -165,8 +192,7 @@ export class CursorRecorder {
       try {
         this.tick()
       } catch (e) {
-        if (!this.tickErrorReported) this.deps.onTickError?.(e)
-        this.tickErrorReported = true
+        this.reportTickError(e)
       }
     }, this.deps.intervalMs ?? CURSOR_TICK_MS)
   }
@@ -188,7 +214,16 @@ export function writeCursorTrack(dir: string, track: CursorTrackV1): boolean {
   if (!existsSync(join(dir, 'session.json'))) return false
   const file = join(dir, CURSOR_FILE)
   const tmp = `${file}.tmp`
-  writeFileSync(tmp, JSON.stringify(track), 'utf8')
-  renameSync(tmp, file)
+  try {
+    writeFileSync(tmp, JSON.stringify(track), 'utf8')
+    renameSync(tmp, file)
+  } catch (e) {
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* melhor esforço */
+    }
+    throw e
+  }
   return true
 }

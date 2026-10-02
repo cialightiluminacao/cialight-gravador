@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { CursorRecorder, writeCursorTrack, type CursorRecorderDeps } from './cursorRecorder'
@@ -39,6 +39,28 @@ function harness(over: Partial<CursorRecorderDeps> = {}) {
     rec.tick()
   }
   return { env, rec, step }
+}
+
+// vídeo 800×600 (tamanho inicial da janela), mapeamento 'contain' como o encoder no modo janela
+function harnessContain() {
+  const h = harness()
+  const rec = new CursorRecorder(
+    {
+      now: () => h.env.wall,
+      readPoint: () => h.env.point,
+      readFrame: () => h.env.frame,
+      setInterval: () => ++h.env.timers,
+      clearInterval: () => void h.env.timers--
+    },
+    { width: 800, height: 600 },
+    'contain'
+  )
+  const step = (ms: number, p?: { x: number; y: number }): void => {
+    h.env.wall += ms
+    if (p) h.env.point = p
+    rec.tick()
+  }
+  return { env: h.env, rec, step }
 }
 
 describe('CursorRecorder', () => {
@@ -208,6 +230,69 @@ describe('CursorRecorder', () => {
     expect(rec.stop().samples.length).toBe(2)
   })
 
+  it('leitura que lança na pausa: o relógio e o timer param mesmo assim (sem amostras na pausa, tMs sem deslocar)', () => {
+    let fail = false
+    const errors: unknown[] = []
+    const { env, rec, step } = harness({
+      readPoint: () => {
+        if (fail) throw new Error('ponto indisponível')
+        return env.point
+      },
+      onTickError: (e) => errors.push(e)
+    })
+    rec.begin()
+    step(100, { x: 100, y: 100 })
+    fail = true
+    expect(() => rec.pause()).not.toThrow()
+    expect(env.timers).toBe(0)
+    fail = false
+    env.wall += 2000
+    rec.tick() // em pausa: ignorado
+    rec.resume()
+    step(50, { x: 200, y: 200 })
+    const t = rec.stop()
+    expect(t.samples.map((s) => s.tMs)).toEqual([0, 100, 150])
+    expect(errors.length).toBe(1)
+  })
+
+  it('leitura que lança na parada: o timer é liberado e a trilha sai assim mesmo', () => {
+    let fail = false
+    const { env, rec, step } = harness({
+      readFrame: () => {
+        if (fail) throw new Error('janela sumiu')
+        return env.frame
+      }
+    })
+    rec.begin()
+    step(16, { x: 3, y: 3 })
+    fail = true
+    let t: CursorTrackV1 | null = null
+    expect(() => (t = rec.stop())).not.toThrow()
+    expect(env.timers).toBe(0)
+    expect(t!.samples.map((s) => s.tMs)).toEqual([0, 16])
+    expect(rec.isRunning).toBe(false)
+  })
+
+  it("modo 'contain': limites da janela redimensionada passam pela caixa do encoder no tamanho do vídeo", () => {
+    const { env, rec, step } = harnessContain()
+    env.frame = { x: 0, y: 0, width: 800, height: 600 }
+    env.point = { x: 400, y: 300 }
+    rec.begin()
+    env.frame = { x: 0, y: 0, width: 400, height: 300 } // redução uniforme: mesma proporção → mesmo normalizado
+    step(16, { x: 100, y: 75 })
+    env.frame = { x: 0, y: 0, width: 1600, height: 600 } // mais larga: barras em cima e embaixo
+    step(16, { x: 0, y: 0 }) // canto da janela → (0, 0,5 − 0,5 × (600/1600 × 4/3)) = (0, 0,25)
+    rec.addClick('left', { x: 1600, y: 600 }) // canto oposto → (1, 0,75)
+    rec.addClick('left', { x: 1700, y: 300 }) // fora da janela → descartado
+    const t = rec.stop()
+    expect(t.samples).toEqual([
+      { tMs: 0, x: 0.5, y: 0.5 },
+      { tMs: 16, x: 0.25, y: 0.25 },
+      { tMs: 32, x: 0, y: 0.25 }
+    ])
+    expect(t.clicks).toEqual([{ tMs: 32, x: 1, y: 0.75, button: 'left' }])
+  })
+
   it('stop é idempotente e para o timer', () => {
     const { env, rec, step } = harness()
     rec.begin()
@@ -235,6 +320,13 @@ describe('writeCursorTrack', () => {
     expect(writeCursorTrack(dir, track)).toBe(true)
     expect(JSON.parse(readFileSync(join(dir, 'cursor.json'), 'utf8'))).toEqual(track)
     expect(readdirSync(dir).sort()).toEqual(['cursor.json', 'session.json'])
+  })
+
+  it('falha na escrita: não deixa cursor.json.tmp para trás', () => {
+    writeFileSync(join(dir, 'session.json'), '{}')
+    mkdirSync(join(dir, 'cursor.json')) // rename sobre uma pasta falha
+    expect(() => writeCursorTrack(dir, track)).toThrow()
+    expect(existsSync(join(dir, 'cursor.json.tmp'))).toBe(false)
   })
 
   it('pasta sem session.json (gravação descartada/apagada): não escreve nem recria a pasta', () => {

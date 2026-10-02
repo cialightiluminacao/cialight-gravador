@@ -4,7 +4,7 @@ import { dipToPhysical, hwndFromSourceId, physicalDisplays, type CursorButton, t
 import type { CursorBeginInfo } from '@shared/ipc'
 import { CursorRecorder, CURSOR_TICK_MS, writeCursorTrack, type CursorRecorderDeps } from './cursorRecorder'
 import { ButtonEdges } from './buttonEdges'
-import { loadWinInput, winInputLoadError } from './winInput'
+import { loadWinInput, winInputLoadError, type WinInput } from './winInput'
 import { log } from '../log'
 
 // Trilha do cursor durante a gravação (F6). O engine do renderer avisa começo/pausa/retomada/parada (IPC sem
@@ -37,11 +37,6 @@ export function setCursorTestHooks(h: CursorTestHooks | null): void {
   testHooks = h
 }
 
-/** Pré-carrega o binding nativo fora do caminho da gravação (custa ~45 ms no main). */
-export function warmUpCursorNative(): void {
-  setTimeout(() => void loadWinInput(), 3000)
-}
-
 function displayTable(): DisplayGeometry[] {
   return physicalDisplays(screen.getAllDisplays(), (r) => screen.dipToScreenRect(null, r))
 }
@@ -71,8 +66,9 @@ export function cursorBegin(info: CursorBeginInfo, dir: string, owner?: WebConte
       screen.off('display-added', onMetrics)
       screen.off('display-removed', onMetrics)
     })
-    const native = loadWinInput()
-    if (!native) logNativeFailure('módulo nativo indisponível', winInputLoadError())
+    // o binding nativo só carrega DEPOIS de o relógio começar (rec.begin abaixo): o require síncrono (~45 ms) não
+    // pode atrasar o zero da trilha; até lá não há cliques nem limites de janela
+    let native: WinInput | null = null
 
     let readFrame: () => Rect | null
     if (info.source.kind === 'screen') {
@@ -82,14 +78,12 @@ export function cursorBegin(info: CursorBeginInfo, dir: string, owner?: WebConte
     } else {
       const hwnd = hwndFromSourceId(info.source.id)
       readFrame = () => (hwnd && native ? native.windowFrame(hwnd) : null)
-      if (!hwnd || !native) log.warn('cursor: limites da janela gravada indisponíveis; trilha do cursor desligada')
+      if (!hwnd) log.warn('cursor: janela gravada sem HWND; trilha do cursor desligada')
     }
     const readDip = testHooks?.readDipPoint ?? (() => screen.getCursorScreenPoint())
-    let pollClicks: CursorRecorderDeps['pollClicks']
-    if (native && !testHooks?.disableNativeClicks) {
-      const edges = new ButtonEdges()
-      pollClicks = () => edges.update(native.readButtons(), native.buttonsSwapped())
-    }
+    const clicksWanted = !testHooks?.disableNativeClicks
+    const edges = new ButtonEdges()
+    const pollClicks: CursorRecorderDeps['pollClicks'] = () => (native && clicksWanted ? edges.update(native.readButtons(), native.buttonsSwapped()) : [])
     const rec = new CursorRecorder(
       {
         now: () => performance.now(),
@@ -99,7 +93,9 @@ export function cursorBegin(info: CursorBeginInfo, dir: string, owner?: WebConte
         onClickSourceError: (e) => logNativeFailure('leitura dos botões falhou', e),
         onTickError: (e) => log.warn('cursor: falha numa amostra do cursor (as próximas seguem)', e)
       },
-      { width: info.width, height: info.height }
+      { width: info.width, height: info.height },
+      // modo janela: o encoder encaixa a janela redimensionada no tamanho inicial com 'contain' (RecordingEngine)
+      info.source.kind === 'window' ? 'contain' : 'stretch'
     )
     const onGone = (): void => {
       if (active?.rec === rec) cursorStop(info.sessionId)
@@ -115,7 +111,18 @@ export function cursorBegin(info: CursorBeginInfo, dir: string, owner?: WebConte
     }
     active = { sessionId: info.sessionId, dir, rec, release }
     rec.begin()
-    log.info(`cursor: trilha iniciada (${info.source.kind}, tick ${CURSOR_TICK_MS} ms, cliques ${pollClicks ? 'sim' : 'não'})`)
+    native = loadWinInput()
+    if (!native) logNativeFailure('módulo nativo indisponível', winInputLoadError())
+    else if (clicksWanted) {
+      // descarta o bit "pressionado desde a última leitura" de antes do início (falha aqui: a fonte se desliga no tick)
+      try {
+        pollClicks()
+      } catch {
+        /* o CursorRecorder registra e desliga os cliques na próxima leitura */
+      }
+    }
+    if (info.source.kind === 'window' && !native) log.warn('cursor: limites da janela gravada indisponíveis; trilha do cursor sem amostras')
+    log.info(`cursor: trilha iniciada (${info.source.kind}, tick ${CURSOR_TICK_MS} ms, cliques ${native && clicksWanted ? 'sim' : 'não'})`)
   } catch (e) {
     active = null
     release()

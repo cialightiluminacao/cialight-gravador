@@ -142,6 +142,8 @@ Caminho de melhoria, se for preciso: Raw Input (`RegisterRawInputDevices` com `R
   relação ao vídeo. É a mesma defasagem que já afeta os eventos v1 carimbados no `MediaClock` (traços, PiP). Não foi
   compensada aqui (a trilha segue a semântica do `MediaClock`, como pede a tarefa); fica registrada para o consumidor
   (auto-zoom/realce) decidir um deslocamento.
+  **Decisão (ruling R11 do controller, Task 2):** a constante `CURSOR_VIDEO_LAG_MS = 80` é aplicada na LEITURA da
+  trilha (o cursor.json continua no tempo do relógio de mídia).
 
 ## 6. Pacote
 

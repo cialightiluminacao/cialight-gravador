@@ -34,7 +34,7 @@ import { check as updateCheck, download as updateDownload, getUpdateStatus, inst
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
 import { setExportBusyCheck } from './quitGuard'
-import { cursorBegin, cursorDiscard, cursorPause, cursorResume, cursorStop, warmUpCursorNative } from './cursor/cursorCapture'
+import { cursorBegin, cursorDiscard, cursorPause, cursorResume, cursorStop } from './cursor/cursorCapture'
 
 const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'ts']
 const AUDIO_EXT = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
@@ -206,7 +206,6 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ipcMain.on(IPC.cursor.resume, () => cursorResume())
   ipcMain.handle(IPC.cursor.stop, (_e, sessionId: string) => cursorStop(sessionId))
   ipcMain.on(IPC.cursor.discard, (_e, sessionId: string) => cursorDiscard(sessionId))
-  warmUpCursorNative()
 
   // ---- project (editor) ----
   ipcMain.handle(IPC.project.list, () => projects.list())

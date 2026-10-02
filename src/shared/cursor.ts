@@ -49,6 +49,20 @@ export function normalizeToFrame(p: { x: number; y: number }, frame: { x: number
   }
 }
 
+/**
+ * Ponto → 0–1 do VÍDEO quando o encoder encaixa o quadro atual no tamanho fixo do vídeo com `contain` (modo janela:
+ * `sizeChangeBehavior: 'contain'` do RecordingEngine). Uma janela redimensionada vira uma caixa centrada de escala
+ * min(W/w, H/h) com barras; o ponto é levado para dentro dela. Mesma proporção do vídeo = `normalizeToFrame`.
+ */
+export function normalizeContain(p: { x: number; y: number }, frame: Rect, video: { width: number; height: number }): { x: number; y: number } {
+  const u = normalizeToFrame(p, frame)
+  if (!(frame.width > 0 && frame.height > 0 && video.width > 0 && video.height > 0)) return u
+  const s = Math.min(video.width / frame.width, video.height / frame.height)
+  const cw = (frame.width * s) / video.width
+  const ch = (frame.height * s) / video.height
+  return { x: 0.5 + (u.x - 0.5) * cw, y: 0.5 + (u.y - 0.5) * ch }
+}
+
 /** Monitor com os limites em DIP (como o Electron informa) e em px físicos (como o vídeo é capturado). */
 export interface DisplayGeometry { id: string; dip: Rect; phys: Rect; scaleFactor: number }
 

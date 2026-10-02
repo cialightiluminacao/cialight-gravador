@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CursorTrackSchema, dipToPhysical, hwndFromSourceId, normalizeToFrame, parseCursorTrack, physicalDisplays, type CursorTrackV1, type DisplayGeometry } from './cursor'
+import { CursorTrackSchema, dipToPhysical, hwndFromSourceId, normalizeContain, normalizeToFrame, parseCursorTrack, physicalDisplays, type CursorTrackV1, type DisplayGeometry } from './cursor'
 
 const track = (over: Partial<CursorTrackV1> = {}): CursorTrackV1 => ({
   version: 1,
@@ -141,5 +141,32 @@ describe('hwndFromSourceId', () => {
     expect(hwndFromSourceId('screen:0:0')).toBeNull()
     expect(hwndFromSourceId('window:abc:0')).toBeNull()
     expect(hwndFromSourceId('')).toBeNull()
+  })
+})
+
+describe('normalizeContain (caixa do encoder no modo janela)', () => {
+  const video = { width: 1280, height: 720 }
+  it('mesma proporção do vídeo = normalizeToFrame', () => {
+    const f = { x: 100, y: 50, width: 640, height: 360 }
+    expect(normalizeContain({ x: 260, y: 140 }, f, video)).toEqual(normalizeToFrame({ x: 260, y: 140 }, f))
+  })
+  it('janela mais alta: barras laterais', () => {
+    const f = { x: 0, y: 0, width: 360, height: 360 } // quadrada em 16:9 → ocupa 720/1280 = 0,5625 da largura
+    const a = normalizeContain({ x: 0, y: 0 }, f, video)
+    expect(a.x).toBeCloseTo(0.5 - 0.5625 / 2, 12)
+    expect(a.y).toBe(0)
+    const b = normalizeContain({ x: 360, y: 360 }, f, video)
+    expect(b.x).toBeCloseTo(0.5 + 0.5625 / 2, 12)
+    expect(b.y).toBe(1)
+  })
+  it('janela mais larga: barras em cima e embaixo; fora da janela continua fora', () => {
+    const f = { x: 10, y: 10, width: 1280, height: 360 } // 32:9 em 16:9 → altura 0,5
+    expect(normalizeContain({ x: 10 + 640, y: 10 }, f, video)).toEqual({ x: 0.5, y: 0.25 })
+    expect(normalizeContain({ x: 10, y: 10 + 360 }, f, video)).toEqual({ x: 0, y: 0.75 })
+    expect(normalizeContain({ x: 0, y: 10 }, f, video).x).toBeLessThan(0)
+  })
+  it('quadro vazio não gera NaN', () => {
+    const n = normalizeContain({ x: 1, y: 1 }, { x: 0, y: 0, width: 0, height: 0 }, video)
+    expect(Number.isFinite(n.x) && Number.isFinite(n.y)).toBe(true)
   })
 })

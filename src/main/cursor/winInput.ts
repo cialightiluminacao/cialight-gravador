@@ -26,7 +26,7 @@ let cached: WinInput | null | undefined
 let loadError: unknown = null
 
 function load(): WinInput {
-  // require tardio: o koffi custa ~45 ms para carregar e não deve atrasar a abertura do app
+  // require tardio (na 1ª gravação, depois de o relógio da trilha começar): ~45 ms; nunca na abertura do app
   const koffi = require('koffi') as typeof import('koffi')
   const user32 = koffi.load('user32.dll')
   const dwmapi = koffi.load('dwmapi.dll')
