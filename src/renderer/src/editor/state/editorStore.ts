@@ -36,6 +36,8 @@ export interface EditorState {
   audioJobs: Record<string, AudioJobState>
   /** Comparar A/B (botão segurado): o preview toca o original em vez do áudio processado. */
   audioBypass: boolean
+  /** Assets cujo speech.json não carregou no audio worker (sem dados de fala: não abaixam a música). */
+  speechFailed: Record<string, true>
   canUndo: boolean
   canRedo: boolean
 
@@ -50,6 +52,7 @@ export interface EditorState {
   markAudioProcessed(assetId: string, key: string, fingerprint: string): void
   setAudioJob(id: string, state: AudioJobState | null): void
   setAudioBypass(on: boolean): void
+  setSpeechFailed(assetId: string): void
   begin(): void
   commitTx(): void
   cancelTx(): void
@@ -95,6 +98,7 @@ const INITIAL = {
   ingest: {} as Record<string, IngestProgress>,
   audioJobs: {} as Record<string, AudioJobState>,
   audioBypass: false,
+  speechFailed: {} as Record<string, true>,
 }
 
 export const useEditorStore = create<EditorState>()((set, get) => ({
@@ -141,7 +145,9 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       present: fix(history.present),
       future: history.future.map(fix),
     }
-    set({ ...derive(h), txBase: txBase ? fix(txBase) : null, dirty: true })
+    // análise de fala regravada: o worker relê; o aviso de falha antigo some
+    const speechFailed = 'speech' in patch && get().speechFailed[assetId] ? Object.fromEntries(Object.entries(get().speechFailed).filter(([k]) => k !== assetId)) as Record<string, true> : get().speechFailed
+    set({ ...derive(h), txBase: txBase ? fix(txBase) : null, dirty: true, speechFailed })
   },
 
   markAudioProcessed: (assetId, key, fingerprint) => {
@@ -160,6 +166,8 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     }),
 
   setAudioBypass: (on) => set({ audioBypass: on }),
+
+  setSpeechFailed: (assetId) => set((s) => (s.speechFailed[assetId] ? s : { speechFailed: { ...s.speechFailed, [assetId]: true } })),
 
   setIngest: (assetId, progress) =>
     set((s) => {

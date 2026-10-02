@@ -94,6 +94,21 @@ describe('editorStore', () => {
     expect(() => st().apply(() => { throw new TypeError('bug') })).toThrow('bug')
   })
 
+  it('speechFailed: marca o asset sem dados de fala; nova análise (patch de speech) limpa; fechar zera', () => {
+    st().apply((p) => ({ ...p, assets: [asset('x'), asset('y')] }))
+    st().setSpeechFailed('x')
+    st().setSpeechFailed('y')
+    const before = st().speechFailed
+    st().setSpeechFailed('x')
+    expect(st().speechFailed).toBe(before) // sem mudança: mesmo objeto
+    st().applyAssetPatch('x', { name: 'outro' })
+    expect(st().speechFailed).toEqual({ x: true, y: true })
+    st().applyAssetPatch('x', { speech: 'cache/x.speech.json' })
+    expect(st().speechFailed).toEqual({ y: true })
+    st().close()
+    expect(st().speechFailed).toEqual({})
+  })
+
   it('applyAssetPatch não cria histórico e corrige past/present/future', () => {
     st().apply((p) => ({ ...p, assets: [asset('x', 'orig')] }))
     st().apply((p) => addMarker(p, 1))

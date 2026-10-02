@@ -21,5 +21,8 @@ describe('duckingHint', () => {
     expect(duckingHint(proj(true, (v, m) => [track('tv', 'voice', v, { muted: true }), track('tm', 'music', m)]))).toMatch(/Nenhuma faixa de Voz/)
     expect(duckingHint(proj(true, (v, m) => [track('tv', 'sfx', v), track('tm', 'music', m)]))).toMatch(/Nenhuma faixa de Voz/)
     expect(duckingHint(proj(false))).toMatch(/sem análise de fala/)
+    // speech.json que não carregou no worker conta como sem dados
+    expect(duckingHint(proj(true), { v: true })).toMatch(/sem análise de fala/)
+    expect(duckingHint(proj(true), { m: true })).toBeNull()
   })
 })

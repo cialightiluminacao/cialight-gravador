@@ -124,7 +124,17 @@ export function voiceAssetIds(p: Project): string[] {
 export function speechOnTimeline(seg: Pick<AudioSegment, 'startUs' | 'durationUs' | 'srcInUs' | 'speed' | 'reverse'>, speech: readonly SpeechInterval[]): SpeechInterval[] {
   const out: SpeechInterval[] = []
   const dur = seg.durationUs
-  for (const iv of speech) {
+  // trecho da fonte que o item lê; `speech` vem ordenado (speechFromFile): busca binária do 1º intervalo que o alcança
+  const srcLo = seg.srcInUs
+  const srcHi = seg.srcInUs + dur * seg.speed
+  let lo = 0, hi = speech.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (speech[mid].toUs <= srcLo) lo = mid + 1
+    else hi = mid
+  }
+  for (let k = lo; k < speech.length && speech[k].fromUs < srcHi; k++) {
+    const iv = speech[k]
     const a = (iv.fromUs - seg.srcInUs) / seg.speed
     const b = (iv.toUs - seg.srcInUs) / seg.speed
     const l0 = Math.max(0, seg.reverse ? dur - b : a)
@@ -187,17 +197,36 @@ export function duckEnvelope(speech: readonly SpeechInterval[], mix: AudioMix): 
   return out
 }
 
-/** Ganho de uma lista de pontos no instante t (preso às pontas). */
-function gainOf(points: GainPoint[], t: Us): number {
-  if (!points.length) return 1
+/**
+ * Ganho de uma lista de pontos (ordenada) no instante t, preso às pontas; vazia = 1. Busca binária do 1º ponto com
+ * tUs ≥ t (com tempos repetidos — degrau — vale o 1º deles, como antes). `from`: índice a partir do qual procurar
+ * (varredura em ordem).
+ */
+function gainOf(points: readonly GainPoint[], t: Us, from = 0): number {
+  const n = points.length
+  if (!n) return 1
   if (t <= points[0].tUs) return points[0].gain
-  for (let i = 1; i < points.length; i++) {
-    if (t <= points[i].tUs) {
-      const a = points[i - 1], b = points[i]
-      return b.tUs === a.tUs ? b.gain : a.gain + ((b.gain - a.gain) * (t - a.tUs)) / (b.tUs - a.tUs)
-    }
+  if (t > points[n - 1].tUs) return points[n - 1].gain
+  let lo = Math.max(1, from), hi = n - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (points[mid].tUs < t) lo = mid + 1
+    else hi = mid
   }
-  return points[points.length - 1].gain
+  const a = points[lo - 1], b = points[lo]
+  return b.tUs === a.tUs ? b.gain : a.gain + ((b.gain - a.gain) * (t - a.tUs)) / (b.tUs - a.tUs)
+}
+
+/** Tempos (ordenados, sem repetição) de duas listas ordenadas de pontos, presos a [lo, hi], mais as pontas. */
+function mergedTimes(a: readonly GainPoint[], b: readonly GainPoint[], lo: Us, hi: Us): Us[] {
+  const out: Us[] = [lo]
+  let i = 0, j = 0
+  while (i < a.length || j < b.length) {
+    const t = j >= b.length || (i < a.length && a[i].tUs <= b[j].tUs) ? a[i++].tUs : b[j++].tUs
+    if (t > out[out.length - 1] && t < hi) out.push(t)
+  }
+  if (hi > out[out.length - 1]) out.push(hi)
+  return out
 }
 
 /** Envelope de ducking nas faixas de música pela fala das faixas de voz (puro: a fala chega como dado). */
@@ -210,8 +239,14 @@ function applyDucking(p: Project, segs: AudioSegment[], speech: Readonly<Record<
   return segs.map((s) => {
     const end = s.startUs + s.durationUs
     if (!music.has(s.trackId) || env[0].tUs >= end || env[env.length - 1].tUs <= s.startUs) return s
-    const times = [...new Set([...s.gain.map((g) => g.tUs), ...env.map((g) => g.tUs), s.startUs, end])].filter((t) => t >= s.startUs && t <= end).sort((x, y) => x - y)
-    return { ...s, gain: times.map((t) => ({ tUs: t, gain: gainOf(s.gain, t) * gainOf(env, t) })) }
+    // varredura em ordem (merge das duas listas ordenadas): O(n + m)
+    let i = 1, j = 1
+    const gain = mergedTimes(s.gain, env, s.startUs, end).map((t): GainPoint => {
+      while (i < s.gain.length - 1 && s.gain[i].tUs < t) i++
+      while (j < env.length - 1 && env[j].tUs < t) j++
+      return { tUs: t, gain: gainOf(s.gain, t, i - 1) * gainOf(env, t, j - 1) }
+    })
+    return { ...s, gain }
   })
 }
 
@@ -266,17 +301,8 @@ export function shuttleSegments(segs: AudioSegment[], rate: number): AudioSegmen
   })
 }
 
-/** Ganho linear no instante tUs; 0 fora do segmento. */
+/** Ganho linear no instante tUs (busca binária no envelope); 0 fora do segmento. */
 export function gainAt(seg: AudioSegment, tUs: Us): number {
   if (tUs < seg.startUs || tUs > seg.startUs + seg.durationUs) return 0
-  const g = seg.gain
-  if (g.length === 0) return 1
-  if (tUs <= g[0].tUs) return g[0].gain
-  for (let i = 1; i < g.length; i++) {
-    if (tUs <= g[i].tUs) {
-      const a = g[i - 1], b = g[i]
-      return b.tUs === a.tUs ? b.gain : a.gain + ((b.gain - a.gain) * (tUs - a.tUs)) / (b.tUs - a.tUs)
-    }
-  }
-  return g[g.length - 1].gain
+  return gainOf(seg.gain, tUs)
 }

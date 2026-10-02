@@ -426,7 +426,7 @@ class AudioFeed {
     this.blocks = Math.ceil(this.totalFrames / AUDIO_BLOCK_FRAMES)
     port.onmessage = (e: MessageEvent<AudioOut>) => {
       const m = e.data
-      if (m.seq === undefined) return // aviso de mídia (o bloco sai com silêncio no lugar dela)
+      if (m.t === 'speechError' || m.seq === undefined) return // aviso de mídia/fala (o bloco sai com silêncio no lugar dela)
       const w = this.waiting.get(m.seq)
       this.waiting.delete(m.seq)
       if (m.t === 'block') w?.resolve(m.pcm)

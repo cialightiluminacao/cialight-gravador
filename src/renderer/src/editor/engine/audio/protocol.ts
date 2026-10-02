@@ -17,3 +17,5 @@ export type AudioOut =
   // estéreo intercalado 48 kHz (transferido); tracks: pico por faixa no bloco (medidores; só as faixas que soaram)
   | { t: 'block'; seq: number; fromUs: Us; pcm: Float32Array; tracks: Record<string, number> }
   | { t: 'error'; message: string; seq?: number; assetId?: string } // assetId: falha de mídia (uma vez por asset)
+  // speech.json do asset não carregou (uma vez por URL): sem dados de fala, aquela voz não abaixa a música
+  | { t: 'speechError'; assetId: string }

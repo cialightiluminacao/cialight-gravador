@@ -12,12 +12,14 @@ export class AudioClient {
   private readonly pending = new Map<number, (b: AudioBlock | null) => void>()
   private readonly errorListeners = new Set<(message: string, assetId?: string) => void>()
   private readonly fatalListeners = new Set<(message: string) => void>()
+  private readonly speechListeners = new Set<(assetId: string) => void>()
 
   constructor() {
     this.worker = new Worker(new URL('./audio.worker.ts', import.meta.url), { type: 'module' })
     this.worker.addEventListener('message', (e: MessageEvent<AudioOut>) => {
       const m = e.data
       if (m.t === 'block') this.settle(m.seq, { fromUs: m.fromUs, pcm: m.pcm, tracks: m.tracks })
+      else if (m.t === 'speechError') for (const l of this.speechListeners) l(m.assetId)
       else {
         if (m.seq !== undefined) this.settle(m.seq, null)
         for (const l of this.errorListeners) l(m.message, m.assetId)
@@ -70,8 +72,15 @@ export class AudioClient {
     return () => this.errorListeners.delete(cb)
   }
 
+  /** speech.json do asset não carregou (o worker avisa uma vez por URL): aquela voz fica sem ducking. */
+  onSpeechError(cb: (assetId: string) => void): () => void {
+    this.speechListeners.add(cb)
+    return () => this.speechListeners.delete(cb)
+  }
+
   dispose(): void {
     this.send({ t: 'dispose' })
+    this.speechListeners.clear()
     for (const [seq] of this.pending) this.settle(seq, null)
     this.errorListeners.clear()
     this.fatalListeners.clear()

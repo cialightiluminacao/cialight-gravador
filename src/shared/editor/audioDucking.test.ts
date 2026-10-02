@@ -129,6 +129,8 @@ describe('ducking (planAudio com intervalos de fala)', () => {
     expect(flat(music(ops.setItemEnabled(p, ['i_v'], false), speech))).toBe(true)
     expect(flat(music(ops.updateItem<MediaItem>(p, 'i_v', (d) => { d.audio.enabled = false }), speech))).toBe(true)
     expect(flat(music(proj({ speed: 8, durationUs: 2 * S }), { v: sp([1, 2]) }))).toBe(true)
+    // congelado: o item não toca áudio (fora do plano), então a fala da fonte no ponto congelado não abaixa
+    expect(flat(music(proj({ freeze: { atUs: 1.5 * S }, durationUs: 3 * S }), { v: sp([1, 2]) }))).toBe(true)
     expect(flat(music({ ...p, audioMix: { ...AUDIO_MIX_DEFAULTS, enabled: false } }, speech))).toBe(true)
   })
 
@@ -161,6 +163,32 @@ describe('ducking (planAudio com intervalos de fala)', () => {
     expect(s.gain[s.gain.length - 1].tUs).toBe(13 * S)
     expect(g(s, 3)).toBeCloseTo(DUCK, 9)
     expect(s.gain.every((x, i) => i === 0 || x.tUs >= s.gain[i - 1].tUs)).toBe(true)
+  })
+
+  it('escala: 1000 regiões de fala em 30 min, voz picotada em 500 itens — plano em < 50 ms e gainAt coerente', () => {
+    const MIN = 60 * S
+    const speech = Array.from({ length: 1000 }, (_, k) => ({ fromUs: k * 1.8 * S, toUs: k * 1.8 * S + S }))
+    const p0 = proj({ durationUs: 30 * MIN })
+    const vAsset = { ...p0.assets[0], durationUs: 30 * MIN }
+    const mAsset = { ...p0.assets[1], durationUs: 30 * MIN }
+    // voz cortada em 500 pedaços (como depois de remover silêncios), música inteira
+    const pieces = Array.from({ length: 500 }, (_, k) => ({ ...p0.tracks[0].items[0], id: `i_v${k}`, startUs: k * 3.6 * S, inUs: k * 3.6 * S, durationUs: 3.6 * S }))
+    const p: Project = {
+      ...p0,
+      assets: [vAsset, mAsset, p0.assets[2]],
+      tracks: [{ ...p0.tracks[0], items: pieces }, { ...p0.tracks[1], items: [{ ...p0.tracks[1].items[0], durationUs: 30 * MIN }] as MediaItem[] }]
+    }
+    planAudio(p, { speech: { v: speech } }) // aquecimento do JIT
+    const t0 = performance.now()
+    const segs = planAudio(p, { speech: { v: speech } })
+    const ms = performance.now() - t0
+    const m = segs.find((s) => s.itemId === 'i_m')!
+    expect(ms).toBeLessThan(50)
+    expect(m.gain.length).toBeGreaterThan(2000)
+    expect(gainAt(m, Math.round(900.5 * S))).toBeCloseTo(DUCK, 9) // fala k=500: [900 s, 901 s)
+    const t1 = performance.now()
+    for (let t = 0; t < 30 * MIN; t += 10_000) gainAt(m, t)
+    expect(performance.now() - t1).toBeLessThan(50)
   })
 
   it('duckEnvelope: pontos em µs inteiros, união com hold, rampas', () => {

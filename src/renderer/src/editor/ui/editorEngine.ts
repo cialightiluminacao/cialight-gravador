@@ -44,6 +44,8 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
     const asset = assetId ? useEditorStore.getState().project?.assets.find((a) => a.id === assetId) : undefined
     toast.error(asset ? `Não foi possível tocar o áudio de “${asset.name}”` : 'Problema na reprodução do áudio', { description: message })
   })
+  // speech.json que não carregou: o inspetor mostra "sem dados de fala" para o asset
+  const offSpeech = audio.onSpeechError((assetId) => useEditorStore.getState().setSpeechFailed(assetId))
   // watchdog (spec §13): tocando com pedido de quadro sem resposta há 5 s → worker novo num canvas novo, mesmo projeto/estado
   const watchdog = new RenderWatchdog(opts.stallMs ?? RENDER_STALL_MS)
   const offRender = render.onMessage((m) => {
@@ -112,6 +114,7 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
     dispose() {
       unsub()
       offError()
+      offSpeech()
       offRender()
       clearInterval(watchTimer)
       cancelAnimationFrame(raf)

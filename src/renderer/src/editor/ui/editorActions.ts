@@ -1,7 +1,7 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addEffect, addMarker, addMediaFromAsset, addTrack, deleteItems, musicTrackName, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
+import { addEffect, addMarker, addMediaFromAsset, addTrack, deleteItems, musicTrackName, updateTrack, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
 import type { EffectPresetId, EffectRegionInit } from '@shared/editor/factory'
 import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
 import { frameDurUs, frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
@@ -10,6 +10,7 @@ import type { ShortcutAction } from '../shortcuts'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
 import { useKeyframeSelection } from '../state/keyframeSelection'
 import { useViewerTool } from '../state/viewerTool'
+import { autoMusicLanding } from './musicLanding'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 
@@ -85,7 +86,17 @@ export function addAssetAt(assetId: string, atUs: Us, track?: { trackId: string 
     ids = r.itemIds
     return r.project
   })
-  if (ok) s.select(ids)
+  if (!ok) return
+  s.select(ids)
+  // áudio que caiu sozinho na faixa Música: pode ser narração — um clique troca o papel da faixa para Voz
+  const p = st().project
+  const landed = p ? autoMusicLanding(p, assetId, ids, !track || 'newTrack' in track) : null
+  if (landed) {
+    toast(`Áudio adicionado à faixa “${landed.trackName}”`, {
+      description: 'A música abaixa sozinha quando há fala nas faixas de Voz.',
+      action: { label: 'É narração? Mover para Voz', onClick: () => void st().apply((q) => updateTrack(q, landed.trackId, { role: 'voice' })) }
+    })
+  }
 }
 
 /** Adiciona o asset no playhead (vídeo + áudio vinculado) e seleciona o que entrou. */

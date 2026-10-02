@@ -84,11 +84,12 @@ function SpeechNote({ item }: { item: MediaItem }): React.JSX.Element | null {
   const voice = useEditorStore((s) => !!s.project && findItem(s.project, item.id)?.track.role === 'voice')
   const asset = useEditorStore((s) => s.project?.assets.find((a) => a.id === item.assetId))
   const analyzing = useEditorStore((s) => !!s.ingest[item.assetId])
-  if (!voice || !asset || asset.speech) return null
+  const failed = useEditorStore((s) => !!s.speechFailed[item.assetId])
+  if (!voice || !asset || (asset.speech && !failed)) return null
   return (
     <p className="flex items-start gap-1.5 border-b border-border px-3 py-2 text-[11px] leading-relaxed text-muted-2" data-speech-note="">
       <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      <span>{asset.status === 'processing' || analyzing ? 'Analisando a fala desta mídia… até lá ela não abaixa a música.' : 'Fala desta mídia não analisada: ela não abaixa a música (ducking).'}</span>
+      <span>{!failed && (asset.status === 'processing' || analyzing) ? 'Analisando a fala desta mídia… até lá ela não abaixa a música.' : failed ? 'Sem dados de fala (a análise não pôde ser lida): esta mídia não abaixa a música.' : 'Fala desta mídia não analisada: ela não abaixa a música (ducking).'}</span>
     </p>
   )
 }

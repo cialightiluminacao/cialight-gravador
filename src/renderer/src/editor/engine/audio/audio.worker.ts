@@ -13,16 +13,18 @@
 // Ducking: o plano (puro) recebe a fala das faixas de voz como dado — o worker lê os speech.json (mediaUrls.speech,
 // cache por URL) antes de montar o plano, e os pedidos de bloco esperam o plano pronto. Mesmo caminho no preview e
 // na exportação, então os dois abaixam a música igual. speech.json que não carrega = sem dados (aquela voz não abaixa).
-// Medidores: cada bloco devolve o pico por faixa (mixBlock), poucos números por bloco.
+// speech.json que não carrega é avisado uma vez por URL ('speechError'); falha ao montar o plano com a fala mantém o
+// plano sem ducking e avisa ('error') — os blocos nunca ficam esperando.
+// Medidores: no preview cada bloco devolve o pico por faixa (mixBlock), poucos números por bloco; a exportação não mede.
 import { splitAudioSourceKey } from '@shared/editor/audioProcess'
 import { abPlan, shuttleSegments, voiceAssetIds, type AudioSegment } from '@shared/editor/audioPlan'
-import { speechFromFile, type SpeechFile, type SpeechInterval } from '@shared/editor/speech'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 import { AssetPcm } from './assetPcm'
 import { mixBlock, SR, StretchBank, type PcmSource } from './mixer'
 import type { AudioIn, AudioOut } from './protocol'
 import { createStretcher } from './stretch'
+import { SpeechLoader } from './speechLoader'
 
 type RenderMsg = Extract<AudioIn, { t: 'render' }> & { reply: (m: AudioOut, transfer?: Transferable[]) => void }
 
@@ -39,11 +41,20 @@ const sources = new Map<string, AssetPcm>()
 const stretch = new StretchBank((rate) => createStretcher(rate, 2))
 const queue: RenderMsg[] = []
 let busy = false
-// fala por URL do speech.json (falha não fica em cache: tenta de novo no próximo projeto)
-const speechCache = new Map<string, Promise<SpeechInterval[] | null>>()
+// fala por URL do speech.json (cache; falha avisada uma vez por URL e tentada de novo no próximo projeto)
+const speech = new SpeechLoader(
+  async (url) => {
+    const r = await fetch(url, { cache: 'no-store' })
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    return r.json()
+  },
+  (assetId) => post({ t: 'speechError', assetId })
+)
 // plano com ducking em montagem (speech.json carregando); os blocos esperam
 let planReady: Promise<void> = Promise.resolve()
 let planGen = 0
+// picos por faixa nos blocos (só no preview: a exportação não tem medidores)
+let meters = false
 // muda a cada `cancel`: pedidos e aquecimentos de antes ficam obsoletos
 let epoch = 0
 
@@ -90,6 +101,7 @@ function enqueue(m: Extract<AudioIn, { t: 'render' }>, reply: RenderMsg['reply']
 
 function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean, bypassProcessing: boolean): void {
   const gen = ++planGen
+  meters = useProxy
   const use = (ab: ReturnType<typeof abPlan>): void => {
     segments = ab.segments
     // exportação (sem proxy) não compara: só o plano tocado
@@ -98,11 +110,21 @@ function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean, b
   }
   // as fontes não dependem do ducking (só o ganho muda): o plano sem fala já define o que decodificar
   use(abPlan(project, bypassProcessing))
-  const voice = voiceAssetIds(project).filter((id) => mediaUrls[id]?.speech)
+  let voice: string[] = []
+  try {
+    voice = voiceAssetIds(project).filter((id) => mediaUrls[id]?.speech)
+  } catch (err) {
+    post({ t: 'error', message: `ducking desativado: ${errMsg(err)}` })
+  }
+  // nunca rejeita: falha ao montar segue com o plano sem fala (já em uso), sem ducking mas tocando
   planReady = voice.length
-    ? loadSpeech(voice, mediaUrls).then((speech) => {
-        if (gen === planGen) use(abPlan(project, bypassProcessing, speech))
-      })
+    ? speech.plan(
+        Object.fromEntries(voice.map((id) => [id, mediaUrls[id]!.speech!])),
+        (sp) => {
+          if (gen === planGen) use(abPlan(project, bypassProcessing, sp))
+        },
+        (message) => post({ t: 'error', message: `ducking desativado: ${message}` })
+      )
     : Promise.resolve()
   stretch.retain(new Set(segments.filter((s) => s.mode === 'stretch').map((s) => s.itemId)))
   const used = new Set([...segments.filter((s) => s.mode !== 'mute'), ...alternate].map((s) => s.sourceKey))
@@ -140,27 +162,6 @@ function sourceFor(project: Project, sourceKey: string, mediaUrls: MediaUrls, us
   return { url: u.original, trackIndex: multi ? asset.audioTrackIndex! : null }
 }
 
-/** Intervalos de fala dos assets (speech.json pela URL do protocolo), por assetId; o que não carregar fica de fora. */
-async function loadSpeech(assetIds: string[], mediaUrls: MediaUrls): Promise<Record<string, SpeechInterval[]>> {
-  const out: Record<string, SpeechInterval[]> = {}
-  await Promise.all(
-    assetIds.map(async (id) => {
-      const url = mediaUrls[id]!.speech!
-      let p = speechCache.get(url)
-      if (!p) {
-        p = fetch(url, { cache: 'no-store' })
-          .then(async (r) => (r.ok ? speechFromFile((await r.json()) as SpeechFile) : null))
-          .catch(() => null)
-        speechCache.set(url, p)
-      }
-      const iv = await p
-      if (iv) out[id] = iv
-      else if (speechCache.get(url) === p) speechCache.delete(url)
-    })
-  )
-  return out
-}
-
 /** Espera o plano mais recente (um projeto novo durante a espera troca a promessa). */
 async function planSettled(): Promise<void> {
   let p: Promise<void>
@@ -188,9 +189,9 @@ async function pump(): Promise<void> {
         stretch.pin(new Set(segs.filter((s) => s.mode === 'stretch' && s.startUs < blockEnd && s.startUs + s.durationUs > fromUs).map((s) => s.itemId)))
         await prepare(segs, fromUs, m.frames, stale)
         if (stale()) continue // cancelado durante a decodificação: o cliente já descartou
-        const peaks = new Map<string, number>()
+        const peaks = meters ? new Map<string, number>() : undefined
         const pcm = mixBlock(segs, fromUs, m.frames, sources as Map<string, PcmSource>, peaks)
-        m.reply({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm, tracks: Object.fromEntries(peaks) }, [pcm.buffer])
+        m.reply({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm, tracks: peaks ? Object.fromEntries(peaks) : {} }, [pcm.buffer])
         void prepare(segs, blockEnd, Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
         // A/B: o outro lado também fica decodificado (bloco + aquecimento), para segurar/soltar não começar do zero
         if (rate === 1 && alternate.length) void warm(alternate, fromUs, m.frames + Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
