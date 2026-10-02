@@ -50,7 +50,8 @@ export function EffectLibrary(): React.JSX.Element {
           }}
           onDoubleClick={() => addAtPlayhead(p.id)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') addAtPlayhead(p.id)
+            // só o cartão em foco: o Enter no botão "+" interno sobe até aqui e o botão já adiciona pelo clique
+            if (e.key === 'Enter' && e.target === e.currentTarget) addAtPlayhead(p.id)
           }}
         >
           <div className="relative flex aspect-video items-center justify-center overflow-hidden rounded-md border border-border bg-gradient-to-br from-accent/10 to-bg-2 text-fg-2">

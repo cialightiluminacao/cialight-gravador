@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAlert, Upload, X } from 'lucide-react'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
-import { findItem, projectDurationUs } from '@shared/editor/ops'
+import { contentEndUs, findItem } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
 import { planAudio } from '@shared/editor/audioPlan'
 import { Button } from '@/components/ui/Button'
@@ -44,7 +44,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const [folder, setFolder] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
-  const totalUs = project ? projectDurationUs(project) : 0
+  // fim do conteúdo (sem efeitos e itens desativados): um efeito depois da mídia não estica "Tudo" com preto
+  const totalUs = project ? contentEndUs(project) : 0
   const inOutUsable = hasInOut(totalUs, inUs, outUs)
 
   // ao abrir (fora de uma exportação): formulário com os padrões do projeto
@@ -52,7 +53,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     if (!open || !project || phase.kind === 'running') return
     setPhase({ kind: 'form' })
     setFileName(`${fileNameFromTitle(project.name) || 'Vídeo'}.mp4`)
-    setRangeMode(hasInOut(projectDurationUs(project), useEditorStore.getState().inUs, useEditorStore.getState().outUs) ? 'inout' : 'all')
+    setRangeMode(hasInOut(contentEndUs(project), useEditorStore.getState().inUs, useEditorStore.getState().outUs) ? 'inout' : 'all')
   }, [open])
 
   // diálogo desmontado (editor fechado) no meio da exportação: cancela
@@ -70,12 +71,12 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
   const issues = durationUs > 0 ? exportMediaIssues(project, range.fromUs, range.toUs) : []
   const privacy = durationUs > 0 ? privacyWarnings(project, range.fromUs, range.toUs) : []
-  // "Revisar": seleciona o efeito, leva o playhead ao começo dele (dentro do intervalo) e fecha o diálogo
+  // "Revisar": seleciona o efeito, leva o playhead ao instante do aviso (o mais fraco, o início da mídia por
+  // cima…, sempre dentro do intervalo) e fecha o diálogo
   const review = (w: PrivacyWarning): void => {
-    const f = findItem(project, w.itemId)
-    if (!f) return
+    if (!findItem(project, w.itemId)) return
     useEditorStore.getState().select([w.itemId])
-    onSeek(Math.max(f.item.startUs, range.fromUs))
+    onSeek(Math.min(Math.max(w.tUs, range.fromUs), Math.max(range.fromUs, range.toUs - 1)))
     onOpenChange(false)
   }
   // QA (só fora do pacote): window.__qaEditor.exportDir troca a pasta padrão (o QA nunca grava na pasta real)
@@ -319,7 +320,7 @@ function PrivacySection({ warnings, onReview }: { warnings: PrivacyWarning[]; on
               <span className="min-w-0 flex-1">
                 <span className="font-semibold">
                   {name}
-                  {item ? ` em ${formatClock(item.startUs / 1000, false)}` : ''}
+                  {` em ${formatClock(w.tUs / 1000, false)}`}
                 </span>
                 {' — '}
                 {w.message}

@@ -6,8 +6,8 @@ import { useEditorStore } from '../../state/editorStore'
 import { cornerScale, rotateAngle, snapCenter, type Corner, type Guides, type ItemBox, type Pt } from '../viewerGeometry'
 import { startViewerGesture } from './viewerGesture'
 
-// Manipulação direta de mídia no visualizador (F1): arrastar move, cantos escalam (Shift mantém o
-// centro), alça de cima gira (Shift: 15°). Cada gesto é uma transação. Guias de centro com snap a
+// Manipulação direta de mídia no visualizador (F1): arrastar move, cantos escalam sempre na proporção (Alt: a
+// partir do centro — o mesmo modificador das alças da região de efeito), alça de cima gira (Shift: 15°). Cada gesto é uma transação. Guias de centro com snap a
 // 0,5 ± 1 %. O contorno do selecionado é desenhado pelo render worker.
 
 type V = MediaItem & { visual: VisualProps }
@@ -75,8 +75,8 @@ export function startItemTransform(e: React.PointerEvent, box: ItemBox, g: ItemG
         return write(base, { x: sx.value - offX, y: sy.value - offY })
       }
       if (g.kind === 'scale') {
-        const r = cornerScale(box, g.corner, now, ev.shiftKey)
-        return write(base, { scale: Math.max(0.01, s0 * r.factor), ...(ev.shiftKey ? {} : { x: r.cx / W - offX, y: r.cy / H - offY }) })
+        const r = cornerScale(box, g.corner, now, ev.altKey)
+        return write(base, { scale: Math.max(0.01, s0 * r.factor), ...(ev.altKey ? {} : { x: r.cx / W - offX, y: r.cy / H - offY }) })
       }
       return write(base, { rotation: rotateAngle(center, from, now, r0, ev.shiftKey) })
     },
@@ -107,8 +107,8 @@ export function ItemTransformHandles({ box, k, onGesture }: { box: ItemBox; k: n
         <button
           key={c}
           type="button"
-          aria-label="Redimensionar (Shift: a partir do centro)"
-          title="Redimensionar (Shift: a partir do centro)"
+          aria-label="Redimensionar (sempre na proporção; Alt: a partir do centro)"
+          title="Redimensionar (sempre na proporção; Alt: a partir do centro)"
           className="pointer-events-auto absolute h-3 w-3 rounded-[3px] border-2 border-accent bg-fg shadow"
           style={{
             cursor: CORNER_CURSOR[c],
