@@ -94,10 +94,14 @@ describe('desempenho das âncoras', () => {
   }, PERF_TIMEOUT_MS)
 })
 
-/** Melhor de `n` medidas (a carga da suíte em paralelo varia muito; a primeira chamada aquece o JIT e os índices). */
-const best = (n: number, f: () => void): number => {
+/**
+ * Melhor medida, repetindo até `n` vezes enquanto passar do alvo: o limite absoluto vale para a máquina livre, e a
+ * suíte inteira em paralelo (mais outros processos) deixa uma medida isolada até ~9× mais lenta — repetir pega um
+ * instante com menos disputa sem afrouxar o alvo. A primeira chamada também aquece o JIT e os índices.
+ */
+const best = (n: number, f: () => void, target = 0): number => {
   let b = Infinity
-  for (let i = 0; i < n; i++) b = Math.min(b, ms(f))
+  for (let i = 0; i < n && b > target; i++) b = Math.min(b, ms(f))
   return b
 }
 
@@ -111,27 +115,27 @@ describe('desempenho F4 em projetos de 1 h (reenquadrar, privacidade, gravação
     const p = deleteRanges(hourProject(), silences)
     expect(p.tracks[1].items).toHaveLength(301)
     const focus = { [p.tracks[0].items[10].id]: [{ localUs: 0, x: 0.7, y: 0.5 }] }
-    expect(best(2, () => reframeProject(p, '9:16', { mode: 'cover', focus }))).toBeLessThanOrEqual(1500)
-  }, PERF_TIMEOUT_MS * 2)
+    expect(best(10, () => reframeProject(p, '9:16', { mode: 'cover', focus }), 1500)).toBeLessThanOrEqual(1500)
+  }, PERF_TIMEOUT_MS * 3)
 
   it('pior caso: 1200 cortes com blur normal + invertido ancorados (2400 efeitos): reenquadrar ≤ 8 s; privacidade de 1 h ≤ 150 ms', () => {
     const p = deleteRanges(hourProject(true, true), silences1200)
     expect(p.tracks[1].items).toHaveLength(1201)
     expect(p.tracks[2].items).toHaveLength(1201)
     let r: ReturnType<typeof reframeProject> | null = null
-    expect(ms(() => (r = reframeProject(p, '9:16', { mode: 'cover' })))).toBeLessThanOrEqual(8000)
+    expect(best(4, () => (r = reframeProject(p, '9:16', { mode: 'cover' })), 8000)).toBeLessThanOrEqual(8000)
     expect(r!.project.canvas.width).toBe(1080)
-    expect(best(3, () => privacyWarnings(p, 0, H1))).toBeLessThanOrEqual(150)
-  }, PERF_TIMEOUT_MS * 2)
+    expect(best(10, () => privacyWarnings(p, 0, H1), 150)).toBeLessThanOrEqual(150)
+  }, PERF_TIMEOUT_MS * 4)
 
   it('toDiskProject sem mudança (2400 ancorados): ≤ 20 ms nos mesmos objetos e no projeto parseado de novo (IPC); a mudança refaz o que mudou', () => {
     const p = deleteRanges(hourProject(true, true), silences1200)
     const cold = JSON.stringify(toDiskProject(p))
-    expect(best(3, () => toDiskProject(p))).toBeLessThanOrEqual(20)
+    expect(best(10, () => toDiskProject(p), 20)).toBeLessThanOrEqual(20)
     // o processo principal recebe o projeto pelo IPC e o parseia de novo: objetos novos, mesmo conteúdo
-    const clones = [0, 1, 2].map(() => structuredClone(p))
+    const clones = Array.from({ length: 10 }, () => structuredClone(p))
     let i = 0
-    expect(best(3, () => toDiskProject(clones[i++]))).toBeLessThanOrEqual(20)
+    expect(best(10, () => toDiskProject(clones[i++]), 20)).toBeLessThanOrEqual(20)
     expect(JSON.stringify(toDiskProject(clones[0]))).toBe(cold)
     // mudança no clipe de uma âncora: a caixa é refeita — igual ao cálculo sem cache (outro id de projeto)
     const piece = p.tracks[0].items[5] as MediaItem
@@ -170,6 +174,6 @@ describe('desempenho F4 em projetos de 1 h (reenquadrar, privacidade, gravação
     }
     frames()
     // sozinho ~0,03 ms por quadro
-    expect(best(5, frames) / FRAMES).toBeLessThanOrEqual(0.5)
+    expect(best(10, frames, 0.5 * FRAMES) / FRAMES).toBeLessThanOrEqual(0.5)
   })
 })
