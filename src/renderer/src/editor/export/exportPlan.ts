@@ -32,6 +32,12 @@ export function frameCount(fromUs: Us, toUs: Us, fps: number): number {
   return Math.max(1, Math.ceil((d * fps) / 1e6 - 1e-3))
 }
 
+/** Aviso quando o codificador de áudio não aceitou a taxa pedida e a exportação saiu numa menor (nunca em silêncio). */
+export function audioRateWarning(requestedBps: number, actualBps: number, codec: 'aac' | 'opus' | null): string | null {
+  if (!codec || !(actualBps > 0) || actualBps >= requestedBps) return null
+  return `O áudio saiu em ${codec === 'aac' ? 'AAC' : 'Opus'} ${Math.round(actualBps / 1000)} kbps: o codificador deste computador não aceita ${Math.round(requestedBps / 1000)} kbps.`
+}
+
 /** Tamanho estimado (bytes) = bitrate × duração. */
 export function estimateBytes(videoBps: number, audioBps: number, durationUs: Us): number {
   return Math.round(((videoBps + audioBps) * (durationUs / 1e6)) / 8)

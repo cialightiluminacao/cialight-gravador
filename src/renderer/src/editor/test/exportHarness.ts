@@ -275,11 +275,15 @@ async function f7Cases(params: Params, scenario: Project, report: Record<string,
   const targetSettings: ExportSettings = { ...settingsForPreset('youtube1080', long.canvas), quality: { kind: 'target', mb: params.targetMB } }
   const targetReq = req(long, targetSettings, 'f7-alvo.mp4')
   report.f7Target = { ...(await exportOnce(targetReq)), requestTargetBytes: targetReq.targetBytes ?? null, requestVideoBitrate: targetReq.videoBitrate, durationUs: projectDurationUs(long) }
+  // a2) o mesmo pedido com a 1ª passada forçada acima do alvo (4× o bitrate): a 2ª passada do alvo personalizado
+  report.f7TargetResize = await exportOnce({ ...req(long, targetSettings, 'f7-alvo-2a-passada.mp4'), simulateFirstPassOvershoot: true })
   // b) 60 fps de um projeto de 30 fps: quadros exatos (frameCount)
   const fps60: ExportSettings = { ...settingsForPreset('youtube1080', scenario.canvas), fps: 60 }
   report.f7Fps60 = { ...(await exportOnce(req(scenario, fps60, 'f7-60fps.mp4'))), expectedFrames: frameCount(0, projectDurationUs(scenario), 60) }
   // c) intermediário: quadro-chave a cada 0,5 s, áudio 320 kbps
   report.f7Intermediate = await exportOnce(req(scenario, settingsForPreset('intermediate', scenario.canvas), 'f7-intermediario.mp4'))
+  // áudio de 320 kbps pedido direto: ou sai a 320 sem aviso, ou sai menor COM aviso (nunca em silêncio)
+  report.f7Audio320 = await exportOnce({ ...req(scenario, settingsForPreset('youtube1080', scenario.canvas), 'f7-audio-320.mp4'), audioBitrate: 320_000 })
   // d) Feed 1:1 num projeto 1080×1080 (e indisponível no 16:9)
   const square = await window.api.project.load(params.squareProjectId)
   report.f7Feed11 = {

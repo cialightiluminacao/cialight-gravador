@@ -44,12 +44,18 @@ export const EXPORT_PRESETS: readonly ExportPreset[] = [
   { id: 'feed11', label: 'Instagram Feed 1:1', hint: '1080×1080 · até 30 fps', size: { kind: 'exact', w: 1080, h: 1080, aspect: 1 }, fpsCap: 30, quality: { kind: 'bitrate', bps30: 8_000_000, bps60: 8_000_000 }, keyFrameIntervalS: 2, audioKbps: 128, allowHevc: false },
   { id: 'feed45', label: 'Instagram Feed 4:5', hint: '1080×1350 · até 30 fps', size: { kind: 'exact', w: 1080, h: 1350, aspect: 4 / 5 }, fpsCap: 30, quality: { kind: 'bitrate', bps30: 8_000_000, bps60: 8_000_000 }, keyFrameIntervalS: 2, audioKbps: 128, allowHevc: false },
   { id: 'original', label: 'Original (máxima)', hint: 'Resolução do projeto · 20 Mbps (30 Mbps acima de 30 fps)', size: { kind: 'original' }, fpsCap: null, quality: { kind: 'bitrate', bps30: 20_000_000, bps60: 30_000_000 }, keyFrameIntervalS: 2, audioKbps: 192, allowHevc: true },
-  { id: 'intermediate', label: 'Edição (intermediário)', hint: 'Para reeditar: 60 Mbps, quadro-chave a cada 0,5 s', size: { kind: 'original' }, fpsCap: null, quality: { kind: 'bitrate', bps30: 60_000_000, bps60: 90_000_000 }, keyFrameIntervalS: 0.5, audioKbps: 320, allowHevc: false }
+  { id: 'intermediate', label: 'Edição (intermediário)', hint: 'Para reeditar: 60 Mbps, quadro-chave a cada 0,5 s', size: { kind: 'original' }, fpsCap: null, quality: { kind: 'bitrate', bps30: 60_000_000, bps60: 90_000_000 }, keyFrameIntervalS: 0.5, audioKbps: 192, allowHevc: false }
 ]
 
-/** O que o diálogo edita. O preset preenche; qualquer ajuste troca `presetId` por 'custom' (as configurações são a verdade). */
+/**
+ * O que o diálogo edita. O preset preenche; `presetId` continua sendo o preset de base e qualquer ajuste liga
+ * `customized` (rótulo "Personalizado"; as configurações são a verdade). Sem ajustes valem o teto de bitrate, a
+ * disponibilidade e o "só H.264" do preset; com ajustes, só os limites genéricos.
+ */
 export interface ExportSettings {
   presetId: ExportPresetId
+  /** O usuário ajustou algo depois de escolher o preset. */
+  customized?: boolean
   /** Pares, 16–4096, na proporção do projeto. */
   width: number
   height: number
@@ -86,8 +92,14 @@ export function presetById(id: ExportPresetId): ExportPreset | undefined {
   return EXPORT_PRESETS.find((p) => p.id === id)
 }
 
-/** Preset efetivo ('custom' parte do Original). */
-const effective = (id: ExportPresetId): ExportPreset => presetById(id === 'custom' ? 'original' : id)!
+/** Preset efetivo, nunca undefined ('custom' parte do Original). */
+export function basePreset(id: ExportPresetId): ExportPreset {
+  return presetById(id === 'custom' ? 'original' : id) ?? EXPORT_PRESETS.find((p) => p.id === 'original')!
+}
+const effective = basePreset
+
+/** Os limites do preset (teto, disponibilidade, só H.264) valem enquanto não houver ajustes. */
+const presetRules = (s: ExportSettings): ExportPreset | undefined => (s.customized ? undefined : presetById(s.presetId))
 
 /** Resolução de saída do preset (pares). Exatos devolvem o tamanho fixo mesmo sem a proporção (ver presetAvailability). */
 export function presetOutputSize(id: ExportPresetId, canvas: Pick<Canvas, 'width' | 'height'>): Size {
@@ -139,10 +151,10 @@ export function presetAvailability(id: ExportPresetId, canvas: Pick<Canvas, 'wid
   return { ok: true }
 }
 
-/** Bitrate de vídeo (bps): taxa fixa, ou o do tamanho alvo limitado a [MIN_TARGET_BPS, teto do preset ou 50 Mbps]. */
+/** Bitrate de vídeo (bps): taxa fixa, ou o do tamanho alvo limitado a [MIN_TARGET_BPS, teto do preset (sem ajustes) ou 50 Mbps]. */
 export function videoBitrateFor(s: ExportSettings, durationUs: Us): number {
   if (s.quality.kind === 'bitrate') return s.quality.bps
-  const p = presetById(s.presetId)
+  const p = presetRules(s)
   const max = p?.quality.kind === 'target' ? p.quality.maxBps : MAX_TARGET_BPS
   return Math.min(max, targetBitrate(s.quality.mb, durationUs, s.audioKbps))
 }
@@ -188,7 +200,7 @@ export function validateExport(s: ExportSettings, canvas: Canvas, durationUs: Us
   const warnings: string[] = []
   const result = (blocker: string | null): ExportValidation => ({ blocker, warnings: blocker ? [] : warnings })
   if (!(durationUs > 0)) return result('A linha do tempo está vazia.')
-  const avail = s.presetId === 'custom' ? { ok: true } : presetAvailability(s.presetId, canvas, durationUs)
+  const avail = presetRules(s) ? presetAvailability(s.presetId, canvas, durationUs) : { ok: true }
   if (!avail.ok) return result(avail.reason ?? 'Preset indisponível para este projeto.')
   const { width: w, height: h, fps } = s
   if (!Number.isInteger(w) || !Number.isInteger(h) || w % 2 || h % 2) return result('Largura e altura precisam ser números pares.')
@@ -198,7 +210,7 @@ export function validateExport(s: ExportSettings, canvas: Canvas, durationUs: Us
   // o fallback do HEVC é o H.264: o limite vale para os dois
   if (!h264FitsLevel52(w, h, fps)) return result('Resolução e fps acima do limite do H.264 (nível 5.2): reduza a resolução ou o fps.')
   if (s.codec === 'hevc') {
-    const p = presetById(s.presetId)
+    const p = presetRules(s)
     if (p && !p.allowHevc) return result(`O preset “${p.label}” usa só H.264 (compatibilidade).`)
     if (!hevcSupported) return result('HEVC não suportado neste computador')
   }

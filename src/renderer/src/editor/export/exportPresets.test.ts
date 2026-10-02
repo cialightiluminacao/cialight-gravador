@@ -7,6 +7,7 @@ import {
   outputFileName,
   presetAvailability,
   presetOutputSize,
+  basePreset,
   settingsForPreset,
   sizeForHeight,
   sizeForWidth,
@@ -54,7 +55,7 @@ describe('EXPORT_PRESETS', () => {
     expect(by.feed11).toMatchObject({ size: { kind: 'exact', w: 1080, h: 1080, aspect: 1 }, fpsCap: 30, quality: { kind: 'bitrate', bps30: 8_000_000, bps60: 8_000_000 }, audioKbps: 128, allowHevc: false })
     expect(by.feed45).toMatchObject({ size: { kind: 'exact', w: 1080, h: 1350, aspect: 4 / 5 }, fpsCap: 30, quality: { kind: 'bitrate', bps30: 8_000_000, bps60: 8_000_000 }, audioKbps: 128, allowHevc: false })
     expect(by.original).toMatchObject({ size: { kind: 'original' }, fpsCap: null, quality: { kind: 'bitrate', bps30: 20_000_000, bps60: 30_000_000 }, keyFrameIntervalS: 2, audioKbps: 192, allowHevc: true })
-    expect(by.intermediate).toMatchObject({ size: { kind: 'original' }, fpsCap: null, quality: { kind: 'bitrate', bps30: 60_000_000, bps60: 90_000_000 }, keyFrameIntervalS: 0.5, audioKbps: 320, allowHevc: false })
+    expect(by.intermediate).toMatchObject({ size: { kind: 'original' }, fpsCap: null, quality: { kind: 'bitrate', bps30: 60_000_000, bps60: 90_000_000 }, keyFrameIntervalS: 0.5, audioKbps: 192, allowHevc: false })
   })
 })
 
@@ -84,7 +85,7 @@ describe('settingsForPreset', () => {
     expect(settingsForPreset('youtube1080', C1440_60).quality).toEqual({ kind: 'bitrate', bps: 20_000_000 })
     expect(settingsForPreset('youtube4k', C1440_60).quality).toEqual({ kind: 'bitrate', bps: 68_000_000 })
     expect(settingsForPreset('original', C1440_60).quality).toEqual({ kind: 'bitrate', bps: 30_000_000 })
-    expect(settingsForPreset('intermediate', C1080)).toMatchObject({ quality: { kind: 'bitrate', bps: 60_000_000 }, keyFrameIntervalS: 0.5, audioKbps: 320 })
+    expect(settingsForPreset('intermediate', C1080)).toMatchObject({ quality: { kind: 'bitrate', bps: 60_000_000 }, keyFrameIntervalS: 0.5, audioKbps: 192 })
     expect(settingsForPreset('intermediate', C1440_60).quality).toEqual({ kind: 'bitrate', bps: 90_000_000 })
     // teto de 30 fps: um projeto de 60 fps no Reels usa a taxa de 30
     expect(settingsForPreset('reels', cv(1080, 1920, 60))).toMatchObject({ fps: 30, quality: { kind: 'bitrate', bps: 10_000_000 } })
@@ -173,7 +174,7 @@ describe('exportRequestFor', () => {
     const t: ExportSettings = { ...settingsForPreset('youtube1080', C1080), presetId: 'custom', quality: { kind: 'target', mb: 3 } }
     expect(exportRequestFor(t, 20 * S)).toEqual({ width: 1920, height: 1080, fps: 30, videoBitrate: targetBitrate(3, 20 * S, 192), audioBitrate: 192_000, keyFrameIntervalS: 2, codec: 'h264', targetBytes: 3 * MiB })
     expect(exportRequestFor(settingsForPreset('whatsapp', C1080), 20 * S).targetBytes).toBe(64 * MiB)
-    expect(exportRequestFor(settingsForPreset('intermediate', C1080), 20 * S)).toEqual({ width: 1920, height: 1080, fps: 30, videoBitrate: 60_000_000, audioBitrate: 320_000, keyFrameIntervalS: 0.5, codec: 'h264' })
+    expect(exportRequestFor(settingsForPreset('intermediate', C1080), 20 * S)).toEqual({ width: 1920, height: 1080, fps: 30, videoBitrate: 60_000_000, audioBitrate: 192_000, keyFrameIntervalS: 0.5, codec: 'h264' })
   })
 })
 
@@ -253,5 +254,31 @@ describe('auxiliares do diálogo', () => {
     expect(outputFileName('Aula 1.mp4', 'mp4')).toBe('Aula 1.mp4')
     expect(outputFileName('Aula 1.5', 'mp4')).toBe('Aula 1.5.mp4')
     expect(outputFileName('Aula.MOV', 'mp4')).toBe('Aula.mp4')
+  })
+})
+
+describe('personalizado: limites do preset base só sem ajustes (decisão do controlador)', () => {
+  it('sem ajustes: teto do preset (WhatsApp 8 Mbps) e disponibilidade do preset valem', () => {
+    const wa = settingsForPreset('whatsapp', C1080)
+    expect(wa.customized).toBeFalsy()
+    expect(videoBitrateFor({ ...wa, quality: { kind: 'target', mb: 500 } }, 10 * S)).toBe(8_000_000)
+    expect(validateExport(wa, C1080, 2 * 3600 * S, false).blocker).toBe('Vídeo longo demais para caber em 64 MB — exporte um trecho menor (I–O)')
+    expect(validateExport({ ...wa, codec: 'hevc' }, C1080, 20 * S, true).blocker).toBe('O preset “WhatsApp (até 64 MB)” usa só H.264 (compatibilidade).')
+  })
+  it('com ajustes: limites genéricos (teto de 50 Mbps, sem o bloqueio de disponibilidade nem o "só H.264" do preset base)', () => {
+    const wa: ExportSettings = { ...settingsForPreset('whatsapp', C1080), customized: true }
+    expect(videoBitrateFor({ ...wa, quality: { kind: 'target', mb: 500 } }, 10 * S)).toBe(50_000_000)
+    const long = validateExport({ ...wa, quality: { kind: 'target', mb: 4000 } }, C1080, 2 * 3600 * S, false)
+    expect(long.blocker).toBeNull()
+    expect(validateExport({ ...wa, codec: 'hevc' }, C1080, 20 * S, true).blocker).toBeNull()
+    // as regras genéricas continuam: HEVC sem suporte, nível, tamanho alvo pequeno demais
+    expect(validateExport({ ...wa, codec: 'hevc' }, C1080, 20 * S, false).blocker).toBe('HEVC não suportado neste computador')
+    expect(validateExport({ ...wa, quality: { kind: 'target', mb: 64 } }, C1080, 2 * 3600 * S, false).blocker).toMatch(/^64 MB é pouco para 2:00:00/)
+    // preset exato com ajustes: a regra genérica de proporção continua valendo
+    expect(validateExport({ ...settingsForPreset('reels', C1080), customized: true }, C1080, 20 * S, false).blocker).toBe('A proporção 1080×1920 não é a do projeto (1920×1080) — use Reenquadrar para mudar a proporção.')
+  })
+  it('basePreset: "custom" é o Original (nunca undefined)', () => {
+    expect(basePreset('custom').id).toBe('original')
+    expect(basePreset('whatsapp').id).toBe('whatsapp')
   })
 })

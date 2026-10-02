@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { estimateBytes, exportMediaIssues, exportRange, frameCount, missingMediaWarnings, rawTargetBitrate, resizeBitrate, targetBitrate } from './exportPlan'
+import { audioRateWarning, estimateBytes, exportMediaIssues, exportRange, frameCount, missingMediaWarnings, rawTargetBitrate, resizeBitrate, targetBitrate } from './exportPlan'
 import { addAsset, addMediaFromAsset, setItemEnabled, updateTrack } from '@shared/editor/ops'
 import { createEmptyProject } from '@shared/editor/factory'
 import type { Asset, Project } from '@shared/editor/project'
@@ -111,5 +111,14 @@ describe('missingMediaWarnings', () => {
     expect(w[0]).toContain('1 quadro ')
     expect(w[1]).toContain('120 quadros')
     expect(w[2]).toContain('“x”')
+  })
+})
+
+describe('audioRateWarning', () => {
+  it('avisa quando o codificador baixa a taxa de áudio pedida; nada quando é a mesma', () => {
+    expect(audioRateWarning(320_000, 192_000, 'aac')).toBe('O áudio saiu em AAC 192 kbps: o codificador deste computador não aceita 320 kbps.')
+    expect(audioRateWarning(192_000, 192_000, 'aac')).toBeNull()
+    expect(audioRateWarning(192_000, 192_000, 'opus')).toBeNull()
+    expect(audioRateWarning(192_000, 0, null)).toBeNull()
   })
 })

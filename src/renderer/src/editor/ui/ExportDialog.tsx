@@ -24,7 +24,7 @@ import {
   fpsChoices,
   outputFileName,
   presetAvailability,
-  presetById,
+  basePreset,
   settingsForPreset,
   sizeForHeight,
   sizeForWidth,
@@ -66,7 +66,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const appInfo = useAppStore((s) => s.appInfo)
   const [phase, setPhase] = useState<Phase>({ kind: 'form' })
   // preset de base (disponibilidade, HEVC permitido) + configurações (a verdade); qualquer ajuste → "Personalizado"
-  const [exp, setExp] = useState<{ settings: ExportSettings; customized: boolean; canvas: string } | null>(null)
+  const [exp, setExp] = useState<{ settings: ExportSettings; canvas: string } | null>(null)
   const [customOpen, setCustomOpen] = useState(false)
   const [hevc, setHevc] = useState<{ key: string; ok: boolean } | null>(null)
   const [rangeMode, setRangeMode] = useState<'all' | 'inout'>('all')
@@ -89,10 +89,10 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     setRangeMode(range0 ? 'inout' : 'all')
     const key = canvasKey(project.canvas)
     setExp((cur) => {
-      if (cur && cur.customized && cur.canvas === key) return cur
+      if (cur && cur.settings.customized && cur.canvas === key) return cur
       const base = cur?.settings.presetId ?? DEFAULT_PRESET
       const id = presetAvailability(base, project.canvas, contentEndUs(project)).ok ? base : DEFAULT_PRESET
-      return { settings: settingsForPreset(id, project.canvas), customized: false, canvas: key }
+      return { settings: settingsForPreset(id, project.canvas), canvas: key }
     })
   }, [open])
 
@@ -103,7 +103,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const s = exp?.settings
   const probeKey = s ? `${s.width}x${s.height}@${s.fps}` : ''
   useEffect(() => {
-    if (!open || !s || !presetById(s.presetId)?.allowHevc) return
+    if (!open || !s) return
     let alive = true
     void probeHevc(s.width, s.height, s.fps).then((ok) => {
       if (alive) setHevc({ key: probeKey, ok })
@@ -111,7 +111,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     return () => {
       alive = false
     }
-  }, [open, probeKey, s?.presetId])
+  }, [open, probeKey])
 
   if (!project || !exp || !s) return null
   const canvas = project.canvas
@@ -120,9 +120,11 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const hasAudio = planAudio(project).some((x) => x.mode !== 'mute')
   // redução de ruído/normalização ainda processando ou que falhou: a exportação sairia com o original nesses trechos
   const voiceIssues = audioProcessIssues(project, audioJobs, range.fromUs, range.toUs)
-  const basePreset = presetById(s.presetId)
+  const base = basePreset(s.presetId)
+  const customized = !!s.customized
   const hevcState: 'checking' | 'ok' | 'no' = hevc?.key === probeKey ? (hevc.ok ? 'ok' : 'no') : 'checking'
-  const validation = validateExport(s, canvas, durationUs, hevcState === 'ok')
+  // verificando: o bloqueio é o "Verificando…" abaixo, não "não suportado"
+  const validation = validateExport(s, canvas, durationUs, hevcState !== 'no')
   const videoBps = videoBitrateFor(s, durationUs)
   const estimate = estimateFor(s, durationUs, hasAudio)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
@@ -145,15 +147,11 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const codecBlocked = s.codec === 'hevc' && hevcState === 'checking' ? 'Verificando o suporte a HEVC…' : null
   const blocker = validation.blocker ?? codecBlocked ?? (!targetFolder ? 'Escolha a pasta de destino.' : !name ? 'Dê um nome ao arquivo.' : null)
 
-  const pickPreset = (id: ExportPresetId): void => setExp({ settings: settingsForPreset(id, canvas), customized: false, canvas: canvasKey(canvas) })
-  const edit = (patch: Partial<ExportSettings>): void => setExp((cur) => (cur ? { ...cur, settings: { ...cur.settings, ...patch }, customized: true } : cur))
-  const hevcTitle = !basePreset?.allowHevc
-    ? `O preset “${basePreset?.label ?? ''}” usa só H.264 (compatibilidade).`
-    : hevcState === 'checking'
-      ? 'Verificando o suporte a HEVC…'
-      : hevcState === 'no'
-        ? 'HEVC não suportado neste computador'
-        : undefined
+  const pickPreset = (id: ExportPresetId): void => setExp({ settings: settingsForPreset(id, canvas), canvas: canvasKey(canvas) })
+  const edit = (patch: Partial<ExportSettings>): void => setExp((cur) => (cur ? { ...cur, settings: { ...cur.settings, ...patch, customized: true } } : cur))
+  // HEVC desativado só sem suporte (ou verificando); preset "só H.264" sem ajustes: escolher HEVC personaliza
+  const hevcTitle = hevcState === 'checking' ? 'Verificando o suporte a HEVC…' : hevcState === 'no' ? 'HEVC não suportado neste computador' : undefined
+  const hevcNote = hevcTitle ?? (!base.allowHevc && !customized ? `O preset “${base.label}” usa H.264 (compatibilidade); escolher HEVC personaliza o preset.` : undefined)
   const fpsOptions = fpsChoices(canvas.fps).map((f) => ({ value: String(f), label: formatFps(f), hint: f === canvas.fps ? 'do projeto' : undefined }))
 
   const start = async (): Promise<void> => {
@@ -194,9 +192,9 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               <span id={label('presets')} className="text-[12px] font-medium text-fg-2">
                 Preset
               </span>
-              {exp.customized ? (
+              {customized ? (
                 <span className="text-[11px] text-accent-2" data-export-custom="">
-                  Personalizado (a partir de {basePreset?.label})
+                  Personalizado (a partir de {base.label})
                 </span>
               ) : null}
             </div>
@@ -222,7 +220,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                   >
                     <span className="block text-[13px] font-semibold text-fg">
                       {p.label}
-                      {selected && exp.customized ? <span className="ml-1.5 text-[11px] font-medium text-accent-2">· Personalizado</span> : null}
+                      {selected && customized ? <span className="ml-1.5 text-[11px] font-medium text-accent-2">· Personalizado</span> : null}
                     </span>
                     <span className={cn('block text-[11px]', av.ok ? 'text-muted' : 'text-warn')}>{av.ok ? p.hint : av.reason}</span>
                   </button>
@@ -308,9 +306,9 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                         { value: 'hevc', label: 'HEVC', disabled: !!hevcTitle && s.codec !== 'hevc', title: hevcTitle }
                       ]}
                     />
-                    {hevcTitle ? (
+                    {hevcNote ? (
                       <span className="text-[11px] text-muted" data-hevc-note="">
-                        {hevcTitle}
+                        {hevcNote}
                       </span>
                     ) : (
                       <span className="text-[11px] text-muted">HEVC: arquivo menor; nem todo aparelho reproduz</span>
@@ -445,6 +443,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                 </span>
                 <span className="block text-[11px] text-muted" data-export-done-info="">
                   MP4 · {CODEC_LABEL[phase.result.codec]} · {phase.result.width}×{phase.result.height} · {formatFps(phase.result.fps)} · {formatBytes(phase.result.size)}
+                  {phase.result.audioCodec ? ` · áudio ${phase.result.audioCodec === 'aac' ? 'AAC' : 'Opus'} ${Math.round(phase.result.audioBitrate / 1000)} kbps` : ''}
                   {phase.result.passes > 1 ? ` · ${phase.result.passes} passadas (refeito para caber no tamanho alvo)` : ''}
                 </span>
                 {phase.result.fellBackFromHevc ? <span className="block text-[11px] text-warn">O HEVC falhou neste computador; o vídeo saiu em H.264.</span> : null}

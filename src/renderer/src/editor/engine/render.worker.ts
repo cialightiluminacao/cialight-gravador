@@ -505,7 +505,7 @@ async function runExport(
   signal: AbortSignal,
   outbox: ChunkOutbox,
   state: { packets: number }
-): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }> {
+): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; audioBitrate: number; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }> {
   const p = project
   if (!compositor || !canvas || !p) throw new Error('exportação antes de init/project')
   compositor.resize(job.width, job.height)
@@ -590,7 +590,7 @@ async function runExport(
     if (feed) await feed.feed(audio!, Infinity)
     if (signal.aborted) throw new Cancelled()
     await encoderCall(() => output.finalize())
-    return { videoCodec, audioCodec, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations] }
+    return { videoCodec, audioCodec, audioBitrate: audioCodec ? audioBitrate : 0, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations] }
   } catch (err) {
     if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {})
     throw err

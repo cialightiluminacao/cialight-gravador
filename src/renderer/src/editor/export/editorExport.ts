@@ -11,7 +11,7 @@ import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
-import { KEYFRAME_INTERVAL_S, missingMediaWarnings, resizeBitrate } from './exportPlan'
+import { audioRateWarning, KEYFRAME_INTERVAL_S, missingMediaWarnings, resizeBitrate } from './exportPlan'
 import type { VideoCodecChoice } from './exportPresets'
 import { EditorExportCancelled, finalizeOrCancel, type Finalized } from './finalize'
 import { ipcErrorMessage } from '@/lib/ipcError'
@@ -39,6 +39,8 @@ export interface EditorExportRequest {
   simulateHwFailure?: boolean
   /** Testes: simula a falha do encoder HEVC (exercita a volta para H.264). */
   simulateHevcFailure?: boolean
+  /** Testes: a 1ª passada usa 4× o bitrate pedido (passa do tamanho alvo → exercita a 2ª passada). */
+  simulateFirstPassOvershoot?: boolean
 }
 
 export interface EditorExportProgress {
@@ -65,6 +67,8 @@ export interface EditorExportResult {
   /** Codec string completo do encoder (avc1.…/hvc1.…). */
   videoCodec: string
   audioCodec: 'aac' | 'opus' | null
+  /** Taxa de áudio realmente usada (bps; 0 sem áudio). Menor que a pedida → aviso em `warnings`. */
+  audioBitrate: number
   hardware: HwPref
   /** Encoder de hardware falhou e a exportação foi refeita em software. */
   fellBackToSoftware: boolean
@@ -103,7 +107,7 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
   const signal = opts.signal ?? new AbortController().signal
   const durationUs = req.toUs - req.fromUs
   try {
-    let videoBitrate = req.videoBitrate
+    let videoBitrate = req.simulateFirstPassOvershoot ? req.videoBitrate * 4 : req.videoBitrate
     let hw: HwPref = 'prefer-hardware'
     let codec: VideoCodecChoice = req.codec ?? 'h264'
     let fellBack = false
@@ -129,7 +133,8 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
         off()
       }
       if (out.oversize && req.targetBytes && pass === 1) {
-        videoBitrate = resizeBitrate(videoBitrate, req.targetBytes, out.size)
+        // nunca acima do bitrate do pedido (o do alvo): com a 1ª passada inflada (teste) a regra linear subestimaria a correção
+        videoBitrate = Math.min(req.videoBitrate, resizeBitrate(videoBitrate, req.targetBytes, out.size))
         console.warn(`exportação: ${out.size} bytes > alvo ${req.targetBytes}; refazendo a ${videoBitrate} bps`)
         continue
       }
@@ -145,6 +150,7 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
         codec,
         videoCodec: enc.videoCodec,
         audioCodec: enc.audioCodec,
+        audioBitrate: enc.audioBitrate,
         hardware: hw,
         fellBackToSoftware: fellBack,
         fellBackFromHevc,
@@ -162,6 +168,7 @@ interface Encoded {
   total: number
   videoCodec: string
   audioCodec: 'aac' | 'opus' | null
+  audioBitrate: number
   hardware: HwPref
   codec: VideoCodecChoice
   fellBack: boolean
@@ -215,6 +222,7 @@ interface AttemptDone {
   total: number
   videoCodec: string
   audioCodec: 'aac' | 'opus' | null
+  audioBitrate: number
   warnings: string[]
 }
 
@@ -323,7 +331,8 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
             () => {
               const media = missingMediaWarnings(req.project, m.missing)
               const ann = m.missingAnnotations.length ? [`As anotações de ${m.missingAnnotations.length === 1 ? 'uma gravação' : `${m.missingAnnotations.length} gravações`} não puderam ser lidas e ficaram de fora.`] : []
-              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, warnings: [...media, ...ann, ...audioWarnings] } })
+              const rate = audioRateWarning(req.audioBitrate, m.audioBitrate, m.audioCodec)
+              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, audioBitrate: m.audioBitrate, warnings: [...media, ...ann, ...audioWarnings, ...(rate ? [rate] : [])] } })
             },
             () => {}
           )

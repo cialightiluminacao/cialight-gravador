@@ -79,7 +79,7 @@ const LONG_ID = 'p-editor-export-20s'
 const SQUARE_ID = 'p-editor-export-quadrado'
 const F7_TARGET_MB = 3
 
-interface ExportOut { path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; fellBackFromHevc?: boolean; codec?: string; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
+interface ExportOut { audioBitrate?: number; path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; fellBackFromHevc?: boolean; codec?: string; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
 type Region = { x: number; y: number; w: number; h: number }
 interface HarnessReport {
   errors: string[]
@@ -96,6 +96,8 @@ interface HarnessReport {
   f7Target?: ExportOut & { requestTargetBytes?: number | null; requestVideoBitrate?: number; durationUs?: number }
   f7Fps60?: ExportOut & { expectedFrames?: number }
   f7Intermediate?: ExportOut
+  f7TargetResize?: ExportOut
+  f7Audio320?: ExportOut
   f7Feed11?: ExportOut & { availability?: { ok: boolean; reason?: string }; unavailableOn169?: { ok: boolean; reason?: string } }
   f7Hevc?: { supported: true; effects?: EffectsOut } | { supported: false; dialogBlocker?: string | null }
   f7HevcFallback?: ExportOut
@@ -291,7 +293,7 @@ function streamInfo(file: string): Promise<{ codec_name?: string; codec_tag_stri
  * 30; raio ∝ altura), energia de detalhe do miolo borrado < 10 % da do ruído de fora, e o ruído de fora intacto
  * (energia ≥ 50 % da do preview reduzido: nada borrado fora da região).
  */
-async function checkEffects(label: string, what: string, fx: EffectsOut | undefined, expect: { w: number; h: number; codec: 'h264' | 'hevc' }, dir: string, failures: string[]): Promise<void> {
+async function checkEffects(label: string, what: string, fx: EffectsOut | undefined, expect: { w: number; h: number; codec: 'h264' | 'hevc'; ringTol?: number }, dir: string, failures: string[]): Promise<void> {
   const out = fx?.export?.path
   const tag = label.toLowerCase().replace(/[^a-z0-9]+/g, '-')
   check(!!out && existsSync(out) && !!fx?.previewBlockVar, `${label}: projeto 1920×1080 exportado (${what}) (${out ?? fx?.export?.error ?? fx?.error})`, failures)
@@ -303,8 +305,8 @@ async function checkEffects(label: string, what: string, fx: EffectsOut | undefi
   else check(st?.codec_name === 'h264', `${label}: codec H.264 (${st?.codec_name})`, failures)
   const img = await frameRgb(out, FX_T_US / 1e6, join(dir, `${tag}-saida.rgb`))
   // tarja: centro de cada bloco 16×16 (macrobloco) inteiro dentro da região. Miolo: ±3 por canal após o encoder.
-  // Anel (macroblocos na borda da região, vizinhos do ruído): o deblocking/croma 4:2:0 do encoder puxa até 4 níveis
-  // a 8 Mbps (medido no WhatsApp 720p) — continua opaco e sem detalhe (ver a máscara de baixa variância), ±6.
+  // Anel (macroblocos na borda da região, vizinhos do ruído): ±3 como o miolo, exceto onde a variante pede outra
+  // tolerância (só o WhatsApp a 8 Mbps: o deblocking/croma 4:2:0 puxa até 4 níveis ali — opaco e sem detalhe, ±6).
   const by0 = Math.ceil(((FX_SOLID.y - FX_SOLID.h / 2) * OH) / FX_BLOCK)
   const bx0 = Math.ceil(((FX_SOLID.x - FX_SOLID.w / 2) * OW) / FX_BLOCK)
   const by1 = Math.floor(((FX_SOLID.y + FX_SOLID.h / 2) * OH) / FX_BLOCK) - 1
@@ -324,7 +326,8 @@ async function checkEffects(label: string, what: string, fx: EffectsOut | undefi
     }
   }
   check(worst.inner.n > 100 && worst.inner.d <= 3, `${label}: tarja com a cor exata na exportação — miolo (${worst.inner.n} blocos, pior desvio ${worst.inner.d} em ${worst.inner.px}; esperado 18,52,86 ± 3)`, failures)
-  check(worst.ring.n > 20 && worst.ring.d <= 6, `${label}: tarja — anel da borda (${worst.ring.n} blocos, pior desvio ${worst.ring.d} em ${worst.ring.px}; ± 6)`, failures)
+  const ringTol = expect.ringTol ?? 3
+  check(worst.ring.n > 20 && worst.ring.d <= ringTol, `${label}: tarja — anel da borda (${worst.ring.n} blocos, pior desvio ${worst.ring.d} em ${worst.ring.px}; ± ${ringTol})`, failures)
   // região borrada no mesmo lugar: blocos de baixa variância (ruído: milhares; borrado/tarja: ~0), exportação × preview
   const exportVar = blockVar(img, OW, OH, FX_BLOCK)
   const pv = fx.previewBlockVar
@@ -610,6 +613,10 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     check(Math.abs(pr.durationMs - 20000) <= FRAME_MS, `F7 alvo: duração 20 s ± 1 quadro (${pr.durationMs} ms)`, failures)
   }
 
+  // a2) mesmo alvo com a 1ª passada forçada acima (4× o bitrate): 2 passadas e ≤ alvo
+  const fr = r.f7TargetResize
+  check(!!fr?.path && existsSync(fr.path) && fr.passes === 2 && statSync(fr.path).size <= targetBytes, `F7 alvo (2ª passada): 1ª passada acima do alvo → refeito, ${fr?.passes} passadas, ${fr?.path && existsSync(fr.path) ? statSync(fr.path).size : fr?.error} bytes ≤ ${targetBytes}`, failures)
+
   // b) 60 fps a partir de um projeto de 30 fps: quadros exatos
   const f60 = r.f7Fps60
   check(!!f60?.path && existsSync(f60.path), `F7 60 fps: exportado (${f60?.path ?? f60?.error})`, failures)
@@ -629,7 +636,14 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     const maxGap = Math.max(0, ...gaps)
     check(keys.length >= 14 && maxGap <= 0.5 + 1e-3, `F7 intermediário: ${keys.length} quadros-chave, maior intervalo ${maxGap.toFixed(3)} s ≤ 0,5 s`, failures)
     const as = (await probeFile(fi.path)).streams.find((s) => s.type === 'audio')
-    check(as?.codec === 'aac' && fi.audioCodec === 'aac', `F7 intermediário: áudio AAC (320 kbps pedido; o AAC do Windows aceita até a maior taxa suportada abaixo) ${JSON.stringify(as)}`, failures)
+    check(as?.codec === 'aac' && fi.audioCodec === 'aac' && fi.audioBitrate === 192_000 && !(fi.warnings ?? []).some((w) => w.includes('O áudio saiu')), `F7 intermediário: áudio AAC 192 kbps = o do preset, sem rebaixamento (${fi.audioBitrate}; ${JSON.stringify(as)})`, failures)
+  }
+  const a320 = r.f7Audio320
+  const rateWarn = (a320?.warnings ?? []).find((w) => w.startsWith('O áudio saiu em'))
+  check(!!a320?.path && (a320.audioBitrate === 320_000 ? !rateWarn : (a320.audioBitrate ?? 0) < 320_000 && !!rateWarn && rateWarn.includes(`${Math.round((a320.audioBitrate ?? 0) / 1000)} kbps`)), `F7 áudio 320 kbps pedido: saiu a ${a320?.audioBitrate} bps ${rateWarn ? `com aviso "${rateWarn}"` : 'sem aviso'} (rebaixar só com aviso)`, failures)
+  if (a320?.path && existsSync(a320.path)) {
+    const as = (await probeFile(a320.path)).streams.find((s) => s.type === 'audio')
+    check(as?.codec === a320.audioCodec && Math.abs((as?.bitrate ?? 0) - (a320.audioBitrate ?? 0)) <= 0.15 * (a320.audioBitrate ?? 1), `F7 áudio 320: taxa no arquivo ≈ a informada (${as?.bitrate} × ${a320.audioBitrate})`, failures)
   }
 
   // d) Feed 1:1 num projeto 1080×1080
@@ -657,7 +671,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   }
 
   // f) privacidade num preset reduzido: WhatsApp (1280×720 do projeto 1920×1080, bitrate do preset)
-  await checkEffects('F7 WhatsApp', 'preset WhatsApp 720p', r.f7Whatsapp, { w: 1280, h: 720, codec: 'h264' }, dir, failures)
+  await checkEffects('F7 WhatsApp', 'preset WhatsApp 720p', r.f7Whatsapp, { w: 1280, h: 720, codec: 'h264', ringTol: 6 }, dir, failures)
 
   // ---- velocidade 2× com tom preservado ----
   const spOut = r.speed?.path

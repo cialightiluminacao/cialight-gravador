@@ -148,7 +148,8 @@ async function main() {
     const est = await ev(`return ${DLG}.querySelector('[data-export-estimate]')?.textContent ?? ''`)
     const checked = await ev(`return ${DLG}.querySelector('[data-preset="${id}"]').getAttribute('aria-checked')`)
     check(`preset ${id}: selecionado, estimativa ${est.split('·').slice(0, 4).join('·')}`, checked === 'true' && /≈/.test(est), { checked, est })
-    await shot(`f7-02-preset-${id}.png`)
+    // o YouTube 1080p é o padrão: a tela dele é a f7-01
+    if (id !== 'youtube1080') await shot(`f7-02-preset-${id}.png`)
   }
 
   // ---- Personalizar aberto ----
@@ -181,7 +182,7 @@ async function main() {
     await ev(`${DLG}.querySelector('[data-preset="whatsapp"]').click(); return 1`)
     await sleep(300)
     const wa = await ev(`const b = [...${DLG}.querySelectorAll('[data-export-custom-panel] button')].find((x) => x.textContent.trim() === 'HEVC'); return { disabled: b?.disabled, note: ${DLG}.querySelector('[data-hevc-note]')?.textContent }`)
-    check('WhatsApp: HEVC desativado (preset só H.264)', wa.disabled === true && /usa só H\.264/.test(wa.note ?? ''), wa)
+    check('WhatsApp (sem ajustes): H.264 por compatibilidade, HEVC disponível avisando que personaliza', wa.disabled === false && /usa H\.264 \(compatibilidade\); escolher HEVC personaliza/.test(wa.note ?? ''), wa)
     await shot('f7-04b-hevc-whatsapp.png')
   }
 
