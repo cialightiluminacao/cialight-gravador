@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Marker } from './project'
-import { chaptersFromMarkers, formatChapterTime, MIN_CHAPTER_GAP_US } from './chapters'
+import { baseName, chaptersFromMarkers, formatChapterTime, joinDefaultPath, MIN_CHAPTER_GAP_US } from './chapters'
 
 const S = 1_000_000
 const mk = (tSec: number, label = 'x'): Marker => ({ id: `m${tSec}`, tUs: Math.round(tSec * S), label, color: '#f59e0b' })
@@ -47,7 +47,7 @@ describe('chaptersFromMarkers', () => {
   it('mesmo segundo: mantém o primeiro e avisa', () => {
     const r = chaptersFromMarkers([mk(20.2, 'A'), mk(20.8, 'B'), mk(40, 'C')], R)
     expect(r.chapters.map((c) => c.label)).toEqual(['Introdução', 'A', 'C'])
-    expect(r.warnings.some((w) => w.includes('mesmo segundo'))).toBe(true)
+    expect(r.warnings).toEqual(['Marcadores no mesmo segundo: só o primeiro foi mantido; descartado: 00:20 "B"'])
   })
   it('sem marcadores no intervalo', () => {
     const r = chaptersFromMarkers([mk(700)], R)
@@ -80,5 +80,22 @@ describe('chaptersFromMarkers', () => {
     expect(performance.now() - t0).toBeLessThan(200)
     expect(r.chapters).toHaveLength(1000)
     expect(r.chapters.every((c, i) => i === 0 || c.tUs > r.chapters[i - 1].tUs)).toBe(true)
+  })
+})
+
+describe('caminhos do .txt', () => {
+  const n = 'Visão geral - capítulos.txt'
+  it('junta pasta e nome com o separador certo', () => {
+    expect(joinDefaultPath('C:\\a\\b\\', n)).toBe('C:\\a\\b\\' + n)
+    expect(joinDefaultPath('C:\\a\\b', n)).toBe('C:\\a\\b\\' + n)
+    expect(joinDefaultPath('C:/a/b', n)).toBe('C:/a/b/' + n)
+    expect(joinDefaultPath('C:/a/b//', n)).toBe('C:/a/b/' + n)
+    expect(joinDefaultPath(null, n)).toBe(n)
+    expect(joinDefaultPath('', n)).toBe(n)
+  })
+  it('baseName com barra invertida e normal', () => {
+    expect(baseName('C:\\a\\b\\x.txt')).toBe('x.txt')
+    expect(baseName('C:/a/b/x.txt')).toBe('x.txt')
+    expect(baseName('x.txt')).toBe('x.txt')
   })
 })

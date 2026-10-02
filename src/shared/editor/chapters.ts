@@ -34,15 +34,18 @@ export function chaptersFromMarkers(markers: readonly Marker[], range: { fromUs:
 
   const kept: { tUs: Us; label: string }[] = []
   const dups: string[] = []
+  const clean = (l: string): string => l.replace(/\s*[\r\n]+\s*/g, ' ').trim()
   for (const c of raw) {
     const last = kept[kept.length - 1]
-    if (last && Math.floor(last.tUs / SECOND_US) === Math.floor(c.tUs / SECOND_US)) dups.push(formatChapterTime(c.tUs, useHours))
-    else kept.push(c)
+    if (last && Math.floor(last.tUs / SECOND_US) === Math.floor(c.tUs / SECOND_US)) {
+      const t = formatChapterTime(last.tUs, useHours)
+      dups.push(clean(c.label) ? `${t} "${clean(c.label)}"` : t)
+    } else kept.push(c)
   }
-  if (dups.length) warnings.push(`Marcadores no mesmo segundo: só o primeiro foi mantido (${dups.join(', ')})`)
+  if (dups.length) warnings.push(`Marcadores no mesmo segundo: só o primeiro foi mantido; descartado: ${dups.join(', ')}`)
 
   const chapters: Chapter[] = kept.map((c, i) => {
-    const label = c.label.replace(/\s*[\r\n]+\s*/g, ' ').trim()
+    const label = clean(c.label)
     return { tUs: c.tUs, label: label || `Capítulo ${i + 1}` }
   })
 
@@ -56,4 +59,17 @@ export function chaptersFromMarkers(markers: readonly Marker[], range: { fromUs:
 
   const text = chapters.map((c) => `${formatChapterTime(c.tUs, useHours)} ${c.label}`).join('\n')
   return { chapters, text, warnings }
+}
+
+/** Caminho sugerido para salvar: pasta + nome, com o separador da pasta (aceita barra invertida e normal; sem pasta, só o nome). */
+export function joinDefaultPath(folder: string | null, name: string): string {
+  const trimmed = (folder ?? '').replace(/[\\/]+$/, '')
+  if (!trimmed) return name
+  const sep = trimmed.includes('\\') || !trimmed.includes('/') ? '\\' : '/'
+  return trimmed + sep + name
+}
+
+/** Último componente de um caminho (barra invertida ou normal). */
+export function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path
 }

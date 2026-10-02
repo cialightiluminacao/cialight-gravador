@@ -1,11 +1,11 @@
 import { toast } from 'sonner'
 import { sanitizeFileName } from '@shared/filenames'
 import { contentEndUs } from '@shared/editor/ops'
-import { chaptersFromMarkers } from '@shared/editor/chapters'
+import { baseName, joinDefaultPath } from '@shared/editor/chapters'
 import { ipcErrorMessage } from '@/lib/ipcError'
 import { showOutputInFolder } from '@/screens/Review/outputActions'
 import { useEditorStore } from '../state/editorStore'
-import { exportRange, hasInOut } from '../export/exportPlan'
+import { chaptersForEditor } from './chaptersRange'
 
 // Capítulos do YouTube (texto para a descrição) a partir dos marcadores: copiar e salvar .txt.
 
@@ -30,8 +30,8 @@ export function chaptersFileName(projectName: string): string {
 export async function saveChaptersText(text: string, projectName: string, folder: string | null): Promise<string | null> {
   const name = chaptersFileName(projectName)
   try {
-    const path = await window.api.editorExport.saveText(folder ? `${folder.replace(/[\/]+$/, '')}\${name}` : name, text)
-    if (path) toast.success(`Capítulos salvos: ${path.split(/[\/]/).pop()}`, { action: { label: 'Abrir pasta', onClick: () => showOutputInFolder(path) } })
+    const path = await window.api.editorExport.saveText(joinDefaultPath(folder, name), text)
+    if (path) toast.success(`Capítulos salvos: ${baseName(path)}`, { action: { label: 'Abrir pasta', onClick: () => showOutputInFolder(path) } })
     return path
   } catch (e) {
     toast.error('Não foi possível salvar os capítulos', { description: ipcErrorMessage(e) })
@@ -43,9 +43,7 @@ export async function saveChaptersText(text: string, projectName: string, folder
 export async function copyProjectChapters(): Promise<void> {
   const { project, inUs, outUs } = useEditorStore.getState()
   if (!project) return
-  const total = contentEndUs(project)
-  const range = exportRange(total, inUs, outUs, hasInOut(total, inUs, outUs) ? 'inout' : 'all')
-  const r = chaptersFromMarkers(project.markers, range)
+  const r = chaptersForEditor(project.markers, contentEndUs(project), inUs, outUs)
   if (!r.chapters.length) {
     toast.info('Adicione marcadores (M) para gerar capítulos')
     return
