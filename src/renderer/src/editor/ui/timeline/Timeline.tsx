@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MousePointerClick } from 'lucide-react'
+import { toast } from 'sonner'
+import { TEXT_PRESETS, type ShapePresetId, type TextPresetId } from '@shared/editor/factory'
 import { projectDurationUs } from '@shared/editor/ops'
 import type { Marker } from '@shared/editor/project'
 import { snapDelta, snapPoints } from '@shared/editor/snap'
@@ -9,12 +11,16 @@ import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
 import { useExpandedItems } from '../../state/keyframeLanes'
 import { useSilencePreview } from '../../state/silencePreview'
-import { addAssetAt, addEffectAt, registerZoomFit, seekTo } from '../editorActions'
+import { addAssetAt, addEffectAt, addShapeAt, addTextAt, addTransitionTo, registerZoomFit, seekTo } from '../editorActions'
 import { effectFromDrag, isEffectDrag } from '../EffectLibrary'
 import { ASSET_MIME } from '../MediaCard'
+import { isShapeDrag, isTextDrag, shapeFromDrag, textFromDrag } from '../TextLibrary'
+import { isTransitionDrag, transitionFromDrag } from '../TransitionLibrary'
 import { ContextMenu, type MenuEntry } from './ContextMenu'
 import { HScrollbar } from './HScrollbar'
-import { dropTarget, effectDropTrack } from './dragMath'
+import { dropTarget, effectDropTrack, overlayDropTrack } from './dragMath'
+import { CUT_HIT_PX, transitionDropReason, transitionDropTarget } from './transitionMath'
+import { transitionMenuEntries } from './transitionMenu'
 import { itemMenuEntries, markerMenuEntries } from './itemMenu'
 import { buildLayout, displayNeighborIndex, HEADER_W, RULER_H, SEP_H, zoneAt } from './layout'
 import { Playhead } from './Playhead'
@@ -33,6 +39,11 @@ import { fitZoom, maxScrollUs, pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 const SCROLLBAR_H = 11
 const NO_ENTRIES: MenuEntry[] = []
+/** Duração com que uma forma solta da biblioteca ocupa a linha do tempo (3 s). */
+const SHAPE_DROP_US = 3_000_000
+
+/** Corte-alvo realçado durante o arraste de uma transição (ok = vai entrar; senão, a regra recusa). */
+interface CutHover { toId: string; cutUs: number; y: number; h: number; ok: boolean }
 
 function PlayheadTimecode(): React.JSX.Element {
   const t = useEditorStore((s) => s.playheadUs)
@@ -45,6 +56,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
   const pps = useEditorStore((s) => s.zoomPxPerSec)
   const scrollUs = useEditorStore((s) => s.scrollUs)
   const selection = useEditorStore((s) => s.selection)
+  const selectedTransition = useEditorStore((s) => s.selectedTransition)
   const inUs = useEditorStore((s) => s.inUs)
   const outUs = useEditorStore((s) => s.outUs)
   const silenceCuts = useSilencePreview((s) => s.cuts)
@@ -53,6 +65,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
   const [overlay, setOverlay] = useState<DragOverlay>(NO_OVERLAY)
   const [menu, setMenu] = useState<{ x: number; y: number; entries: MenuEntry[] } | null>(null)
   const [dropHover, setDropHover] = useState(false)
+  const [cutHover, setCutHover] = useState<CutHover | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const rulerBoxRef = useRef<HTMLDivElement>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
@@ -161,26 +174,68 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
     },
     [playback]
   )
+  const onTransitionMenu = useCallback((toId: string, x: number, y: number) => {
+    const p = st().project
+    if (p) setMenu({ x, y, entries: transitionMenuEntries(p, toId) })
+  }, [])
   const onMarkerMenu = useCallback((m: Marker, x: number, y: number) => setMenu({ x, y, entries: markerMenuEntries(m, playback) }), [playback])
   const closeMenu = useCallback(() => setMenu(null), [])
   const onSeek = useCallback((us: number) => seekTo(playback, us), [playback])
-  const drag = useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu, onSeek })
+  const drag = useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu, onTransitionMenu, onSeek })
 
-  // ---- soltar mídia/efeito da biblioteca no ponto/faixa sob o ponteiro
-  const onDrop = (e: React.DragEvent): void => {
-    setDropHover(false)
-    const assetId = e.dataTransfer.getData(ASSET_MIME)
-    const preset = effectFromDrag(e)
+  /** Instante sob o ponteiro (µs) e a zona de faixa; `snap` só para mídia/efeito/texto/forma (a transição não gruda). */
+  const pointerAt = (e: React.DragEvent, snap: boolean): { atUs: number; zone: ReturnType<typeof zoneAt> } | null => {
     const scroller = scrollerRef.current
-    if ((!assetId && !preset) || !scroller) return
-    e.preventDefault()
+    if (!scroller) return null
     const s = st()
     const r = scroller.getBoundingClientRect()
     let atUs = Math.max(0, pxToUs(Math.max(0, e.clientX - r.left - HEADER_W), s.zoomPxPerSec, s.scrollUs))
-    if (s.snapping && s.project) atUs += snapDelta([atUs], snapPoints(s.project, s.playheadUs, []), pxToDurUs(SNAP_PX, s.zoomPxPerSec)).deltaUs
-    atUs = Math.max(0, atUs)
-    const zone = zoneAt(layoutRef.current, e.clientY - r.top + scroller.scrollTop)
-    if (preset) {
+    if (snap && s.snapping && s.project) atUs += snapDelta([atUs], snapPoints(s.project, s.playheadUs, []), pxToDurUs(SNAP_PX, s.zoomPxPerSec)).deltaUs
+    return { atUs: Math.max(0, atUs), zone: zoneAt(layoutRef.current, e.clientY - r.top + scroller.scrollTop) }
+  }
+
+  /** Corte (ou clipe) sob o ponteiro durante o arraste de uma transição. */
+  const cutUnder = (e: React.DragEvent): CutHover | null => {
+    const s = st()
+    const at = pointerAt(e, false)
+    if (!s.project || !at || at.zone?.kind !== 'track') return null
+    const zone = at.zone
+    const track = s.project.tracks.find((t) => t.id === zone.trackId)
+    if (!track) return null
+    const tgt = transitionDropTarget(track, at.atUs, pxToDurUs(CUT_HIT_PX, s.zoomPxPerSec))
+    const row = layoutRef.current.rows.find((r) => r.track.id === track.id)
+    const b = tgt ? track.items.find((i) => i.id === tgt.toId) : undefined
+    if (!tgt || !b || !row) return null
+    return { toId: b.id, cutUs: b.startUs, y: row.y, h: row.h, ok: transitionDropReason(s.project, track.id, b.id) === null }
+  }
+
+  // ---- soltar mídia/efeito/texto/forma/transição da biblioteca no ponto/faixa sob o ponteiro
+  const onDrop = (e: React.DragEvent): void => {
+    setDropHover(false)
+    setCutHover(null)
+    const assetId = e.dataTransfer.getData(ASSET_MIME)
+    const preset = effectFromDrag(e)
+    const textPreset = textFromDrag(e)
+    const shapePreset = shapeFromDrag(e)
+    const tKind = transitionFromDrag(e)
+    if (!assetId && !preset && !textPreset && !shapePreset && !tKind) return
+    e.preventDefault()
+    const s = st()
+    const at = pointerAt(e, !tKind)
+    if (!at) return
+    const { atUs, zone } = at
+    if (tKind) {
+      const track = s.project && zone?.kind === 'track' ? s.project.tracks.find((t) => t.id === zone.trackId) : undefined
+      const tgt = track ? transitionDropTarget(track, atUs, pxToDurUs(CUT_HIT_PX, s.zoomPxPerSec)) : null
+      if (!tgt) toast('Solte a transição sobre o corte entre dois clipes encostados, ou sobre um clipe.')
+      else addTransitionTo(tgt.toId, tKind)
+    } else if (textPreset) {
+      const trackId = s.project ? overlayDropTrack(s.project, zone, atUs, TEXT_PRESETS[textPreset as TextPresetId].durationUs, 'text') : undefined
+      addTextAt(textPreset, atUs, trackId ? { trackId } : undefined)
+    } else if (shapePreset) {
+      const trackId = s.project ? overlayDropTrack(s.project, zone, atUs, SHAPE_DROP_US, 'shape') : undefined
+      addShapeAt(shapePreset as ShapePresetId, atUs, trackId ? { trackId } : undefined)
+    } else if (preset) {
       const trackId = s.project ? effectDropTrack(s.project, zone, atUs) : undefined
       addEffectAt(preset, atUs, trackId ? { trackId } : undefined)
     } else addAssetAt(assetId, atUs, s.project ? dropTarget(s.project, assetId, zone) : undefined)
@@ -197,13 +252,22 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
       className="flex h-full min-h-0 flex-col bg-bg-2"
       aria-label="Linha do tempo"
       onDragOver={(e) => {
-        if (!Array.from(e.dataTransfer.types).includes(ASSET_MIME) && !isEffectDrag(e)) return
+        const transition = isTransitionDrag(e)
+        if (!Array.from(e.dataTransfer.types).includes(ASSET_MIME) && !isEffectDrag(e) && !isTextDrag(e) && !isShapeDrag(e) && !transition) return
         e.preventDefault()
         e.dataTransfer.dropEffect = 'copy'
         if (!dropHover) setDropHover(true)
+        // transição: realça o corte-alvo (acento = entra; vermelho = a regra recusa)
+        if (transition) {
+          const c = cutUnder(e)
+          setCutHover((prev) => (prev?.toId === c?.toId && prev?.ok === c?.ok && prev?.y === c?.y ? prev : c))
+        }
       }}
       onDragLeave={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropHover(false)
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setDropHover(false)
+          setCutHover(null)
+        }
       }}
       onDrop={onDrop}
     >
@@ -229,10 +293,17 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
             {layout.rows.map((row) => (
               <div key={row.track.id} className="absolute inset-x-0 flex border-b border-border/70" style={{ top: row.y, height: row.h }}>
                 <TrackHeader playback={playback} track={row.track} rowH={row.h - 1} up={displayNeighborIndex(project.tracks, row.track.id, 'up')} down={displayNeighborIndex(project.tracks, row.track.id, 'down')} />
-                <TrackLane track={row.track} rowH={row.itemH - 1} expanded={expanded} lanesTop={row.itemH} projectId={project.id} assets={assets} pxPerSec={pps} scrollUs={scrollUs} viewW={viewW} selection={selection} />
+                <TrackLane track={row.track} rowH={row.itemH - 1} expanded={expanded} lanesTop={row.itemH} projectId={project.id} assets={assets} pxPerSec={pps} scrollUs={scrollUs} viewW={viewW} selection={selection} selectedTransition={selectedTransition} />
               </div>
             ))}
             {layout.sepY !== null ? <div className="absolute inset-x-0 border-b border-border-strong bg-bg" style={{ top: layout.sepY, height: SEP_H }} /> : null}
+            {cutHover ? (
+              <div
+                data-cut-highlight={cutHover.ok ? 'ok' : 'invalid'}
+                className={cn('pointer-events-none absolute z-20 w-1 rounded-full shadow-[0_0_6px_currentColor]', cutHover.ok ? 'bg-accent text-accent' : 'bg-danger text-danger')}
+                style={{ left: HEADER_W + x(cutHover.cutUs) - 2, top: cutHover.y + 2, height: cutHover.h - 4 }}
+              />
+            ) : null}
             {ghost ? (
               <div
                 className={cn('pointer-events-none absolute z-10 flex items-center rounded-[6px] border-2 px-2 text-[10px] font-semibold', ghost.tone === 'invalid' ? 'border-danger bg-danger/25 text-danger' : 'border-dashed border-accent bg-accent/15 text-accent')}

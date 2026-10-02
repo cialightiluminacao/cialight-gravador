@@ -1,13 +1,14 @@
 import { useCallback } from 'react'
 import { toast } from 'sonner'
 import type { AnimPath } from '@shared/editor/animPaths'
-import { findItem, projectDurationUs } from '@shared/editor/ops'
-import type { Project, Us } from '@shared/editor/project'
+import { findItem, projectDurationUs, setTransitionDuration } from '@shared/editor/ops'
+import type { MediaItem, Project, Us } from '@shared/editor/project'
 import { formatTimecodeUs, itemEndUs } from '@shared/editor/time'
 import type { SnapPoint } from '@shared/editor/snap'
 import { useEditorStore } from '../../state/editorStore'
 import { useCurveEditor } from '../../state/keyframeLanes'
 import { concreteRefs, dragGroup, keysInLaneBox, shiftSelKeys, toggleKey, useKeyframeSelection, type SelKey } from '../../state/keyframeSelection'
+import { dragDuration } from './transitionMath'
 import { edgeScrollPx, gestureSnapPoints, planFade, planKeyframeDrag, planMove, planTrim, type MoveInput, type MovePlan } from './dragMath'
 import { HEADER_W, itemsInBox, laneAt, lanePaths, ROW_H, TOP_PAD, zoneAt, type Layout } from './layout'
 import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
@@ -17,6 +18,8 @@ import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
 //    acima da 1ª de vídeo / abaixo da última de áudio cria faixa nova ao soltar)
 //  • borda do item (data-edge) → trim (Ctrl = ripple; Alt ignora o vínculo)
 //  • alça de fade (data-fade) → fade de entrada/saída
+//  • ícone de transição ([data-transition-id], irmão dos itens) → clique seleciona a transição; borda (data-tedge) → arrastar
+//    muda a duração (a janela é centrada no corte: a borda anda 1, a duração muda 2)
 //  • losango de keyframe (data-keyframe: combinado; data-lane-key: linha de uma propriedade) → clique leva o
 //    playhead ao key e o seleciona (Shift/Ctrl soma/tira); arrastar move o losango — ou todos os selecionados,
 //    se ele está entre eles — no quadro, preso ao item (soltar sobre outro key o substitui)
@@ -48,6 +51,8 @@ interface Opts {
   layoutRef: React.RefObject<Layout>
   setOverlay: (o: DragOverlay) => void
   onItemMenu: (itemId: string, clientX: number, clientY: number) => void
+  /** Menu de contexto do ícone de transição (id do clipe B). */
+  onTransitionMenu: (toId: string, clientX: number, clientY: number) => void
   /** Leva o playhead a `us` (clique num losango de keyframe). */
   onSeek: (us: Us) => void
 }
@@ -73,7 +78,7 @@ export function cancelActiveGesture(): void {
 /** Há gesto em andamento (o atalho global de teclado não roda). */
 export const gestureActive = (): boolean => active !== null
 
-export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu, onSeek }: Opts): {
+export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu, onTransitionMenu, onSeek }: Opts): {
   onPointerDown: (e: React.PointerEvent<HTMLElement>) => void
   onContextMenu: (e: React.MouseEvent<HTMLElement>) => void
 } {
@@ -116,6 +121,8 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
       const fade = target.closest<HTMLElement>('[data-fade]')?.dataset.fade as 'in' | 'out' | undefined
       const kfAttr = target.closest<HTMLElement>('[data-keyframe]')?.dataset.keyframe
       const lanesEl = target.closest<HTMLElement>('[data-lanes-item]')
+      const tId = target.closest<HTMLElement>('[data-transition-id]')?.dataset.transitionId
+      const tEdge = target.closest<HTMLElement>('[data-tedge]')?.dataset.tedge as 'start' | 'end' | undefined
       const laneKeyEl = target.closest<HTMLElement>('[data-lane-key]')
       const id = itemEl?.dataset.itemId ?? lanesEl?.dataset.lanesItem
       // losango: o combinado (todas as propriedades no instante) ou o de uma linha
@@ -127,7 +134,39 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
         if (!(sel.length === 1 && sel[0] === itemId)) st().select([itemId])
       }
 
-      if (id && kfKey) {
+      if (tId) {
+        // ---------------- ícone de transição: seleciona; a borda arrasta a duração (UM passo de desfazer)
+        st().selectTransition(tId)
+        const f0 = findItem(st().project!, tId)
+        const tr0 = (f0?.item as MediaItem | undefined)?.transitionIn
+        if (!f0 || !tr0 || !tEdge) return
+        if (f0.track.locked) {
+          toast.error(`Faixa bloqueada: desbloqueie "${f0.track.name}" para mudar a transição`)
+          return
+        }
+        let failed: string | null = null
+        let lastUs = tr0.durationUs
+        onMove = (ev) => {
+          if (!started) {
+            if (Math.abs(ev.clientX - x0) < TRIM_THRESHOLD_PX) return
+            if (!begin('ew-resize')) return finish(false)
+          }
+          const base = txBase()
+          if (!base) return
+          const fb = findItem(base, tId)
+          const i = fb ? fb.track.items.findIndex((x) => x.id === tId) : -1
+          if (!fb || i < 1) return finish(false)
+          lastUs = dragDuration(tr0.durationUs, tEdge, deltaAt(ev), fb.track.items[i - 1], fb.item)
+          failed = st().apply(() => setTransitionDuration(base, tId, lastUs), { transient: true }) ? null : 'falhou'
+          const row = layoutRef.current.rows.find((x) => x.track.id === fb.track.id)
+          setOverlay({ ...NO_OVERLAY, label: row ? { us: fb.item.startUs, y: row.y, text: `Transição: ${secLabel(lastUs)}` } : null })
+        }
+        onEnd = (commit) => {
+          if (!started) return
+          if (commit && !failed) st().commitTx()
+          else st().cancelTx()
+        }
+      } else if (id && kfKey) {
         // ---------------- losango de keyframe (combinado ou de uma linha)
         const fromUs = kfKey.tUs
         const setKf = useKeyframeSelection.getState().set
@@ -415,6 +454,14 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
       const target = e.target as HTMLElement
       if (target.closest('[data-track-header]')) return
       e.preventDefault()
+      const tId = target.closest<HTMLElement>('[data-transition-id]')?.dataset.transitionId
+      if (tId) {
+        if (!active) {
+          st().selectTransition(tId)
+          onTransitionMenu(tId, e.clientX, e.clientY)
+        }
+        return
+      }
       const laneKey = target.closest<HTMLElement>('[data-lane-key]')
       const id = target.closest<HTMLElement>('[data-item-id]')?.dataset.itemId ?? target.closest<HTMLElement>('[data-lanes-item]')?.dataset.lanesItem
       if (!id || active) return
@@ -427,7 +474,7 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
       if (!st().selection.includes(id)) st().select([id])
       onItemMenu(id, e.clientX, e.clientY)
     },
-    [onItemMenu]
+    [onItemMenu, onTransitionMenu]
   )
 
   return { onPointerDown, onContextMenu }

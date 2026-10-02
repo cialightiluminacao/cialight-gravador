@@ -74,7 +74,7 @@ export function canTransition(p: Project, trackId: string, aId: string | undefin
  * Janela da transição que entra no item `items[i]` (B) da faixa, ou null se não houver uma válida. Duração acima do
  * máximo (projeto antigo/editado fora) é limitada ao máximo para desenhar; abaixo do mínimo, nenhuma.
  */
-function windowAt(track: Track, i: number): TransitionWindow | null {
+export function transitionWindowAt(track: Track, i: number): TransitionWindow | null {
   if (i <= 0 || i >= track.items.length) return null
   const b = track.items[i]
   if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) return null
@@ -96,7 +96,7 @@ export function transitionWindows(p: Project): TransitionWindow[] {
   for (const t of p.tracks) {
     if (t.kind !== 'video') continue
     for (let i = 1; i < t.items.length; i++) {
-      const w = windowAt(t, i)
+      const w = transitionWindowAt(t, i)
       if (w) out.push(w)
     }
   }
@@ -120,9 +120,9 @@ export function transitionAt(track: Track, tUs: Us): TransitionWindow | null {
   }
   const i = lo - 1
   // tUs antes do corte (dentro de A = items[i]) → transição para items[i+1]; depois do corte → transição para items[i]
-  const next = windowAt(track, i + 1)
+  const next = transitionWindowAt(track, i + 1)
   if (next && tUs >= next.startUs && tUs < next.endUs) return next
-  const cur = windowAt(track, i)
+  const cur = transitionWindowAt(track, i)
   return cur && tUs >= cur.startUs && tUs < cur.endUs ? cur : null
 }
 

@@ -1,9 +1,9 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addEffect, addMarker, addMediaFromAsset, addTrack, copyKeyframes, deleteItems, musicTrackName, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, pasteKeyframes, projectDurationUs, removeKeys, splitAt, toggleEnabled, toggleKeyframes, trimItem, type KeyframeClipboard } from '@shared/editor/ops'
-import type { EffectPresetId, EffectRegionInit } from '@shared/editor/factory'
-import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
+import { addEffect, addMarker, updateItem, addMediaFromAsset, addShape, addText, addTrack, addTransition, removeTransition, setTransitionDuration, copyKeyframes, deleteItems, musicTrackName, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, pasteKeyframes, projectDurationUs, removeKeys, splitAt, toggleEnabled, toggleKeyframes, trimItem, type KeyframeClipboard } from '@shared/editor/ops'
+import type { EffectPresetId, EffectRegionInit, ShapePresetId, TextPresetId } from '@shared/editor/factory'
+import type { Item, MediaItem, Project, TrackKind, TransitionKind, Us } from '@shared/editor/project'
 import { frameDurUs, frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
 import type { PlaybackController } from '../engine/PlaybackController'
 import type { ShortcutAction } from '../shortcuts'
@@ -13,6 +13,8 @@ import { useViewerTool } from '../state/viewerTool'
 import { autoMusicLanding, moveToVoice } from './musicLanding'
 import { narrationActive } from './narrationFlow'
 import { planKeyframePaste } from './keyframePaste'
+import { nearestEligibleCut } from './timeline/transitionMath'
+import { formatTransitionDuration, transitionLabel } from './transitionInfo'
 
 /** Efeito ancorado colado/duplicado sem o clipe da âncora: a cópia fica solta na caixa de reserva (ops.duplicateItems). */
 const LOOSE_PASTE = 'Efeito colado sem o clipe — ficou solto'
@@ -136,6 +138,102 @@ export function addEffectAt(preset: EffectPresetId, atUs: Us, opts?: { trackId?:
     return r.project
   })
   if (ok) s.select([id])
+}
+
+/** Centro do texto/forma recém-criado no ponto (normalizado) — dentro da mesma edição, um passo só. */
+function placeAt(p: Project, itemId: string, at: { x: number; y: number }): Project {
+  return updateItem(p, itemId, (d) => {
+    if (d.type !== 'text' && d.type !== 'shape') return
+    d.visual.transform.x = { value: at.x }
+    d.visual.transform.y = { value: at.y }
+  })
+}
+
+/** Texto da biblioteca em atUs (faixa escolhida ao soltar na linha do tempo; sem ela, colocação automática); seleciona o item. */
+export function addTextAt(preset: TextPresetId, atUs: Us, opts?: { trackId?: string; at?: { x: number; y: number } }): string | null {
+  const s = st()
+  let id = ''
+  const ok = s.apply((p) => {
+    const r = addText(p, preset, atUs, opts?.trackId ? { trackId: opts.trackId } : undefined)
+    id = r.itemId
+    return opts?.at ? placeAt(r.project, r.itemId, opts.at) : r.project
+  })
+  if (ok) s.select([id])
+  return ok ? id : null
+}
+
+/** Forma da biblioteca em atUs (como addTextAt). */
+export function addShapeAt(preset: ShapePresetId, atUs: Us, opts?: { trackId?: string; at?: { x: number; y: number } }): string | null {
+  const s = st()
+  let id = ''
+  const ok = s.apply((p) => {
+    const r = addShape(p, preset, atUs, opts?.trackId ? { trackId: opts.trackId } : undefined)
+    id = r.itemId
+    return opts?.at ? placeAt(r.project, r.itemId, opts.at) : r.project
+  })
+  if (ok) s.select([id])
+  return ok ? id : null
+}
+
+/**
+ * Transição `kind` na entrada do clipe `toId` (B). Se já havia uma, troca o tipo e mantém a duração. Seleciona a
+ * transição; erros de regra (EditError) viram toast pelo store.
+ */
+export function addTransitionTo(toId: string, kind: TransitionKind): boolean {
+  const s = st()
+  const prev = s.project ? (findItem(s.project, toId)?.item as MediaItem | undefined)?.transitionIn : undefined
+  const ok = s.apply((p) => addTransition(p, toId, kind, prev?.durationUs))
+  if (ok) s.selectTransition(toId)
+  return ok
+}
+
+/**
+ * Transição no corte elegível mais próximo do playhead: nas faixas de vídeo dos itens selecionados (ou da transição
+ * selecionada); sem seleção de faixa, em todas as de vídeo. Sem corte elegível → toast que explica.
+ */
+export function addTransitionNearPlayhead(kind: TransitionKind): boolean {
+  const { project, selection, selectedTransition, playheadUs } = st()
+  if (!project) return false
+  const tracks = new Set<string>()
+  for (const id of selectedTransition ? [selectedTransition, ...selection] : selection) {
+    const f = findItem(project, id)
+    if (f && f.track.kind === 'video') tracks.add(f.track.id)
+  }
+  const cut = nearestEligibleCut(project, tracks.size ? [...tracks] : null, playheadUs)
+  if (!cut) {
+    toast(`Não há corte para a transição “${transitionLabel(kind)}”`, {
+      description: tracks.size
+        ? 'Na faixa selecionada não há dois clipes de vídeo, imagem ou texto encostados e ativos. Aproxime os clipes ou selecione outra faixa.'
+        : 'Ela vai entre dois clipes de vídeo, imagem ou texto encostados e ativos na mesma faixa. Coloque dois clipes lado a lado.'
+    })
+    return false
+  }
+  return addTransitionTo(cut.toId, kind)
+}
+
+/** Nova duração da transição de `toId`; o op limita a [mínimo, metade do clipe mais curto] — se limitou, avisa. */
+export function setTransitionDurationTo(toId: string, wantedUs: Us): boolean {
+  const s = st()
+  const ok = s.apply((p) => setTransitionDuration(p, toId, wantedUs))
+  if (!ok) return false
+  const got = (findItem(st().project!, toId)?.item as MediaItem | undefined)?.transitionIn?.durationUs
+  if (got !== undefined && got !== Math.round(wantedUs)) toast(`Duração limitada a ${formatTransitionDuration(got)}`, { description: got < wantedUs ? 'A transição ocupa no máximo metade do clipe mais curto.' : 'A transição dura no mínimo 0,1 s.' })
+  return true
+}
+
+/** Remove a transição selecionada (Delete). */
+export function removeSelectedTransition(): boolean {
+  const s = st()
+  const id = s.selectedTransition
+  if (!id) return false
+  // a transição selecionada já não existe (desfeita/removida por outro caminho): solta a seleção e deixa o Delete seguir
+  if (!s.project || !(findItem(s.project, id)?.item as MediaItem | undefined)?.transitionIn) {
+    s.selectTransition(null)
+    return false
+  }
+  const ok = s.apply((p) => removeTransition(p, id))
+  if (ok) s.selectTransition(null)
+  return true
 }
 
 export function splitAtPlayhead(): void {
@@ -265,7 +363,9 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'split': splitAtPlayhead(); return true
     case 'rippleTrimStart': trimToPlayhead('start'); return true
     case 'rippleTrimEnd': trimToPlayhead('end'); return true
-    case 'delete': if (!deleteSelectedKeyframe()) deleteSelection(false); return true
+    case 'delete': if (!removeSelectedTransition() && !deleteSelectedKeyframe()) deleteSelection(false); return true
+    case 'addTitle': addTextAt('title', s.playheadUs); return true
+    case 'addCrossfade': addTransitionNearPlayhead('crossfade'); return true
     case 'rippleDelete': deleteSelection(true); return true
     case 'copy':
       if (copySelectedKeyframes()) return true

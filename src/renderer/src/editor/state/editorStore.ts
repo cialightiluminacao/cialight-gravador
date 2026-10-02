@@ -22,6 +22,8 @@ export interface EditorState {
   saving: boolean
   lastSavedAt: number | null
   selection: string[]
+  /** Transição selecionada (id do clipe B, dono do `transitionIn`); exclusiva com a seleção de itens (select() a limpa). */
+  selectedTransition: string | null
   playheadUs: Us
   playing: boolean
   /** Taxa da reprodução (shuttle J/K/L: ±1, ±2, ±4, ±8); 1 quando parado. */
@@ -61,6 +63,8 @@ export interface EditorState {
   redo(): void
   markSaved(): void
   select(ids: string[], mode?: 'set' | 'add' | 'toggle'): void
+  /** Seleciona a transição de entrada do clipe `toId` (limpa a seleção de itens); null desmarca. */
+  selectTransition(toId: string | null): void
   setPlayhead(us: Us): void
   setPlaying(b: boolean, rate?: number): void
   setZoom(pxPerSec: number, anchorUs?: Us): void
@@ -87,6 +91,7 @@ const INITIAL = {
   saving: false,
   lastSavedAt: null,
   selection: [] as string[],
+  selectedTransition: null as string | null,
   playheadUs: 0,
   playing: false,
   playRate: 1,
@@ -226,11 +231,13 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
 
   select: (ids, mode = 'set') =>
     set((s) => {
-      if (mode === 'set') return { selection: [...ids] }
-      if (mode === 'add') return { selection: [...s.selection, ...ids.filter((i) => !s.selection.includes(i))] }
+      if (mode === 'set') return { selection: [...ids], selectedTransition: null }
+      if (mode === 'add') return { selection: [...s.selection, ...ids.filter((i) => !s.selection.includes(i))], selectedTransition: null }
       const toggled = new Set(ids)
-      return { selection: [...s.selection.filter((i) => !toggled.has(i)), ...ids.filter((i) => !s.selection.includes(i))] }
+      return { selection: [...s.selection.filter((i) => !toggled.has(i)), ...ids.filter((i) => !s.selection.includes(i))], selectedTransition: null }
     }),
+
+  selectTransition: (toId) => set((s) => (toId === null ? (s.selectedTransition === null ? s : { selectedTransition: null }) : { selectedTransition: toId, selection: [] })),
 
   setPlayhead: (us) => set({ playheadUs: Math.max(0, Math.round(us)) }),
   setPlaying: (b, rate = 1) => set({ playing: b, playRate: b ? rate : 1 }),

@@ -4,9 +4,11 @@
 import { evalAnim } from '@shared/editor/anim'
 import { screenToContent } from '@shared/editor/contentPose'
 import { EditError, findItem, setAnimValue } from '@shared/editor/ops'
-import { attachedMedia, clipFrameAt, effectRegionAt, resolveFrame } from '@shared/editor/resolve'
+import { attachedMedia, clipFrameAt, effectRegionAt, resolveFrame, type Layer, type TextLayer } from '@shared/editor/resolve'
 import type { EffectItem, Project, Us } from '@shared/editor/project'
 import { layerMatrix, type Rotation } from '../engine/compositor/matrix'
+import { shapeBoxPx } from '../engine/text/shapeRaster'
+import { measureTextBox, type FrameSize } from '../engine/text/textRaster'
 
 export interface ItemBox {
   itemId: string
@@ -21,18 +23,44 @@ export interface ItemBox {
 export type Corner = 'tl' | 'tr' | 'bl' | 'br'
 export interface Pt { x: number; y: number }
 
-/** Camadas de mídia visíveis em tUs (fundo → topo), com o mesmo tamanho que o compositor desenha. */
-export function itemBoxes(p: Project, tUs: Us): ItemBox[] {
-  const W = p.canvas.width
-  const H = p.canvas.height
-  const out: ItemBox[] = []
-  for (const l of resolveFrame(p, tUs)) {
-    if (l.kind !== 'media') continue
-    const a = p.assets.find((x) => x.id === l.assetId)
-    const src = { w: a?.video?.width || W, h: a?.video?.height || H, rotation: (a?.video?.rotation ?? 0) as Rotation }
-    const g = layerMatrix({ rect: l.rect, fit: l.fit, crop: l.crop }, src, { w: W, h: H })
-    out.push({ itemId: l.itemId, cx: l.rect.cx * W, cy: l.rect.cy * H, w: g.size[0], h: g.size[1], rotation: l.rect.rotation })
+/** Mede a caixa de um texto (a do compositor; nos testes, um medidor sem Canvas). */
+export type TextMeasure = (layer: TextLayer, frame: FrameSize) => { cx: number; cy: number; w: number; h: number; rotation: number }
+
+/** Caixas das camadas de `layers` (fundo → topo); transição: A e B entram (o da frente na ordem de desenho é o último). */
+function collectBoxes(p: Project, layers: Layer[], W: number, H: number, measure: TextMeasure, out: ItemBox[]): void {
+  for (const l of layers) {
+    if (l.kind === 'media') {
+      const a = p.assets.find((x) => x.id === l.assetId)
+      const src = { w: a?.video?.width || W, h: a?.video?.height || H, rotation: (a?.video?.rotation ?? 0) as Rotation }
+      const g = layerMatrix({ rect: l.rect, fit: l.fit, crop: l.crop }, src, { w: W, h: H })
+      out.push({ itemId: l.itemId, cx: l.rect.cx * W, cy: l.rect.cy * H, w: g.size[0], h: g.size[1], rotation: l.rect.rotation })
+    } else if (l.kind === 'text') {
+      if (!l.text) continue // o compositor não desenha texto vazio
+      const b = measure(l, { W, H })
+      out.push({ itemId: l.itemId, cx: b.cx, cy: b.cy, w: b.w, h: b.h, rotation: b.rotation })
+    } else if (l.kind === 'shape') {
+      const b = shapeBoxPx(l.item, { W, H })
+      out.push({ itemId: l.itemId, cx: l.rect.cx * W, cy: l.rect.cy * H, w: b.w * l.rect.scale, h: b.h * l.rect.scale, rotation: l.rect.rotation })
+    } else if (l.kind === 'transition') {
+      // na 1ª metade A fica na frente; na 2ª, B (como o compositor desenha a janela): o hit-test pega o último
+      if (l.linear < 0.5) {
+        collectBoxes(p, l.to, W, H, measure, out)
+        collectBoxes(p, l.from, W, H, measure, out)
+      } else {
+        collectBoxes(p, l.from, W, H, measure, out)
+        collectBoxes(p, l.to, W, H, measure, out)
+      }
+    }
   }
+}
+
+/**
+ * Caixas das camadas visíveis em tUs — mídia, texto e forma (fundo → topo), com o mesmo tamanho que o compositor
+ * desenha. Dentro da janela de uma transição, os clipes A e B continuam selecionáveis (cada um com a pose da camada).
+ */
+export function itemBoxes(p: Project, tUs: Us, measure: TextMeasure = measureTextBox): ItemBox[] {
+  const out: ItemBox[] = []
+  collectBoxes(p, resolveFrame(p, tUs), p.canvas.width, p.canvas.height, measure, out)
   return out
 }
 

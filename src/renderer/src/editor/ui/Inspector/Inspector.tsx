@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Film, Image as ImageIcon, Layers, Music, SlidersHorizontal, Sparkles } from 'lucide-react'
+import { Film, Image as ImageIcon, Layers, Music, Shapes, SlidersHorizontal, Sparkles, Type, Blend } from 'lucide-react'
 import { findItem, linkedIds } from '@shared/editor/ops'
 import type { Item, MediaItem, Project, VisualProps } from '@shared/editor/project'
 import { formatTimecodeUs } from '@shared/editor/time'
@@ -14,7 +14,9 @@ import { SpeedPanel } from './SpeedPanel'
 import { EffectPanel } from './EffectPanel'
 import { AudioMixPanel } from './AudioMixPanel'
 import { InspectorPlayback } from './KeyframeButton'
-import { AnimPanel } from './AnimPanel'
+import { TextPanel } from './TextPanel'
+import { ShapePanel } from './ShapePanel'
+import { TransitionPanel } from './TransitionPanel'
 import { ITEM_TYPE_LABEL, itemLabel } from '../itemLabel'
 
 // Inspetor (coluna direita): propriedades do item selecionado; sem seleção, as do projeto.
@@ -24,20 +26,25 @@ const FPS_OPTIONS = [24, 25, 30, 50, 60].map((f) => ({ value: String(f), label: 
 export function Inspector({ playback }: { playback: PlaybackController | null }): React.JSX.Element {
   const project = useEditorStore((s) => s.project)
   const selection = useEditorStore((s) => s.selection)
+  const selectedTransition = useEditorStore((s) => s.selectedTransition)
   const found = project && selection.length === 1 ? findItem(project, selection[0]) : null
 
   let body: React.ReactNode
   let title = 'Projeto'
   let icon = <SlidersHorizontal className="h-3.5 w-3.5" />
   if (!project) body = null
-  else if (selection.length > 1) {
+  else if (selectedTransition && selection.length === 0 && (findItem(project, selectedTransition)?.item as MediaItem | undefined)?.transitionIn) {
+    title = 'Transição'
+    icon = <Blend className="h-3.5 w-3.5" />
+    body = <TransitionPanel key={selectedTransition} toId={selectedTransition} />
+  } else if (selection.length > 1) {
     title = `${selection.length} itens`
     icon = <Layers className="h-3.5 w-3.5" />
     body = <p className="px-3 py-4 text-[11px] leading-relaxed text-muted">Vários itens selecionados. Selecione um só para editar as propriedades.</p>
   } else if (found) {
     const asset = found.item.type === 'media' ? project.assets.find((a) => a.id === (found.item as MediaItem).assetId) : undefined
     title = itemLabel(project, found.item)
-    icon = found.track.kind === 'audio' ? <Music className="h-3.5 w-3.5" /> : found.item.type === 'effect' ? <Sparkles className="h-3.5 w-3.5" /> : asset?.kind === 'image' ? <ImageIcon className="h-3.5 w-3.5" /> : <Film className="h-3.5 w-3.5" />
+    icon = found.track.kind === 'audio' ? <Music className="h-3.5 w-3.5" /> : found.item.type === 'effect' ? <Sparkles className="h-3.5 w-3.5" /> : found.item.type === 'text' ? <Type className="h-3.5 w-3.5" /> : found.item.type === 'shape' ? <Shapes className="h-3.5 w-3.5" /> : asset?.kind === 'image' ? <ImageIcon className="h-3.5 w-3.5" /> : <Film className="h-3.5 w-3.5" />
     body = <ItemPanels key={found.item.id} project={project} item={found.item} trackKind={found.track.kind} locked={found.track.locked} />
   } else body = <ProjectPanel project={project} />
 
@@ -68,16 +75,22 @@ function ItemPanels({ project, item, trackKind, locked }: { project: Project; it
       </>
     )
   }
-  if (item.type !== 'media') {
+  if (item.type === 'text' || item.type === 'shape') {
     return (
       <>
-        <PanelSection title={ITEM_TYPE_LABEL[item.type]}>
+        <div className="border-b border-border px-3 py-2">
           <Timing item={item} fps={project.canvas.fps} />
-          <p className="pt-1 text-[11px] leading-relaxed text-muted">As demais propriedades deste tipo de item chegam numa próxima versão do editor.</p>
-        </PanelSection>
-        {/* texto e forma (F5) já animam a entrada/saída pelo mesmo painel */}
-        {item.type === 'text' || item.type === 'shape' ? <AnimPanel item={item} disabled={locked} /> : null}
+        </div>
+        {item.type === 'text' ? <TextPanel item={item} locked={locked} /> : <ShapePanel item={item} locked={locked} />}
       </>
+    )
+  }
+  if (item.type !== 'media') {
+    return (
+      <PanelSection title={ITEM_TYPE_LABEL[item.type]}>
+        <Timing item={item} fps={project.canvas.fps} />
+        <p className="pt-1 text-[11px] leading-relaxed text-muted">As demais propriedades deste tipo de item chegam numa próxima versão do editor.</p>
+      </PanelSection>
     )
   }
   // o som de um vídeo fica no item de áudio vinculado (addMediaFromAsset); é ele que a aba Áudio edita
