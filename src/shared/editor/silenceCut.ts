@@ -2,7 +2,7 @@
 // (speechOnTimeline: inUs/speed/reverse/trim), definem os silêncios; cada silêncio longo vira um corte com margem,
 // aplicado com deleteRanges em todas as faixas desbloqueadas (tela, webcam, anotações, efeitos) — num passo só.
 import { speechOnTimeline } from './audioPlan'
-import { deleteRanges } from './ops'
+import { deleteRanges, lockedVideoDesyncsEffects } from './ops'
 import { MIN_ITEM_US } from './project'
 import type { Project, Us } from './project'
 import type { SpeechInterval } from './speech'
@@ -159,13 +159,10 @@ export function planSilenceCuts(p: Project, opts: SilenceCutOpts, speech: Readon
   const lockedTrackIds = p.tracks.filter((t) => t.locked).map((t) => t.id)
   let blocked: string | null = null
   if (cuts.length) {
-    const first = cuts[0].fromUs
-    const hasFx = p.tracks.some((t) => t.items.some((i) => i.type === 'effect' && itemEndUs(i) > first))
     // efeitos cobrem imagem: faixa de VÍDEO bloqueada (com mídia ou com efeitos) desalinharia efeito e conteúdo;
     // faixa de áudio bloqueada só fica fora de sincronia (aviso)
-    const lockedVideo = p.tracks.some((t) => t.locked && t.kind === 'video')
     if (sources.some((t) => t.locked)) blocked = 'Uma faixa de voz de referência está bloqueada. Desbloqueie-a para remover os silêncios.'
-    else if (lockedVideo && hasFx) blocked = 'Há faixas de vídeo bloqueadas e efeitos de privacidade: cortar só as faixas desbloqueadas tiraria os efeitos de cima do que eles escondem. Desbloqueie as faixas para remover os silêncios.'
+    else if (lockedVideoDesyncsEffects(p, cuts[0].fromUs)) blocked = 'Há faixas de vídeo bloqueadas e efeitos de privacidade: cortar só as faixas desbloqueadas tiraria os efeitos de cima do que eles escondem. Desbloqueie as faixas para remover os silêncios.'
   }
   const hit = (s: Us, e: Us): boolean => cuts.some((c) => c.fromUs < e && c.toUs > s)
   const musicTrackIds = cuts.length ? p.tracks.filter((t) => t.role === 'music' && !t.locked && t.items.some((i) => hit(i.startUs, itemEndUs(i)))).map((t) => t.id) : []

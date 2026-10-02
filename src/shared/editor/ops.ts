@@ -119,6 +119,15 @@ function assertUnlocked(track: Track): void {
   if (track.locked) throw new EditError('locked', `Faixa bloqueada: ${track.name}`)
 }
 
+/**
+ * Ripple que deixa faixas bloqueadas para trás desalinha efeitos de privacidade: com uma faixa de VÍDEO bloqueada
+ * (mídia ou efeitos) e algum efeito terminando depois de `fromUs`, efeito e conteúdo que ele esconde se separam.
+ * Regra única do congelar quadro e da remoção de silêncios (faixa de áudio bloqueada só sai de sincronia).
+ */
+export function lockedVideoDesyncsEffects(p: Project, fromUs: Us): boolean {
+  return p.tracks.some((t) => t.locked && t.kind === 'video') && p.tracks.some((t) => t.items.some((i) => i.type === 'effect' && end(i) > fromUs))
+}
+
 /** Ids dados + (opcionalmente) vinculados, sem repetição; lança se algum não existir. */
 function expand(p: Project, itemIds: string[], includeLinked: boolean): string[] {
   const out: string[] = []
@@ -1321,6 +1330,7 @@ export function freezeFrameAt(p: Project, itemId: string, atUs: Us, durationUs: 
   if (at < item.startUs || at > end(item)) throw new EditError('bounds', 'O playhead não está sobre o clipe')
   if (at - item.startUs < MIN_ITEM_US) at = item.startUs
   else if (end(item) - at < MIN_ITEM_US) at = end(item)
+  if (lockedVideoDesyncsEffects(p, at)) throw new EditError('locked', 'Há faixas de vídeo bloqueadas com efeitos depois deste ponto: desbloqueie-as para congelar o quadro (senão os efeitos sairiam de cima do conteúdo).')
   const D = Math.max(MIN_ITEM_US, Math.round(durationUs))
   const srcUs = sourceTimeUs(item, asset, Math.min(at, end(item) - 1))
   const piece: MediaItem = {

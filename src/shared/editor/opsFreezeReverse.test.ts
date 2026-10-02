@@ -167,6 +167,26 @@ describe('freezeFrameAt', () => {
     expect(fxs.find((i) => i.id !== f)!.linkId).toBe(right.linkId)
     expect(validateProject(q)).toEqual([])
   })
+  it('revisão final (I1): recusa com faixa de vídeo bloqueada e efeito depois do ponto (mesma regra dos silêncios)', () => {
+    const { p, f } = linked() // efeito [2,10)
+    const v = p.tracks[0].items[0].id
+    const fxTrack = ops.findItem(p, f)!.track.id
+    // faixa de efeitos bloqueada: o vídeo andaria e o desfoque ficaria parado
+    const lockedFx = ops.updateTrack(p, fxTrack, { locked: true })
+    expect(() => ops.freezeFrameAt(lockedFx, v, 4 * S, 2 * S)).toThrow(expect.objectContaining({ code: 'locked', message: expect.stringMatching(/desbloqueie-as para congelar/) }))
+    // outra faixa de vídeo bloqueada (ex.: webcam) com efeito depois do ponto: também
+    let cam = ops.addTrack(p, 'video').project
+    cam = ops.updateTrack(cam, cam.tracks.find((t) => t.kind === 'video' && t.items.length === 0)!.id, { locked: true })
+    expect(() => ops.freezeFrameAt(cam, v, 4 * S, 2 * S)).toThrow(expect.objectContaining({ code: 'locked' }))
+    // efeito todo antes do ponto: nada a desalinhar
+    const early = ops.addEffect(base().p, 'blur', 0, { durationUs: S })
+    const earlyLocked = ops.updateTrack(early.project, ops.findItem(early.project, early.itemId)!.track.id, { locked: true })
+    expect(() => ops.freezeFrameAt(earlyLocked, earlyLocked.tracks[0].items[0].id, 4 * S, 2 * S)).not.toThrow()
+    // sem efeitos, faixa de vídeo bloqueada não impede
+    const plain = ops.addTrack(base().p, 'video').project
+    const plainLocked = ops.updateTrack(plain, plain.tracks.find((t) => t.kind === 'video' && t.items.length === 0)!.id, { locked: true })
+    expect(() => ops.freezeFrameAt(plainLocked, plainLocked.tracks[0].items[0].id, 4 * S, 2 * S)).not.toThrow()
+  })
   it('recusa áudio, imagem, faixa bloqueada e instante fora do item', () => {
     const { p, v, a } = base()
     expect(() => ops.freezeFrameAt(p, a, 4 * S, S)).toThrow(ops.EditError)
