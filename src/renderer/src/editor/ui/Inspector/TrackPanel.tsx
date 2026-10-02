@@ -22,7 +22,7 @@ export function TrackPanel({ project, item }: { project: Project; item: EffectIt
     <PanelSection title="Seguir conteúdo">
       <div className="space-y-2" data-follow-content-panel="">
         <p className="text-[10.5px] leading-snug text-muted">
-          Ponha a região sobre o conteúdo no quadro do playhead: o movimento é acompanhado até o fim do efeito e vira keyframes editáveis. Se o conteúdo se perder, a região é ampliada{item.invert ? ' (invertido: o buraco é fechado)' : ''}.
+          Ponha a região sobre o conteúdo no quadro do playhead: o movimento é acompanhado até o fim do efeito e vira keyframes editáveis. Onde houver dúvida (conteúdo coberto, repetido ou parecido na tela, movimento estranho), a região é ampliada{item.invert ? ' (invertido: o buraco é fechado)' : ''}.
         </p>
         {job ? (
           <div className="space-y-1.5" role="status" aria-live="polite">
@@ -48,7 +48,7 @@ export function TrackPanel({ project, item }: { project: Project; item: EffectIt
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10.5px] text-muted">
             <span>Faixa no item:</span>
             <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-3 rounded-sm bg-ok" aria-hidden />confiante</span>
-            <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-3 rounded-sm bg-warn" aria-hidden />incerto</span>
+            <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-3 rounded-sm bg-warn" aria-hidden />incerto (ampliada)</span>
             <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-3 rounded-sm bg-danger" aria-hidden />perdido</span>
           </p>
         ) : null}

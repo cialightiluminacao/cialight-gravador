@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { ANIM_PATHS, getAnim } from '@shared/editor/animPaths'
 import { keyframeTimesUs } from '@shared/editor/ops'
 import type { Item } from '@shared/editor/project'
 import { cn } from '@/lib/cn'
@@ -23,12 +24,14 @@ interface Props {
 }
 
 export function KeyframeMarks({ item, pxPerSec, clipFrom, visW, h, locked }: Props): React.JSX.Element | null {
-  const times = useMemo(() => keyframeTimesUs(item), [item])
+  // só refaz quando alguma curva muda (mover o item no tempo não muda as anims: o immer mantém os objetos)
+  const anims = ANIM_PATHS.map((pt) => getAnim(item, pt))
+  const times = useMemo(() => keyframeTimesUs(item), anims)
   const sel = useKeyframeSelection((s) => (s.sel?.itemId === item.id ? s.sel : null))
   if (times.length === 0) return null
   return (
     <>
-      {keyframeMarkLefts(times, pxPerSec, clipFrom, visW, HIT).map(({ tUs, left }) => {
+      {keyframeMarkLefts(times, pxPerSec, clipFrom, visW, HIT, sel ? (t) => isKeySelected(sel, item.id, null, t) : undefined).map(({ tUs, left }) => {
         const selected = isKeySelected(sel, item.id, null, tUs)
         return (
           <span

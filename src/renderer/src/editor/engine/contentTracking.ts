@@ -10,6 +10,7 @@ import type { EffectItem, Project, Us } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
 import {
   analysisSize,
+  DEFAULT_TRACK_OPTS,
   regionExtentPx,
   templateBox,
   trackingBlocker,
@@ -97,9 +98,8 @@ export async function runContentTracking(req: ContentTrackingRequest, o: { onPro
       o.signal?.addEventListener('abort', onAbort)
       render.trackStart({ jobId, width: size.width, height: size.height, fps: p.canvas.fps, fromUs, toUs: end, effectItemId: fx.id, box, ...(req.opts ? { opts: req.opts } : {}) })
     })
-    // multiescala: a escala real pode estar até meio intervalo entre duas testadas
-    const scales = [...(req.opts?.scales ?? [1])].sort((a, b) => a - b)
-    const scaleTol = scales.length > 1 ? Math.max(...scales.slice(1).map((s, i) => s - scales[i])) / 2 : 0
+    // escala sempre estimada (R20): a folga de meio passo das sondas é a de trackToKeys
+    const scaleTol = (req.opts?.scaleStep ?? DEFAULT_TRACK_OPTS.scaleStep) / 2
     return { ...trackToKeys(fx, results, geometry, { scaleTol }), results, geometry, fromUs }
   } finally {
     render.dispose()

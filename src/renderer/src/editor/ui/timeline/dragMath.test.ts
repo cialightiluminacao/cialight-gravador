@@ -6,6 +6,7 @@ import { snapPoints } from '@shared/editor/snap'
 import { canChangeTrack, dropTarget, effectDropTrack, edgeScrollPx, EDGE_SCROLL_MAX, fadeHandleLefts, gestureSnapPoints, keyframeMarkLefts, planFade, planKeyframeDrag, planMove, planTrim } from './dragMath'
 
 import { concreteRefs, dragGroup } from '../../state/keyframeSelection'
+import { curveSegments } from './laneMath'
 
 const S = 1_000_000
 const vid = (id: string, dur = 10 * S): Asset => ({ id, name: id, kind: 'video', source: { type: 'file', path: `C:/${id}.mp4`, size: 1, mtimeMs: 1 }, durationUs: dur, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
@@ -277,23 +278,52 @@ describe('fadeHandleLefts', () => {
 })
 
 describe('keyframeMarkLefts (losangos na timeline)', () => {
-  it('posição escala com o zoom e desconta o recorte; centrada no instante', () => {
-    expect(keyframeMarkLefts([0, S, 2 * S], 100, 0, 1000, 10)).toEqual([{ tUs: 0, left: -5 }, { tUs: S, left: 95 }, { tUs: 2 * S, left: 195 }])
-    expect(keyframeMarkLefts([S], 400, 0, 1000, 10)).toEqual([{ tUs: S, left: 395 }])
-    expect(keyframeMarkLefts([S], 100, 50, 1000, 10)).toEqual([{ tUs: S, left: 45 }])
+  it('posição escala com o zoom e desconta o recorte; centrada no instante; i = índice na lista', () => {
+    expect(keyframeMarkLefts([0, S, 2 * S], 100, 0, 1000, 10)).toEqual([{ tUs: 0, left: -5, i: 0 }, { tUs: S, left: 95, i: 1 }, { tUs: 2 * S, left: 195, i: 2 }])
+    expect(keyframeMarkLefts([S], 400, 0, 1000, 10)).toEqual([{ tUs: S, left: 395, i: 0 }])
+    expect(keyframeMarkLefts([S], 100, 50, 1000, 10)).toEqual([{ tUs: S, left: 45, i: 0 }])
   })
   it('só os visíveis no recorte', () => {
     expect(keyframeMarkLefts([0, S, 3 * S, 5 * S], 100, 200, 250, 10).map((m) => m.tUs)).toEqual([3 * S])
     expect(keyframeMarkLefts([2 * S + 40_000], 100, 200, 250, 10).map((m) => m.tUs)).toEqual([2 * S + 40_000]) // meio losango ainda aparece
   })
-  it('keys densos (um por quadro): losangos a menos de 2 px do anterior não viram elementos', () => {
+  it('keys densos (um por quadro): grupos de menos de 2 px viram um losango só — o ÚLTIMO (o que ficava por cima e recebia o clique)', () => {
     // 10 min a 30 fps num item de 1200 px (2 px/s): 18 000 keys → no máximo ~600 losangos
     const times = Array.from({ length: 18_000 }, (_, i) => Math.round((i * S) / 30))
     const marks = keyframeMarkLefts(times, 2, 0, 1200, 13)
     expect(marks.length).toBeLessThanOrEqual(601)
-    for (let i = 1; i < marks.length; i++) expect(marks[i].left - marks[i - 1].left).toBeGreaterThanOrEqual(2)
+    expect(marks.length).toBeGreaterThan(550)
+    // cada losango é o último key do grupo: o seguinte já está a ≥ 2 px do primeiro do grupo
+    for (const m of marks) expect(m.tUs).toBe(times[m.i])
+    // três keys a 0,5 px: desenhado o último (antes, o último ficava por cima e era o que o clique pegava)
+    expect(keyframeMarkLefts([S, S + 5000, S + 10_000], 100, 0, 1000, 10).map((m) => m.tUs)).toEqual([S + 10_000])
     // com zoom suficiente, todos aparecem
     expect(keyframeMarkLefts(times.slice(0, 30), 200, 0, 1200, 13)).toHaveLength(30)
+  })
+  it('selecionados sempre aparecem (anel de seleção), mesmo no meio de um grupo denso (M3)', () => {
+    const times = Array.from({ length: 300 }, (_, i) => Math.round((i * S) / 30))
+    const sel = new Set([times[7], times[150]])
+    const marks = keyframeMarkLefts(times, 2, 0, 1200, 13, (t) => sel.has(t))
+    expect(marks.map((m) => m.tUs)).toEqual(expect.arrayContaining([times[7], times[150]]))
+    expect(marks.length).toBeLessThanOrEqual(25)
+  })
+  it('perf (invariante 6): 1 h com um key por quadro (108 000) — losangos e curva da linha em poucos ms', () => {
+    const times = Array.from({ length: 108_000 }, (_, i) => Math.round((i * S) / 30))
+    const anim = { value: 0, keys: times.map((tUs, i) => ({ tUs, value: Math.sin(i / 50), ease: 'linear' as const })) }
+    let best = Infinity
+    for (let r = 0; r < 5; r++) {
+      const t0 = performance.now()
+      const marks = keyframeMarkLefts(times, 1500 / 3600, 0, 1500, 13)
+      const segs = curveSegments(anim, 3600 * S, 1500 / 3600, 0, 1500, 22)
+      const zoomed = curveSegments(anim, 3600 * S, 200, 400_000, 1500, 22) // zoom alto no meio da hora
+      best = Math.min(best, performance.now() - t0)
+      expect(marks.length).toBeLessThanOrEqual(751)
+      // SVG proporcional à largura: ≤ 4 pontos por coluna de pixel
+      const pts = segs.reduce((a, s) => a + s.d.split('L').length, 0)
+      expect(pts).toBeLessThanOrEqual(4 * 1500 + 8)
+      expect(zoomed.length).toBeGreaterThan(0)
+    }
+    expect(best).toBeLessThan(40)
   })
 })
 

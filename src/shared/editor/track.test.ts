@@ -289,14 +289,19 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
   })
 
   it('R4b: com passo de análise > 1 quadro, cada key é alargado pelo maior deslocamento entre vizinhos (oráculo)', () => {
-    const sc: Scene = { path: zigzag, pw: 60, ph: 40 }
+    // zigue-zague a meia velocidade: 24 px por quadro analisado (dentro da janela), virando entre as amostras
+    const slowZig = (t: number): { x: number; y: number } => zigzag(t / 2)
+    const sc: Scene = { path: slowZig, pw: 60, ph: 40 }
     const all = frames(sc, 0, 1.5)
     const strided = all.filter((_, n) => n % 3 === 0) // um quadro analisado a cada 3
     const fx0 = effectOn(sc, 0, 1.5)
     const results = trackFrames(strided, boxAt(sc, 0))
+    expect(results.filter((r) => r.state === 'ok').length).toBeGreaterThan(results.length * 0.8)
     const out = trackToKeys(fx0, results, GEO)
     const fx1 = { ...fx0, region: out.region }
     for (let i = 1; i < results.length - 1; i++) {
+      // R4b vale entre quadros confiantes seguidos (a perda tem a sua própria cobertura)
+      if (results[i - 1].state !== 'ok' || results[i].state !== 'ok' || results[i + 1].state !== 'ok') continue
       const d = Math.max(Math.hypot(results[i].x - results[i - 1].x, results[i].y - results[i - 1].y), Math.hypot(results[i + 1].x - results[i].x, results[i + 1].y - results[i].y)) * (CW / AW)
       const v = region(fx1, results[i].tUs)
       expect((v.w * CW - (sc.pw * CW) / AW) / 2).toBeGreaterThanOrEqual(d - 1e-6)
@@ -336,6 +341,21 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
     expect(new Set(ts).size).toBe(ts.length)
   })
 
+  it('degrau conservador mesmo com só 2 µs entre os quadros (M1): o instante do meio já é o seguro', () => {
+    const sc: Scene = { path: linear, pw: 60, ph: 40 }
+    const r = (tUs: number, state: 'ok' | 'lost'): TrackResult => ({ tUs, x: 120, y: 90, w: 60, h: 40, scale: 1, scaleLo: 1, scaleHi: 1, confidence: state === 'ok' ? 1 : 0.1, state, reach: state === 'ok' ? 0 : 40 })
+    // invertido: perde em 2 µs e recupera em 4 µs → 1 e 3 µs já são o buraco nulo
+    const inv = { ...effectOn(sc, 0, 1, { invert: true }) }
+    const ri = trackToKeys(inv, [r(0, 'ok'), r(2, 'lost'), r(4, 'ok'), r(6, 'ok')], GEO).region
+    for (const t of [1, 2, 3]) expect([evalAnim(ri.w, t), evalAnim(ri.h, t), evalAnim(ri.x, t)]).toEqual([0, 0, 0])
+    // normal: 1 µs já é a região ampliada; 3 µs ainda é a ampliada (encolhe só no key de 4 µs)
+    const nor = effectOn(sc, 0, 1)
+    const rn = trackToKeys(nor, [r(0, 'ok'), r(2, 'lost'), r(4, 'ok'), r(6, 'ok')], GEO).region
+    expect(evalAnim(rn.w, 1)).toBe(evalAnim(rn.w, 2))
+    expect(evalAnim(rn.w, 3)).toBeGreaterThanOrEqual(evalAnim(rn.w, 2))
+    expect(evalAnim(rn.w, 4)).toBeLessThan(evalAnim(rn.w, 3))
+  })
+
   it('formato do toast da perda', () => {
     expect(formatTrackTime(2_216_667)).toBe('00:02,2')
     expect(formatTrackTime(83_950_000)).toBe('01:23,9')
@@ -373,15 +393,15 @@ describe('oráculo de privacidade (denso, 1/240 s)', () => {
     const hole = { ...bare, invert: true }
     expect(oracle(sc, { ...fx0, invert: true }, hole, 0, 1.5).length).toBeGreaterThan(0)
   })
-  it('multiescala (0,9/1/1,1): conteúdo que cresce e encolhe (zoom da gravação) fica coberto', () => {
+  it('escala sempre estimada (R20): conteúdo que cresce e encolhe 10 % fica coberto (opções padrão)', () => {
     const sc: Scene = { path: (t) => ({ x: 220 + 40 * t, y: 130 }), pw: 60, ph: 40, zoom: (t) => 1 + 0.1 * Math.sin(t * 3) }
     for (const invert of [false, true]) {
       const fx0 = effectOn(sc, 0, 2, { invert })
-      const results = trackFrames(frames(sc, 0, 2), boxAt(sc, 0), { scales: [0.9, 1, 1.1] })
-      // a escala acompanha o zoom (passo 0,1 na lista)
-      expect(results.some((r) => r.scale === 1.1)).toBe(true)
-      expect(results.some((r) => r.scale === 0.9)).toBe(true)
-      const fx1 = { ...fx0, region: trackToKeys(fx0, results, GEO, { scaleTol: 0.05 }).region }
+      const results = trackFrames(frames(sc, 0, 2), boxAt(sc, 0))
+      // a escala acompanha o zoom
+      expect(Math.max(...results.map((r) => r.scale))).toBeGreaterThan(1.05)
+      expect(Math.min(...results.map((r) => r.scale))).toBeLessThan(0.95)
+      const fx1 = { ...fx0, region: trackToKeys(fx0, results, GEO).region }
       expect(oracle(sc, fx0, fx1, 0, 2)).toEqual([])
     }
   })
@@ -465,6 +485,35 @@ describe('aplicar o rastreamento no projeto', () => {
     expect(trackingBlocker(off, 'fx')).toBeNull()
     const ana = trackingProject(off, 'fx')
     expect((findItem(ana, 'fx')!.item as EffectItem).enabled).not.toBe(false)
+  })
+
+  it('faixa oculta: a análise mostra só o efeito, não os outros itens dela (M2)', () => {
+    const p = project(fx0)
+    const other = { ...createEffectItem('blur', 2_100_000, 500_000), id: 'outro' }
+    const hidden: Project = { ...p, tracks: p.tracks.map((t) => (t.id === 'tfx' ? { ...t, hidden: true, items: [...t.items, other] } : t)) }
+    const ana = trackingProject(hidden, 'fx')
+    const t = ana.tracks.find((x) => x.id === 'tfx')!
+    expect(t.hidden).toBe(false)
+    expect(t.items.map((i) => i.id)).toEqual(['fx'])
+    // as outras faixas ficam como estavam
+    expect(ana.tracks.find((x) => x.id === 'tv')).toBe(hidden.tracks.find((x) => x.id === 'tv'))
+  })
+
+  it('v1.3 e ida e volta com perda: invertido (keys de NO_HOLE, zeros) e normal (região ampliada, w > 1) (M6)', () => {
+    const occ: Scene = { path: occludedPath, pw: 60, ph: 40, occluder: OCCLUDER }
+    for (const invert of [true, false]) {
+      const fx = { ...effectOn(occ, 0, 2, { invert }), durationUs: 2_000_000 }
+      const res = trackFrames(frames(occ, 0, 2), boxAt(occ, 0))
+      const out = trackToKeys(fx, res, GEO)
+      expect(out.lost.length).toBeGreaterThan(0)
+      if (invert) expect(out.region.w.keys!.some((k) => k.value === 0)).toBe(true)
+      else expect(out.region.w.keys!.some((k) => k.value > 1)).toBe(true)
+      const q = applyTrackedRegion(project(fx), 'fx', out.region)
+      expect(validateProject(q)).toEqual([])
+      const disk = JSON.parse(JSON.stringify(toDiskProject(q)))
+      expect(parseProjectV13(disk).success).toBe(true)
+      expect(parseProject(disk)).toEqual(q)
+    }
   })
 
   it('quadros de análise: só as camadas ABAIXO do efeito (ele e o que está acima ficam de fora; escopo track)', () => {

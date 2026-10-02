@@ -4,8 +4,8 @@ import { formatTrackTime } from '@shared/editor/track'
 import { cn } from '@/lib/cn'
 import { stripRuns, useTrackStrips } from '../../state/trackStrips'
 
-// Faixa de confiança do "Seguir conteúdo" (F6) embaixo do item de efeito: verde = confiante, âmbar = incerto (aceito
-// com folga extra), vermelho = perdido (região ampliada / buraco fechado). Só enquanto a região do item é a que o
+// Faixa de confiança do "Seguir conteúdo" (F6) embaixo do item de efeito: verde = confiante, âmbar = incerto (pico
+// plausível, mas sem confiança: tratado como perda), vermelho = perdido — nos dois, região ampliada / buraco fechado. Só enquanto a região do item é a que o
 // rastreamento gravou (state/trackStrips). Coordenadas locais à caixa visível do item.
 
 const TONE = { ok: 'bg-ok', weak: 'bg-warn', lost: 'bg-danger' } as const

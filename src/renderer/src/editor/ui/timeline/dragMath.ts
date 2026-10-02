@@ -235,18 +235,32 @@ export function fadeHandleLefts(finPx: number, foutPx: number, x0: number, x1: n
  * Losangos dos keyframes de um item: `left` (px locais à caixa visível, de tamanho `size`) centrado no
  * instante local de cada key; só os que aparecem no recorte [0, visW].
  */
-export function keyframeMarkLefts(timesUs: Us[], pxPerSec: number, clipFrom: number, visW: number, size: number): { tUs: Us; left: number }[] {
-  const out: { tUs: Us; left: number }[] = []
-  for (const tUs of timesUs) {
-    const left = (tUs * pxPerSec) / 1e6 - clipFrom - size / 2
-    if (left + size < 0 || left > visW) continue
-    // keys densos (um por quadro do "Seguir conteúdo"): losangos a menos de MARK_MIN_GAP_PX do anterior ficam de fora
-    // (seriam o mesmo losango na tela) — no máximo ~visW/MARK_MIN_GAP_PX elementos, em qualquer zoom
-    const prev = out[out.length - 1]
-    if (prev && left - prev.left < MARK_MIN_GAP_PX) continue
-    out.push({ tUs, left })
+export function keyframeMarkLefts(timesUs: readonly Us[], pxPerSec: number, clipFrom: number, visW: number, size: number, keep?: (tUs: Us) => boolean): { tUs: Us; left: number; i: number }[] {
+  const out: { tUs: Us; left: number; i: number; kept: boolean }[] = []
+  const leftOf = (t: Us): number => (t * pxPerSec) / 1e6 - clipFrom - size / 2
+  // tempos ordenados: começa no primeiro visível (busca binária) — O(log n + visíveis)
+  let lo = 0, hi = timesUs.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (leftOf(timesUs[mid]) + size < 0) lo = mid + 1
+    else hi = mid
   }
-  return out
+  // keys densos (um por quadro do "Seguir conteúdo"): losangos a menos de MARK_MIN_GAP_PX do PRIMEIRO do grupo são o
+  // mesmo losango na tela e só o ÚLTIMO do grupo é desenhado — o mesmo que ficava por cima (e recebia o clique) quando
+  // todos eram desenhados. Selecionados (`keep`) sempre aparecem, com o anel. ≤ ~visW/MARK_MIN_GAP_PX + selecionados.
+  let anchor = -Infinity
+  for (let i = lo; i < timesUs.length; i++) {
+    const tUs = timesUs[i]
+    const left = leftOf(tUs)
+    if (left > visW) break
+    const kept = keep?.(tUs) ?? false
+    const last = out[out.length - 1]
+    const inGroup = !!last && left - anchor < MARK_MIN_GAP_PX
+    if (!inGroup) anchor = left
+    if (inGroup && !kept && !last.kept) out[out.length - 1] = { tUs, left, i, kept }
+    else out.push({ tUs, left, i, kept })
+  }
+  return out.map(({ tUs, left, i }) => ({ tUs, left, i }))
 }
 
 /** Distância mínima (px) entre losangos desenhados. */

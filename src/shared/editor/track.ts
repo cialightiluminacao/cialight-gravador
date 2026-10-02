@@ -6,28 +6,39 @@
 // do efeito (layersBelowEffect: ele e tudo acima ficam de fora) — o resultado já está nas coordenadas do quadro do
 // efeito. Efeito ancorado (`attach`) é recusado (TRACK_ATTACHED_MESSAGE).
 //
-// Rastreador: molde = caixa da região no quadro inicial (cinza). Busca exaustiva numa janela de ±searchPx em volta da
-// última posição, de grosso a fino (pirâmide 2×2 só da região da busca: os 3 melhores máximos locais do nível grosso
-// refinados por subida 3×3 em cada nível; no nível 0 só posições dentro da janela) e subpixel por parábola. Escalas opcionais (`scales`, relativas ao
-// molde original: 0,9/1/1,1) só no nível 0. Confiança = NCC do melhor ponto.
-// - ≥ recoverAbove: 'ok'; entre lostBelow e recoverAbove: 'weak' (aceita, janela 1,5×, folga extra na região);
-//   abaixo de lostBelow: perda. Perdido, a posição NUNCA é inventada: fica a última confiante e a janela cresce
-//   `growth`× por quadro (até o quadro inteiro); só volta com confiança ≥ recoverAbove (histerese).
-// - Molde: o ORIGINAL sempre (sem deriva). Atualização lenta opcional (updateRate > 0, padrão desligado): só com
-//   confiança ≥ updateAbove e escala 1 o molde corrente vira (1 − α)·corrente + α·trecho achado; na perda volta ao
-//   original (a recuperação procura o conteúdo como o usuário o marcou).
+// Rastreador (rulings R4, R19, R20): molde = caixa da região no quadro inicial (cinza), sempre o ORIGINAL (sem
+// atualização: nada de deriva; a escala é refeita por reamostragem dele). Picos de NCC numa janela de ±searchPx em volta
+// da previsão (posição + movimento recente), de grosso a fino (pirâmide 2×2 só da região da busca; os melhores máximos
+// do nível grosso refinados por subida 3×3; no nível 0 só dentro da janela), subpixel por parábola. Um quadro só é
+// 'ok' (verde) e move a região se TODOS valem:
+// - confiança ≥ recoverAbove (0,85; texto fino reamostrado a 480 px com deslocamento subpixel fica em ~0,9);
+// - não ambíguo: o 2º pico (fora de meio molde do 1º) fica a mais de ambiguityMargin (0,1) do melhor — conteúdo
+//   repetido/parecido na janela (linhas de tabela, cópia do valor) não decide nada;
+// - dentro do portão de movimento: ≤ 2·gateMinPx + 2·|v| da previsão (|v| = movimento entre os dois últimos 'ok');
+// - rígido: as células com textura do molde (~16 px) concordam com o casamento num ajuste translação + escala
+//   (resíduo ≤ 0,75 px; ≥ 2 discordando = dois movimentos dentro da região, como uma região folgada sobre fundo
+//   parado — nenhuma translação única cobre os dois).
+// Senão o quadro é 'weak' (âmbar: pico plausível perto da previsão, abaixo do 'ok') ou 'lost' (vermelho) — os dois com
+// a MESMA geometria de perda: a posição NUNCA é inventada (fica a última 'ok') e a cobertura (reach) cresce `growth`×
+// por quadro (até o quadro inteiro); a janela de busca nunca cresce por um quadro incerto. Recuperação só pelo caminho
+// guardado: o melhor pico dentro de um portão em volta da previsão segurada (posição + v·quadros perdidos), ≥
+// recoverAbove, rígido, sem NENHUM pico ambíguo em toda a área coberta (uma cópia idêntica coberta = continua perdido),
+// com o centro dentro da cobertura (caixa nova ⊆ ampliada) e confirmado por um 2º quadro seguido no mesmo lugar.
+// Escala (R20) sempre estimada: passos de scaleStep (3 %) a partir da atual enquanto o NCC melhora ≥ 0,003
+// (histerese: sem deriva); as sondas vizinhas que não se separam da escolhida são incerteza não resolvida, [scaleLo,
+// scaleHi] — a região normal usa a maior e o buraco do invertido a menor, mais meio passo de folga.
 //
 // trackToKeys (rulings R4/R4b): um key por quadro analisado em x/y/w/h (rotação: constante do início, se tinha keys
 // depois dele). Região de cada quadro = a região do usuário no início transportada pelo deslocamento (e escala) do
 // conteúdo, com FOLGA D (px do quadro):
-// - confiante: 1 px da análise (erro do subpixel) + o maior deslocamento até os vizinhos confiantes (a interpolação
-//   linear entre keys nunca fica atrás do conteúdo, R4b) + meia variação de escala (scaleTol) + 25 % do meio-tamanho
-//   em 'weak';
-// - perdido: a janela alcançada (reach·√2: o centro pode estar em qualquer ponto do quadrado ±reach) + 1 px.
+// - 'ok': 1 px da análise (erro do subpixel) + o maior movimento de borda até os vizinhos 'ok' (centro + mudança de
+//   escala: a interpolação linear entre keys nunca fica atrás do conteúdo, R4b) + meio passo de escala (scaleTol);
+// - 'weak'/'lost': a cobertura alcançada (reach·√2: o centro pode estar em qualquer ponto do quadrado ±reach) + 1 px.
 // Normal: a região CRESCE pela folga (retângulo: meias-larguras + D; elipse: × (1 + D/menor semieixo), que contém a
 // elipse somada a um disco de raio D). Invertido (a região é o buraco nítido): ENCOLHE pela folga e, perdido ou sem
 // tamanho, vira o buraco nulo (NO_HOLE, a convenção de conservativeRegion) — nunca maior.
-// Transições em degrau (keys a 1 µs; nenhum instante inteiro entre eles): normal, ao perder a região ampliada vale logo
+// Transições em degrau (keys a 1 µs — também quando os quadros estão a só 2 µs; nenhum instante inteiro fica entre o
+// último seguro e o degrau): normal, ao perder a região ampliada vale logo
 // depois do último quadro confiante; ao recuperar, a ampliada (alargada até conter a caixa nova) vale até 1 µs antes do
 // key da caixa nova — só encolhe num key em que a caixa nova ⊆ ampliada. Invertido: o buraco fecha/abre em degrau
 // (interpolar até NO_HOLE moveria o buraco para o canto, fora do conteúdo).
@@ -36,7 +47,7 @@
 import { evalAnim, insertKeyExact } from './anim'
 import { NO_HOLE, type RegionValues } from './contentPose'
 import { EditError, findItem, TRACK_ATTACHED_MESSAGE } from './ops'
-import type { Anim, EffectItem, EffectRegion, Keyframe, Project, Us } from './project'
+import type { Anim, EffectItem, EffectRegion, Item, Keyframe, Project, Us } from './project'
 import type { Layer } from './resolve'
 import { frameToUs, usToFrame } from './time'
 
@@ -48,34 +59,36 @@ export interface GrayImage { width: number; height: number; data: Float32Array }
 export interface TrackBox { x: number; y: number; w: number; h: number }
 
 export interface TrackOpts {
-  /** Raio da janela de busca (px da análise) com o rastreamento confiante. */
+  /** Raio da janela de busca (px da análise, Chebyshev, em volta da previsão) com o rastreamento confiante. */
   searchPx: number
-  /** Raio máximo da janela; ausente = o lado maior do quadro (o quadro inteiro). */
+  /** Raio máximo da cobertura da perda; ausente = o lado maior do quadro (o quadro inteiro). */
   maxSearchPx?: number
-  /** Crescimento da janela por quadro perdido. */
+  /** Crescimento da cobertura por quadro perdido. */
   growth: number
-  /** Escalas testadas (relativas ao molde original); [1] = só translação. */
-  scales: number[]
-  /** Abaixo disso o conteúdo foi perdido. */
+  /** Passo das sondas de escala (relativo à escala atual): s·(1 ± passo). A região leva meio passo de folga. */
+  scaleStep: number
+  /** Piso do 'weak' (âmbar): abaixo disso o conteúdo foi perdido. */
   lostBelow: number
-  /** Confiança alta: 'ok' e mínimo para recuperar uma perda. */
+  /** Confiança alta: 'ok' (verde) e mínimo para recuperar uma perda. */
   recoverAbove: number
-  /** Atualização lenta do molde: só com confiança ≥ updateAbove; α = updateRate (0 = desligada). */
-  updateAbove: number
-  updateRate: number
+  /** Ambíguo: o 2º pico (fora da vizinhança do 1º) a menos disso do melhor → perda (R19). */
+  ambiguityMargin: number
+  /** Portão de movimento mínimo (px da análise): 'ok' até 2·gateMinPx + 2·|v| da previsão; 'weak' só até gateMinPx. */
+  gateMinPx: number
   /** Desvio-padrão mínimo do molde (níveis de cinza): abaixo disso a região é lisa demais para seguir. */
   minStd: number
 }
 
-export const DEFAULT_TRACK_OPTS: TrackOpts = { searchPx: 40, growth: 2, scales: [1], lostBelow: 0.6, recoverAbove: 0.85, updateAbove: 0.95, updateRate: 0, minStd: 3 }
+export const DEFAULT_TRACK_OPTS: TrackOpts = { searchPx: 40, growth: 2, scaleStep: 0.03, lostBelow: 0.7, recoverAbove: 0.85, ambiguityMargin: 0.1, gateMinPx: 4, minStd: 3 }
 
 export type TrackState = 'ok' | 'weak' | 'lost'
 
 /**
  * Resultado de um quadro analisado: centro (px da análise; perdido = a última posição confiante, segurada), escala
- * relativa ao molde, confiança (NCC, 0–1), estado e, perdido, o raio da janela de busca alcançada.
+ * estimada relativa ao molde e o intervalo das escalas empatadas [scaleLo, scaleHi], confiança (NCC, 0–1), estado e,
+ * perdido, o raio da cobertura alcançada (o centro do conteúdo pode estar em qualquer ponto do quadrado ±reach).
  */
-export interface TrackResult { tUs: Us; x: number; y: number; w: number; h: number; scale: number; confidence: number; state: TrackState; reach: number }
+export interface TrackResult { tUs: Us; x: number; y: number; w: number; h: number; scale: number; scaleLo: number; scaleHi: number; confidence: number; state: TrackState; reach: number }
 
 // ---------------------------------------------------------------- imagem
 
@@ -209,21 +222,34 @@ function ncc(L: Level, t: Tpl, gu: number, gv: number): number {
   return dot / Math.sqrt(varI)
 }
 
-/** Molde por nível da pirâmide (até o lado menor ficar < MIN_LEVEL_PX) e nas escalas extras (nível 0). */
-interface TplSet { patch: Plane; levels: Tpl[]; scaled: { s: number; t: Tpl }[] }
+/**
+ * Molde de uma escala: por nível da pirâmide (até o lado menor ficar < MIN_LEVEL_PX) e as células do nível 0 para o
+ * teste de rigidez (células de ~CELL_PX; só as com textura contam).
+ */
+interface TplSet { scale: number; levels: Tpl[]; cells: { x: number; y: number; t: Tpl }[] }
 const MIN_LEVEL_PX = 6
 /** Lado mínimo do molde (px da análise). */
 const MIN_TPL_PX = 8
+/** Lado aproximado das células do teste de rigidez (px da análise). */
+const CELL_PX = 16
 
-function tplSet(patch: Plane, scales: number[]): TplSet {
-  const levels: Tpl[] = [normalized(patch)]
-  let p = patch
+function tplSet(patch: Plane, scale: number): TplSet {
+  const base = scale === 1 ? patch : resize(patch, Math.max(MIN_LEVEL_PX, Math.round(patch.w * scale)), Math.max(MIN_LEVEL_PX, Math.round(patch.h * scale)))
+  const levels: Tpl[] = [normalized(base)]
+  let p = base
   while (Math.min(Math.floor(p.w / 2), Math.floor(p.h / 2)) >= MIN_LEVEL_PX && levels.length < 4) {
     p = half(p)
     levels.push(normalized(p))
   }
-  const scaled = scales.filter((s) => s !== 1).map((s) => ({ s, t: normalized(resize(patch, Math.max(MIN_LEVEL_PX, Math.round(patch.w * s)), Math.max(MIN_LEVEL_PX, Math.round(patch.h * s)))) }))
-  return { patch, levels, scaled }
+  // células de ~CELL_PX (3–6 colunas, 1–4 linhas): pequenas o bastante para caírem inteiras dentro do conteúdo
+  const cols = Math.min(6, Math.max(3, Math.round(base.w / CELL_PX))), rows = Math.min(4, Math.max(1, Math.round(base.h / CELL_PX)))
+  const cells: { x: number; y: number; t: Tpl }[] = []
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const x = Math.floor((i * base.w) / cols), y = Math.floor((j * base.h) / rows)
+    const c = crop(base, x, y, Math.floor(((i + 1) * base.w) / cols) - x, Math.floor(((j + 1) * base.h) / rows) - y)
+    if (c.w >= 4 && c.h >= 4 && std(c) >= RIGID_MIN_STD) cells.push({ x, y, t: normalized(c) })
+  }
+  return { scale, levels, cells }
 }
 
 // ---------------------------------------------------------------- rastreador
@@ -232,53 +258,62 @@ function tplSet(patch: Plane, scales: number[]): TplSet {
 export interface Tracker {
   readonly opts: TrackOpts
   readonly box: TrackBox
-  /** Canto superior esquerdo inteiro do molde no quadro inicial (px da análise). */
-  readonly tx0: number
-  readonly ty0: number
-  readonly orig: TplSet
-  readonly cur: TplSet
-  /** Centro atual (perdido: o último confiante). */
+  /** Centro do molde (escala 1) no quadro inicial, px da análise; centro relatado = centro na imagem − (c0 − box). */
+  readonly c0x: number
+  readonly c0y: number
+  /** Trecho original (escala 1) e o molde na escala atual. */
+  readonly patch: Plane
+  readonly set: TplSet
+  /** Centro atual (perdido: o último confiante, segurado). */
   readonly pos: { x: number; y: number }
   readonly scale: number
-  readonly radius: number
+  /** Movimento por quadro entre os dois últimos quadros 'ok' seguidos (px da análise); null = desconhecido. */
+  readonly v: { x: number; y: number } | null
+  readonly lastOk: boolean
   readonly lost: boolean
+  /** Quadros perdidos seguidos e o alcance da cobertura (raio, px da análise) do último. */
+  readonly lostFrames: number
   readonly reach: number
+  /** Recuperação: o 1º quadro que passou nas condições (precisa de um 2º consistente antes de encolher). */
+  readonly pending: { x: number; y: number } | null
 }
 
-interface Found { x: number; y: number; scale: number; score: number; u: number; v: number }
+/** Pico de NCC refinado no nível 0: canto (u, v) inteiro e centro na imagem (px da análise). */
+interface Peak { u: number; v: number; ix: number; iy: number; s: number }
 
-const TOP_K = 3
+/** Candidatos do nível grosso refinados (os melhores até 0,3 abaixo do melhor): o 1º e os que podem empatar com ele. */
+const MAX_CANDS = 5
+const COARSE_SPREAD = 0.3
 /** Passos da subida 3×3 em cada nível do refinamento. */
 const HILL_STEPS = 4
 
-/** Melhor posição do molde na janela de raio r (Chebyshev, em px da análise) em volta de tr.pos. */
-function locate(tr: Tracker, img: GrayImage, r: number): Found | null {
-  const set = tr.cur
+/**
+ * Picos de NCC do molde com o CENTRO na janela de raio r (Chebyshev) em volta de (icx, icy) — px da imagem da análise.
+ * Pirâmide só da região da busca (custo proporcional à janela); busca exaustiva no nível grosso (a janela cabe em ~12
+ * px nele), os MAX_CANDS melhores máximos locais refinados por subida 3×3 por nível até o nível 0 (só dentro da janela).
+ * Saída ordenada pelo NCC, sem repetidos: um pico a menos de meio molde (nos dois eixos) de um melhor é o mesmo pico.
+ * `L0`: o nível 0 do recorte (para o subpixel e as sondas de escala).
+ */
+function findPeaks(set: TplSet, img: GrayImage, icx: number, icy: number, r: number): { peaks: Peak[]; L0: Level | null } {
   const t0 = set.levels[0]
-  // nível grosso: a janela cabe em ~12 px nele (e o molde ainda tem ≥ MIN_LEVEL_PX)
+  if (t0.w > img.width || t0.h > img.height) return { peaks: [], L0: null }
   let top = 0
   while (top < set.levels.length - 1 && r / 2 ** top > 12) top++
   const k = 2 ** top
-  // canto previsto (nível 0): centro − meio molde, com o deslocamento desde o quadro inicial
-  const cu0 = tr.tx0 + (tr.pos.x - tr.box.x), cv0 = tr.ty0 + (tr.pos.y - tr.box.y)
+  const cu0 = icx - t0.w / 2, cv0 = icy - t0.h / 2
   const uMin = Math.max(0, Math.ceil(cu0 - r)), uMax = Math.min(img.width - t0.w, Math.floor(cu0 + r))
   const vMin = Math.max(0, Math.ceil(cv0 - r)), vMax = Math.min(img.height - t0.h, Math.floor(cv0 + r))
-  if (uMin > uMax || vMin > vMax) return null
-  // pirâmide só da região da busca (custo por quadro proporcional à janela, não ao quadro): janela + molde (o maior das
-  // escalas) + margem para o refinamento e o subpixel; o canto alinhado a 2^top. Fora do recorte, score = −∞ (a busca
-  // do nível 0 fica sempre dentro da janela, que o recorte contém)
-  const m = 3 * k + 2
-  const big = Math.max(t0.w, ...set.scaled.map((x) => x.t.w)), bigH = Math.max(t0.h, ...set.scaled.map((x) => x.t.h))
+  if (uMin > uMax || vMin > vMax) return { peaks: [], L0: null }
+  // recorte: janela + molde + margem do refinamento, do subpixel e das sondas de escala (moldes um pouco maiores)
+  const m = 3 * k + 10
   const rx0 = Math.max(0, Math.floor((uMin - m) / k) * k), ry0 = Math.max(0, Math.floor((vMin - m) / k) * k)
-  const rx1 = Math.min(img.width, uMax + big + m + k), ry1 = Math.min(img.height, vMax + bigH + m + k)
+  const rx1 = Math.min(img.width, uMax + t0.w + m + k), ry1 = Math.min(img.height, vMax + t0.h + m + k)
   const pyr = pyramid(crop({ w: img.width, h: img.height, d: img.data }, rx0, ry0, rx1 - rx0, ry1 - ry0), top, rx0, ry0)
-  const L0 = pyr[0]
-  // busca exaustiva no nível grosso: os TOP_K melhores máximos locais
   const T = set.levels[top], L = pyr[top]
   const gu0 = Math.max(L.ox, Math.floor(uMin / k)), gu1 = Math.min(L.ox + L.w - T.w, Math.ceil(uMax / k))
   const gv0 = Math.max(L.oy, Math.floor(vMin / k)), gv1 = Math.min(L.oy + L.h - T.h, Math.ceil(vMax / k))
   const gw = gu1 - gu0 + 1, gh = gv1 - gv0 + 1
-  let cands: { u: number; v: number; s: number }[] = []
+  const coarse: { u: number; v: number; s: number }[] = []
   if (gw > 0 && gh > 0) {
     const grid = new Float32Array(gw * gh)
     for (let v = gv0; v <= gv1; v++) for (let u = gu0; u <= gu1; u++) grid[(v - gv0) * gw + (u - gu0)] = ncc(L, T, u, v)
@@ -289,26 +324,20 @@ function locate(tr: Tracker, img: GrayImage, r: number): Found | null {
         for (let dj = -1; dj <= 1 && peak; dj++) for (let di = -1; di <= 1; di++) {
           if ((di || dj) && i + di >= 0 && i + di < gw && j + dj >= 0 && j + dj < gh && grid[(j + dj) * gw + i + di] > s) { peak = false; break }
         }
-        if (!peak) continue
-        cands.push({ u: i + gu0, v: j + gv0, s })
-        if (cands.length > TOP_K) {
-          cands.sort((a, b) => b.s - a.s)
-          cands = cands.slice(0, TOP_K)
-        }
+        if (peak) coarse.push({ u: i + gu0, v: j + gv0, s })
       }
     }
   }
-  // refinamento por nível (subida 3×3 a partir do ponto dobrado, até ±HILL_STEPS); no nível 0, só dentro da janela.
-  // Candidatos bem piores que o melhor do nível grosso não são refinados.
-  const coarseBest = cands.reduce((a, c) => Math.max(a, c.s), -Infinity)
-  let best: { u: number; v: number; s: number } | null = null
+  coarse.sort((a, b) => b.s - a.s)
+  const cands = coarse.filter((c, i) => i < MAX_CANDS && c.s >= (coarse[0]?.s ?? 0) - COARSE_SPREAD)
+  const refined: Peak[] = []
   for (const c of cands) {
-    if (c.s < coarseBest - 0.25) continue
     let u = c.u, v = c.v, s = c.s
     for (let l = top - 1; l >= 0; l--) {
       const Tl = set.levels[l], Ll = pyr[l]
       const lo = l === 0 ? { u: uMin, v: vMin } : { u: Ll.ox, v: Ll.oy }
       const hi = l === 0 ? { u: uMax, v: vMax } : { u: Ll.ox + Ll.w - Tl.w, v: Ll.oy + Ll.h - Tl.h }
+      if (lo.u > hi.u || lo.v > hi.v) { s = -Infinity; break }
       const seen = new Map<number, number>()
       const score = (uu: number, vv: number): number => {
         if (uu < lo.u || uu > hi.u || vv < lo.v || vv > hi.v) return -Infinity
@@ -317,9 +346,7 @@ function locate(tr: Tracker, img: GrayImage, r: number): Found | null {
         if (sc === undefined) seen.set(key, (sc = ncc(Ll, Tl, uu, vv)))
         return sc
       }
-      // ponto de partida dentro dos limites
       let cu = Math.min(hi.u, Math.max(lo.u, 2 * u)), cv = Math.min(hi.v, Math.max(lo.v, 2 * v))
-      if (lo.u > hi.u || lo.v > hi.v) { s = -Infinity; break }
       let cs = score(cu, cv)
       for (let step = 0; step < HILL_STEPS; step++) {
         let nu = cu, nv = cv, ns = cs
@@ -333,41 +360,153 @@ function locate(tr: Tracker, img: GrayImage, r: number): Found | null {
       u = cu; v = cv; s = cs
     }
     if (top === 0 && (u < uMin || u > uMax || v < vMin || v > vMax)) continue
-    if (s > -Infinity && (!best || s > best.s)) best = { u, v, s }
+    if (s > -Infinity) refined.push({ u, v, ix: u + t0.w / 2, iy: v + t0.h / 2, s })
   }
-  if (!best) return null
-  // subpixel (parábola em x e em y) com o molde de escala 1
-  const sub = (l: number, c: number, rr: number): number => {
-    const den = l - 2 * c + rr
-    return den < 0 ? Math.max(-0.5, Math.min(0.5, (l - rr) / (2 * den))) : 0
-  }
-  const at = (u: number, v: number, t: Tpl): number | null => (u >= L0.ox && v >= L0.oy && u <= L0.ox + L0.w - t.w && v <= L0.oy + L0.h - t.h ? ncc(L0, t, u, v) : null)
-  const refine = (u: number, v: number, s: number, t: Tpl): { ox: number; oy: number } => {
-    const l = at(u - 1, v, t), rr = at(u + 1, v, t), up = at(u, v - 1, t), dn = at(u, v + 1, t)
-    return { ox: l !== null && rr !== null ? sub(l, s, rr) : 0, oy: up !== null && dn !== null ? sub(up, s, dn) : 0 }
-  }
-  // centro do molde de escala 1 no quadro inicial: tx0 + w/2 (≈ box.x); deslocamento = canto − canto inicial
-  let out: Found
-  {
-    const o = refine(best.u, best.v, best.s, t0)
-    out = { x: tr.box.x + (best.u + o.ox - tr.tx0), y: tr.box.y + (best.v + o.oy - tr.ty0), scale: 1, score: best.s, u: best.u, v: best.v }
-  }
-  // escalas extras: em volta do centro achado (±2 px), molde reamostrado
-  for (const { s: sc, t } of set.scaled) {
-    const cx = best.u + t0.w / 2, cy = best.v + t0.h / 2
-    const u0 = Math.round(cx - t.w / 2), v0 = Math.round(cy - t.h / 2)
-    let bs = -Infinity, bu = u0, bv = v0
-    for (let dv = -2; dv <= 2; dv++) for (let du = -2; du <= 2; du++) {
-      const sc2 = at(u0 + du, v0 + dv, t)
-      if (sc2 !== null && sc2 > bs) { bs = sc2; bu = u0 + du; bv = v0 + dv }
-    }
-    if (!(bs > out.score)) continue
-    const o = refine(bu, bv, bs, t)
-    // centro deste molde = canto + meio molde dele; o do molde de escala 1 no início = tx0 + w/2
-    out = { x: tr.box.x + (bu + o.ox + t.w / 2 - (tr.tx0 + t0.w / 2)), y: tr.box.y + (bv + o.oy + t.h / 2 - (tr.ty0 + t0.h / 2)), scale: sc, score: bs, u: bu, v: bv }
-  }
-  return out
+  refined.sort((a, b) => b.s - a.s)
+  const peaks: Peak[] = []
+  for (const p of refined) if (!peaks.some((q) => Math.abs(q.u - p.u) < t0.w / 2 && Math.abs(q.v - p.v) < t0.h / 2)) peaks.push(p)
+  return { peaks, L0: pyr[0] }
 }
+
+/** Pico com subpixel e escala estimada; [lo, hi] = escalas que a sonda não separa da estimada (incerteza não resolvida). */
+interface Found { ix: number; iy: number; score: number; scale: number; lo: number; hi: number; set: TplSet }
+
+/** Passos da subida em escala (cada um de scaleStep) por quadro, e o ganho de NCC mínimo para dar um passo. */
+const SCALE_STEPS = 4
+const SCALE_GAIN = 0.003
+
+/**
+ * Subpixel e escala do pico (R20): a escala sobe/desce em passos de scaleStep a partir da atual enquanto o NCC melhora
+ * pelo menos SCALE_GAIN (até SCALE_STEPS; sem o ganho, fica — sem deriva: o molde reamostrado é um pouco mais suave e
+ * uma estimativa contínua acumularia esse viés); o molde é refeito na escala escolhida e a posição achada de novo (±2
+ * px, subpixel). As sondas vizinhas que ficam a menos de SCALE_GAIN da escolhida são incerteza não resolvida: [lo, hi]
+ * (a região normal usa hi e o buraco do invertido usa lo, mais meio passo de folga em trackToKeys).
+ */
+function refinePeak(tr: Tracker, L0: Level, p: Peak): Found {
+  const step = tr.opts.scaleStep
+  const at = (u: number, v: number, t: Tpl): number | null => (u >= L0.ox && v >= L0.oy && u <= L0.ox + L0.w - t.w && v <= L0.oy + L0.h - t.h ? ncc(L0, t, u, v) : null)
+  /** Melhor casamento do molde t centrado no centro do pico: subida 3×3 (até ±2 px). */
+  const near = (t: Tpl): { u: number; v: number; s: number } => {
+    const u0 = Math.round(p.ix - t.w / 2), v0 = Math.round(p.iy - t.h / 2)
+    let bu = u0, bv = v0, bs = at(u0, v0, t) ?? -Infinity
+    for (let step = 0; step < 2; step++) {
+      let nu = bu, nv = bv, ns = bs
+      for (let dv = -1; dv <= 1; dv++) for (let du = -1; du <= 1; du++) {
+        if (!du && !dv) continue
+        const sc = at(bu + du, bv + dv, t)
+        if (sc !== null && sc > ns) { ns = sc; nu = bu + du; nv = bv + dv }
+      }
+      if (nu === bu && nv === bv) break
+      bu = nu; bv = nv; bs = ns
+    }
+    return { u: bu, v: bv, s: bs }
+  }
+  const clampS = (x: number): number => Math.min(MAX_SCALE, Math.max(MIN_SCALE, x))
+  const memo = new Map<number, number>()
+  const evalS = (sc: number): number => {
+    const key = Math.round(sc * 1e5)
+    let r = memo.get(key)
+    if (r === undefined) memo.set(key, (r = sc === tr.scale ? Math.max(p.s, near(tr.set.levels[0]).s) : near(tplLevel0(tr.patch, sc)).s))
+    return r
+  }
+  let sc = tr.scale
+  for (let i = 0; i < SCALE_STEPS; i++) {
+    const c = evalS(sc), up = evalS(clampS(sc * (1 + step))), dn = evalS(clampS(sc * (1 - step)))
+    if (up >= c + SCALE_GAIN && up >= dn) sc = clampS(sc * (1 + step))
+    else if (dn >= c + SCALE_GAIN) sc = clampS(sc * (1 - step))
+    else break
+  }
+  const best = evalS(sc)
+  const tied = [clampS(sc * (1 - step)), sc, clampS(sc * (1 + step))].filter((x) => evalS(x) >= best - SCALE_GAIN)
+  const set = sc === tr.scale ? tr.set : tplSet(tr.patch, sc)
+  const t = set.levels[0]
+  const b = near(t)
+  const ix = b.u + subpix(at(b.u - 1, b.v, t), b.s, at(b.u + 1, b.v, t)) + t.w / 2
+  const iy = b.v + subpix(at(b.u, b.v - 1, t), b.s, at(b.u, b.v + 1, t)) + t.h / 2
+  return { ix, iy, score: b.s, scale: set.scale, lo: Math.min(...tied), hi: Math.max(...tied), set }
+}
+
+/** Vértice da parábola por três NCC vizinhos (−0,5…0,5); 0 sem os vizinhos ou sem máximo. */
+function subpix(l: number | null, c: number, r: number | null): number {
+  if (l === null || r === null) return 0
+  const den = l - 2 * c + r
+  return den < 0 ? Math.max(-0.5, Math.min(0.5, (l - r) / (2 * den))) : 0
+}
+
+/** Só o nível 0 do molde na escala s (sondas); memorizado por trecho original e escala (a escala muda pouco). */
+const probeCache = new WeakMap<Plane, Map<number, Tpl>>()
+function tplLevel0(patch: Plane, s: number): Tpl {
+  let m = probeCache.get(patch)
+  if (!m) probeCache.set(patch, (m = new Map()))
+  const key = Math.round(s * 1e6)
+  let t = m.get(key)
+  if (!t) {
+    if (m.size > 64) m.clear()
+    m.set(key, (t = normalized(s === 1 ? patch : resize(patch, Math.max(MIN_LEVEL_PX, Math.round(patch.w * s)), Math.max(MIN_LEVEL_PX, Math.round(patch.h * s))))))
+  }
+  return t
+}
+
+/**
+ * Resíduo (px) de uma célula com textura no ajuste translação + escala acima do qual ela discorda; não rígido = pelo
+ * menos 2 células discordam (1 se houver ≤ 3) — uma célula sozinha pode errar o subpixel numa textura quase 1-D
+ * (abertura).
+ */
+const RIGID_TOL_PX = 0.75
+/** Textura mínima (desvio-padrão, níveis de cinza) para uma célula contar no teste de rigidez. */
+const RIGID_MIN_STD = 6
+
+/**
+ * Rigidez (R19): cada célula com textura do molde é procurada (subida 3×3, até ±2 px) em volta do lugar que o
+ * casamento dá a ela (subpixel). Os desvios d_i são ajustados por mínimos quadrados a d = a + k·r_i (translação a, variação de
+ * escala k, r_i = centro da célula em relação ao centro do molde). Células que discordam (RIGID_TOL_PX) → não rígido:
+ * dois movimentos dentro da região (folgada sobre fundo parado, conteúdo que muda por dentro) — nenhuma
+ * translação/escala única cobre os dois, e o quadro é tratado como perda. Só decide; posição e escala ficam as de
+ * refinePeak.
+ */
+function rigid(L0: Level, f: Found): boolean {
+  const t = f.set.levels[0]
+  const u0 = f.ix - t.w / 2, v0 = f.iy - t.h / 2
+  const pts: { rx: number; ry: number; ox: number; oy: number }[] = []
+  for (const c of f.set.cells) {
+    const cu = Math.round(u0 + c.x), cv = Math.round(v0 + c.y)
+    const fu = u0 + c.x - cu, fv = v0 + c.y - cv // posição esperada (subpixel) relativa ao inteiro
+    const sc = (du: number, dv: number): number | null => {
+      const u = cu + du, v = cv + dv
+      return u >= L0.ox && v >= L0.oy && u <= L0.ox + L0.w - c.t.w && v <= L0.oy + L0.h - c.t.h ? ncc(L0, c.t, u, v) : null
+    }
+    // subida 3×3 a partir do lugar esperado (até ±2 px)
+    let bu = 0, bv = 0, bs = sc(0, 0) ?? -Infinity
+    for (let step = 0; step < 2; step++) {
+      let nu = bu, nv = bv, ns = bs
+      for (let dv = -1; dv <= 1; dv++) for (let du = -1; du <= 1; du++) {
+        if (!du && !dv) continue
+        const x = sc(bu + du, bv + dv)
+        if (x !== null && x > ns) { ns = x; nu = bu + du; nv = bv + dv }
+      }
+      if (nu === bu && nv === bv) break
+      bu = nu; bv = nv; bs = ns
+    }
+    if (bs === -Infinity) continue
+    const ox = bu + subpix(sc(bu - 1, bv), bs, sc(bu + 1, bv)) - fu, oy = bv + subpix(sc(bu, bv - 1), bs, sc(bu, bv + 1)) - fv
+    pts.push({ rx: c.x + c.t.w / 2 - t.w / 2, ry: c.y + c.t.h / 2 - t.h / 2, ox, oy })
+  }
+  if (pts.length === 0) return true
+  const n = pts.length
+  let mrx = 0, mry = 0, mox = 0, moy = 0
+  for (const q of pts) { mrx += q.rx / n; mry += q.ry / n; mox += q.ox / n; moy += q.oy / n }
+  let num = 0, den = 0
+  for (const q of pts) {
+    num += (q.rx - mrx) * (q.ox - mox) + (q.ry - mry) * (q.oy - moy)
+    den += (q.rx - mrx) ** 2 + (q.ry - mry) ** 2
+  }
+  const k = den > 1e-9 ? num / den : 0
+  const ax = mox - k * mrx, ay = moy - k * mry
+  const off = pts.filter((q) => Math.hypot(q.ox - ax - k * q.rx, q.oy - ay - k * q.ry) > RIGID_TOL_PX).length
+  return off < (n <= 3 ? 1 : 2)
+}
+
+const MIN_SCALE = 0.25, MAX_SCALE = 4
 
 /** Começa o rastreamento no 1º quadro com o molde na caixa `box` (px da análise). EditError: região inválida. */
 export function startTracker(first: GrayImage, box: TrackBox, tUs: Us, opts: Partial<TrackOpts> = {}): { tracker: Tracker; result: TrackResult } {
@@ -377,36 +516,74 @@ export function startTracker(first: GrayImage, box: TrackBox, tUs: Us, opts: Par
   if (x1 - x0 < MIN_TPL_PX || y1 - y0 < MIN_TPL_PX) throw new EditError('invalid', 'A região é pequena demais (ou está fora do quadro) para seguir o conteúdo: aumente-a sobre o que deve ser escondido.')
   const patch = crop({ w: first.width, h: first.height, d: first.data }, x0, y0, x1 - x0, y1 - y0)
   if (std(patch) < o.minStd) throw new EditError('invalid', 'A região está sobre uma área lisa, sem detalhe para seguir: posicione-a sobre o conteúdo a esconder.')
-  const set = tplSet(patch, o.scales)
-  const tracker: Tracker = { opts: o, box, tx0: x0, ty0: y0, orig: set, cur: set, pos: { x: box.x, y: box.y }, scale: 1, radius: o.searchPx, lost: false, reach: 0 }
-  return { tracker, result: { tUs, x: box.x, y: box.y, w: box.w, h: box.h, scale: 1, confidence: 1, state: 'ok', reach: 0 } }
+  const tracker: Tracker = {
+    opts: o, box, c0x: x0 + patch.w / 2, c0y: y0 + patch.h / 2, patch, set: tplSet(patch, 1),
+    pos: { x: box.x, y: box.y }, scale: 1, v: null, lastOk: true, lost: false, lostFrames: 0, reach: 0, pending: null
+  }
+  return { tracker, result: { tUs, x: box.x, y: box.y, w: box.w, h: box.h, scale: 1, scaleLo: 1, scaleHi: 1, confidence: 1, state: 'ok', reach: 0 } }
 }
 
-/** Um quadro: procura o conteúdo, decide confiança/perda/recuperação e devolve o novo estado. */
+/**
+ * Um quadro (rulings R19/R20; ver o topo do arquivo): 'ok' só com confiança alta, sem ambiguidade, dentro do portão de
+ * movimento e rígido; senão 'weak'/'lost' com a geometria da perda (posição segurada, cobertura crescendo). A
+ * recuperação passa pelo caminho guardado (portão em volta da previsão segurada, nenhum pico ambíguo na área coberta,
+ * caixa nova ⊆ cobertura, confirmação por um 2º quadro).
+ */
 export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Tracker; result: TrackResult } {
   const o = tr.opts
-  const r = tr.radius
   const maxR = o.maxSearchPx ?? Math.max(img.width, img.height)
-  const f = locate(tr, img, r)
-  const conf = Math.max(0, Math.min(1, f?.score ?? 0))
-  const res = (x: number, y: number, scale: number, state: TrackState, reach: number): TrackResult => ({ tUs, x, y, w: tr.box.w * scale, h: tr.box.h * scale, scale, confidence: conf, state, reach })
-  const accept = f && (tr.lost ? conf >= o.recoverAbove : conf >= o.lostBelow)
-  if (f && accept) {
-    const ok = conf >= o.recoverAbove
-    let cur = tr.lost ? tr.orig : tr.cur
-    if (o.updateRate > 0 && ok && conf >= o.updateAbove && f.scale === 1) {
-      const fresh = crop({ w: img.width, h: img.height, d: img.data }, f.u, f.v, cur.patch.w, cur.patch.h)
-      const d = new Float32Array(fresh.d.length)
-      for (let i = 0; i < d.length; i++) d[i] = (1 - o.updateRate) * cur.patch.d[i] + o.updateRate * fresh.d[i]
-      cur = tplSet({ w: fresh.w, h: fresh.h, d }, o.scales)
-    }
-    const next: Tracker = { ...tr, cur, pos: { x: f.x, y: f.y }, scale: f.scale, radius: ok ? o.searchPx : Math.min(maxR, r * 1.5), lost: false, reach: 0 }
-    return { tracker: next, result: res(f.x, f.y, f.scale, ok ? 'ok' : 'weak', 0) }
+  const offX = tr.c0x - tr.box.x, offY = tr.c0y - tr.box.y
+  const vx = tr.v?.x ?? 0, vy = tr.v?.y ?? 0, vlen = Math.hypot(vx, vy)
+  const res = (x: number, y: number, scale: number, lo: number, hi: number, state: TrackState, reach: number, confidence: number): TrackResult => ({ tUs, x, y, w: tr.box.w * scale, h: tr.box.h * scale, scale, scaleLo: lo, scaleHi: hi, confidence, state, reach })
+  const accept = (f: Found): { tracker: Tracker; result: TrackResult } => {
+    const x = f.ix - offX, y = f.iy - offY
+    // movimento recente: só entre dois quadros 'ok' seguidos
+    const v = tr.lastOk && !tr.lost ? { x: x - tr.pos.x, y: y - tr.pos.y } : tr.v
+    const next: Tracker = { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v, lastOk: true, lost: false, lostFrames: 0, reach: 0, pending: null }
+    return { tracker: next, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
   }
-  // perda: segura a última posição confiante; a janela desta busca entra no alcance e cresce para o próximo quadro
-  const reach = Math.max(tr.lost ? tr.reach : 0, r)
-  const next: Tracker = { ...tr, cur: tr.orig, radius: Math.min(maxR, r * o.growth), lost: true, reach }
-  return { tracker: next, result: res(tr.pos.x, tr.pos.y, tr.scale, 'lost', reach) }
+  // incerto ('weak': há um pico plausível, mas abaixo de recoverAbove) e perdido têm a MESMA geometria: posição
+  // segurada e cobertura crescendo; só a cor da faixa muda
+  const lose = (reach: number, conf: number, pending: { x: number; y: number } | null, plausible: boolean): { tracker: Tracker; result: TrackResult } => {
+    const next: Tracker = { ...tr, lost: true, lastOk: false, lostFrames: tr.lostFrames + 1, reach, pending }
+    return { tracker: next, result: res(tr.pos.x, tr.pos.y, tr.scale, tr.scale, tr.scale, plausible && conf >= o.lostBelow ? 'weak' : 'lost', reach, conf) }
+  }
+
+  if (!tr.lost) {
+    const px = tr.pos.x + vx, py = tr.pos.y + vy
+    const { peaks, L0 } = findPeaks(tr.set, img, px + offX, py + offY, o.searchPx)
+    const best = peaks[0]
+    // a janela buscada é centrada na previsão: a cobertura da perda parte de lá (centro segurado + |v| + janela)
+    const reach0 = Math.min(maxR, o.searchPx + Math.max(Math.abs(vx), Math.abs(vy)))
+    if (!best || !L0) return lose(reach0, 0, null, false)
+    const f0 = refinePeak(tr, L0, best)
+    const conf = Math.max(0, Math.min(1, f0.score))
+    const ambiguous = peaks.length > 1 && peaks[1].s >= best.s - o.ambiguityMargin
+    const d = Math.hypot(f0.ix - offX - px, f0.iy - offY - py)
+    const gate = tr.v ? 2 * o.gateMinPx + 2 * vlen : Infinity
+    if (!ambiguous && conf >= o.recoverAbove && d <= gate && rigid(L0, f0)) return accept(f0)
+    // incerto só se o pico plausível está perto da previsão (portão mínimo): longe dela, é perda mesmo
+    return lose(reach0, conf, null, !ambiguous && d <= o.gateMinPx)
+  }
+
+  // perdido: cobertura crescendo em volta da posição segurada; procura em toda ela (ambiguidade) e recupera só no portão
+  const reach = Math.min(maxR, tr.reach * o.growth)
+  const k = tr.lostFrames + 1
+  const gx = tr.pos.x + vx * k, gy = tr.pos.y + vy * k
+  // o erro da previsão cresce com os quadros perdidos (movimento desconhecido ou mudando): o portão também, até a janela
+  const gateRec = Math.min(o.searchPx, 2 * o.gateMinPx + k * (o.gateMinPx + 0.5 * vlen))
+  const { peaks, L0 } = findPeaks(tr.set, img, tr.pos.x + offX, tr.pos.y + offY, reach)
+  const cand = peaks.find((p) => Math.hypot(p.ix - offX - gx, p.iy - offY - gy) <= gateRec)
+  if (!cand || !L0) return lose(reach, peaks[0] ? Math.max(0, peaks[0].s) : 0, null, false)
+  const f0 = refinePeak(tr, L0, cand)
+  const conf = Math.max(0, Math.min(1, f0.score))
+  const ambiguous = peaks.some((p) => p !== cand && p.s >= cand.s - o.ambiguityMargin)
+  const x = f0.ix - offX, y = f0.iy - offY
+  const inside = Math.max(Math.abs(x - tr.pos.x), Math.abs(y - tr.pos.y)) <= reach
+  if (ambiguous || conf < o.recoverAbove || !inside || !rigid(L0, f0)) return lose(reach, conf, null, !ambiguous && inside)
+  // confirmação: um 2º quadro seguido, no mesmo lugar (± o portão mínimo + o movimento)
+  if (!tr.pending || Math.hypot(x - tr.pending.x, y - tr.pending.y) > 2 * o.gateMinPx + vlen) return lose(reach, conf, { x, y }, true)
+  return accept(f0)
 }
 
 /** Rastreia uma sequência de quadros (o 1º define o molde). */
@@ -484,15 +661,19 @@ export function layersBelowEffect(layers: Layer[], fxId: string): Layer[] {
   return i < 0 ? layers : layers.slice(0, i)
 }
 
-/** Projeto dos quadros de análise: o efeito (mesmo desativado, ou numa faixa oculta) entra no resolve para o corte. */
+/**
+ * Projeto dos quadros de análise: o efeito (mesmo desativado, ou numa faixa oculta) entra no resolve para o corte. Faixa
+ * oculta: só o efeito volta a aparecer — os outros itens dela continuam fora (não são desenhados de verdade).
+ */
 export function trackingProject(p: Project, fxId: string): Project {
   const f = findItem(p, fxId)
   if (!f || (f.item.enabled !== false && !f.track.hidden)) return p
+  const fx = (({ enabled: _e, ...rest }) => rest)(f.item) as Item
   return {
     ...p,
     tracks: p.tracks.map((t, i) => {
       if (i !== f.trackIndex) return t
-      return { ...t, hidden: false, items: t.items.map((it) => (it.id === fxId ? (({ enabled: _e, ...rest }) => rest)(it) : it)) }
+      return t.hidden ? { ...t, hidden: false, items: [fx] } : { ...t, items: t.items.map((it) => (it.id === fxId ? fx : it)) }
     })
   }
 }
@@ -509,10 +690,8 @@ export function trackingBlocker(p: Project, fxId: string): string | null {
 // ---------------------------------------------------------------- resultado → keys
 
 export interface TrackKeysOpts {
-  /** Incerteza relativa da escala (multiescala: meio passo, ex. 0,05); 0 sem multiescala. */
+  /** Incerteza relativa da escala que vira folga (R20); padrão: meio passo das sondas (DEFAULT_TRACK_OPTS.scaleStep / 2). */
   scaleTol?: number
-  /** Folga extra dos quadros 'weak' (fração do meio-tamanho da região). */
-  weakPadFrac?: number
 }
 
 /** Confiança por quadro (tempo LOCAL ao efeito) para a faixa da timeline. */
@@ -560,16 +739,19 @@ export function trackToKeys(fx: EffectItem, results: readonly TrackResult[], g: 
   const W = g.canvasW, H = g.canvasH
   const kx = W / g.analysisW, ky = H / g.analysisH
   const unit = Math.max(kx, ky) // 1 px da análise no quadro
-  const scaleTol = o.scaleTol ?? 0, weakPad = o.weakPadFrac ?? 0.25
+  const scaleTol = o.scaleTol ?? DEFAULT_TRACK_OPTS.scaleStep / 2
   const shape = fx.region.shape
   const a = results[0].tUs - fx.startUs
   const R0 = valuesAt(fx.region, a)
   const r0 = results[0]
   const n = results.length
-  const conf = (i: number): boolean => i >= 0 && i < n && results[i].state !== 'lost'
-  const placed = (r: TrackResult): RegionValues => ({ x: R0.x + (r.x - r0.x) / g.analysisW, y: R0.y + (r.y - r0.y) / g.analysisH, w: R0.w * r.scale, h: R0.h * r.scale, rotation: R0.rotation })
-  const disp = (p: TrackResult, q: TrackResult): number => Math.hypot((p.x - q.x) * kx, (p.y - q.y) * ky)
+  const conf = (i: number): boolean => i >= 0 && i < n && results[i].state === 'ok'
+  // escala do tamanho: a maior das empatadas (normal, cobre mais) / a menor (invertido, buraco menor) — R20
+  const sz = (r: TrackResult): number => (fx.invert ? (r.scaleLo ?? r.scale) : (r.scaleHi ?? r.scale))
+  const placed = (r: TrackResult): RegionValues => ({ x: R0.x + (r.x - r0.x) / g.analysisW, y: R0.y + (r.y - r0.y) / g.analysisH, w: R0.w * sz(r), h: R0.h * sz(r), rotation: R0.rotation })
   const halfMax = (v: RegionValues): number => Math.max(Math.abs(v.w) * W, Math.abs(v.h) * H) / 2
+  // movimento da borda entre dois quadros: o do centro + o da mudança de escala
+  const disp = (p: TrackResult, q: TrackResult): number => Math.hypot((p.x - q.x) * kx, (p.y - q.y) * ky) + Math.abs(sz(p) - sz(q)) * halfMax(R0)
   const D: number[] = []
   const vals: RegionValues[] = []
   for (let i = 0; i < n; i++) {
@@ -578,7 +760,7 @@ export function trackToKeys(fx: EffectItem, results: readonly TrackResult[], g: 
     let d: number
     if (conf(i)) {
       const neigh = Math.max(conf(i - 1) ? disp(r, results[i - 1]) : 0, conf(i + 1) ? disp(r, results[i + 1]) : 0)
-      d = unit + neigh + scaleTol * halfMax(base) + (r.state === 'weak' ? weakPad * halfMax(base) : 0)
+      d = unit + neigh + scaleTol * halfMax(base)
     } else d = unit + r.reach * Math.hypot(kx, ky) + scaleTol * halfMax(base)
     D.push(d)
     vals.push(fx.invert ? (conf(i) ? (inflate(base, shape, -d, W, H) ?? NO_HOLE) : NO_HOLE) : inflate(base, shape, d, W, H)!)
@@ -590,13 +772,14 @@ export function trackToKeys(fx: EffectItem, results: readonly TrackResult[], g: 
     const t = results[i].tUs - fx.startUs
     if (i > 0 && kind(i) !== kind(i - 1)) {
       const tp = results[i - 1].tUs - fx.startUs
-      if (t - tp >= 3) {
+      // degrau conservador sempre que houver um instante inteiro entre os dois quadros (tp + 1 ≤ t − 1)
+      if (t - tp >= 2) {
         if (fx.invert) samples.push(kind(i) === 'closed' ? { t: tp + 1, v: NO_HOLE } : { t: t - 1, v: NO_HOLE })
         else if (kind(i) === 'grown') samples.push({ t: tp + 1, v: vals[i] })
         else {
           // recuperação: a ampliada (centro segurado) alargada até conter a caixa nova vale até 1 µs antes dela
           const held = results[i - 1], cur = results[i]
-          const need = D[i] + disp(cur, held) + Math.max(0, cur.scale - held.scale) * halfMax(R0)
+          const need = D[i] + disp(cur, held)
           samples.push({ t: t - 1, v: inflate(placed(held), shape, Math.max(D[i - 1], need), W, H)! })
         }
       }

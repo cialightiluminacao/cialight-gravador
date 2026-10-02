@@ -1617,8 +1617,23 @@ export function toggleKeyframes(p: Project, itemId: string, paths: AnimPath[], t
 
 /** Instantes locais (µs) com key em qualquer propriedade do item, ordenados; keys a ±1 µs contam uma vez. */
 export function keyframeTimesUs(item: Item): Us[] {
-  const all = ANIM_PATHS.flatMap((pt) => (getAnim(item, pt)?.keys ?? []).map((k) => k.tUs)).sort((a, b) => a - b)
-  return all.filter((t, i) => i === 0 || t - all[i - 1] > 1)
+  // fusão das listas de cada propriedade (já ordenadas): O(n · propriedades), sem ordenar tudo de novo (curvas densas
+  // do "Seguir conteúdo": um key por quadro em x/y/w/h)
+  let all: Us[] = []
+  for (const pt of ANIM_PATHS) {
+    const ks = getAnim(item, pt)?.keys
+    if (!ks?.length) continue
+    const merged: Us[] = []
+    let i = 0, j = 0
+    while (i < all.length || j < ks.length) {
+      if (j >= ks.length || (i < all.length && all[i] <= ks[j].tUs)) merged.push(all[i++])
+      else merged.push(ks[j++].tUs)
+    }
+    all = merged
+  }
+  const out: Us[] = []
+  for (const t of all) if (out.length === 0 || t - out[out.length - 1] > 1) out.push(t)
+  return out
 }
 
 /** Aplica `fn` a cada propriedade animável do item (draft); null = não muda. Recusa faixa bloqueada. */
