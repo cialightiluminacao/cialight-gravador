@@ -67,6 +67,8 @@ const MSG: Record<ReframeWarningKind, string> = {
 
 /** Curva entre dois pontos de foco (a câmera anda suave). */
 const FOCUS_EASE = 'inOut' as const
+/** Aproximação mínima (pico ÷ base) para um trecho contar como zoom: acima do Ken Burns (1,15), que segue os pontos. */
+const ZOOM_FOCUS_MIN = 1.2
 /** Amostragem mínima das partes assadas (como o desancorar): 60 por segundo. */
 const MIN_SAMPLE_FPS = 60
 
@@ -127,6 +129,15 @@ export function focusToScreen(p: Project, m: MediaItem, f: FocusPoint): { tUs: U
   return cf ? { tUs, ...screenAt(cf, f) } : null
 }
 
+/** O clipe tem zoom (keys de escala com aproximação ≥ ZOOM_FOCUS_MIN): no reenquadrar, o alvo dele manda nesses trechos. */
+export function hasZoomKeys(m: MediaItem): boolean {
+  const s = m.visual?.transform.scale
+  if (!s?.keys?.length) return false
+  const vs = s.keys.map((k) => k.value)
+  const base = Math.min(...vs)
+  return base > 0 && Math.max(...vs) >= base * ZOOM_FOCUS_MIN
+}
+
 /** Clipe principal de cima ativo no instante (o que recebe os pontos de foco no visualizador); null = nenhum. */
 export function mainClipAt(p: Project, tUs: Us): MediaItem | null {
   for (let i = p.tracks.length - 1; i >= 0; i--) {
@@ -171,11 +182,30 @@ function simplifyXY(s: { t: Us; x: number; y: number; r: { x0: number; x1: numbe
 }
 
 /**
+ * Peso do alvo do zoom em cada amostra (escalas em ordem de tempo): trechos contíguos com a escala acima da base (a
+ * menor do clipe) e pico ≥ ZOOM_FOCUS_MIN × base; peso = (s/base − 1)/(pico/base − 1) — 1 na espera do zoom, 0 fora.
+ */
+function zoomWeights(sc: number[]): number[] {
+  const base = Math.min(...sc)
+  const w = sc.map(() => 0)
+  if (!(base > 0)) return w
+  for (let i = 0; i < sc.length; ) {
+    if (sc[i] <= base * (1 + 1e-6)) { i++; continue }
+    let j = i, peak = sc[i]
+    while (j < sc.length && sc[j] > base * (1 + 1e-6)) peak = Math.max(peak, sc[j++])
+    if (peak >= base * ZOOM_FOCUS_MIN) for (let k = i; k < j; k++) w[k] = Math.min(1, (sc[k] / base - 1) / (peak / base - 1))
+    i = j
+  }
+  return w
+}
+
+/**
  * x/y do clipe principal em 'cover' no quadro novo (`q1`: o projeto só com o quadro novo, para a geometria): o ponto de
  * foco no centro, preso à faixa sem bordas (coverRange) em cada instante. Geometria parada (escala, giro, corte sem
  * keys) e pontos do usuário → um key por ponto com Suavizar ambos (exatos: x/y são afins no ponto e a faixa é fixa,
  * então a curva entre dois pontos válidos fica válida). Senão → amostras em cada quadro (e nos keys) simplificadas com
- * keys lineares, a ≤ FIT_TOL do quadro e sempre dentro da faixa.
+ * keys lineares, a ≤ FIT_TOL do quadro e sempre dentro da faixa. Com pontos do usuário e zoom já no clipe: nos trechos
+ * do zoom o foco vai ao alvo dele (zoomWeights) — o detalhe ampliado continua no quadro novo; fora deles, os pontos.
  */
 function focusTransform(p0: Project, q1: Project, m0: MediaItem, points: FocusPoint[]): { x: Anim<number>; y: Anim<number> } {
   const v0 = m0.visual!, t0 = v0.transform, c0 = v0.crop
@@ -226,7 +256,17 @@ function focusTransform(p0: Project, q1: Project, m0: MediaItem, points: FocusPo
     if (l >= D) break
     times.add(l)
   }
-  const samples = [...times].sort((a, b) => a - b).map((l) => ({ t: l, ...desired(l, focusAt(l)), must: must.has(l) }))
+  const ts = [...times].sort((a, b) => a - b)
+  const zw = pts.length ? zoomWeights(ts.map((l) => evalAnim(t0.scale, l))) : null
+  const samples = ts.map((l, i) => {
+    let f = focusAt(l)
+    // trecho de zoom: o alvo dele (o conteúdo no centro do quadro antigo) é o foco; entra e sai junto com a escala
+    if (zw && zw[i] > 0) {
+      const z = contentAt(clipFrameAt(p0, rest0, m0.startUs + l, true)!, 0.5, 0.5)
+      f = { x: f.x + (z.x - f.x) * zw[i], y: f.y + (z.y - f.y) * zw[i] }
+    }
+    return { t: l, ...desired(l, f), must: must.has(l) }
+  })
   const tol = FIT_TOL * Math.max(W1, H1)
   return simplifyXY(samples, tol / W1, tol / H1)
 }

@@ -11,8 +11,8 @@ import { layerBase } from './layerGeometry'
 import { clipFrameAt, effectRegionAt } from './resolve'
 import { parseProject, toDiskProject } from './schema'
 import { frameToUs, itemEndUs } from './time'
-import { applyKenBurns, coversFrame, sourceOf } from './zoom'
-import { focusFromScreen, focusToScreen, mainClipAt, reframeCanvas, reframeName, reframeProject, reframeWindow, type FocusPoint } from './reframe'
+import { applyKenBurns, applyZoom, coversFrame, sourceOf } from './zoom'
+import { focusFromScreen, focusToScreen, hasZoomKeys, mainClipAt, reframeCanvas, reframeName, reframeProject, reframeWindow, type FocusPoint } from './reframe'
 
 const S = 1_000_000
 const vid: Asset = { id: 'v', name: 'tela', kind: 'video', source: { type: 'file', path: 'C:/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 20 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, status: 'ready' }
@@ -125,6 +125,43 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
     }
     expect(maxOff).toBeLessThanOrEqual(0.005 * 1920 + 1e-6)
     expect((m1.visual!.transform.x.keys?.length ?? 0)).toBeGreaterThan(1)
+  })
+
+  it('zoom anterior + ponto de foco: o detalhe do zoom fica no quadro novo durante toda a espera (denso, 1/240 s)', () => {
+    // 2,5× no detalhe (0,25; 0,25) de 3 s a 4,5 s (ida 2,5→3 s, espera 1,5 s, volta até 5 s)
+    const p = applyZoom(single(), 'm', { x: 0.25, y: 0.25, w: 0.4, h: 0.4 }, 2.5 * S, 0.5 * S, 1.5 * S, 'inOut', { clamp: true }).project
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 1 * S, x: 0.7, y: 0.5 }] } })
+    const m1 = mOf(r.project, 'm')
+    const src = sourceOf(r.project, m1)
+    for (let k = 0; k <= 240 * 1.5; k++) {
+      const t = 3 * S + Math.round((k * S) / 240)
+      const s = toScreen(clipFrameAt(r.project, m1, Math.min(t, 4.5 * S))!, 0.25 * 1920, 0.25 * 1080)
+      // dentro do quadro e a ±2 % do centro
+      expect(Math.abs(s.x - 540)).toBeLessThanOrEqual(0.02 * 1080)
+      expect(Math.abs(s.y - 960)).toBeLessThanOrEqual(0.02 * 1920)
+    }
+    // fora do zoom, o ponto do usuário manda (no centro) e nunca aparece borda
+    for (const t of [0, 1 * S, 2 * S, 6 * S, 9 * S]) {
+      const s = toScreen(clipFrameAt(r.project, m1, t)!, 0.7 * 1920, 0.5 * 1080)
+      expect(Math.abs(s.x - 540)).toBeLessThanOrEqual(0.005 * 1920 + 1e-6)
+    }
+    for (let k = 0; k < 300; k++) expect(coversFrame(m1.visual!, src, { w: 1080, h: 1920 }, frameToUs(k, 30))).toBe(true)
+  })
+
+  it('hasZoomKeys: zoom sim, Ken Burns leve e clipe parado não (nota do painel)', () => {
+    expect(hasZoomKeys(mOf(applyZoom(single(), 'm', { x: 0.25, y: 0.25, w: 0.4, h: 0.4 }, 2.5 * S, 0.5 * S, 1.5 * S, 'inOut', { clamp: true }).project, 'm'))).toBe(true)
+    expect(hasZoomKeys(mOf(applyKenBurns(single(), 'm', 'br').project, 'm'))).toBe(false)
+    expect(hasZoomKeys(mOf(single(), 'm'))).toBe(false)
+  })
+
+  it('Ken Burns (aproximação leve) + ponto de foco: o ponto do usuário continua no centro', () => {
+    const p = applyKenBurns(single(), 'm', 'br').project
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.7, y: 0.5 }] } })
+    const m1 = mOf(r.project, 'm')
+    for (const t of [0, 5 * S, 9.9 * S]) {
+      const s = toScreen(clipFrameAt(r.project, m1, t)!, 0.7 * 1920, 0.5 * 1080)
+      expect(Math.abs(s.x - 540)).toBeLessThanOrEqual(0.005 * 1920 + 1e-6)
+    }
   })
 
   it("modo 'contain': fit contain, posição intacta, pontos ignorados", () => {

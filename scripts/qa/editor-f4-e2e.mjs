@@ -3,14 +3,14 @@
 //
 // Gera um vídeo 1920×1080 de 8 s (mídia sintética): fundo liso escuro, um "CPF 123.456" branco parado em (1180, 400)
 // e um quadrado verde (marcador do foco) de 100 px centrado em (1400, 540), logo abaixo do texto (no 9:16 o foco fica
-// no centro também durante o zoom e o texto continua no quadro). No app: cria um projeto pela tela de
+// no centro fora do zoom; durante o zoom, o alvo do zoom fica no centro e o texto continua no quadro). No app: cria um projeto pela tela de
 // Projetos, importa o vídeo e o solta na linha do tempo; desenha (B) um blur sobre o CPF (vinculado ao clipe,
 // intensidade 80); com a ferramenta Zoom (Z: ida 0,5 s, volta depois de 1 s) arrasta o enquadramento 2× em volta do
 // texto aos 2 s → o aviso de privacidade oferece "Ancorar efeito ao clipe", que ancora o blur; no inspetor do vídeo
 // põe Pop na entrada e Desfoque na saída; no editor de curvas (botão direito no losango da escala aos 2 s) arrasta uma
 // alça → curva personalizada (bezier); exporta "Alta 1080p". Depois "Reenquadrar" → 9:16, ponto de foco no marcador,
 // "Criar cópia" (padrão) e exporta a cópia em "Vertical 9:16". Com o ffmpeg: dimensões e durações das duas
-// exportações; o marcador no centro horizontal do 9:16 (fora do zoom); e o texto sob o blur ilegível durante todo o
+// exportações; o marcador no centro do 9:16 fora do zoom e, no meio do zoom, onde o alvo do zoom no centro o leva; e o texto sob o blur ilegível durante todo o
 // zoom (ida com a curva personalizada, parado, volta) nas DUAS exportações — métrica de legibilidade do F2 (contraste
 // local p99−p1 após caixa 3 px < 0,15 × o da fonte; variância do laplaciano < 0,2 × a da fonte), na caixa do texto
 // levada à tela pela região do efeito ancorado no instante (o contorno do visualizador, effectRegionAt).
@@ -470,7 +470,10 @@ async function main() {
 
   const marks = [...OTHER_FRAMES, 90].map((n) => ({ n, blob: greenBlob(frame(outV, n, 'rgb24'), 1080, 1920) }))
   console.log(`  marcador no 9:16: ${JSON.stringify(marks)}`)
-  check('9:16: o marcador (ponto de foco) no centro do quadro (540, 960) ± 4 px, 178 px de lado ± 4, fora do zoom; 356 ± 6 no meio do zoom', marks.every((m) => m.blob && near(m.blob.cx, 540, 4) && near(m.blob.cy, 960, 4) && near(m.blob.w, m.n === 90 ? 355.6 : 177.8, m.n === 90 ? 6 : 4)), marks)
+  // no meio do zoom (2×), o alvo dele (centro do retângulo arrastado) fica no centro do 9:16: o marcador, deslocado dele
+  const K = (1920 / 1080) * 2, zc = [(ZOOM_RECT[0][0] + ZOOM_RECT[1][0]) / 2, (ZOOM_RECT[0][1] + ZOOM_RECT[1][1]) / 2]
+  const at = (m) => (m.n === 90 ? [540 + (1400 - zc[0]) * K, 960 + (540 - zc[1]) * K, 8] : [540, 960, 4])
+  check('9:16: o marcador (ponto de foco) no centro do quadro (540, 960) ± 4 px, 178 px de lado ± 4, fora do zoom; no meio do zoom, o alvo do zoom no centro (marcador deslocado dele ± 8 px), 356 ± 6', marks.every((m) => m.blob && near(m.blob.cx, at(m)[0], at(m)[2]) && near(m.blob.cy, at(m)[1], at(m)[2]) && near(m.blob.w, m.n === 90 ? 355.6 : 177.8, m.n === 90 ? 6 : 4)), marks)
 
   for (const [tag, out, w, h, outl] of [['horizontal', outH, W, H, outlH], ['vertical', outV, 1080, 1920, outlV]]) {
     const rows = legibility(video, out, w, h, rSrc, outl, [...ZOOM_FRAMES, ...OTHER_FRAMES])

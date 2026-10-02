@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
-import { Crop, Crosshair, ShieldCheck, TriangleAlert, X } from 'lucide-react'
+import { Crop, Crosshair, ShieldCheck, TriangleAlert, X, ZoomIn } from 'lucide-react'
 import { toast } from 'sonner'
 import { newProjectId } from '@shared/editor/ids'
 import type { MediaItem, Project } from '@shared/editor/project'
 import { findItem } from '@shared/editor/ops'
-import { mainClipAt, REFRAME_ASPECTS, reframeName, type ReframeAspect, type ReframeWarning } from '@shared/editor/reframe'
+import { hasZoomKeys, mainClipAt, REFRAME_ASPECTS, reframeName, type ReframeAspect, type ReframeWarning } from '@shared/editor/reframe'
 import { formatTimecodeUs } from '@shared/editor/time'
 import { Button } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/primitives'
@@ -201,6 +201,12 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
                     'Não há clipe principal no playhead: mova o playhead para um trecho com vídeo.'
                   )}
                 </p>
+                {target && hasZoomKeys(target) ? (
+                  <p data-reframe-zoom-note="" className="flex gap-2 rounded-xl border border-border bg-bg-2 px-3 py-2 text-[11px] leading-snug text-fg-2">
+                    <ZoomIn className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
+                    <span>Este clipe tem zoom: durante o zoom, o enquadramento segue o alvo dele (o detalhe ampliado continua no quadro); os pontos de foco valem fora do zoom.</span>
+                  </p>
+                ) : null}
                 {groups.length ? (
                   <div className="space-y-2" aria-label="Pontos de foco por clipe">
                     {groups.map((g) => (
