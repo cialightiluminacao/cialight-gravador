@@ -13,11 +13,14 @@ export interface ExportJobSpec {
   /** Intervalo da timeline exportado; o arquivo começa em 0 = fromUs. */
   fromUs: Us
   toUs: Us
-  video: { bitrate: number; hw: HwPref; keyFrameIntervalS: number }
+  /** codec: 'avc' (H.264) ou 'hevc' (só por hardware; MP4 com a tag hvc1). */
+  video: { codec: 'avc' | 'hevc'; bitrate: number; hw: HwPref; keyFrameIntervalS: number }
   /** null: sem faixa de áudio (projeto sem áudio). Codec escolhido no worker: AAC, ou Opus se AAC indisponível. */
   audio: { bitrate: number } | null
   /** Testes: simula falha do encoder de hardware antes do 1º pacote. */
   simulateHwFailure?: boolean
+  /** Testes: simula falha do encoder HEVC antes do 1º pacote (exercita a volta para H.264). */
+  simulateHevcFailure?: boolean
 }
 
 export type RenderIn =

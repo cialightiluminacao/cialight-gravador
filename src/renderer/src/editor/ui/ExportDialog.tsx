@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
-import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAlert, Upload, X } from 'lucide-react'
+import { useEffect, useId, useRef, useState } from 'react'
+import { ChevronDown, CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, SlidersHorizontal, TriangleAlert, Upload, X } from 'lucide-react'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
 import { contentEndUs, findItem } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
 import { planAudio } from '@shared/editor/audioPlan'
+import type { Project } from '@shared/editor/project'
 import { audioProcessIssues } from './audioProcessing'
 import { Button } from '@/components/ui/Button'
-import { Dialog, DialogContent, Progress, Segmented } from '@/components/ui/primitives'
+import { Dialog, DialogContent, Progress, Segmented, Select } from '@/components/ui/primitives'
 import { PathField } from '@/components/ui/PathField'
 import { useAppStore } from '@/app/store'
 import { formatBytes, formatClock } from '@/lib/format'
@@ -15,12 +16,32 @@ import { ipcErrorMessage } from '@/lib/ipcError'
 import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
 import { useEditorStore } from '../state/editorStore'
 import { EditorExportCancelled, editorExportRunning, runEditorExport, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
-import { AUDIO_KBPS, EDITOR_EXPORT_PRESETS, estimateBytes, exportMediaIssues, exportRange, hasInOut, outputSize, presetVideoBitrate, WHATSAPP_TARGET_MB, type EditorExportPresetId, type ExportMediaIssue } from '../export/exportPlan'
+import { exportMediaIssues, exportRange, hasInOut, type ExportMediaIssue } from '../export/exportPlan'
+import {
+  EXPORT_PRESETS,
+  estimateFor,
+  exportRequestFor,
+  fpsChoices,
+  outputFileName,
+  presetAvailability,
+  presetById,
+  settingsForPreset,
+  sizeForHeight,
+  sizeForWidth,
+  validateExport,
+  videoBitrateFor,
+  type ExportPresetId,
+  type ExportSettings,
+  type VideoCodecChoice
+} from '../export/exportPresets'
+import { probeHevc } from '../export/hevcSupport'
 
-// Diálogo de exportação do editor: preset, intervalo (tudo / I–O), nome e pasta, estimativa de tamanho;
-// depois progresso (%, velocidade × tempo real, tempo restante, cancelar) e o resultado (abrir pasta /
-// copiar arquivo). A exportação usa workers próprios: o preview continua vivo (pausado ao começar).
-// Avisos de privacidade do intervalo (efeito fraco/desativado) aparecem com "Revisar"; nunca bloqueiam.
+// Diálogo de exportação do editor: preset (cartões com o motivo quando indisponível), "Personalizar"
+// (resolução na proporção do projeto, fps, qualidade por taxa ou tamanho alvo, codec H.264/HEVC — HEVC só
+// quando o hardware confirma), intervalo (tudo / I–O), nome e pasta, estimativa e avisos; um bloqueio desativa
+// Exportar com o motivo. Depois: progresso (%, velocidade × tempo real, tempo restante, cancelar) e o resultado
+// (codec usado, resolução, passadas, avisos; abrir pasta / copiar arquivo). A exportação usa workers próprios:
+// o preview continua vivo (pausado ao começar). Avisos de privacidade do intervalo aparecem com "Revisar".
 
 type Phase =
   | { kind: 'form' }
@@ -28,9 +49,13 @@ type Phase =
   | { kind: 'done'; result: EditorExportResult }
   | { kind: 'error'; message: string }
 
+const DEFAULT_PRESET: ExportPresetId = 'youtube1080'
 const formatMbps = (bps: number): string => `${(bps / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} Mbps`
+const formatFps = (fps: number): string => `${fps.toLocaleString('pt-BR', { maximumFractionDigits: 3 })} fps`
+const CODEC_LABEL: Record<VideoCodecChoice, string> = { h264: 'H.264', hevc: 'HEVC' }
 const ISSUE_LABEL: Record<ExportMediaIssue['status'], string> = { missing: 'ausente', processing: 'ainda processando', error: 'com erro' }
 const EFFECT_LABEL = { blur: 'Blur', pixelate: 'Pixelizar', solid: 'Tarja' } as const
+const canvasKey = (c: Project['canvas']): string => `${c.width}x${c.height}@${c.fps}`
 
 export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { open: boolean; onOpenChange: (open: boolean) => void; onBeforeExport: () => void; onSeek: (us: number) => void }): React.JSX.Element | null {
   const project = useEditorStore((s) => s.project)
@@ -40,38 +65,66 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const settings = useAppStore((s) => s.settings)
   const appInfo = useAppStore((s) => s.appInfo)
   const [phase, setPhase] = useState<Phase>({ kind: 'form' })
-  const [preset, setPreset] = useState<EditorExportPresetId>('high1080')
+  // preset de base (disponibilidade, HEVC permitido) + configurações (a verdade); qualquer ajuste → "Personalizado"
+  const [exp, setExp] = useState<{ settings: ExportSettings; customized: boolean; canvas: string } | null>(null)
+  const [customOpen, setCustomOpen] = useState(false)
+  const [hevc, setHevc] = useState<{ key: string; ok: boolean } | null>(null)
   const [rangeMode, setRangeMode] = useState<'all' | 'inout'>('all')
   const [fileName, setFileName] = useState('')
   const [folder, setFolder] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const ids = useId()
 
   // fim do conteúdo (sem efeitos e itens desativados): um efeito depois da mídia não estica "Tudo" com preto
   const totalUs = project ? contentEndUs(project) : 0
   const inOutUsable = hasInOut(totalUs, inUs, outUs)
 
-  // ao abrir (fora de uma exportação): formulário com os padrões do projeto
+  // ao abrir (fora de uma exportação): formulário com os padrões do projeto; ajustes personalizados valem
+  // enquanto o quadro do projeto não muda (senão, volta ao preset — ou ao padrão, se ele deixou de servir)
   useEffect(() => {
     if (!open || !project || phase.kind === 'running') return
     setPhase({ kind: 'form' })
-    setFileName(`${fileNameFromTitle(project.name) || 'Vídeo'}.mp4`)
-    setRangeMode(hasInOut(contentEndUs(project), useEditorStore.getState().inUs, useEditorStore.getState().outUs) ? 'inout' : 'all')
+    setFileName(outputFileName(fileNameFromTitle(project.name) || 'Vídeo', 'mp4'))
+    const range0 = hasInOut(contentEndUs(project), useEditorStore.getState().inUs, useEditorStore.getState().outUs)
+    setRangeMode(range0 ? 'inout' : 'all')
+    const key = canvasKey(project.canvas)
+    setExp((cur) => {
+      if (cur && cur.customized && cur.canvas === key) return cur
+      const base = cur?.settings.presetId ?? DEFAULT_PRESET
+      const id = presetAvailability(base, project.canvas, contentEndUs(project)).ok ? base : DEFAULT_PRESET
+      return { settings: settingsForPreset(id, project.canvas), customized: false, canvas: key }
+    })
   }, [open])
 
   // diálogo desmontado (editor fechado) no meio da exportação: cancela
   useEffect(() => () => abortRef.current?.abort(), [])
 
-  if (!project) return null
+  // suporte a HEVC na resolução/fps de saída (cache por w×h@fps no hevcSupport)
+  const s = exp?.settings
+  const probeKey = s ? `${s.width}x${s.height}@${s.fps}` : ''
+  useEffect(() => {
+    if (!open || !s || !presetById(s.presetId)?.allowHevc) return
+    let alive = true
+    void probeHevc(s.width, s.height, s.fps).then((ok) => {
+      if (alive) setHevc({ key: probeKey, ok })
+    })
+    return () => {
+      alive = false
+    }
+  }, [open, probeKey, s?.presetId])
+
+  if (!project || !exp || !s) return null
+  const canvas = project.canvas
   const range = exportRange(totalUs, inUs, outUs, rangeMode)
   const durationUs = range.toUs - range.fromUs
-  const size = outputSize(preset, project.canvas)
-  const fps = project.canvas.fps
-  const videoBps = presetVideoBitrate(preset, fps, durationUs)
-  const hasAudio = planAudio(project).some((s) => s.mode !== 'mute')
+  const hasAudio = planAudio(project).some((x) => x.mode !== 'mute')
   // redução de ruído/normalização ainda processando ou que falhou: a exportação sairia com o original nesses trechos
   const voiceIssues = audioProcessIssues(project, audioJobs, range.fromUs, range.toUs)
-  const audioBps = hasAudio ? AUDIO_KBPS * 1000 : 0
-  const estimate = estimateBytes(videoBps, audioBps, durationUs)
+  const basePreset = presetById(s.presetId)
+  const hevcState: 'checking' | 'ok' | 'no' = hevc?.key === probeKey ? (hevc.ok ? 'ok' : 'no') : 'checking'
+  const validation = validateExport(s, canvas, durationUs, hevcState === 'ok')
+  const videoBps = videoBitrateFor(s, durationUs)
+  const estimate = estimateFor(s, durationUs, hasAudio)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
   const issues = durationUs > 0 ? exportMediaIssues(project, range.fromUs, range.toUs) : []
   const privacy = durationUs > 0 ? privacyWarnings(project, range.fromUs, range.toUs) : []
@@ -89,18 +142,22 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const targetFolder = folder ?? defaultFolder
   const name = sanitizeFileName(fileName.trim())
   const running = phase.kind === 'running'
-  const blocker = !size
-    ? 'Mude a proporção do projeto para 9:16 para usar o preset Vertical.'
-    : durationUs <= 0
-      ? 'A linha do tempo está vazia.'
-      : !targetFolder
-        ? 'Escolha a pasta de destino.'
-        : !name
-          ? 'Dê um nome ao arquivo.'
-          : null
+  const codecBlocked = s.codec === 'hevc' && hevcState === 'checking' ? 'Verificando o suporte a HEVC…' : null
+  const blocker = validation.blocker ?? codecBlocked ?? (!targetFolder ? 'Escolha a pasta de destino.' : !name ? 'Dê um nome ao arquivo.' : null)
+
+  const pickPreset = (id: ExportPresetId): void => setExp({ settings: settingsForPreset(id, canvas), customized: false, canvas: canvasKey(canvas) })
+  const edit = (patch: Partial<ExportSettings>): void => setExp((cur) => (cur ? { ...cur, settings: { ...cur.settings, ...patch }, customized: true } : cur))
+  const hevcTitle = !basePreset?.allowHevc
+    ? `O preset “${basePreset?.label ?? ''}” usa só H.264 (compatibilidade).`
+    : hevcState === 'checking'
+      ? 'Verificando o suporte a HEVC…'
+      : hevcState === 'no'
+        ? 'HEVC não suportado neste computador'
+        : undefined
+  const fpsOptions = fpsChoices(canvas.fps).map((f) => ({ value: String(f), label: formatFps(f), hint: f === canvas.fps ? 'do projeto' : undefined }))
 
   const start = async (): Promise<void> => {
-    if (!size || !targetFolder || blocker || editorExportRunning()) return
+    if (!targetFolder || blocker || editorExportRunning()) return
     onBeforeExport()
     const snapshot = useEditorStore.getState().project ?? project
     const ac = new AbortController()
@@ -108,20 +165,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     setPhase({ kind: 'running', progress: null, cancelling: false })
     try {
       const result = await runEditorExport(
-        {
-          project: snapshot,
-          width: size.width,
-          height: size.height,
-          fps,
-          fromUs: range.fromUs,
-          toUs: range.toUs,
-          videoBitrate: videoBps,
-          audioBitrate: AUDIO_KBPS * 1000,
-          outputDir: targetFolder,
-          fileName: name,
-          estimateBytes: estimate,
-          ...(preset === 'whatsapp' ? { targetBytes: WHATSAPP_TARGET_MB * 1024 * 1024 } : {})
-        },
+        { project: snapshot, fromUs: range.fromUs, toUs: range.toUs, ...exportRequestFor(s, durationUs), outputDir: targetFolder, fileName: name, estimateBytes: estimate },
         { signal: ac.signal, onProgress: (progress) => setPhase((p) => (p.kind === 'running' ? { ...p, progress } : p)) }
       )
       setPhase({ kind: 'done', result })
@@ -139,35 +183,148 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   }
 
   const title = phase.kind === 'done' ? 'Vídeo exportado' : phase.kind === 'running' ? 'Exportando…' : phase.kind === 'error' ? 'A exportação falhou' : 'Exportar vídeo'
+  const label = (id: string): string => `${ids}-${id}`
 
   return (
     <Dialog open={open} onOpenChange={(o) => !running && onOpenChange(o)}>
-      <DialogContent title={title} hideClose={running} className="w-[min(600px,94vw)]">
+      <DialogContent title={title} hideClose={running} className="w-[min(680px,94vw)]">
         {phase.kind === 'form' ? (
-          <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Preset de exportação">
-              {EDITOR_EXPORT_PRESETS.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={preset === p.id}
-                  onClick={() => setPreset(p.id)}
-                  className={cn(
-                    'rounded-xl border px-3 py-2.5 text-left transition-colors',
-                    preset === p.id ? 'border-accent/70 bg-accent/10' : 'border-border-strong bg-bg-2 hover:border-white/20'
-                  )}
-                >
-                  <span className="block text-[13px] font-semibold text-fg">{p.label}</span>
-                  <span className="block text-[11px] text-muted">{p.hint}</span>
-                </button>
-              ))}
+          <div className="flex max-h-[min(78vh,760px)] flex-col gap-4 overflow-y-auto pr-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <span id={label('presets')} className="text-[12px] font-medium text-fg-2">
+                Preset
+              </span>
+              {exp.customized ? (
+                <span className="text-[11px] text-accent-2" data-export-custom="">
+                  Personalizado (a partir de {basePreset?.label})
+                </span>
+              ) : null}
+            </div>
+            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-labelledby={label('presets')}>
+              {EXPORT_PRESETS.map((p) => {
+                const av = presetAvailability(p.id, canvas, durationUs)
+                const selected = s.presetId === p.id
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    aria-disabled={!av.ok}
+                    disabled={!av.ok}
+                    title={av.ok ? p.hint : av.reason}
+                    data-preset={p.id}
+                    onClick={() => pickPreset(p.id)}
+                    className={cn(
+                      'rounded-xl border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55',
+                      selected ? 'border-accent/70 bg-accent/10' : 'border-border-strong bg-bg-2 enabled:hover:border-white/20'
+                    )}
+                  >
+                    <span className="block text-[13px] font-semibold text-fg">
+                      {p.label}
+                      {selected && exp.customized ? <span className="ml-1.5 text-[11px] font-medium text-accent-2">· Personalizado</span> : null}
+                    </span>
+                    <span className={cn('block text-[11px]', av.ok ? 'text-muted' : 'text-warn')}>{av.ok ? p.hint : av.reason}</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="rounded-xl border border-border">
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-fg-2 hover:text-fg"
+                aria-expanded={customOpen}
+                aria-controls={label('custom')}
+                onClick={() => setCustomOpen((v) => !v)}
+                data-export-customize=""
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                Personalizar
+                <span className="ml-auto text-[11px] font-normal text-muted">
+                  {s.width}×{s.height} · {formatFps(s.fps)} · {s.quality.kind === 'bitrate' ? formatMbps(s.quality.bps) : `alvo ${s.quality.mb.toLocaleString('pt-BR')} MB`} · {CODEC_LABEL[s.codec]}
+                </span>
+                <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', customOpen && 'rotate-180')} />
+              </button>
+              {customOpen ? (
+                <div id={label('custom')} className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2.5 border-t border-border px-3 py-3" data-export-custom-panel="">
+                  <span className="text-[12px] text-fg-2">Resolução</span>
+                  <div className="flex items-center gap-2">
+                    <NumberField
+                      id={label('w')}
+                      ariaLabel="Largura (pixels)"
+                      value={s.width}
+                      step={2}
+                      commitOnBlur
+                      onCommit={(v) => edit(sizeForWidth(v, canvas))}
+                    />
+                    <span className="text-muted">×</span>
+                    <NumberField
+                      id={label('h')}
+                      ariaLabel="Altura (pixels)"
+                      value={s.height}
+                      step={2}
+                      commitOnBlur
+                      onCommit={(v) => edit(sizeForHeight(v, canvas))}
+                    />
+                    <span className="text-[11px] text-muted">proporção do projeto mantida</span>
+                  </div>
+
+                  <label htmlFor={label('fps')} className="text-[12px] text-fg-2">
+                    Quadros por segundo
+                  </label>
+                  <Select id={label('fps')} ariaLabel="Quadros por segundo" triggerClassName="h-8 w-40" value={String(s.fps)} options={fpsOptions} onValueChange={(v) => edit({ fps: Number(v) })} />
+
+                  <span className="text-[12px] text-fg-2">Qualidade</span>
+                  <div className="flex items-center gap-2">
+                    <Segmented
+                      size="sm"
+                      ariaLabel="Tipo de qualidade"
+                      value={s.quality.kind}
+                      onValueChange={(k) =>
+                        edit({ quality: k === 'bitrate' ? { kind: 'bitrate', bps: Math.round(videoBps / 100_000) * 100_000 } : { kind: 'target', mb: Math.max(1, Math.round(estimate / (1024 * 1024))) } })
+                      }
+                      options={[
+                        { value: 'bitrate', label: 'Taxa (Mbps)' },
+                        { value: 'target', label: 'Tamanho alvo (MB)' }
+                      ]}
+                    />
+                    {s.quality.kind === 'bitrate' ? (
+                      <NumberField id={label('bps')} ariaLabel="Taxa de vídeo em Mbps" value={s.quality.bps / 1e6} step={0.5} onCommit={(v) => edit({ quality: { kind: 'bitrate', bps: Math.round(v * 1e6) } })} />
+                    ) : (
+                      <NumberField id={label('mb')} ariaLabel="Tamanho alvo em MB" value={s.quality.mb} step={1} onCommit={(v) => edit({ quality: { kind: 'target', mb: v } })} />
+                    )}
+                  </div>
+
+                  <span className="text-[12px] text-fg-2">Codec</span>
+                  <div className="flex items-center gap-2" title={hevcTitle}>
+                    <Segmented
+                      size="sm"
+                      ariaLabel="Codec de vídeo"
+                      value={s.codec}
+                      onValueChange={(c) => edit({ codec: c })}
+                      options={[
+                        { value: 'h264', label: 'H.264' },
+                        { value: 'hevc', label: 'HEVC', disabled: !!hevcTitle && s.codec !== 'hevc', title: hevcTitle }
+                      ]}
+                    />
+                    {hevcTitle ? (
+                      <span className="text-[11px] text-muted" data-hevc-note="">
+                        {hevcTitle}
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-muted">HEVC: arquivo menor; nem todo aparelho reproduz</span>
+                    )}
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="flex items-center justify-between gap-3">
               <span className="text-[12px] font-medium text-fg-2">Intervalo</span>
               <Segmented
                 size="sm"
+                ariaLabel="Intervalo exportado"
                 value={rangeMode}
                 onValueChange={setRangeMode}
                 options={[
@@ -188,6 +345,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                   if (e.key === 'Enter' && !blocker && !issues.length) void start()
                 }}
                 spellCheck={false}
+                data-export-name=""
               />
             </label>
 
@@ -196,16 +354,31 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               <PathField value={folder} defaultPath={defaultFolder} onChange={setFolder} />
             </div>
 
-            <div className="rounded-xl border border-border bg-bg-2/60 px-3 py-2.5 text-[12px] text-fg-2">
-              {size ? (
-                <span>
-                  {size.width}×{size.height} · {fps} fps · {formatClock(durationUs / 1000, false)} · H.264 {formatMbps(videoBps)}
-                  {hasAudio ? ` + AAC ${AUDIO_KBPS} kbps` : ' · sem áudio'} ·{' '}
-                  <span className="font-semibold text-fg">≈ {formatBytes(estimate)}</span>
-                </span>
+            <div className="rounded-xl border border-border bg-bg-2/60 px-3 py-2.5 text-[12px] text-fg-2" data-export-estimate="" aria-live="polite">
+              {durationUs > 0 ? (
+                <>
+                  <span className="block">
+                    <span className="font-semibold text-fg">≈ {formatBytes(estimate)}</span> · {s.width}×{s.height} · {formatFps(s.fps)} · {CODEC_LABEL[s.codec]}
+                  </span>
+                  <span className="block text-[11px] text-muted">
+                    {formatClock(durationUs / 1000, false)} · vídeo {formatMbps(videoBps)}
+                    {hasAudio ? ` + áudio ${s.audioKbps} kbps` : ' · sem áudio'}
+                    {s.quality.kind === 'target' ? ` · alvo ${s.quality.mb.toLocaleString('pt-BR')} MB (refeito se passar)` : ''}
+                  </span>
+                </>
+              ) : null}
+              {validation.warnings.length ? (
+                <ul className="mt-1.5 flex flex-col gap-0.5 text-warn" data-export-warnings="">
+                  {validation.warnings.map((w) => (
+                    <li key={w} className="flex items-start gap-1.5">
+                      <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {w}
+                    </li>
+                  ))}
+                </ul>
               ) : null}
               {blocker ? (
-                <span className={cn('flex items-start gap-1.5 text-warn', size && 'mt-1.5')}>
+                <span className="mt-1.5 flex items-start gap-1.5 text-warn" role="alert" data-export-blocker="">
                   <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   {blocker}
                 </span>
@@ -251,7 +424,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 Cancelar
               </Button>
-              <Button variant={issues.length ? 'secondary' : 'primary'} disabled={!!blocker} onClick={() => void start()}>
+              <Button variant={issues.length ? 'secondary' : 'primary'} disabled={!!blocker} title={blocker ?? undefined} onClick={() => void start()} data-export-start="">
                 <Upload className="h-4 w-4" /> {issues.length ? 'Exportar mesmo assim' : 'Exportar'}
               </Button>
             </div>
@@ -270,11 +443,12 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                 <span className="block truncate text-[13px] font-semibold" title={phase.result.path}>
                   {phase.result.path.split(/[\\/]/).pop()}
                 </span>
-                <span className="block text-[11px] text-muted">
-                  MP4 · {formatBytes(phase.result.size)}
-                  {phase.result.fellBackToSoftware ? ' · codificado em software (o encoder de hardware falhou)' : ''}
-                  {phase.result.passes > 1 ? ' · refeito para caber no tamanho-alvo' : ''}
+                <span className="block text-[11px] text-muted" data-export-done-info="">
+                  MP4 · {CODEC_LABEL[phase.result.codec]} · {phase.result.width}×{phase.result.height} · {formatFps(phase.result.fps)} · {formatBytes(phase.result.size)}
+                  {phase.result.passes > 1 ? ` · ${phase.result.passes} passadas (refeito para caber no tamanho alvo)` : ''}
                 </span>
+                {phase.result.fellBackFromHevc ? <span className="block text-[11px] text-warn">O HEVC falhou neste computador; o vídeo saiu em H.264.</span> : null}
+                {phase.result.fellBackToSoftware ? <span className="block text-[11px] text-muted">Codificado em software (o encoder de hardware falhou).</span> : null}
               </span>
             </div>
             {phase.result.warnings.length ? (
@@ -319,6 +493,48 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
         ) : null}
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * Campo numérico com rascunho: digitar não reformata. `commitOnBlur`: aplica só ao sair/Enter (a resolução
+ * recalcula o outro lado); sem ele, aplica a cada número válido. Valor inválido ao sair volta ao atual.
+ */
+function NumberField({ id, ariaLabel, value, step, commitOnBlur, onCommit }: { id: string; ariaLabel: string; value: number; step: number; commitOnBlur?: boolean; onCommit: (v: number) => void }): React.JSX.Element {
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => setDraft(String(value)), [value])
+  const parse = (t: string): number | null => {
+    const n = Number(t.replace(',', '.'))
+    return t.trim() !== '' && Number.isFinite(n) && n > 0 ? n : null
+  }
+  const commit = (): void => {
+    const n = parse(draft)
+    if (n === null) setDraft(String(value))
+    else if (n !== value) onCommit(n)
+    else setDraft(String(value))
+  }
+  return (
+    <input
+      id={id}
+      aria-label={ariaLabel}
+      type="text"
+      inputMode="decimal"
+      data-step={step}
+      className="h-8 w-20 rounded-lg border border-border-strong bg-bg-2 px-2 text-right font-mono text-[12px] tabular-nums text-fg outline-none focus:border-accent/60"
+      value={draft}
+      onChange={(e) => {
+        setDraft(e.target.value)
+        if (!commitOnBlur) {
+          const n = parse(e.target.value)
+          if (n !== null && n !== value) onCommit(n)
+        }
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit()
+      }}
+      spellCheck={false}
+    />
   )
 }
 

@@ -98,3 +98,23 @@ describe('CURVE_EDITOR_ACTIONS', () => {
     for (const a of ['delete', 'split', 'paste', 'copy'] as const) expect(CURVE_EDITOR_ACTIONS.has(a)).toBe(false)
   })
 })
+
+describe('exportar (Ctrl+E)', () => {
+  it('Ctrl+E abre a exportação; E, Shift+E, Alt+Shift+E e Ctrl+Shift+E continuam como estavam', () => {
+    expect(shortcutFor(key('e', { ctrlKey: true }))).toBe('export')
+    expect(shortcutFor(key('E', { ctrlKey: true }))).toBe('export')
+    expect(shortcutFor(key('e', { metaKey: true }))).toBe('export')
+    expect(shortcutFor(key('e'))).toBeNull()
+    expect(shortcutFor(key('E', { shiftKey: true }))).toBe('toggleEnabled')
+    expect(shortcutFor(key('E', { shiftKey: true, altKey: true }))).toBe('toggleEnabledUnlinked')
+    expect(shortcutFor(key('E', { ctrlKey: true, shiftKey: true }))).toBeNull()
+    expect(shortcutFor(key('e', { ctrlKey: true, altKey: true }))).toBeNull()
+    // digitando num campo não abre
+    expect(shortcutFor(key('e', { ctrlKey: true, target: { tagName: 'INPUT', type: 'text' } as unknown as EventTarget }))).toBeNull()
+    expect(SHORTCUT_LABELS.export).toBe('Ctrl+E')
+  })
+  it('nenhum outro atalho usa Ctrl+E', () => {
+    const labels = Object.entries(SHORTCUT_LABELS).filter(([, v]) => v === 'Ctrl+E')
+    expect(labels).toEqual([['export', 'Ctrl+E']])
+  })
+})

@@ -6,7 +6,7 @@ import { useAppStore } from '@/app/store'
 import { flushAutosave, startAutosave, useEditorStore } from '../state/editorStore'
 import { CURVE_EDITOR_ACTIONS, shortcutFor, TRANSPORT_ACTIONS } from '../shortcuts'
 import { createEditorEngine, type EditorEngine } from './editorEngine'
-import { runShortcut, seekTo } from './editorActions'
+import { registerExportOpen, runShortcut, seekTo } from './editorActions'
 import { enqueuePending, importPaths } from './mediaImport'
 import { startAudioProcessing } from './audioProcessing'
 import { audioSourceKey } from '@shared/editor/audioProcess'
@@ -63,6 +63,12 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
   const [exportOpen, setExportOpen] = useState(false)
   const loaded = useEditorStore((s) => s.project?.id === projectId)
   const engineRef = useRef<EditorEngine | null>(null)
+
+  // Ctrl+E (editorActions) abre o diálogo de exportação desta tela
+  useEffect(() => {
+    registerExportOpen(() => setExportOpen(true))
+    return () => registerExportOpen(null)
+  }, [])
 
   // ---- ciclo de vida: projeto, motor, autosave, ingestão, janela maximizada ----
   useEffect(() => {

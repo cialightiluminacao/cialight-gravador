@@ -5,7 +5,7 @@
 //
 // Exportação (`exportStart`, numa instância própria com o canvas na resolução de saída): para n = 0..N−1,
 // tUs = fromUs + frameToUs(n, fps) → o mesmo composeAt do preview (fontes originais/intermediárias, sequencial)
-// → VideoSample(canvas) → VideoSampleSource H.264; o áudio vem em blocos de 100 ms do audio worker de
+// → VideoSample(canvas) → VideoSampleSource H.264 (ou HEVC, só hardware); o áudio vem em blocos de 100 ms do audio worker de
 // exportação pela MessagePort, em ordem, → AudioSampleSource (AAC, ou Opus se AAC indisponível). O MP4
 // (mdat antes do moov; o main remuxa com faststart) sai em chunks `exportChunk` com contrapressão por `chunkAck`.
 import {
@@ -26,7 +26,7 @@ import { frameToUs } from '@shared/editor/time'
 import type { Session } from '@shared/types'
 import { drawStrokes } from '@shared/compositor'
 import { FILE_PROTOCOL } from '@shared/ipc'
-import { h264LevelFor } from '@/engine/encoderSupport'
+import { h264LevelFor, hevcCodecString } from '@/engine/encoderSupport'
 import { Compositor, type SourceMeta } from './compositor/compositor'
 import { DecoderPool } from './decoderPool'
 import { SR } from './audio/mixer'
@@ -521,13 +521,14 @@ async function runExport(
     else throw new Error('Nenhum codificador de áudio disponível (AAC ou Opus)')
   }
 
-  const videoCodec = h264LevelFor(job.width, job.height, job.fps)
+  const hevc = job.video.codec === 'hevc'
+  const videoCodec = hevc ? hevcCodecString(job.width, job.height, job.fps) : h264LevelFor(job.width, job.height, job.fps)
   const output = new Output({
     format: new Mp4OutputFormat({ fastStart: false }),
     target: new StreamTarget(new WritableStream<StreamTargetChunk>({ write: (chunk) => outbox.send(chunk) }), { chunked: true, chunkSize: EXPORT_CHUNK_BYTES })
   })
   const video = new VideoSampleSource({
-    codec: 'avc',
+    codec: job.video.codec,
     fullCodecString: videoCodec,
     quality: new Quality({ bitrate: job.video.bitrate }),
     keyFrameInterval: job.video.keyFrameIntervalS,
@@ -544,6 +545,7 @@ async function runExport(
 
   try {
     await encoderCall(() => output.start())
+    if (job.simulateHevcFailure && hevc) throw new EncoderError('falha simulada do encoder HEVC')
     if (job.simulateHwFailure && job.video.hw === 'prefer-hardware') throw new EncoderError('falha simulada do encoder de hardware')
     const frameDur = 1 / job.fps
     let lastReport = 0

@@ -4,6 +4,7 @@ import type { Project } from '@shared/editor/project'
 import { Button } from '@/components/ui/Button'
 import { Select, Tip, type SelectOption } from '@/components/ui/primitives'
 import { useEditorStore } from '../state/editorStore'
+import { SHORTCUT_LABELS } from '../shortcuts'
 import { ASPECTS, aspectIdOf, canvasForAspect, firstMediaSize, type AspectId } from './aspects'
 import { useReframe } from '../state/reframe'
 import { defaultReframeAspect } from './ReframeDialog'
@@ -126,9 +127,11 @@ export function TopBar({ onBack, onExport }: { onBack: () => void; onExport: () 
             <Crop className="h-3.5 w-3.5" /> Reenquadrar
           </Button>
         </Tip>
-        <Button variant="primary" size="sm" className="ml-1.5 h-8 px-3.5" onClick={onExport}>
-          <Upload className="h-3.5 w-3.5" /> Exportar
-        </Button>
+        <Tip content="Exportar vídeo" shortcut={SHORTCUT_LABELS.export} side="bottom">
+          <Button variant="primary" size="sm" className="ml-1.5 h-8 px-3.5" onClick={onExport}>
+            <Upload className="h-3.5 w-3.5" /> Exportar
+          </Button>
+        </Tip>
       </div>
     </header>
   )

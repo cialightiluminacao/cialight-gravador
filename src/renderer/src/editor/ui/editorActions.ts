@@ -31,6 +31,12 @@ export function registerZoomFit(fn: (() => void) | null): void {
   zoomFitHandler = fn
 }
 
+/** Ctrl+E abre o diálogo de exportação, que é estado da tela do editor: ela registra o handler aqui. */
+let exportOpenHandler: (() => void) | null = null
+export function registerExportOpen(fn: (() => void) | null): void {
+  exportOpenHandler = fn
+}
+
 export function seekTo(playback: PlaybackController | null, us: Us): void {
   const p = st().project
   // gravando narração: o relógio da reprodução é a referência do início da gravação
@@ -319,6 +325,10 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'zoomOut': zoomBy(0.8); return true
     case 'zoomFit': zoomFitHandler?.(); return true
     case 'save': void saveNow(); return true
+    case 'export':
+      if (!exportOpenHandler) return false
+      exportOpenHandler()
+      return true
     case 'toggleSnap':
       s.toggleSnapping()
       toast(st().snapping ? 'Ímã ligado' : 'Ímã desligado', { duration: 1200 })

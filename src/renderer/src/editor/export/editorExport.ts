@@ -2,7 +2,8 @@
 // resolução de saída) e um audio worker de exportação ligados por MessageChannel — o preview continua vivo e
 // intocado. Os bytes do MP4 vão para `<saída>.part` via IPC (editorExport.write) com contrapressão (chunkAck
 // depois de gravar); no fim o main remuxa com faststart. Falha do CODIFICADOR de hardware antes do 1º pacote →
-// nova tentativa com `prefer-software` (outras falhas mostram a causa real). Tamanho-alvo: saída acima do alvo
+// nova tentativa com `prefer-software` (outras falhas mostram a causa real); HEVC (só hardware) que falha antes
+// do 1º pacote → a mesma exportação em H.264 (hardware → software), com aviso. Tamanho-alvo (qualquer): saída acima do alvo
 // é refeita uma vez com bitrate × (alvo/obtido) × 0,97 ("Ajustando tamanho…"). Uma exportação por vez.
 import { planAudio } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
@@ -11,6 +12,7 @@ import { AudioClient } from '../engine/audio/AudioClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
 import { KEYFRAME_INTERVAL_S, missingMediaWarnings, resizeBitrate } from './exportPlan'
+import type { VideoCodecChoice } from './exportPresets'
 import { EditorExportCancelled, finalizeOrCancel, type Finalized } from './finalize'
 import { ipcErrorMessage } from '@/lib/ipcError'
 
@@ -25,12 +27,18 @@ export interface EditorExportRequest {
   audioBitrate: number
   outputDir: string
   fileName: string
+  /** Codec pedido (padrão H.264). HEVC só por hardware; se falhar antes do 1º pacote, sai em H.264. */
+  codec?: VideoCodecChoice
+  /** Intervalo entre quadros-chave (s); padrão 2 s. */
+  keyFrameIntervalS?: number
   /** Tamanho estimado (bytes): o main exige estimativa × 2,1 livres antes de começar. */
   estimateBytes?: number
-  /** Tamanho máximo (bytes) da saída (WhatsApp): acima disso, refaz uma vez com bitrate corrigido. */
+  /** Tamanho máximo (bytes) da saída (tamanho alvo): acima disso, refaz uma vez com bitrate corrigido. */
   targetBytes?: number
   /** Testes: simula a falha do encoder de hardware (exercita a nova tentativa em software). */
   simulateHwFailure?: boolean
+  /** Testes: simula a falha do encoder HEVC (exercita a volta para H.264). */
+  simulateHevcFailure?: boolean
 }
 
 export interface EditorExportProgress {
@@ -49,11 +57,19 @@ export interface EditorExportProgress {
 export interface EditorExportResult {
   path: string
   size: number
+  width: number
+  height: number
+  fps: number
+  /** Codec realmente usado (HEVC que falhou sai como h264). */
+  codec: VideoCodecChoice
+  /** Codec string completo do encoder (avc1.…/hvc1.…). */
   videoCodec: string
   audioCodec: 'aac' | 'opus' | null
   hardware: HwPref
   /** Encoder de hardware falhou e a exportação foi refeita em software. */
   fellBackToSoftware: boolean
+  /** HEVC falhou e a exportação foi refeita em H.264. */
+  fellBackFromHevc: boolean
   /** Passadas de codificação (2 = refeita para caber no tamanho-alvo). */
   passes: number
   /** Avisos para a tela de concluído (mídia de áudio que falhou, alvo de tamanho não atingido). */
@@ -89,13 +105,17 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
   try {
     let videoBitrate = req.videoBitrate
     let hw: HwPref = 'prefer-hardware'
+    let codec: VideoCodecChoice = req.codec ?? 'h264'
     let fellBack = false
+    let fellBackFromHevc = false
     const warnings = new Set<string>()
     for (let pass = 1; ; pass++) {
       const stage = pass === 1 ? 'render' : 'resize'
-      const enc = await encode({ ...req, videoBitrate }, hw, stage, signal, opts.onProgress)
+      const enc = await encode({ ...req, videoBitrate }, codec, hw, stage, signal, opts.onProgress)
       hw = enc.hardware
+      codec = enc.codec
       fellBack ||= enc.fellBack
+      fellBackFromHevc ||= enc.fellBackFromHevc
       for (const w of enc.warnings) warnings.add(w)
       // remux: progresso real do ffmpeg nos últimos 2 %
       const off = api.editorExport.onFinalizeProgress((p) => {
@@ -114,9 +134,23 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
         continue
       }
       if (out.warning) warnings.add(out.warning)
-      if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}. Ele pode não ser aceito pelo WhatsApp.`)
+      if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}.`)
       opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 100, speed: null, etaS: null })
-      return { path: out.path, size: out.size, videoCodec: enc.videoCodec, audioCodec: enc.audioCodec, hardware: hw, fellBackToSoftware: fellBack, passes: pass, warnings: [...warnings] }
+      return {
+        path: out.path,
+        size: out.size,
+        width: req.width,
+        height: req.height,
+        fps: req.fps,
+        codec,
+        videoCodec: enc.videoCodec,
+        audioCodec: enc.audioCodec,
+        hardware: hw,
+        fellBackToSoftware: fellBack,
+        fellBackFromHevc,
+        passes: pass,
+        warnings: [...warnings]
+      }
     }
   } finally {
     running = false
@@ -129,24 +163,41 @@ interface Encoded {
   videoCodec: string
   audioCodec: 'aac' | 'opus' | null
   hardware: HwPref
+  codec: VideoCodecChoice
   fellBack: boolean
+  fellBackFromHevc: boolean
   warnings: string[]
 }
 
-/** Codifica para um .part novo; falha do codificador de hardware antes do 1º pacote → refaz em software. */
-async function encode(req: EditorExportRequest, hw: HwPref, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<Encoded> {
+/** Aviso da tela de concluído quando o HEVC falha. */
+export const HEVC_FALLBACK_WARNING = 'HEVC falhou; exportado em H.264.'
+
+/**
+ * Codifica para um .part novo. Falha do codificador antes do 1º pacote: HEVC → H.264 (hardware), e H.264 de
+ * hardware → software.
+ */
+async function encode(req: EditorExportRequest, codec: VideoCodecChoice, hw: HwPref, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<Encoded> {
   const api = window.api
   let fellBack = false
+  let fellBackFromHevc = false
   for (;;) {
     if (signal.aborted) throw new EditorExportCancelled()
     const { jobId } = await api.editorExport.open(req.outputDir, req.fileName, { estimateBytes: req.estimateBytes })
     try {
-      const done = await attempt(req, jobId, hw, stage, signal, onProgress)
-      return { jobId, ...done, hardware: hw, fellBack }
+      const done = await attempt(req, jobId, codec, hw, stage, signal, onProgress)
+      const warnings = fellBackFromHevc ? [HEVC_FALLBACK_WARNING, ...done.warnings] : done.warnings
+      return { jobId, ...done, warnings, hardware: hw, codec, fellBack, fellBackFromHevc }
     } catch (e) {
       await api.editorExport.cancel(jobId).catch(() => {})
       if (e instanceof EditorExportCancelled || signal.aborted) throw new EditorExportCancelled()
       if (e instanceof AttemptError && e.retryInSoftware) {
+        if (codec === 'hevc') {
+          console.warn(`exportação: encoder HEVC falhou (${e.message}); refazendo em H.264`)
+          codec = 'h264'
+          hw = 'prefer-hardware'
+          fellBackFromHevc = true
+          continue
+        }
         if (hw === 'prefer-hardware') {
           console.warn(`exportação: encoder de hardware falhou (${e.message}); tentando em software`)
           hw = 'prefer-software'
@@ -168,7 +219,7 @@ interface AttemptDone {
 }
 
 /** Uma tentativa completa (workers próprios, descartados no fim). */
-function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<AttemptDone> {
+function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoice, hw: HwPref, stage: 'render' | 'resize', signal: AbortSignal, onProgress?: OnProgress): Promise<AttemptDone> {
   const api = window.api
   const hasAudio = planAudio(req.project).some((s) => s.mode !== 'mute')
   const urls = mediaUrlsFor(req.project, 'export')
@@ -193,9 +244,10 @@ function attempt(req: EditorExportRequest, jobId: string, hw: HwPref, stage: 're
     fps: req.fps,
     fromUs: req.fromUs,
     toUs: req.toUs,
-    video: { bitrate: req.videoBitrate, hw, keyFrameIntervalS: KEYFRAME_INTERVAL_S },
+    video: { codec: codec === 'hevc' ? 'hevc' : 'avc', bitrate: req.videoBitrate, hw, keyFrameIntervalS: req.keyFrameIntervalS ?? KEYFRAME_INTERVAL_S },
     audio: hasAudio ? { bitrate: req.audioBitrate } : null,
-    ...(req.simulateHwFailure ? { simulateHwFailure: true } : {})
+    ...(req.simulateHwFailure ? { simulateHwFailure: true } : {}),
+    ...(req.simulateHevcFailure ? { simulateHevcFailure: true } : {})
   }
 
   return new Promise<AttemptDone>((resolve, reject) => {

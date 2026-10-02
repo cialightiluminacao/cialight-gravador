@@ -39,6 +39,37 @@ export function h264LevelFor(width: number, height: number, fps: number): string
   return 'avc1.64003C'
 }
 
+/** (w×h @ fps) cabe no H.264 nível 5.2 (36 864 macroblocos por quadro, 2 073 600 por segundo)? */
+export function h264FitsLevel52(width: number, height: number, fps: number): boolean {
+  const mbs = Math.ceil(width / 16) * Math.ceil(height / 16)
+  return mbs <= 36864 && mbs * fps <= 2073600
+}
+
+/**
+ * Codec string HEVC Main (tier Main, progressivo) com o nível mínimo para (w×h @ fps), a partir do 3.0.
+ * Prefixo `hvc1` (parâmetros no hvcC, o que o QuickTime/Apple exige). Tabela (MaxLumaPs, MaxLumaSr):
+ * 3: 552 960/16 588 800; 3.1: 983 040/33 177 600; 4: 2 228 224/66 846 720; 4.1: …/133 693 440;
+ * 5: 8 912 896/267 386 880; 5.1: …/534 773 760; 5.2: …/1 069 547 520; 6: 35 651 584/1 069 547 520; 6.1/6.2.
+ */
+export function hevcCodecString(width: number, height: number, fps: number): string {
+  const ps = width * height
+  const sr = ps * fps
+  const levels: [number, number, number][] = [
+    [90, 552960, 16588800],
+    [93, 983040, 33177600],
+    [120, 2228224, 66846720],
+    [123, 2228224, 133693440],
+    [150, 8912896, 267386880],
+    [153, 8912896, 534773760],
+    [156, 8912896, 1069547520],
+    [180, 35651584, 1069547520],
+    [183, 35651584, 2139095040],
+    [186, 35651584, 4278190080]
+  ]
+  const level = levels.find(([, maxPs, maxSr]) => ps <= maxPs && sr <= maxSr)?.[0] ?? 186
+  return `hvc1.1.6.L${level}.B0`
+}
+
 /** Dimensões alvo mantendo a proporção da fonte e limitando pela qualidade escolhida. */
 export function targetDimensions(quality: Quality, srcW: number, srcH: number): { width: number; height: number } {
   const p = QUALITY_PRESETS[quality]
