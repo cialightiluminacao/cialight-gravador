@@ -129,6 +129,6 @@ describe('texto e forma da biblioteca', () => {
     expect(tt.visual.transform.x).toEqual({ value: 0.2 })
     expect(tt.visual.transform.y).toEqual({ value: 0.3 })
     const ss = ops.findItem(st().project!, s)!.item
-    expect(ss).toMatchObject({ type: 'shape', shape: 'ellipse', spotlight: { dim: 0.6 } })
+    expect(ss).toMatchObject({ type: 'shape', shape: 'ellipse', spotlight: { dim: 0.6 }, name: 'Holofote' }) // a linha do tempo mostra o nome do modelo
   })
 })

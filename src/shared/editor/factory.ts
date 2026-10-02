@@ -201,6 +201,7 @@ export function createShapeItem(preset: ShapePresetId, startUs: Us, opts?: { dur
   return {
     id: newId('i_'),
     type: 'shape',
+    name: c.label, // a linha do tempo e o inspetor mostram o nome do modelo (Holofote, Destaque…)
     startUs,
     durationUs: opts?.durationUs ?? TEXT_DEFAULT_US,
     shape: c.shape,

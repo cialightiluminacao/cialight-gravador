@@ -3,7 +3,7 @@ import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { attachEffects } from '@shared/editor/followTransform'
 import { EditError, addAsset, addEffect, addMediaFromAsset, addShape, addText, addTransition, insertItems, setAnimValue, setItemEnabled, toggleKeyframe, updateItem, updateTrack } from '@shared/editor/ops'
 import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/project'
-import { cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionBoxOf, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, writeRegionValues, type RegionBox } from './viewerGeometry'
+import { transitionSidePose, cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionBoxOf, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, writeRegionValues, type RegionBox } from './viewerGeometry'
 
 const asset = (id: string, w: number, h: number): Asset => ({ id, name: id, kind: 'video', source: { type: 'generated', file: `${id}.mp4` }, durationUs: 5_000_000, status: 'ready', video: { width: w, height: h, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: 1_000_000 } })
 
@@ -290,5 +290,32 @@ describe('viewerGeometry — texto, forma e transição (F5)', () => {
     const q = addTransition(t.project, m.itemIds[0], 'crossfade', 1_000_000)
     const ids = itemBoxes(q, 3_100_000, measure).map((x) => x.itemId)
     expect(ids).toEqual(expect.arrayContaining([t.itemId, m.itemIds[0]]))
+  })
+
+  it('a seleção acompanha o clipe que desliza (deslizar ←) e o que cresce (zoom) dentro da janela', () => {
+    expect(transitionSidePose('slideL', 'from', 0.5, 1920, 1080)).toMatchObject({ dx: -960, s: 1 })
+    expect(transitionSidePose('slideL', 'to', 0.5, 1920, 1080)).toMatchObject({ dx: 960, s: 1 })
+    expect(transitionSidePose('slideU', 'from', 0.25, 1920, 1080)).toMatchObject({ dx: 0, dy: -270, s: 1 })
+    expect(transitionSidePose('slideD', 'to', 0.25, 1920, 1080)).toMatchObject({ dx: 0, dy: -810, s: 1 })
+    expect(transitionSidePose('zoomIn', 'from', 1, 1920, 1080).s).toBeCloseTo(1.5)
+    expect(transitionSidePose('zoomIn', 'to', 0, 1920, 1080).s).toBeCloseTo(0.85)
+    expect(transitionSidePose('crossfade', 'from', 0.5, 1920, 1080)).toEqual({ dx: 0, dy: 0, s: 1 })
+    const p0 = addAsset(createEmptyProject('t'), asset('v', 1920, 1080))
+    const a = addMediaFromAsset(p0, 'v', 0)
+    const b = addMediaFromAsset(a.project, 'v', 5_000_000)
+    const p = addTransition(b.project, b.itemIds[0], 'slideL', 1_000_000) // janela 4,5 s – 5,5 s
+    // meio da janela (progress 0,5): A deslocado −½ quadro, B +½
+    const boxes = itemBoxes(p, 5_000_000, measure)
+    const ba = boxes.find((x) => x.itemId === a.itemIds[0])!
+    const bb = boxes.find((x) => x.itemId === b.itemIds[0])!
+    expect(ba.cx).toBeCloseTo(0)
+    expect(bb.cx).toBeCloseTo(1920)
+    // cada um é selecionável onde o shader o desenha: A na metade esquerda, B na direita
+    expect(hitTest(boxes, 480, 540)).toBe(a.itemIds[0])
+    expect(hitTest(boxes, 1440, 540)).toBe(b.itemIds[0])
+    // zoom perto do fim da janela: A cresceu mais de 1,3×
+    const z = addTransition(b.project, b.itemIds[0], 'zoomIn', 1_000_000)
+    const zb = itemBoxes(z, 5_400_000, measure).find((x) => x.itemId === a.itemIds[0])!
+    expect(zb.w).toBeGreaterThan(1920 * 1.3)
   })
 })

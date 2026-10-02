@@ -5,8 +5,9 @@ import { evalAnim } from '@shared/editor/anim'
 import { screenToContent } from '@shared/editor/contentPose'
 import { EditError, findItem, setAnimValue } from '@shared/editor/ops'
 import { attachedMedia, clipFrameAt, effectRegionAt, resolveFrame, type Layer, type TextLayer } from '@shared/editor/resolve'
-import type { EffectItem, Project, Us } from '@shared/editor/project'
+import type { EffectItem, Project, TransitionKind, Us } from '@shared/editor/project'
 import { layerMatrix, type Rotation } from '../engine/compositor/matrix'
+import { TRANSITION_MODES, ZOOM_A_GROW, ZOOM_B_FROM } from '../engine/compositor/shadersTransitions'
 import { shapeBoxPx } from '../engine/text/shapeRaster'
 import { measureTextBox, type FrameSize } from '../engine/text/textRaster'
 
@@ -26,29 +27,56 @@ export interface Pt { x: number; y: number }
 /** Mede a caixa de um texto (a do compositor; nos testes, um medidor sem Canvas). */
 export type TextMeasure = (layer: TextLayer, frame: FrameSize) => { cx: number; cy: number; w: number; h: number; rotation: number }
 
+/** Deslocamento (px) e escala (em torno do centro do quadro) que o shader da transição aplica a um lado (A = from, B = to). */
+export interface SidePose { dx: number; dy: number; s: number }
+const IDENTITY: SidePose = { dx: 0, dy: 0, s: 1 }
+
+/**
+ * Pose do lado da transição em `p` (0–1, o `progress` já suavizado do resolve), a mesma conta de FS_TRANSITION:
+ * deslizar desloca A em p·dir e B em (p − 1)·dir (dir em uv GL, y para cima); zoom escala A de 1 a 1,5 e B de 0,85 a 1
+ * em torno do centro. Os demais tipos não mexem na geometria (a seleção acompanha o clipe que desliza/cresce).
+ */
+export function transitionSidePose(kind: TransitionKind, side: 'from' | 'to', p: number, W: number, H: number): SidePose {
+  const m = TRANSITION_MODES[kind]
+  if (!m) return IDENTITY
+  if (m.mode === 2) {
+    const k = side === 'from' ? p : p - 1
+    return { dx: m.dir[0] * k * W || 0, dy: -m.dir[1] * k * H || 0, s: 1 } // `|| 0`: sem -0
+  }
+  if (m.mode === 4) return { dx: 0, dy: 0, s: side === 'from' ? 1 + ZOOM_A_GROW * p : ZOOM_B_FROM + (1 - ZOOM_B_FROM) * p }
+  return IDENTITY
+}
+
+function placed(b: ItemBox, pose: SidePose, W: number, H: number): ItemBox {
+  if (pose === IDENTITY) return b
+  return { ...b, cx: W / 2 + (b.cx - W / 2) * pose.s + pose.dx, cy: H / 2 + (b.cy - H / 2) * pose.s + pose.dy, w: b.w * pose.s, h: b.h * pose.s }
+}
+
 /** Caixas das camadas de `layers` (fundo → topo); transição: A e B entram (o da frente na ordem de desenho é o último). */
-function collectBoxes(p: Project, layers: Layer[], W: number, H: number, measure: TextMeasure, out: ItemBox[]): void {
+function collectBoxes(p: Project, layers: Layer[], W: number, H: number, measure: TextMeasure, out: ItemBox[], pose: SidePose = IDENTITY): void {
   for (const l of layers) {
     if (l.kind === 'media') {
       const a = p.assets.find((x) => x.id === l.assetId)
       const src = { w: a?.video?.width || W, h: a?.video?.height || H, rotation: (a?.video?.rotation ?? 0) as Rotation }
       const g = layerMatrix({ rect: l.rect, fit: l.fit, crop: l.crop }, src, { w: W, h: H })
-      out.push({ itemId: l.itemId, cx: l.rect.cx * W, cy: l.rect.cy * H, w: g.size[0], h: g.size[1], rotation: l.rect.rotation })
+      out.push(placed({ itemId: l.itemId, cx: l.rect.cx * W, cy: l.rect.cy * H, w: g.size[0], h: g.size[1], rotation: l.rect.rotation }, pose, W, H))
     } else if (l.kind === 'text') {
       if (!l.text) continue // o compositor não desenha texto vazio
       const b = measure(l, { W, H })
-      out.push({ itemId: l.itemId, cx: b.cx, cy: b.cy, w: b.w, h: b.h, rotation: b.rotation })
+      out.push(placed({ itemId: l.itemId, cx: b.cx, cy: b.cy, w: b.w, h: b.h, rotation: b.rotation }, pose, W, H))
     } else if (l.kind === 'shape') {
       const b = shapeBoxPx(l.item, { W, H })
-      out.push({ itemId: l.itemId, cx: l.rect.cx * W, cy: l.rect.cy * H, w: b.w * l.rect.scale, h: b.h * l.rect.scale, rotation: l.rect.rotation })
+      out.push(placed({ itemId: l.itemId, cx: l.rect.cx * W, cy: l.rect.cy * H, w: b.w * l.rect.scale, h: b.h * l.rect.scale, rotation: l.rect.rotation }, pose, W, H))
     } else if (l.kind === 'transition') {
+      const from = transitionSidePose(l.transition, 'from', l.progress, W, H)
+      const to = transitionSidePose(l.transition, 'to', l.progress, W, H)
       // na 1ª metade A fica na frente; na 2ª, B (como o compositor desenha a janela): o hit-test pega o último
       if (l.linear < 0.5) {
-        collectBoxes(p, l.to, W, H, measure, out)
-        collectBoxes(p, l.from, W, H, measure, out)
+        collectBoxes(p, l.to, W, H, measure, out, to)
+        collectBoxes(p, l.from, W, H, measure, out, from)
       } else {
-        collectBoxes(p, l.from, W, H, measure, out)
-        collectBoxes(p, l.to, W, H, measure, out)
+        collectBoxes(p, l.from, W, H, measure, out, from)
+        collectBoxes(p, l.to, W, H, measure, out, to)
       }
     }
   }
