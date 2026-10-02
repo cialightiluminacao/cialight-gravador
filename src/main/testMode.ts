@@ -164,7 +164,8 @@ async function testCapture(store: SessionStore): Promise<number> {
     ok(session.state === 'stopped', `estado stopped (${session.state})`, failures)
     const j = JSON.parse(readFileSync(join(store.dirOf(session.id), 'session.json'), 'utf8')) as Session
     ok(j.state === 'stopped' && j.durationMs === session.durationMs, 'session.json persistido', failures)
-    await store.delete(session.id).catch(() => {})
+    // E2E do editor (scripts/qa/editor-e2e.mjs) reaproveita a gravação: CIALIGHT_CAPTURE_KEEP=1 não apaga
+    if (!process.env.CIALIGHT_CAPTURE_KEEP) await store.delete(session.id).catch(() => {})
   }
   writeFileSync(join(outDir, 'capture-report.json'), JSON.stringify({ result, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE CAPTURA PASSOU')
