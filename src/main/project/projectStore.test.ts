@@ -324,9 +324,38 @@ describe('ProjectStore: arquivos gerados (narração) e recuperação', () => {
     store.closeGeneratedWrite(b.handle)
   })
 
+  it('escrita só pela janela dona do handle (outra janela: erro; sem dono informado: só o próprio processo)', () => {
+    const a = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(1), 7)
+    expect(() => store.writeGenerated(a.handle, new Uint8Array([1]), 0, 8)).toThrow(/não pertence/)
+    expect(() => store.setGeneratedMeta(a.handle, meta(2), 8)).toThrow(/não pertence/)
+    expect(() => store.closeGeneratedWrite(a.handle, 8)).toThrow(/não pertence/)
+    store.writeGenerated(a.handle, new Uint8Array([1]), 0, 7)
+    store.closeGeneratedWrite(a.handle, 7)
+    expect(store.pendingGenerated('p-a')).toHaveLength(1)
+  })
+
+  it('clearPendingGenerated: arquivo vazio sai junto; discardFile apaga mesmo com bytes (gravação que não valeu)', () => {
+    const a = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(1))
+    store.closeGeneratedWrite(a.handle)
+    store.clearPendingGenerated('p-a', a.rel)
+    expect(existsSync(join(root, 'p-a', a.rel))).toBe(false)
+    const b = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(1))
+    store.writeGenerated(b.handle, new Uint8Array([1, 2]), 0)
+    store.closeGeneratedWrite(b.handle)
+    store.clearPendingGenerated('p-a', b.rel, { discardFile: true })
+    expect(existsSync(join(root, 'p-a', b.rel))).toBe(false)
+    expect(existsSync(join(root, 'p-a', `${b.rel}.pending.json`))).toBe(false)
+    // aberto: discardFile fecha antes de apagar
+    const c = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(1))
+    store.writeGenerated(c.handle, new Uint8Array([1]), 0)
+    store.clearPendingGenerated('p-a', c.rel, { discardFile: true })
+    expect(existsSync(join(root, 'p-a', c.rel))).toBe(false)
+    expect(() => store.writeGenerated(c.handle, new Uint8Array([1]), 0)).toThrow()
+  })
+
   it('nome/extensão inválidos e meta malformado no disco', () => {
     expect(() => store.openGeneratedWrite('p-a', '../x', 'm4a', meta(1))).toThrow()
-    expect(() => store.openGeneratedWrite('p-a', 'narracao', 'exe' as 'm4a', meta(1))).toThrow()
+    expect(() => store.openGeneratedWrite('p-a', 'narracao', 'webm' as 'm4a', meta(1))).toThrow()
     writeFileSync(join(root, 'p-a', 'generated', 'lixo.m4a'), 'x')
     writeFileSync(join(root, 'p-a', 'generated', 'lixo.m4a.pending.json'), '{nao json')
     expect(store.pendingGenerated('p-a')).toEqual([])

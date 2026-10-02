@@ -4,7 +4,7 @@ import type { Asset, Project } from './project'
 import { MIN_ITEM_US } from './project'
 import * as ops from './ops'
 import { validateProject } from './schema'
-import { narrationAssetName, narrationPlacement, placeNarration } from './narration'
+import { micProcessingWarning, narrationAssetName, narrationPlacement, placeNarration } from './narration'
 
 // Narração gravada na timeline: posição do item (compensando as latências medidas do AudioContext) e a faixa "Narração".
 
@@ -88,5 +88,18 @@ describe('narrationAssetName', () => {
     expect(narrationAssetName('generated/narracao-3.m4a')).toBe('Narração 3')
     expect(narrationAssetName('generated/narracao-12.webm')).toBe('Narração 12')
     expect(narrationAssetName('generated/outro.m4a')).toBe('Narração')
+  })
+})
+
+describe('micProcessingWarning', () => {
+  const off = { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+  it('tudo desligado ou sem microfone: sem aviso', () => {
+    expect(micProcessingWarning(off)).toBeNull()
+    expect(micProcessingWarning(null)).toBeNull()
+  })
+  it('lista o que ficou ligado', () => {
+    expect(micProcessingWarning({ ...off, noiseSuppression: true })).toContain('manteve redução de ruído neste microfone')
+    expect(micProcessingWarning({ ...off, noiseSuppression: true, autoGainControl: true })).toContain('redução de ruído e ganho automático')
+    expect(micProcessingWarning({ echoCancellation: true, noiseSuppression: true, autoGainControl: true })).toContain('redução de ruído, ganho automático e cancelamento de eco')
   })
 })

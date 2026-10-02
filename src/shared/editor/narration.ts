@@ -46,3 +46,15 @@ export function narrationAssetName(rel: string): string {
   const m = /narracao-(\d+)\.[a-z0-9]+$/.exec(rel)
   return m ? `Narração ${m[1]}` : 'Narração'
 }
+
+/**
+ * Processamento que o navegador manteve ligado no microfone da narração (pedido todo desligado) → texto do aviso, ou
+ * null se está tudo desligado.
+ */
+export function micProcessingWarning(p: { echoCancellation: boolean; noiseSuppression: boolean; autoGainControl: boolean } | null): string | null {
+  if (!p) return null
+  const on = [p.noiseSuppression && 'redução de ruído', p.autoGainControl && 'ganho automático', p.echoCancellation && 'cancelamento de eco'].filter((x): x is string => !!x)
+  if (!on.length) return null
+  const list = on.length === 1 ? on[0] : `${on.slice(0, -1).join(', ')} e ${on[on.length - 1]}`
+  return `O sistema manteve ${list} neste microfone; a narração pode sair abafada ou com volume variando. Feche outros programas que estejam usando o microfone e grave de novo.`
+}

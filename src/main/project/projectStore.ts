@@ -31,7 +31,7 @@ export type AssetVariant = 'original' | 'proxy' | 'intermediate'
 
 const SUBDIRS = ['proxies', 'cache', 'generated', 'versions']
 const PENDING_SUFFIX = '.pending.json'
-const GENERATED_EXTS: readonly GeneratedExt[] = ['m4a', 'webm']
+const GENERATED_EXTS: readonly GeneratedExt[] = ['m4a']
 
 /** Escrita aberta em generated/ (narração): arquivo, marcador e a janela dona (fechada se ela cair). */
 interface GeneratedWrite { fd: number; projectId: string; rel: string; marker: string; owner?: number }
@@ -362,16 +362,22 @@ export class ProjectStore {
     return { handle, rel }
   }
 
-  writeGenerated(handle: number, data: Uint8Array, position: number): void {
+  /** Escrita aberta pelo handle; com `owner` (id da janela que pede), só a janela que abriu pode usá-la. */
+  private ownedWrite(handle: number, owner: number | undefined): GeneratedWrite {
     const w = this.generatedWrites.get(handle)
     if (!w) throw new Error('handle de escrita inválido')
+    if (owner !== undefined && w.owner !== owner) throw new Error('o handle de escrita não pertence a esta janela')
+    return w
+  }
+
+  writeGenerated(handle: number, data: Uint8Array, position: number, owner?: number): void {
+    const w = this.ownedWrite(handle, owner)
     let off = 0
     while (off < data.byteLength) off += writeSync(w.fd, data, off, data.byteLength - off, position + off)
   }
 
-  setGeneratedMeta(handle: number, meta: GeneratedMeta): void {
-    const w = this.generatedWrites.get(handle)
-    if (!w) throw new Error('handle de escrita inválido')
+  setGeneratedMeta(handle: number, meta: GeneratedMeta, owner?: number): void {
+    const w = this.ownedWrite(handle, owner)
     if (!isGeneratedMeta(meta)) throw new Error('meta de arquivo gerado inválido')
     const tmp = `${w.marker}.tmp`
     writeFileSync(tmp, JSON.stringify(meta), 'utf8')
@@ -379,9 +385,9 @@ export class ProjectStore {
   }
 
   /** Fecha o arquivo; o marcador fica até clearPendingGenerated (o renderer salvou o projeto com o asset). */
-  closeGeneratedWrite(handle: number): void {
-    const w = this.generatedWrites.get(handle)
-    if (!w) return
+  closeGeneratedWrite(handle: number, owner?: number): void {
+    if (!this.generatedWrites.has(handle)) return
+    const w = this.ownedWrite(handle, owner)
     this.generatedWrites.delete(handle)
     closeSync(w.fd)
   }
@@ -428,8 +434,22 @@ export class ProjectStore {
     return out
   }
 
-  clearPendingGenerated(id: string, rel: string): void {
-    rmSync(`${this.filePath(id, rel)}${PENDING_SUFFIX}`, { force: true })
+  /**
+   * Tira o marcador (o asset foi salvo, ou a gravação não tem conserto). Arquivo vazio sai junto; `discardFile` apaga
+   * o arquivo mesmo com bytes (gravação que não chegou a valer: falha ao começar, nada gravado), fechando-o se aberto.
+   */
+  clearPendingGenerated(id: string, rel: string, opts?: { discardFile?: boolean }): void {
+    if (!rel.startsWith('generated/')) throw new Error(`arquivo gerado inválido: ${rel}`)
+    const file = this.filePath(id, rel)
+    for (const [h, w] of [...this.generatedWrites]) if (w.projectId.toLowerCase() === id.toLowerCase() && w.rel === rel) this.closeGeneratedWrite(h)
+    rmSync(`${file}${PENDING_SUFFIX}`, { force: true })
+    let empty = false
+    try {
+      empty = statSync(file).size === 0
+    } catch {
+      return
+    }
+    if (empty || opts?.discardFile) rmSync(file, { force: true })
   }
 
   assetPath(p: Project, assetId: string, variant: AssetVariant, sessionsStore: SessionStore): string {

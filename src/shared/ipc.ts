@@ -36,7 +36,7 @@ export interface ProjectSummary {
  */
 export interface GeneratedMeta { kind: 'narration'; startUs: Us; inUs: Us; createdAt: string }
 export interface PendingGenerated { rel: string; meta: GeneratedMeta; bytes: number }
-export type GeneratedExt = 'm4a' | 'webm'
+export type GeneratedExt = 'm4a'
 
 export type IngestStep = 'probe' | 'proxy' | 'intermediate' | 'filmstrip' | 'peaks' | 'speech' | 'loudness' | 'audioProcess'
 /** Progresso de uma etapa da ingestão de um asset (0–100). `key`: chave do pré-processamento de áudio (step 'audioProcess'). */
@@ -239,8 +239,11 @@ export interface IpcApi {
     generatedAsset(projectId: string, rel: string, opts: { name: string; repair?: boolean }): Promise<Asset>
     /** Gravações em generated/ que não chegaram ao projeto (janela/app caiu): com o meta e o tamanho. */
     pendingGenerated(projectId: string): Promise<PendingGenerated[]>
-    /** O asset do arquivo já foi salvo no projeto: o marcador sai (o arquivo fica). */
-    clearPendingGenerated(projectId: string, rel: string): Promise<void>
+    /**
+     * O asset do arquivo já foi salvo no projeto (ou a gravação não tem conserto): o marcador sai; o arquivo fica, salvo
+     * se vazio ou com `discardFile` (gravação que não valeu). Escritas de uma janela só aceitam handles abertos por ela.
+     */
+    clearPendingGenerated(projectId: string, rel: string, opts?: { discardFile?: boolean }): Promise<void>
   }
   /**
    * Ingestão de mídia do editor. Fluxo: `import` (probe no main; vídeos/áudios voltam com status

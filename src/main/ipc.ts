@@ -248,17 +248,18 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     }
     return projects.openGeneratedWrite(projectId, base, ext, meta, wc.id)
   })
-  ipcMain.handle(IPC.project.writeGenerated, (_e, handle: number, data: Uint8Array, position: number) => projects.writeGenerated(handle, data, position))
-  ipcMain.handle(IPC.project.writeGeneratedMeta, (_e, handle: number, meta: GeneratedMeta) => projects.setGeneratedMeta(handle, meta))
-  ipcMain.handle(IPC.project.writeGeneratedClose, (_e, handle: number) => projects.closeGeneratedWrite(handle))
+  // handles só valem para a janela que os abriu
+  ipcMain.handle(IPC.project.writeGenerated, (e, handle: number, data: Uint8Array, position: number) => projects.writeGenerated(handle, data, position, e.sender.id))
+  ipcMain.handle(IPC.project.writeGeneratedMeta, (e, handle: number, meta: GeneratedMeta) => projects.setGeneratedMeta(handle, meta, e.sender.id))
+  ipcMain.handle(IPC.project.writeGeneratedClose, (e, handle: number) => projects.closeGeneratedWrite(handle, e.sender.id))
   ipcMain.handle(IPC.project.generatedAsset, async (_e, projectId: string, rel: string, opts: { name: string; repair?: boolean }) => {
     if (typeof rel !== 'string' || !rel.startsWith('generated/')) throw new Error(`arquivo gerado inválido: ${rel}`)
     const path = projects.filePath(projectId, rel)
     if (opts?.repair) {
       // gravação interrompida: o último fragmento pode ter ficado pela metade — remux só do que é legível
-      const tmp = `${path}.repair.${rel.endsWith('.webm') ? 'webm' : 'm4a'}`
+      const tmp = `${path}.repair.m4a`
       try {
-        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', path, '-map', '0:a:0', '-c', 'copy', ...(rel.endsWith('.webm') ? ['-f', 'webm'] : ['-f', 'mp4', '-movflags', '+faststart']), tmp], { label: 'recuperar narração' })
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', path, '-map', '0:a:0', '-c', 'copy', '-f', 'mp4', '-movflags', '+faststart', tmp], { label: 'recuperar narração' })
         renameSync(tmp, path)
       } catch (e) {
         rmSync(tmp, { force: true })
@@ -272,7 +273,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     return asset
   })
   ipcMain.handle(IPC.project.pendingGenerated, (_e, projectId: string) => projects.pendingGenerated(projectId))
-  ipcMain.handle(IPC.project.clearPendingGenerated, (_e, projectId: string, rel: string) => projects.clearPendingGenerated(projectId, rel))
+  ipcMain.handle(IPC.project.clearPendingGenerated, (_e, projectId: string, rel: string, opts?: { discardFile?: boolean }) => projects.clearPendingGenerated(projectId, rel, { discardFile: !!opts?.discardFile }))
 
   // ---- media (ingestão do editor) ----
   ipcMain.handle(IPC.media.import, async (_e, projectId: string, paths: string[]) => {

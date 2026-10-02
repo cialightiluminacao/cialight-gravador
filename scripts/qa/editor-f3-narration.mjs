@@ -95,6 +95,9 @@ async function connect() {
         await new Promise((r) => (ws.onopen = r))
         ws.onmessage = (e) => {
           const m = JSON.parse(e.data)
+          // erros da página aparecem no log do QA (diagnóstico)
+          if (m.method === 'Runtime.exceptionThrown') console.log('    [página] exceção:', m.params.exceptionDetails?.exception?.description?.slice(0, 400) ?? m.params.exceptionDetails?.text)
+          if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') console.log('    [página] console.error:', m.params.args.map((a) => a.value ?? a.description ?? '').join(' ').slice(0, 400))
           if (m.id && pending.has(m.id)) {
             pending.get(m.id)(m)
             pending.delete(m.id)
@@ -219,6 +222,7 @@ function goertzel(pcm, sr, hz, win = 960, hop = 480) {
 async function main() {
   await connect()
   await send('Page.enable')
+  await send('Runtime.enable')
   await send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 1000, deviceScaleFactor: 1, mobile: false })
   for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`)); i++) await sleep(500)
 
@@ -234,9 +238,21 @@ async function main() {
   const past0 = await ev(`return T.st().history.past.length`)
   const started = await startNarration(false, true)
   check('contagem de ~3 s antes de gravar', started.ok && started.countdownMs > 1500 && started.countdownMs < 4500, started)
-  const live = await ev(`await new Promise((r) => setTimeout(r, 700)); const s = T.lastTrack()?.getSettings() ?? {}; return { ec: s.echoCancellation, ns: s.noiseSuppression, agc: s.autoGainControl, label: T.lastTrack()?.label, playing: T.st().playing, playhead: T.st().playheadUs, level: T.nar().level, recordedUs: T.nar().recordedUs }`)
-  check('microfone sem processamento (eco, ruído e ganho automático desligados)', live.ec === false && live.ns === false && live.agc === false, live)
+  const live = await ev(`await new Promise((r) => setTimeout(r, 700)); const s = T.lastTrack()?.getSettings() ?? {}; return { ec: s.echoCancellation, ns: s.noiseSuppression, agc: s.autoGainControl, label: T.lastTrack()?.label, playing: T.st().playing, playhead: T.st().playheadUs, level: T.nar().level, recordedUs: T.nar().recordedUs, warned: T.toasts().some((t) => t.includes('processamento ligado')) }`)
+  check('microfone sem processamento (eco, ruído e ganho automático desligados) e sem o aviso de processamento', live.ec === false && live.ns === false && live.agc === false && !live.warned, live)
   check('timeline tocando a partir do playhead durante a gravação; VU com sinal', live.playing === true && live.playhead > START_S * S && live.level > 0.05, live)
+  // nada do editor responde enquanto grava: bloqueio por cima de tudo, atalhos e transporte ignorados
+  const blocked = await ev(`
+    const tl = document.querySelector('[data-editor-topbar]')
+    const pts = [[700, 800], [660, 350], [1200, 300], [60, 690]]
+    const hits = pts.map(([x, y]) => document.elementFromPoint(x, y)?.closest('[data-narration-block]') ? 1 : 0)
+    const past = T.st().history.past.length
+    await T.clickEl(document.querySelector('button[aria-label="Dividir no playhead"]'))
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 's', code: 'KeyS', bubbles: true, cancelable: true }))
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', code: 'Home', bubbles: true, cancelable: true }))
+    await new Promise((r) => setTimeout(r, 200))
+    return { hits, hint: document.querySelector('[data-narration-hint]')?.textContent, dp: T.st().history.past.length - past, playing: T.st().playing, phase: T.nar().phase, playhead: T.st().playheadUs }`)
+  check('gravando: bloqueio cobre linha do tempo, visualizador, inspetor e barra; "Gravando narração — pare para editar"; clique e atalhos (S, Home) não editam nem pulam', blocked.hits.every((h) => h === 1) && blocked.hint === 'Gravando narração — pare para editar' && blocked.dp === 0 && blocked.playing && blocked.phase === 'recording' && blocked.playhead > START_S * S, blocked)
   await shot('f3-narracao-03-gravando.png')
   await until(`return T.nar().recordedUs >= 3000000`, 8000, 20)
   const stopAt = await ev(`const r = { recordedUs: T.nar().recordedUs, playhead: T.st().playheadUs }; T.key(' ', 'Space'); return r`)
@@ -293,6 +309,20 @@ async function main() {
     check('o 1 kHz do microfone da gravação segue o vídeo inteiro', k1.every((v) => v > Math.max(...k1) / 4), { min: Math.min(...k1), max: Math.max(...k1) })
   }
 
+  // ---------- 2b) desistir na contagem: microfone solto, nada gravado ----------
+  console.log('Esc na contagem regressiva')
+  {
+    const before = readdirSync(join(pdir, 'generated')).sort()
+    await ev(`await T.clickEl(T.button('Gravar narração')); await new Promise((r) => setTimeout(r, 300)); await T.clickEl(T.button('Gravar', document.querySelector('[data-narration-setup]'))); return 1`)
+    await until(`return T.nar().phase === 'countdown' && !!T.lastTrack() && T.lastTrack().readyState === 'live'`, 3000, 50)
+    await ev(`T.key('Escape', 'Escape'); return 1`)
+    const r = await until(`return T.nar().phase === 'idle' ? { phase: T.nar().phase, track: T.lastTrack()?.readyState, block: !!document.querySelector('[data-narration-block]') } : null`, 3000, 50)
+    await sleep(4000) // passa do fim da contagem: nada começa depois
+    const after = readdirSync(join(pdir, 'generated')).sort()
+    const still = await ev(`return { phase: T.nar().phase, playing: T.st().playing }`)
+    check('Esc na contagem: fase idle, microfone liberado (track ended), sem bloqueio, nenhum arquivo criado, nada começa depois', !!r && r.track === 'ended' && !r.block && JSON.stringify(after) === JSON.stringify(before) && still.phase === 'idle' && !still.playing, { r, before, after, still })
+  }
+
   // ---------- 3) microfone desconectado no meio ----------
   console.log('microfone desconectado no meio da gravação')
   await ev(`await T.seek(${6 * S}); return 1`)
@@ -308,7 +338,7 @@ async function main() {
   // ---------- 4) janela cai no meio da gravação → recuperada ao reabrir ----------
   console.log('janela cai no meio da gravação')
   await ev(`window.__qaEditor.store.getState().apply((p) => p); await T.seek(${0.3 * S}); return 1`)
-  await ev(`for (const t of document.querySelectorAll('[data-sonner-toast]')) t.remove(); return 1`)
+  await ev(`return 1`)
   const s3 = await startNarration(false, false)
   check('3ª gravação começou', s3.ok, s3)
   await until(`return T.nar().recordedUs >= 2600000`, 8000, 20)
@@ -325,18 +355,42 @@ async function main() {
   await send('Page.reload')
   await sleep(1500)
   await send('Page.enable')
+  await send('Runtime.enable')
   await send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 1000, deviceScaleFactor: 1, mobile: false })
   for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`).catch(() => false)); i++) await sleep(500)
   check('projeto reaberto depois da queda', await openEditor(pid), null)
   const rec = await until(`const i = T.narrItems().find((x) => x.asset.name === 'Narração 3'); const toasts = T.toasts(); return i && toasts.some((t) => t.includes('recuperada')) ? { startUs: i.startUs, durationUs: i.durationUs, inUs: i.inUs, track: i.track, toasts, items: T.narrItems().length } : null`, 20000, 200)
   console.log('   ', JSON.stringify(rec))
   check('gravação interrompida recuperada no lugar (±50 ms) com aviso; as outras duas narrações continuam', !!rec && Math.abs(rec.startUs - meta.startUs) <= 1 && rec.toasts.some((t) => t.includes('Narração 3 recuperada')) && rec.items === 3, rec)
-  check(`trecho recuperado: ${rec ? (rec.durationUs / S).toFixed(2) : '?'} s de ${(atCrash / S).toFixed(2)} s gravados (perde no máximo o fragmento final, 1 s)`, !!rec && rec.durationUs >= atCrash - 1.2 * S && rec.durationUs <= atCrash + TOL_US, { rec, atCrash })
+  check(`trecho recuperado: ${rec ? (rec.durationUs / S).toFixed(2) : '?'} s de ${(atCrash / S).toFixed(2)} s gravados (perde no máximo o fragmento final, 0,25 s, mais o bloco em curso)`, !!rec && rec.durationUs >= atCrash - 0.45 * S && rec.durationUs <= atCrash + TOL_US, { rec, atCrash })
   check('marcador limpo depois da recuperação', !existsSync(join(pdir, 'generated', 'narracao-3.m4a.pending.json')), null)
   const probe = JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', join(pdir, 'generated', 'narracao-3.m4a')]).toString())
   check('arquivo recuperado legível (ffprobe)', Number(probe.format?.duration) > 1, probe)
   await sleep(300)
   await shot('f3-narracao-06-recuperada.png')
+
+  // ---------- 5) rede de segurança: a reprodução parou no meio ----------
+  console.log('reprodução pausada por fora no meio da gravação')
+  await ev(`await T.seek(${0.4 * S}); return 1`)
+  const n0 = await ev(`return T.narrItems().length`)
+  check('4ª gravação começou', (await startNarration(false, false)).ok, null)
+  await until(`return T.nar().recordedUs >= 900000`, 6000, 20)
+  await ev(`window.__qaEditor.controller.pause(); return 1`)
+  const net = await until(`return T.nar().phase === 'idle' && T.narrItems().length === ${n0 + 1} ? { toasts: T.toasts(), item: T.narrItems().find((i) => i.asset.name === 'Narração 4') } : null`, 10000, 100)
+  check('reprodução parou antes do fim → a gravação termina sozinha, insere no lugar e avisa', !!net && !!net.item && Math.abs(net.item.startUs - 0.4 * S) <= TOL_US && net.toasts.some((t) => t.includes('A reprodução parou no meio da gravação')), net)
+
+  // ---------- 6) falha de escrita no disco (simulada) ----------
+  console.log('falha de escrita no meio da gravação (simulada)')
+  await ev(`await T.seek(${3 * S}); window.__qaEditor.narrationFailWritesAfter = 8; return 1`)
+  check('5ª gravação começou', (await startNarration(false, false)).ok, null)
+  const wf = await until(`return T.nar().phase === 'idle' && T.narrItems().some((i) => i.asset.name === 'Narração 5') ? { toasts: T.toasts(), item: T.narrItems().find((i) => i.asset.name === 'Narração 5') } : null`, 20000, 100)
+  await ev(`delete window.__qaEditor.narrationFailWritesAfter; return 1`)
+  const wfile = join(pdir, 'generated', 'narracao-5.m4a')
+  const wprobe = existsSync(wfile) ? JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', wfile]).toString()) : null
+  console.log('   ', JSON.stringify({ item: wf?.item && { startUs: wf.item.startUs, durationUs: wf.item.durationUs }, wprobe }))
+  check('escrita falhou: a gravação para sozinha com aviso, o parcial fica no disco e entra na timeline no lugar', !!wf && wf.toasts.some((t) => t.includes('Falha ao gravar no disco')) && !!wf.item && Math.abs(wf.item.startUs - 3 * S) <= TOL_US && wf.item.durationUs > 0.1 * S && Number(wprobe?.format?.duration) > 0.1 && !existsSync(`${wfile}.pending.json`), { wf, wprobe })
+  await sleep(300)
+  await shot('f3-narracao-07-falha-de-escrita.png')
 }
 
 try {

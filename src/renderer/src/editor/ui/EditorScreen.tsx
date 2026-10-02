@@ -31,7 +31,7 @@ import { viewerGestureActive } from './viewer/viewerGesture'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; narration: typeof useNarration; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string }
+    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; narration: typeof useNarration; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string; narrationFailWritesAfter?: number }
   }
 }
 

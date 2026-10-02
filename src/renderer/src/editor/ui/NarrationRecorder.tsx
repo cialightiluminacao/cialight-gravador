@@ -135,7 +135,22 @@ export function NarrationOverlay(): React.JSX.Element | null {
 
   if (phase === 'idle') return null
   return createPortal(
-    <div data-narration-bar={phase} className="pointer-events-none fixed inset-x-0 top-16 z-50 flex justify-center">
+    <>
+      {/* bloqueio: nada do editor (linha do tempo, visualizador, inspetor, barra de cima) responde enquanto grava */}
+      <div
+        data-narration-block=""
+        className="fixed inset-0 z-40 cursor-not-allowed bg-black/15"
+        onPointerDown={(e) => e.preventDefault()}
+        onWheel={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center">
+          <span data-narration-hint="" className="rounded-full border border-border-strong bg-surface-3/95 px-4 py-1.5 text-[12px] font-semibold text-fg-2 shadow-xl">
+            {phase === 'countdown' ? 'Preparando a gravação da narração…' : 'Gravando narração — pare para editar'}
+          </span>
+        </div>
+      </div>
+      <div data-narration-bar={phase} className="pointer-events-none fixed inset-x-0 top-16 z-50 flex justify-center">
       {phase === 'countdown' ? (
         <div className="pointer-events-auto flex items-center gap-4 rounded-2xl border border-border-strong bg-surface-3/95 px-5 py-3 shadow-2xl">
           <span data-narration-count="" className="font-mono text-4xl font-bold text-accent tabular-nums">
@@ -164,7 +179,8 @@ export function NarrationOverlay(): React.JSX.Element | null {
           </Tip>
         </div>
       )}
-    </div>,
+      </div>
+    </>,
     document.body
   )
 }

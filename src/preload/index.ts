@@ -82,7 +82,7 @@ const api: IpcApi = {
     writeGeneratedClose: (handle) => ipcRenderer.invoke(IPC.project.writeGeneratedClose, handle),
     generatedAsset: (projectId, rel, opts) => ipcRenderer.invoke(IPC.project.generatedAsset, projectId, rel, opts),
     pendingGenerated: (projectId) => ipcRenderer.invoke(IPC.project.pendingGenerated, projectId),
-    clearPendingGenerated: (projectId, rel) => ipcRenderer.invoke(IPC.project.clearPendingGenerated, projectId, rel)
+    clearPendingGenerated: (projectId, rel, opts) => ipcRenderer.invoke(IPC.project.clearPendingGenerated, projectId, rel, opts)
   },
   media: {
     import: (projectId, paths) => ipcRenderer.invoke(IPC.media.import, projectId, paths),

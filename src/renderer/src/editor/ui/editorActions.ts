@@ -11,6 +11,7 @@ import { flushAutosave, useEditorStore } from '../state/editorStore'
 import { useKeyframeSelection } from '../state/keyframeSelection'
 import { useViewerTool } from '../state/viewerTool'
 import { autoMusicLanding, moveToVoice } from './musicLanding'
+import { narrationActive } from './narrationFlow'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 
@@ -25,14 +26,15 @@ export function registerZoomFit(fn: (() => void) | null): void {
 
 export function seekTo(playback: PlaybackController | null, us: Us): void {
   const p = st().project
-  if (!p) return
+  // gravando narração: o relógio da reprodução é a referência do início da gravação
+  if (!p || narrationActive()) return
   const t = Math.min(Math.max(0, Math.round(us)), projectDurationUs(p))
   if (playback) playback.seek(t)
   else st().setPlayhead(t)
 }
 
 export function togglePlay(playback: PlaybackController | null): void {
-  if (!playback) return
+  if (!playback || narrationActive()) return
   if (st().playing) playback.pause()
   else void playback.play()
 }
@@ -208,7 +210,8 @@ function zoomBy(factor: number): void {
 export function runShortcut(action: ShortcutAction, playback: PlaybackController | null): boolean {
   const s = st()
   const p = s.project
-  if (!p) return false
+  // gravando narração: nada de transporte nem edição (a barra de gravação cuida de Espaço/Esc)
+  if (!p || narrationActive()) return false
   const fps = p.canvas.fps
   switch (action) {
     case 'playPause': togglePlay(playback); return true
