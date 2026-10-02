@@ -384,10 +384,12 @@ function touchedIds(p: Project, fx: EffectItem, acted: Placed[]): { ids: Set<str
 
 /**
  * Região do efeito no quadro novo, em cada amostra, levando o conteúdo que a região antiga cobria (ver o topo do
- * arquivo). `reduced`: algum instante do invertido virou o buraco nulo. Invertido ancorado (`anchored`): a região já
- * vem do resolve e só é conferida (nunca mostrar clipe novo no buraco).
+ * arquivo). `reduced`: algum instante do invertido virou o buraco nulo. `checkOnly` (invertidos que não foram
+ * assados: soltos mantidos, ancorados): a região é a que o efeito já tem no projeto novo (como o resolve a desenha) e só
+ * é conferida — `unsafe` = algum instante mostra no buraco item que não aparecia nele antes (inclusive buraco que antes
+ * não mostrava item nenhum), e esse instante vira o buraco nulo.
  */
-function mappedSamples(p0: Project, p1: Project, id: string, anchored: boolean): { samples: RegionSample[]; reduced: boolean; unsafe: boolean } {
+function mappedSamples(p0: Project, p1: Project, id: string, checkOnly: boolean): { samples: RegionSample[]; reduced: boolean; unsafe: boolean } {
   const fx0 = fxIn(p0, id), fx1 = fxIn(p1, id)
   const acted0 = actedClips(p0, fx0), acted1 = actedClips(p1, fx1)
   const { times, must } = effectTimes(p0, p1, fx0, acted0)
@@ -397,7 +399,7 @@ function mappedSamples(p0: Project, p1: Project, id: string, anchored: boolean):
   const samples = times.map((t): RegionSample => {
     const r0 = effectRegionAt(p0, fx0, t, 0)
     let r1: RegionValues
-    if (anchored) r1 = effectRegionAt(p1, fx1, t, 0)
+    if (checkOnly) r1 = effectRegionAt(p1, fx1, t, 0)
     else {
       const under = clipsAt(p0, fx0, acted0, r0, t, fx0.invert)
       const maps = under.flatMap(({ it, cf }) => {
@@ -543,15 +545,17 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
   }
   // 3. caixas de reserva das âncoras no quadro novo
   p1 = refreshAttachments(p1, p0)
-  // 4. assar os de vários itens; invertidos ancorados: conferir que nenhum item novo aparece no buraco
+  // 4. assar os de vários itens; depois TODO invertido que não foi assado (solto mantido — inclusive o buraco que não
+  //    mostrava item nenhum —, ancorado pelo reenquadrar, já ancorado, âncora perdida): conferir que nenhum item novo
+  //    aparece no buraco (um clipe que cresce ou se move para baixo dele no quadro novo)
   const baked: string[] = []
   const replace = (id: string, fn: (fx: EffectItem) => EffectItem): void => {
     p1 = { ...p1, tracks: p1.tracks.map((t) => (t.items.some((i) => i.id === id) ? { ...t, items: t.items.map((i) => (i.id === id ? fn(i as EffectItem) : i)) } : t)) }
   }
-  const bake = (id: string, anchored: boolean): void => {
+  const bake = (id: string, checkOnly: boolean): void => {
     const fx0 = fxIn(p0, id)
-    const { samples, reduced, unsafe } = mappedSamples(p0, p1, id, anchored)
-    if (anchored && !unsafe) return
+    const { samples, reduced, unsafe } = mappedSamples(p0, p1, id, checkOnly)
+    if (checkOnly && !unsafe) return
     if (reduced) warnings.push({ itemId: id, kind: 'holeReduced', message: MSG.holeReduced, tUs: samples.find((s) => !(s.r.w > 0 && s.r.h > 0))?.t ?? fx0.startUs })
     if (fx0.attach) warnings.push({ itemId: id, kind: 'unanchored', message: MSG.unanchored, tUs: fx0.startUs })
     const region = simplifyRegionSamples(samples, fx0.region.shape, fx0.startUs, canvas.width, canvas.height, fx0.invert ? 'shrink' : 'grow')
@@ -562,7 +566,7 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
     baked.push(id)
   }
   for (const id of [...toBake, ...unanchor]) bake(id, false)
-  for (const t of p1.tracks) for (const fx of t.items) if (fx.type === 'effect' && fx.invert && fx.attach && attachedMedia(p1, fx)) bake(fx.id, true)
+  for (const t of p1.tracks) for (const fx of t.items) if (fx.type === 'effect' && fx.invert && !baked.includes(fx.id)) bake(fx.id, true)
   // 5. regiões que saem do quadro novo (estando dentro do antigo no mesmo instante)
   for (const t of p1.tracks) for (const fx1 of t.items) {
     if (fx1.type !== 'effect') continue

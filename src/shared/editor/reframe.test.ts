@@ -628,3 +628,59 @@ describe('pontos de foco no espaço do conteúdo', () => {
     expect(q.y).toBeCloseTo(f.y, 9)
   })
 })
+
+describe('revisão 2: buraco que não mostrava item nenhum', () => {
+  it.each(MODES)('(a) clipe 4:3 em 16:9 com o buraco na barra lateral → 9:16 %s: o clipe nunca aparece no buraco', (mode) => {
+    const v43: Asset = { ...vid, id: 'v43', video: { ...vid.video!, width: 1440, height: 1080 } }
+    const p = createEmptyProject('Aula')
+    p.assets = [v43]
+    const m = clip('m', v43, 0, 4 * S)
+    p.tracks = [track('tv', [m]), track('tf', [fxAt('hole', 'blurAllExcept', { x: 0.06, y: 0.5, w: 0.08, h: 0.3 }, 0, 4 * S)], { role: 'effects' })]
+    const r = reframeProject(p, '9:16', { mode })
+    const c = coverage(p, r.project, 'hole')
+    expect(c.fails.slice(0, 3)).toEqual([])
+    expect(r.warnings.some((w) => w.itemId === 'hole' && w.kind === 'holeReduced')).toBe(true)
+    // sem o reenquadrar o buraco ficaria aberto sobre o clipe: o oráculo acusa
+    const naive: Project = { ...r.project, tracks: r.project.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === 'hole' ? fxOf(p, 'hole') : i)) })) }
+    expect(coverage(p, naive, 'hole').fails.length).toBeGreaterThan(0)
+  })
+
+  it('(b) buraco no fundo ao lado do PiP → 9:16 cover: o PiP reposicionado nunca aparece no buraco', () => {
+    const p = createEmptyProject('Aula')
+    p.assets = [cam]
+    const pip = clip('pip', cam, 0, 4 * S)
+    pip.visual!.transform.scale = { value: 0.25 }
+    pip.visual!.transform.x = { value: 0.85 }
+    pip.visual!.transform.y = { value: 0.8 }
+    p.tracks = [track('tp', [pip]), track('tf', [fxAt('hole', 'blurAllExcept', { x: 0.62, y: 0.8, w: 0.1, h: 0.2 }, 0, 4 * S)], { role: 'effects' })]
+    const r = reframeProject(p, '9:16', { mode: 'cover' })
+    expect(coverage(p, r.project, 'hole').fails.slice(0, 3)).toEqual([])
+    expect(r.warnings.some((w) => w.itemId === 'hole' && w.kind === 'holeReduced')).toBe(true)
+    const naive: Project = { ...r.project, tracks: r.project.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === 'hole' ? fxOf(p, 'hole') : i)) })) }
+    expect(coverage(p, naive, 'hole').fails.length).toBeGreaterThan(0)
+  })
+
+  it('buraco sem item nenhum embaixo (nem antes nem depois): fica como estava, sem aviso', () => {
+    const p = createEmptyProject('x')
+    p.assets = [cam]
+    const pip = clip('pip', cam, 0, 4 * S)
+    pip.visual!.transform.scale = { value: 0.2 }
+    pip.visual!.transform.x = { value: 0.5 }
+    pip.visual!.transform.y = { value: 0.5 }
+    p.tracks = [track('tp', [pip]), track('tf', [fxAt('hole', 'blurAllExcept', { x: 0.5, y: 0.08, w: 0.1, h: 0.08 }, 0, 4 * S)], { role: 'effects' })]
+    const r = reframeProject(p, '9:16', { mode: 'cover' })
+    expect(fxOf(r.project, 'hole').region).toEqual(fxOf(p, 'hole').region)
+    expect(r.warnings.filter((w) => w.itemId === 'hole')).toEqual([])
+  })
+
+  it.each(RUNS)('%s / %s: todo invertido (solto, ancorado pelo reenquadrar, já ancorado, âncora perdida) passa pela conferência', (aspect, mode) => {
+    const p0 = pipScene([
+      fxAt('loose', 'blurAllExcept', { x: 0.62, y: 0.8, w: 0.1, h: 0.2 }),
+      fxAt('scr', 'blurAllExcept', { x: 0.6, y: 0.7, w: 0.1, h: 0.15 }),
+      fxAt('pre', 'blurAllExcept', { x: 0.55, y: 0.75, w: 0.1, h: 0.15 })
+    ])
+    const p = attachEffects(p0, 'a', ['pre'])
+    const r = reframeProject(p, aspect, { mode, focus: FOCUS_A })
+    for (const id of ['loose', 'scr', 'pre']) expect(coverage(p, r.project, id).fails.slice(0, 3)).toEqual([])
+  })
+})
