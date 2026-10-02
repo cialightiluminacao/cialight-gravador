@@ -57,6 +57,10 @@ interface EffectsReport {
   halfOutside?: { detail: { ref: number; fx: number }; edgeMean: number; refBandMean: number; outsideMaxDiff: number }
   keyframe?: { centroidX: number; centroidX1s: number; maskPixels: number }
   track?: { insideLayer: number[]; outsideLayerDiff: number }
+  trackGap?: { maxDiff: number; hiddenSkipped: number[] }
+  invertFeather?: { featherPx: number; justOutsideDiff: number; justOutsideVsRef: number; centerMaxDiff: number }
+  featherTail?: { rectRing: number; ellipseRing: number; outsideMaxDiff: number; changed: number[] }
+  realloc?: { maxDiff: number }
   bench?: { renderer?: string; noFx: Stats; fx3: Stats; fx3Frame: Stats; error?: string }
 }
 
@@ -244,6 +248,14 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const tk = fx?.track
   const isTarja = (p: number[] | undefined): boolean => !!p && p[0] === 0x12 && p[1] === 0x34 && p[2] === 0x56
   check(isTarja(tk?.insideLayer) && tk!.outsideLayerDiff <= 2, `escopo track: só a camada logo abaixo recebe a tarja (${tk?.insideLayer}; vídeo fora da camada inalterado, dif. ${tk?.outsideLayerDiff})`, failures)
+  const tg = fx?.trackGap
+  check(!!tg && tg.maxDiff === 0, `escopo track sobre lacuna (faixa logo abaixo sem item): quadro inalterado (dif. máx. ${tg?.maxDiff})`, failures)
+  check(isTarja(tg?.hiddenSkipped), `escopo track com faixa oculta no meio: pega a camada da faixa visível logo abaixo (${tg?.hiddenSkipped})`, failures)
+  const ivf = fx?.invertFeather
+  check(!!ivf && ivf.justOutsideDiff <= 1 && ivf.centerMaxDiff === 0, `invertido + feather (${ivf?.featherPx.toFixed(1)} px para dentro): logo fora da região = blur inteiro (dif. ${ivf?.justOutsideDiff} do invertido sem feather; ${ivf?.justOutsideVsRef} do original), miolo intocado (dif. ${ivf?.centerMaxDiff})`, failures)
+  const ft = fx?.featherTail
+  check(!!ft && ft.rectRing <= 2 && ft.ellipseRing <= 2 && ft.outsideMaxDiff === 0 && ft.changed.every((d) => d > 30), `feather sem corte no scissor: retângulo 30° e elipse excêntrica 25° com feather — borda da caixa = original (dif. ${ft?.rectRing} / ${ft?.ellipseRing}), fora = original (${ft?.outsideMaxDiff}), efeito aplicado dentro (dif. máx. ${ft?.changed})`, failures)
+  check(fx?.realloc?.maxDiff === 0, `FBOs liberados após 120 quadros sem efeito e realocados: mesmo quadro (dif. ${fx?.realloc?.maxDiff})`, failures)
   const bn = fx?.bench
   console.log(`desempenho (${bn?.renderer}): sem efeito ${JSON.stringify(bn?.noFx)} ms; 3 blurs fortes ${JSON.stringify(bn?.fx3)} ms (quadro inteiro ${JSON.stringify(bn?.fx3Frame)})`)
   check(!!bn && !bn.error && bn.fx3.n > 0 && bn.fx3.median < 12, `desempenho: 1080p com 3 blurs fortes < 12 ms/quadro (compositor + GPU: mediana ${bn?.fx3.median} ms, p95 ${bn?.fx3.p95} ms) ${bn?.error ?? ''}`, failures)

@@ -75,7 +75,7 @@ describe('resolveFrame', () => {
     let { p } = base()
     const tid = p.tracks[0].id
     p = ops.insertItems(p, tid, [{ id: 'an', type: 'annotations', startUs: 20 * S, durationUs: 5 * S, sessionId: 's1', inUs: 2 * S }], 'overwrite')
-    expect(resolveFrame(p, 21 * S)).toEqual([{ kind: 'annotations', itemId: 'an', sessionId: 's1', sessionMs: 3000, autoFadeMs: null }])
+    expect(resolveFrame(p, 21 * S)).toEqual([{ kind: 'annotations', itemId: 'an', trackId: tid, sessionId: 's1', sessionMs: 3000, autoFadeMs: null }])
     p = ops.insertItems(p, tid, [{ id: 'an2', type: 'annotations', startUs: 40 * S, durationUs: 5 * S, sessionId: 's1', inUs: 0, autoFadeMs: 2500 }], 'overwrite')
     expect(resolveFrame(p, 41 * S)[0]).toMatchObject({ kind: 'annotations', itemId: 'an2', autoFadeMs: 2500 })
     const fx: EffectItem = {
@@ -86,6 +86,24 @@ describe('resolveFrame', () => {
     p = ops.insertItems(p, tid, [fx], 'overwrite')
     const l = resolveFrame(p, 31 * S)[0]
     expect(l).toMatchObject({ kind: 'effect', strength: 8, region: { x: 0.5 } })
+  })
+  it('effect: trackId e belowTrackId = faixa de vídeo visível logo abaixo (pula ocultas e de áudio)', () => {
+    const { p: p0 } = base()
+    const bottom = p0.tracks.find((t) => t.kind === 'video')!.id
+    let p = p0
+    const hidden = ops.addTrack(p, 'video')
+    p = ops.updateTrack(hidden.project, hidden.trackId, { hidden: true })
+    const top = ops.addTrack(p, 'video')
+    p = top.project
+    const fx: EffectItem = {
+      id: 'fx', type: 'effect', effect: 'solid', startUs: 0, durationUs: 2 * S, feather: 0, color: '#000', invert: false, scope: 'track',
+      region: { shape: 'rect', x: { value: 0.5 }, y: { value: 0.5 }, w: { value: 0.2 }, h: { value: 0.2 }, rotation: { value: 0 } }, strength: { value: 100 }
+    }
+    p = ops.insertItems(p, top.trackId, [fx], 'overwrite')
+    expect(resolveFrame(p, S).find((l) => l.kind === 'effect')).toMatchObject({ trackId: top.trackId, belowTrackId: bottom })
+    // na faixa de vídeo mais baixa: nada abaixo
+    const low = ops.insertItems(p0, bottom, [{ ...fx, id: 'fx2', startUs: 20 * S }], 'overwrite')
+    expect(resolveFrame(low, 21 * S)).toEqual([expect.objectContaining({ kind: 'effect', trackId: bottom, belowTrackId: null })])
   })
   it('enabled:false some do resolveFrame; reativar volta', () => {
     const { p: p0 } = base()

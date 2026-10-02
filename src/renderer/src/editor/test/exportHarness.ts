@@ -20,7 +20,7 @@ declare global {
   }
 }
 
-interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; effects: { projectId: string; width: number; height: number; tUs: number; block: number } }
+interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; effects: { projectId: string; width: number; height: number; tUs: number; block: number; blurCrop: { x: number; y: number; w: number; h: number } } }
 
 export async function runExportHarness(params: Params): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
@@ -135,7 +135,11 @@ async function effectsParity(fx: Params['effects'], outputDir: string): Promise<
       ctx.imageSmoothingQuality = 'high'
       ctx.drawImage(src, 0, 0, fx.width, fx.height)
       const small = ctx.getImageData(0, 0, fx.width, fx.height).data
-      return { export: exported, previewBlockVar: blockVariance(small, fx.width, fx.height, fx.block) }
+      // RGB do miolo da região borrada no preview reduzido (o main compara com a exportação por PSNR)
+      const c = fx.blurCrop
+      const blurRgb: number[] = []
+      for (let y = c.y; y < c.y + c.h; y++) for (let x = c.x; x < c.x + c.w; x++) blurRgb.push(small[(y * fx.width + x) * 4], small[(y * fx.width + x) * 4 + 1], small[(y * fx.width + x) * 4 + 2])
+      return { export: exported, previewBlockVar: blockVariance(small, fx.width, fx.height, fx.block), previewBlurRgb: blurRgb }
     } finally {
       client.dispose()
       canvas.remove()

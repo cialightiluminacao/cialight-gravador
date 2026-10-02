@@ -16,9 +16,11 @@ export interface MediaLayer {
   shape: 'rect' | 'rounded' | 'circle'; radius: number
   border?: { width: number; color: string }; adjust?: VisualProps['adjust']; mirror: boolean
 }
-export interface AnnotationsLayer { kind: 'annotations'; itemId: string; sessionId: string; sessionMs: number; autoFadeMs: number | null }
+export interface AnnotationsLayer { kind: 'annotations'; itemId: string; trackId: string; sessionId: string; sessionMs: number; autoFadeMs: number | null }
 export interface EffectLayer {
-  kind: 'effect'; itemId: string; effect: EffectItem['effect']
+  kind: 'effect'; itemId: string; trackId: string; effect: EffectItem['effect']
+  /** Faixa de vídeo visível imediatamente abaixo (escopo `track` só afeta a camada dela); null = nenhuma. */
+  belowTrackId: string | null
   region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }
   strength: number; feather: number; color: string; invert: boolean; scope: 'below' | 'track'
 }
@@ -87,6 +89,16 @@ function visualState(v: VisualProps, itemDur: Us, local: Us): { rect: Rect; opac
 
 const ev = (a: Anim<number>, local: Us): number => evalAnim(a, local)
 
+/** Faixa de vídeo não oculta imediatamente abaixo de trackId (faixas de áudio e ocultas são puladas). */
+function visualTrackBelow(p: Project, trackId: string): string | null {
+  const i = p.tracks.findIndex((t) => t.id === trackId)
+  for (let j = i - 1; j >= 0; j--) {
+    const t = p.tracks[j]
+    if (t.kind === 'video' && !t.hidden) return t.id
+  }
+  return null
+}
+
 /** Camadas visíveis no instante tUs, da mais ao fundo (faixa 0) à mais ao topo. */
 export function resolveFrame(p: Project, tUs: Us): Layer[] {
   const layers: Layer[] = []
@@ -111,7 +123,7 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
         break
       }
       case 'annotations':
-        layers.push({ kind: 'annotations', itemId: item.id, sessionId: item.sessionId, sessionMs: (item.inUs + local) / 1000, autoFadeMs: item.autoFadeMs ?? null })
+        layers.push({ kind: 'annotations', itemId: item.id, trackId: track.id, sessionId: item.sessionId, sessionMs: (item.inUs + local) / 1000, autoFadeMs: item.autoFadeMs ?? null })
         break
       case 'text': {
         const s = visualState(item.visual, item.durationUs, local)
@@ -126,7 +138,7 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
       case 'effect': {
         const r = item.region
         layers.push({
-          kind: 'effect', itemId: item.id, effect: item.effect,
+          kind: 'effect', itemId: item.id, trackId: track.id, effect: item.effect, belowTrackId: visualTrackBelow(p, track.id),
           region: { shape: r.shape, x: ev(r.x, local), y: ev(r.y, local), w: ev(r.w, local), h: ev(r.h, local), rotation: ev(r.rotation, local) },
           strength: ev(item.strength, local), feather: item.feather, color: item.color, invert: item.invert, scope: item.scope
         })

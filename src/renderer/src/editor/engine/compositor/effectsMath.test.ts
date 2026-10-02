@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { blurRadiusPx, downsampleFactor, featherPx, gaussianWeights, pixelBlockPx, regionScissor } from './effectsMath'
+import { blurRadiusPx, downsampleFactor, featherPx, gaussianWeights, pixelBlockPx, regionDistPx, regionScissor } from './effectsMath'
 
 describe('blurRadiusPx', () => {
   it('0–100 → 0…4 % da altura de saída; 60 em 1080p ≈ 26 px', () => {
@@ -115,5 +115,56 @@ describe('regionScissor', () => {
   it('região inteira fora do quadro → caixa vazia', () => {
     const s = regionScissor({ x: 1.5, y: 0.5, w: 0.2, h: 0.2, rotation: 0 }, 0, W, H)
     expect(s.w === 0 || s.h === 0).toBe(true)
+  })
+
+  it('retângulo rotacionado com feather: todo ponto com máscara > 0 (dist < feather) está na caixa', () => {
+    const r = { x: 0.4, y: 0.55, w: 0.25, h: 0.12, rotation: 30, shape: 'rect' as const }
+    expectMaskInside(r, 0.4)
+  })
+
+  it('elipse rotacionada e excêntrica com feather: a cauda do feather inteira cabe na caixa', () => {
+    expectMaskInside({ x: 0.5, y: 0.5, w: 0.5, h: 0.05, rotation: 25, shape: 'ellipse' as const }, 0.8)
+    expectMaskInside({ x: 0.3, y: 0.6, w: 0.1, h: 0.4, rotation: -60, shape: 'ellipse' as const }, 0.3)
+  })
+
+  it('elipse sem feather: caixa justa da elipse (menor que a do retângulo)', () => {
+    const e = regionScissor({ x: 0.5, y: 0.5, w: 0.3, h: 0.3, rotation: 30, shape: 'ellipse' }, 0, W, H)
+    const r = regionScissor({ x: 0.5, y: 0.5, w: 0.3, h: 0.3, rotation: 30, shape: 'rect' }, 0, W, H)
+    expect(e.w).toBeLessThan(r.w)
+    expect(e.h).toBeLessThan(r.h)
+    expectMaskInside({ x: 0.5, y: 0.5, w: 0.3, h: 0.3, rotation: 30, shape: 'ellipse' as const }, 0)
+  })
+
+  /** Varre o quadro: onde a máscara do shader é > 0 (dist < feather, ou ≤ 0 sem feather) tem de estar na caixa. */
+  function expectMaskInside(r: { x: number; y: number; w: number; h: number; rotation: number; shape: 'rect' | 'ellipse' }, feather: number): void {
+    const s = regionScissor(r, feather, W, H)
+    const f = featherPx(r, feather, W, H)
+    let outside = 0
+    let inside = 0
+    for (let py = 0.5; py < H; py += 3) {
+      for (let px = 0.5; px < W; px += 3) {
+        const d = regionDistPx(r, px, py, W, H)
+        if (!(f > 0 ? d < f : d <= 0)) continue
+        inside++
+        const glY = H - py
+        if (px < s.x || px > s.x + s.w || glY < s.y || glY > s.y + s.h) outside++
+      }
+    }
+    expect(inside).toBeGreaterThan(100)
+    expect(outside).toBe(0)
+  }
+})
+
+describe('regionDistPx', () => {
+  it('retângulo: distância com sinal exata (rotação horária, y para baixo)', () => {
+    const r = { x: 0.5, y: 0.5, w: 0.1, h: 0.1, rotation: 0, shape: 'rect' as const }
+    expect(regionDistPx(r, 960, 540, 1920, 1080)).toBeCloseTo(-54, 6)
+    expect(regionDistPx(r, 960 + 96 + 10, 540, 1920, 1080)).toBeCloseTo(10, 6)
+  })
+  it('elipse: exata nos eixos e nunca menor que a cota (f − 1)·min(a, b)', () => {
+    const r = { x: 0.5, y: 0.5, w: 0.2, h: 0.1, rotation: 0, shape: 'ellipse' as const }
+    expect(regionDistPx(r, 960 + 192 + 20, 540, 1920, 1080)).toBeCloseTo(20, 6)
+    expect(regionDistPx(r, 960, 540 - 54 - 7, 1920, 1080)).toBeCloseTo(7, 6)
+    expect(regionDistPx(r, 960, 540, 1920, 1080)).toBeLessThan(0)
   })
 })

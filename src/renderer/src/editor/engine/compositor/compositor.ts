@@ -26,6 +26,9 @@ const REFERENCE_WIDTH = 1920
 const DEFAULT_ROUNDED = 0.06
 const SELECTION_COLOR: [number, number, number, number] = [0.32, 0.6, 1, 1]
 
+// quadros seguidos sem efeito até liberar os FBOs do passe de efeitos (~4 s a 30 fps)
+const IDLE_RELEASE_FRAMES = 120
+
 const SHAPE_CODE = { rect: 0, rounded: 1, circle: 2 } as const
 
 interface TexEntry { tex: WebGLTexture; src: unknown }
@@ -51,6 +54,7 @@ export class Compositor {
   private readonly textures = new Map<string, TexEntry>()
   private readonly effects: EffectPass
   private readonly px1 = new Uint8Array(4)
+  private framesWithoutFx = 0
 
   constructor(private readonly canvas: OffscreenCanvas) {
     const gl = createGl(canvas)
@@ -73,7 +77,11 @@ export class Compositor {
     const H = this.canvas.height
     // Com efeito no quadro, as camadas vão para o FBO de acumulação (o efeito precisa ler o que está abaixo)
     // e o resultado é copiado ao canvas no fim; sem efeito, direto no canvas (caminho da F1, sem custo extra).
-    const fx = layers.some((l) => l.kind === 'effect') ? this.effects.targets(W, H) : null
+    const hasFx = layers.some((l) => l.kind === 'effect')
+    // FBOs de efeito liberados depois de IDLE_RELEASE_FRAMES quadros seguidos sem efeito (realocados no próximo)
+    this.framesWithoutFx = hasFx ? 0 : this.framesWithoutFx + 1
+    if (this.framesWithoutFx === IDLE_RELEASE_FRAMES) this.effects.release()
+    const fx = hasFx ? { accum: this.effects.accum(W, H) } : null
     this.bindTarget(fx?.accum ?? null)
     const [r, g, b] = parseColor(background)
     gl.clearColor(r, g, b, 1)
@@ -85,27 +93,23 @@ export class Compositor {
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i]
       if (layer.kind === 'effect') {
-        // escopo `track` sem camada desenhável logo abaixo: nada a afetar
+        // escopo `track` sem a camada da faixa logo abaixo (lacuna, outro efeito…): nada a afetar
         if (fx && layer.scope === 'below') this.applyEffect(fx.accum, layer, W, H)
         continue
       }
-      // efeitos de escopo `track` logo acima: a camada é desenhada isolada no FBO auxiliar, recebe os efeitos
-      // e só então é composta sobre o acumulado
-      const own: EffectLayer[] = []
-      for (let j = i + 1; j < layers.length; j++) {
-        const next = layers[j]
-        if (next.kind !== 'effect' || next.scope !== 'track') break
-        own.push(next)
-      }
-      if (fx && own.length > 0 && (layer.kind === 'media' || layer.kind === 'annotations')) {
-        this.bindTarget(fx.aux)
+      // efeito de escopo `track` logo acima, da faixa imediatamente acima desta: a camada é desenhada isolada no
+      // FBO auxiliar, recebe o efeito e só então é composta sobre o acumulado
+      const next = layers[i + 1]
+      if (fx && next?.kind === 'effect' && next.scope === 'track' && (layer.kind === 'media' || layer.kind === 'annotations') && next.belowTrackId === layer.trackId) {
+        const aux = this.effects.aux(W, H)
+        this.bindTarget(aux)
         gl.clearColor(0, 0, 0, 0)
         gl.clear(gl.COLOR_BUFFER_BIT)
         this.drawLayer(layer, ctx)
-        for (const e of own) this.applyEffect(fx.aux, e, W, H)
+        this.applyEffect(aux, next, W, H)
         this.bindTarget(fx.accum)
-        this.effects.composite(fx.aux)
-        i += own.length
+        this.effects.composite(aux)
+        i++
         continue
       }
       this.drawLayer(layer, ctx)

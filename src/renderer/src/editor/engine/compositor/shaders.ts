@@ -158,7 +158,7 @@ void main() {
 // Aplicação do efeito com máscara: u_src = cópia do que está abaixo (W×H), u_fx = resultado do blur (escala 1/ds).
 // Região em px do quadro com y para baixo: centro, meia-largura/altura, rotação horária (cos, sin); máscara
 // 1 dentro, borda suave para FORA com largura u_feather (0 = borda dura, cobre exatamente a região);
-// u_invert inverte. u_mode: 0 blur, 1 pixelização (amostra no centro do bloco, grade presa ao quadro), 2 sólido
+// u_invert: efeito fora da região, borda suave para DENTRO dela (fora = 100 % efeito). u_mode: 0 blur, 1 pixelização (amostra no centro do bloco, grade presa ao quadro), 2 sólido
 // (cor exata; × alpha do que está abaixo, que no acumulado é 1). mix com m ∈ {0,1} devolve os pixels exatos.
 export const FS_APPLY = `#version 300 es
 precision highp float;
@@ -185,16 +185,23 @@ void main() {
   vec2 hl = max(u_half, vec2(1e-3));
   float dist;
   if (u_shape == 1) {
-    // distância aproximada à elipse (f·(f−1)/|∇f|)
+    // distância aproximada à elipse (f·(f−1)/|∇f|); fora, nunca abaixo da cota (f−1)·min(a,b) — garante a cauda
+    // do feather dentro da caixa de regionScissor (mesma conta em effectsMath.regionDistPx)
     float f = length(l / hl);
     float g = length(l / (hl * hl));
     dist = g > 1e-6 ? f * (f - 1.0) / g : -min(hl.x, hl.y);
+    if (f > 1.0) dist = max(dist, (f - 1.0) * min(hl.x, hl.y));
   } else {
     vec2 q = abs(l) - hl;
     dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
   }
-  float m = u_feather > 0.0 ? 1.0 - smoothstep(0.0, u_feather, dist) : (dist <= 0.0 ? 1.0 : 0.0);
-  if (u_invert == 1) m = 1.0 - m;
+  float m;
+  if (u_invert == 1) {
+    // invertido: a borda suave cresce para DENTRO da região; tudo fora dela recebe o efeito por inteiro
+    m = u_feather > 0.0 ? smoothstep(-u_feather, 0.0, dist) : (dist <= 0.0 ? 0.0 : 1.0);
+  } else {
+    m = u_feather > 0.0 ? 1.0 - smoothstep(0.0, u_feather, dist) : (dist <= 0.0 ? 1.0 : 0.0);
+  }
   vec4 e;
   if (u_mode == 0) {
     e = texture(u_fx, p * u_fxScale);

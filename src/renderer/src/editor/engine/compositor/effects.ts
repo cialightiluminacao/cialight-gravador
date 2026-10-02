@@ -20,8 +20,8 @@ interface Sized {
   h: number
   /** Acumulado das camadas (destino do quadro antes de ir ao canvas). */
   accum: twgl.FramebufferInfo
-  /** Camada isolada (efeito de escopo `track`), transparente. */
-  aux: twgl.FramebufferInfo
+  /** Camada isolada (efeito de escopo `track`), transparente; criado só quando usado. */
+  aux: twgl.FramebufferInfo | null
   /** Cópia do que está abaixo do efeito (só a área afetada é atualizada). */
   snapshot: WebGLTexture
   /** Pares ping-pong do blur por fator de redução (tamanho ⌈W/ds⌉×⌈H/ds⌉). */
@@ -43,10 +43,21 @@ export class EffectPass {
     this.apply = twgl.createProgramInfo(gl, [VS_FULL, FS_APPLY])
   }
 
-  /** FBOs de acumulação e auxiliar do tamanho W×H (recriados só quando o tamanho muda). */
-  targets(W: number, H: number): { accum: twgl.FramebufferInfo; aux: twgl.FramebufferInfo } {
+  /** FBO de acumulação W×H (recriado só quando o tamanho muda). */
+  accum(W: number, H: number): twgl.FramebufferInfo {
+    return this.ensure(W, H).accum
+  }
+
+  /** FBO auxiliar W×H (camada isolada do escopo `track`), alocado no primeiro uso. */
+  aux(W: number, H: number): twgl.FramebufferInfo {
     const s = this.ensure(W, H)
-    return { accum: s.accum, aux: s.aux }
+    if (!s.aux) s.aux = this.makeFbo(W, H)
+    return s.aux
+  }
+
+  /** Libera os FBOs/texturas por tamanho (quadros sem efeito); o próximo efeito os realoca. */
+  release(): void {
+    this.freeSized()
   }
 
   /** Compõe o alvo `src` (premultiplicado) sobre o framebuffer ligado (blend já configurado pelo chamador). */
@@ -140,7 +151,7 @@ export class EffectPass {
       w: W,
       h: H,
       accum: this.makeFbo(W, H),
-      aux: this.makeFbo(W, H),
+      aux: null,
       snapshot: twgl.createTexture(gl, { internalFormat: gl.RGBA8, format: gl.RGBA, type: gl.UNSIGNED_BYTE, min: gl.LINEAR, mag: gl.LINEAR, wrap: gl.CLAMP_TO_EDGE, width: W, height: H }),
       blur: new Map()
     }
@@ -173,7 +184,7 @@ export class EffectPass {
     const s = this.sized
     if (!s) return
     this.freeFbo(s.accum)
-    this.freeFbo(s.aux)
+    if (s.aux) this.freeFbo(s.aux)
     this.gl.deleteTexture(s.snapshot)
     for (const [a, b] of s.blur.values()) {
       this.freeFbo(a)

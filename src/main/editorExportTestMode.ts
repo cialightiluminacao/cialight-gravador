@@ -48,6 +48,9 @@ const FX_BLOCK = 16
 const FX_T_US = 1_000_000
 const FX_TARJA = [0x12, 0x34, 0x56]
 const FX_SOLID = { x: 0.72, y: 0.5, w: 0.3, h: 0.4 }
+const FX_BLUR = { x: 0.3, y: 0.5, w: 0.3, h: 0.4 }
+// miolo da região borrada na saída (1280×720), 24 px para dentro da borda (longe do feather)
+const FX_BLUR_CROP = { x: Math.round((FX_BLUR.x - FX_BLUR.w / 2) * W) + 24, y: Math.round((FX_BLUR.y - FX_BLUR.h / 2) * H) + 24, w: Math.round(FX_BLUR.w * W) - 48, h: Math.round(FX_BLUR.h * H) - 48 }
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
 
@@ -63,7 +66,7 @@ interface HarnessReport {
   missingMedia?: { preflight: { assetId: string; status: string }[]; export: ExportOut }
   color?: Record<string, { export: ExportOut; frame: unknown }>
   v1Composed?: { path?: string; error?: string }
-  effects?: { export?: ExportOut; previewBlockVar?: number[]; error?: string }
+  effects?: { export?: ExportOut; previewBlockVar?: number[]; previewBlurRgb?: number[]; error?: string }
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
 }
 
@@ -202,7 +205,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   await gen(['-f', 'lavfi', '-i', 'nullsrc=s=480x270,format=gray,geq=lum=random(1)*255,scale=1920:1080:flags=neighbor', '-frames:v', '1', '-update', '1', noise], 'editor-export: ruído')
   const aNoise = assetFromInfo('a_noise', noise, statSync(noise), await probe(noise))
   const noiseItem: MediaItem = { ...createMediaItem(aNoise, 0, 'video'), durationUs: 2_000_000 }
-  const blurFx: EffectItem = createEffectItem('blur', 0, 2_000_000, { x: 0.3, y: 0.5, w: 0.3, h: 0.4 })
+  const blurFx: EffectItem = createEffectItem('blur', 0, 2_000_000, FX_BLUR)
   const solidFx: EffectItem = { ...createEffectItem('solid', 0, 2_000_000, FX_SOLID), color: '#123456', feather: 0 }
   const vt = (id: string, item: MediaItem | EffectItem): Track => ({ id, kind: 'video', name: id, muted: false, hidden: false, locked: false, volume: 1, items: [item] })
   const fxp: Project = {
@@ -226,7 +229,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK } }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -362,6 +365,11 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
       if (a || b) union++
     }
     const iou = union ? inter / union : 0
+    // mesmo raio relativo à altura: o miolo borrado da exportação 720p ≈ preview 1080p reduzido
+    const ex = await frameRgb(fxOut, FX_T_US / 1e6, join(dir, 'efeitos-blur.rgb'), FX_BLUR_CROP)
+    const pb = Uint8Array.from(fx.previewBlurRgb ?? [])
+    const pBlur = psnr(ex, pb)
+    check(pBlur > 30, `efeitos: região borrada exportação 720p × preview 1080p reduzido (raio ∝ altura): PSNR ${pBlur.toFixed(1)} dB > 30 (miolo ${FX_BLUR_CROP.w}×${FX_BLUR_CROP.h})`, failures)
     check(pv.length === exportVar.length && union > 100 && iou >= 0.9, `efeitos: área borrada/tarjada no mesmo lugar (IoU ${iou.toFixed(3)} ≥ 0,9; ${inter}/${union} blocos de ${FX_BLOCK}×${FX_BLOCK})`, failures)
   }
 

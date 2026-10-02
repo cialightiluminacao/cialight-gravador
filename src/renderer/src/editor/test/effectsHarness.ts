@@ -2,7 +2,7 @@ import { createEffectItem, createMediaItem, type EffectPresetId, type EffectRegi
 import type { EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
-import { pixelBlockPx, regionScissor } from '../engine/compositor/effectsMath'
+import { featherPx, pixelBlockPx, regionScissor } from '../engine/compositor/effectsMath'
 
 // Cenários de pixel do passe de efeitos (F2) para o teste de render (CIALIGHT_TEST=editor-render).
 // Projeto base p-editor-effects-test (testsrc2 1080p + ruído + PNG vermelho, criado pelo main); as variantes
@@ -29,7 +29,7 @@ const regionOf = (e: EffectItem): Region => ({ x: e.region.x.value, y: e.region.
 const luma = (d: Img, i: number): number => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
 
 /** Caixa (px, origem em cima à esquerda) da região + feather + `pad`, como o compositor a recorta. */
-function boxTopDown(r: Region, feather: number, pad: number): { x0: number; y0: number; x1: number; y1: number } {
+function boxTopDown(r: Region & { shape?: 'rect' | 'ellipse' }, feather: number, pad: number): { x0: number; y0: number; x1: number; y1: number } {
   const s = regionScissor(r, feather, W, H)
   return { x0: Math.max(0, s.x - pad), x1: Math.min(W, s.x + s.w + pad), y0: Math.max(0, H - (s.y + s.h) - pad), y1: Math.min(H, H - s.y + pad) }
 }
@@ -232,6 +232,49 @@ export async function effectsCheck(): Promise<Record<string, unknown>> {
     const ck = ((H / 2) * W + W / 2) * 4
     // vídeo entre a borda da camada (270 px de lado) e a borda da região
     out.track = { insideLayer: [trackImg[ck], trackImg[ck + 1], trackImg[ck + 2]], outsideLayerDiff: maxDiff(ref, trackImg, Math.round(0.3 * W), Math.round(0.3 * H), Math.round(0.4 * W), Math.round(0.7 * H)) }
+    // faixa logo abaixo sem item (lacuna): o efeito não pega a camada de uma faixa mais baixa → nada muda
+    const gapImg = await frame(withTracks({ ...fxTrack('t_gap', redItem), items: [] }, fxTrack('t_scoped', scoped)), 1_000_000)
+    // faixa oculta no meio é pulada: a camada da faixa visível logo abaixo recebe a tarja
+    const hiddenImg = await frame(withTracks(fxTrack('t_red', redItem), { ...fxTrack('t_oculta', { ...redItem, id: 'i_oculta' }), hidden: true }, fxTrack('t_scoped', scoped)), 1_000_000)
+    out.trackGap = { maxDiff: maxDiff(ref, gapImg, 0, 0, W, H), hiddenSkipped: [hiddenImg[ck], hiddenImg[ck + 1], hiddenImg[ck + 2]] }
+
+    // ---- invertido com feather: a borda suave fica DENTRO da região; logo fora já é 100 % blur ----
+    const invF = effect('blur', { x: 0.5, y: 0.5, w: 0.3, h: 0.3 }, { invert: true, feather: 0.3 })
+    const invFImg = await frame(withTracks(fxTrack('t_invf', invF)), 1_000_000)
+    const fpx = featherPx(regionOf(invF), invF.feather, W, H)
+    const rx1 = Math.ceil(0.65 * W)
+    const ry0 = Math.ceil(0.35 * H)
+    const ry1 = Math.floor(0.65 * H)
+    out.invertFeather = {
+      featherPx: fpx,
+      // faixa de 1–6 px fora da borda direita: igual ao invertido sem feather (onde fora é efeito inteiro)
+      justOutsideDiff: maxDiff(invImg, invFImg, rx1 + 1, ry0, rx1 + 6, ry1),
+      justOutsideVsRef: maxDiff(ref, invFImg, rx1 + 1, ry0, rx1 + 6, ry1),
+      // miolo (região menos o feather): intocado
+      centerMaxDiff: maxDiff(ref, invFImg, Math.ceil(0.35 * W + fpx) + 1, Math.ceil(ry0 + fpx) + 1, Math.floor(0.65 * W - fpx) - 1, Math.floor(ry1 - fpx) - 1)
+    }
+
+    // ---- retângulo rotacionado e elipse excêntrica com feather: a cauda do feather termina dentro do scissor ----
+    const rotRect = effect('blur', { x: 0.3, y: 0.35, w: 0.25, h: 0.12, rotation: 30 }, { feather: 0.4, strength: { value: 100 } })
+    const ellF = effect('blur', { x: 0.7, y: 0.65, w: 0.35, h: 0.06, rotation: 25, shape: 'ellipse' }, { feather: 0.8, strength: { value: 100 } })
+    const tailImg = await frame(withTracks(fxTrack('t_rot', rotRect), fxTrack('t_ellf', ellF)), 1_000_000)
+    const ring = (e: EffectItem): number => {
+      const sc = regionScissor({ ...regionOf(e), shape: e.region.shape }, e.feather, W, H)
+      const x0 = sc.x
+      const x1 = sc.x + sc.w
+      const y0 = H - (sc.y + sc.h)
+      const y1 = H - sc.y
+      // 1ª e última linha/coluna dentro da caixa (onde um corte da cauda apareceria como degrau)
+      return Math.max(maxDiff(ref, tailImg, x0, y0, x1, y0 + 1), maxDiff(ref, tailImg, x0, y1 - 1, x1, y1), maxDiff(ref, tailImg, x0, y0, x0 + 1, y1), maxDiff(ref, tailImg, x1 - 1, y0, x1, y1))
+    }
+    const tailBoxes = [rotRect, ellF].map((e) => boxTopDown({ ...regionOf(e), shape: e.region.shape }, e.feather, 0))
+    out.featherTail = {
+      rectRing: ring(rotRect),
+      ellipseRing: ring(ellF),
+      outsideMaxDiff: maxDiff(ref, tailImg, 0, 0, W, H, (x, y) => tailBoxes.some((b) => x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1)),
+      // o efeito agiu dentro de cada caixa (bordas das barras do testsrc2 borradas)
+      changed: tailBoxes.map((b) => maxDiff(ref, tailImg, b.x0, b.y0, b.x1, b.y1))
+    }
 
     // ---- desempenho: 1080p, reprodução sequencial, sem efeito × 3 blurs fortes (intensidade 100) ----
     client.setProject(base, mediaUrlsFor(base, 'preview'), true)
@@ -240,6 +283,11 @@ export async function effectsCheck(): Promise<Record<string, unknown>> {
     const p3 = withTracks(fxTrack('t_b1', strong(0.25, 0.3)), fxTrack('t_b2', strong(0.6, 0.5)), fxTrack('t_b3', strong(0.8, 0.75)))
     client.setProject(p3, mediaUrlsFor(p3, 'preview'), true)
     const b3 = await client.testBench(0, 60, 30)
+    // FBOs de efeito liberados após 120 quadros sem efeito: o próximo quadro com efeito realoca e sai igual
+    client.setProject(base, mediaUrlsFor(base, 'preview'), true)
+    await client.testBench(0, 125, 60)
+    const again = await frame(withTracks(fxTrack('t_blur', blur), fxTrack('t_pix', pix), fxTrack('t_solid', solid), fxTrack('t_ell', ell)), 1_000_000)
+    out.realloc = { maxDiff: maxDiff(quad, again, 0, 0, W, H) }
     out.bench = { renderer: rendererName(), noFx: stats(b0.drawMs.slice(5)), fx3: stats(b3.drawMs.slice(5)), fx3Frame: stats(b3.frameMs.slice(5)), ...(b0.error || b3.error ? { error: b0.error ?? b3.error } : {}) }
   } catch (e) {
     out.error = e instanceof Error ? (e.stack ?? e.message) : String(e)
