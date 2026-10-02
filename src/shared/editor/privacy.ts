@@ -1,7 +1,7 @@
 // Avisos de privacidade: efeitos fracos demais, desativados ou com mídia por cima, num intervalo da timeline. Puro.
 import { evalAnim } from './anim'
 import { regionTouchesOver } from './attachment'
-import { clipMoves, contentPose, followCheckTimes, poseError, regionAnimated, type ContentPose } from './contentPose'
+import { clipMoves, contentPose, followCheckTimes, poseError, type ContentPose } from './contentPose'
 import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
 import { attachedMedia, clipFrameAt, effectRegionAt, visualTrackBelow } from './resolve'
@@ -32,7 +32,7 @@ const MSG = {
   covered: 'Há mídia acima deste efeito; ela não será borrada',
   noTarget: "Efeito 'só a faixa abaixo' sem mídia embaixo neste trecho",
   unlinkedOverEdited: 'Efeito não vinculado sobre um trecho invertido — confira se ainda cobre o conteúdo',
-  transformedUnderEffect: 'O clipe se move (zoom, pan, animação ou keys da região) e a região deste efeito não acompanha: o conteúdo pode sair de baixo dela',
+  transformedUnderEffect: 'O clipe se move (zoom, pan ou animação) e a região deste efeito não acompanha: o conteúdo pode sair de baixo dela',
   unlinkedOverMoving: 'Clipe não vinculado que se move sob este efeito: a região não acompanha o conteúdo dele',
   attachLost: 'O clipe ao qual este efeito estava ancorado foi apagado ou desativado: a região ficou parada onde estava'
 } as const
@@ -213,9 +213,8 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
       // clipes que se movem sob a região sem que ela os acompanhe (F4). O ancorado acompanha o próprio clipe por
       // construção; qualquer outro clipe que se move, cruza o efeito no tempo e encosta na região é conferido: do grupo
       // de vínculo do efeito (qualquer faixa) → transformedUnderEffect ("Ancorar ao clipe"); fora dele, nas faixas que o
-      // efeito esconde (abaixo; escopo `track`: a faixa-alvo) → unlinkedOverMoving ("Vincular e ancorar"). Efeito sem
-      // âncora com keys na região sobre clipe do grupo parado também é conferido (a região anda e o conteúdo não).
-      const keyed = !it.attach && regionAnimated(it)
+      // efeito esconde (abaixo; escopo `track`: a faixa-alvo) → unlinkedOverMoving ("Vincular e ancorar"). Clipe
+      // parado não é conferido: região com keys sobre ele é o fluxo normal (seguir um texto que anda na gravação).
       const moved: Partial<Record<'transformedUnderEffect' | 'unlinkedOverMoving', { tUs: Us; mediaItemId: string }>> = {}
       p.tracks.forEach((t, mi) => {
         if (t.kind !== 'video' || t.hidden) return
@@ -223,7 +222,7 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
           if (m.type !== 'media' || !m.visual || m.enabled === false || m.id === own?.id) continue
           const inGroup = !!it.linkId && m.linkId === it.linkId
           if (!inGroup && !(target ? t.id === target : mi < ti)) continue
-          if (!clipMoves(m) && !(inGroup && keyed)) continue
+          if (!clipMoves(m)) continue
           const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
           if (a >= b || !regionTouchesOver(p, it, m, a, b)) continue
           const at = unfollowedAt(p, it, m, a, b)

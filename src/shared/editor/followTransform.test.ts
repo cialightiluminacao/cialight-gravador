@@ -227,15 +227,15 @@ describe('desancorar e o buraco do "ajuste assado"', () => {
     expect(evalAnim(mOf(q).visual!.transform.scale, 6 * S)).toBeGreaterThan(18)
     expect(warn(detachEffect(q, 'fx'), 'transformedUnderEffect')).toEqual([])
   })
-  it('região com keys sem âncora sobre clipe vinculado PARADO é conferida (ajuste assado que ficou velho)', () => {
-    const p = scene((m) => { m.visual!.transform.scale = anim(1, 2) })
-    const baked = detachEffect(attached(p), 'fx')
-    expect(warn(baked, 'transformedUnderEffect')).toEqual([])
-    // o zoom some depois: os keys assados continuam andando e o conteúdo não
-    const stale = updateItem<MediaItem>(baked, 'm', (d) => { d.visual!.transform.scale = { value: 1 } })
-    expect(warn(stale, 'transformedUnderEffect')).toEqual([expect.objectContaining({ mediaItemId: 'm' })])
-    // ancorado não sofre disso
-    expect(warn(updateItem<MediaItem>(attached(p), 'm', (d) => { d.visual!.transform.scale = { value: 1 } }), 'transformedUnderEffect')).toEqual([])
+  it('região com keys sem âncora sobre clipe vinculado PARADO não avisa (seguir texto que anda na gravação — fluxo do F2)', () => {
+    // região animada à mão (x 0,2 → 0,7, y e tamanho mudando) sobre o clipe vinculado sem nenhum movimento
+    const hand = scene((_m, fx) => { fx.region.x = anim(0.2, 0.7); fx.region.y = anim(0.3, 0.6, 'inOut'); fx.region.w = anim(0.1, 0.2) })
+    expect(privacyWarnings(hand, 0, 10 * S).filter((w) => w.kind !== 'weakBlur')).toEqual([])
+    // idem depois de desancorar e o zoom sumir (os keys assados ficam; o clipe parado não é conferido)
+    const baked = detachEffect(attached(scene((m) => { m.visual!.transform.scale = anim(1, 2) })), 'fx')
+    expect(warn(updateItem<MediaItem>(baked, 'm', (d) => { d.visual!.transform.scale = { value: 1 } }), 'transformedUnderEffect')).toEqual([])
+    // clipe que se move continua conferido
+    expect(warn(scene((m, fx) => { m.visual!.transform.scale = anim(1, 2); fx.region.x = anim(0.2, 0.7) }), 'transformedUnderEffect')).toHaveLength(1)
   })
 })
 
@@ -279,6 +279,32 @@ describe('operações mantêm a âncora no pedaço certo', () => {
       expect(copyFx.attach!.mediaItemId).toBe(copyM)
       checkAnchors(r.project)
     }
+  })
+  it('colar o efeito junto com o clipe: ancora na cópia do clipe (nunca no original)', () => {
+    const r = duplicateItems(zoomed(), ['m', 'fx'], 15 * S)
+    const copyFx = r.itemIds.map((id) => findItem(r.project, id)!.item).find((i) => i.type === 'effect') as EffectItem
+    const copyM = r.itemIds.find((id) => findItem(r.project, id)!.item.type === 'media')!
+    expect(copyFx.attach!.mediaItemId).toBe(copyM)
+    expect(r.detached).toEqual([])
+    expect(fxOf(r.project).attach!.mediaItemId).toBe('m')
+  })
+  it('colar o efeito ancorado SEM o clipe: a cópia fica solta na caixa de reserva (detached → toast); o original segue ancorado', () => {
+    for (const shape of ['rect', 'ellipse'] as const) {
+      const p = attachEffects(scene((m, fx) => { m.visual!.transform.scale = anim(1, 2); fx.region.shape = shape }), 'm', ['fx'])
+      const f = fxOf(p).attach!.fallback!
+      const r = duplicateItems(p, ['fx'], 12 * S)
+      expect(r.itemIds).toHaveLength(1)
+      expect(r.detached).toEqual(r.itemIds)
+      const copy = findItem(r.project, r.itemIds[0])!.item as EffectItem
+      expect(copy.attach).toBeUndefined()
+      const k = shape === 'ellipse' ? Math.SQRT2 : 1
+      expect(copy.region).toEqual({ shape, x: { value: f.x }, y: { value: f.y }, w: { value: f.w * k }, h: { value: f.h * k }, rotation: { value: 0 } })
+      // a mesma região que o resolve usaria com a âncora perdida
+      expect(effectRegionAt(r.project, copy, 13 * S)).toEqual(effectRegionAt(deleteItems(p, ['m'], { includeLinked: false }), fxOf(p), 5 * S))
+      expect(fxOf(r.project).attach!.mediaItemId).toBe('m')
+    }
+    // efeito sem âncora colado sozinho: nada a soltar
+    expect(duplicateItems(scene(), ['fx'], 12 * S).detached).toEqual([])
   })
   it('congelar quadro: o efeito continua no clipe e cobre o congelado na pose do instante', () => {
     const q = freezeFrameAt(zoomed(), 'm', 4 * S, 2 * S)

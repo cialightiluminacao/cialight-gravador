@@ -14,6 +14,9 @@ import { autoMusicLanding, moveToVoice } from './musicLanding'
 import { narrationActive } from './narrationFlow'
 import { planKeyframePaste } from './keyframePaste'
 
+/** Efeito ancorado colado/duplicado sem o clipe da âncora: a cópia fica solta na caixa de reserva (ops.duplicateItems). */
+const LOOSE_PASTE = 'Efeito colado sem o clipe — ficou solto'
+
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 
 /** Área de transferência interna: itens (ids) ou keyframes — vale o que foi copiado por último. */
@@ -278,13 +281,21 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
       }
       const ids0 = clipboard.ids
       let ids: string[] = []
-      if (s.apply((q) => { const r = duplicateItems(q, ids0, s.playheadUs); ids = r.itemIds; return r.project })) s.select(ids)
+      let loose = 0
+      if (s.apply((q) => { const r = duplicateItems(q, ids0, s.playheadUs); ids = r.itemIds; loose = r.detached.length; return r.project })) {
+        s.select(ids)
+        if (loose) toast(LOOSE_PASTE)
+      }
       return true
     }
     case 'duplicate': {
       if (!s.selection.length) return true
       let ids: string[] = []
-      if (s.apply((q) => { const r = duplicateItems(q, s.selection); ids = r.itemIds; return r.project })) s.select(ids)
+      let loose = 0
+      if (s.apply((q) => { const r = duplicateItems(q, s.selection); ids = r.itemIds; loose = r.detached.length; return r.project })) {
+        s.select(ids)
+        if (loose) toast(LOOSE_PASTE)
+      }
       return true
     }
     case 'undo': s.undo(); return true

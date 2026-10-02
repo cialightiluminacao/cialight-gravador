@@ -145,9 +145,13 @@ function sampleTimes(p: Project, fx: EffectItem, m: MediaItem | null, a: Us, b: 
 }
 
 /**
- * A região do quadro que o efeito tem hoje (ancorado: como o resolve a desenha, sem a folga de 1 px — que encolheria
- * no espaço do conteúdo quando o clipe se aproxima), assada em keys do quadro ao longo do efeito, simplificada
- * (Douglas–Peucker) a FIT_TOL / FIT_TOL_DEG em todas as amostras.
+ * A região do quadro que o efeito tem hoje (ancorado: como o resolve a desenha), assada em keys do quadro ao longo do
+ * efeito, simplificada (Douglas–Peucker) a FIT_TOL / FIT_TOL_DEG em todas as amostras.
+ * Assa SEM a folga de 1 px do resolve (ATTACH_PAD_PX): a folga é constante na TELA, então no espaço do conteúdo ela
+ * vale 1 px ÷ escala — 1 px com o clipe em 1×, 0,05 px a 20×. Assada, a região perderia esse 1 px de conteúdo à
+ * medida que o clipe se aproxima, e a privacidade (que mede o desvio no espaço do conteúdo, × escala atual) acusaria
+ * "não acompanha" num zoom forte (~19×: 1,9 px de conteúdo × 19 ≈ 36 px na tela, acima da tolerância de 1 %). Sem a
+ * folga, a pose assada é constante no conteúdo; a folga só serve à renderização do ancorado.
  */
 export function bakeScreenRegion(p: Project, fx: EffectItem): EffectRegion {
   const W = p.canvas.width, H = p.canvas.height

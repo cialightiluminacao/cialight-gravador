@@ -3,7 +3,8 @@ import { copyKeys, evalAnim, insertKeyExact, pasteKeys, removeKey, setEase, setK
 import { ANIM_PATHS, assignAnim, getAnim, mapItemAnims as mapAnims, mapVisualAnims as mapVisual, type AnimPath } from './animPaths'
 import { maintainAttachments } from './attachment'
 import { createEffectItem, createMediaItem } from './factory'
-import { sourceTimeUs, visualTrackBelow } from './resolve'
+import { regionAabb } from './contentPose'
+import { effectRegionAt, sourceTimeUs, visualTrackBelow } from './resolve'
 import type { EffectPresetId, EffectRegionInit } from './factory'
 import { newId } from './ids'
 import { frameDurUs, itemEndUs } from './time'
@@ -1421,13 +1422,14 @@ export function updateItem<T extends Item>(p: Project, itemId: string, recipe: (
 /**
  * Duplica os itens (com vinculados) em atUs (padrão: logo após o fim do bloco). Os vínculos são
  * recriados entre as cópias. Se não couber na faixa de origem, cria uma faixa do mesmo tipo logo acima; efeito
- * copiado que não cabe vai para outra faixa de efeitos (placeEffect), nunca para uma "Vídeo N".
+ * copiado que não cabe vai para outra faixa de efeitos (placeEffect), nunca para uma "Vídeo N". `detached`: cópias de
+ * efeitos ancorados que vieram sem o clipe da âncora e ficaram soltos (a interface avisa).
  */
-export function duplicateItems(p0: Project, itemIds: string[], atUs?: Us): { project: Project; itemIds: string[] } {
+export function duplicateItems(p0: Project, itemIds: string[], atUs?: Us): { project: Project; itemIds: string[]; detached: string[] } {
   // cópias a partir do projeto já com os alvos antigos gravados (a cópia de um efeito antigo herda o alvo e é remapeada)
   const p = produce(p0, stampLegacyTargets)
   const ids = expand(p, itemIds, true)
-  if (ids.length === 0) return { project: p0, itemIds: [] }
+  if (ids.length === 0) return { project: p0, itemIds: [], detached: [] }
   const found = ids.map((id) => mustFind(p, id))
   const blockStart = Math.min(...found.map((f) => f.item.startUs))
   const at = Math.max(0, Math.round(atUs ?? Math.max(...found.map((f) => end(f.item)))))
@@ -1436,6 +1438,19 @@ export function duplicateItems(p0: Project, itemIds: string[], atUs?: Us): { pro
     trackId: f.track.id,
     item: withLink({ ...f.item, id: newId('i_'), startUs: f.item.startUs + at - blockStart }, mapLink(linkMap, f.item.linkId))
   }))
+  // efeito ancorado: a cópia ancora na cópia do clipe; colado sem o clipe, fica solto na caixa de reserva (a região do
+  // quadro que envolvia a região ancorada; nunca continua preso ao clipe original, em outro instante)
+  const copyOf = new Map(found.map((f, i) => [f.item.id, copies[i].item.id]))
+  const detached: string[] = []
+  copies.forEach((c, i) => {
+    if (c.item.type !== 'effect' || !c.item.attach) return
+    const to = copyOf.get(c.item.attach.mediaItemId)
+    if (to) c.item = { ...c.item, attach: { ...c.item.attach, mediaItemId: to } }
+    else {
+      c.item = looseEffect(p, found[i].item as EffectItem, c.item)
+      detached.push(c.item.id)
+    }
+  })
   const movedTrack = new Map<string, string>()
   const project = edit(p, (d) => {
     for (const trackId of [...new Set(copies.filter((c) => c.item.type !== 'effect').map((c) => c.trackId))]) {
@@ -1455,7 +1470,17 @@ export function duplicateItems(p0: Project, itemIds: string[], atUs?: Us): { pro
     }
     finalize(d)
   })
-  return { project, itemIds: copies.map((c) => c.item.id) }
+  return { project, itemIds: copies.map((c) => c.item.id), detached }
+}
+
+/**
+ * Cópia `copy` do efeito ancorado `orig` sem a âncora: a região do quadro passa a ser a caixa de reserva (sem ela, a
+ * caixa da região no início do efeito), parada; elipse cresce √2 (a que contém a caixa), como o resolve faz.
+ */
+function looseEffect(p: Project, orig: EffectItem, copy: EffectItem): EffectItem {
+  const f = orig.attach?.fallback ?? ((b) => ({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2, w: b.x1 - b.x0, h: b.y1 - b.y0 }))(regionAabb(effectRegionAt(p, orig, orig.startUs), p.canvas.width, p.canvas.height))
+  const k = orig.region.shape === 'ellipse' ? Math.SQRT2 : 1
+  return { ...omit(copy, 'attach'), region: { shape: orig.region.shape, x: { value: f.x }, y: { value: f.y }, w: { value: f.w * k }, h: { value: f.h * k }, rotation: { value: 0 } } }
 }
 
 /**
