@@ -28,6 +28,8 @@ import { rnnoiseDir } from './export/ffmpegPath'
 import { DENOISE_DELAY_SAMPLES, processAudioFile } from './media/audioProcess'
 import { DENOISE_MODEL } from '@shared/editor/audioProcess'
 import { tmpdir } from 'os'
+import { SessionSchema, parseSession } from '@shared/schemas'
+import { checkCursorAfterRecording, checkCursorRealSourceAndOverhead, installCursorTest } from './cursor/cursorTestChecks'
 
 // Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render|editor-export|models). Roda no Electron
 // real com o ffmpeg embutido; escreve um relatório JSON em test-out/ e sai com
@@ -166,6 +168,13 @@ async function testCapture(store: SessionStore): Promise<number> {
   mkdirSync(outDir, { recursive: true })
   const failures: string[] = []
   const win = new BrowserWindow({ width: 1000, height: 700, show: true, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
+  // trilha do cursor (F6): primeiro a fonte real (binding nativo, custo de CPU), depois a sintética para a gravação
+  const okc = (cond: boolean, msg: string): void => ok(cond, msg, failures)
+  const cursorReport: Record<string, unknown> = {}
+  cursorReport.real = await checkCursorRealSourceAndOverhead(win, outDir, okc)
+  const cursorSt = installCursorTest(ipcMain)
+  // a janela do teste fica por cima: o "flash" dela mede o alinhamento relógio × PTS no vídeo do monitor principal
+  win.setAlwaysOnTop(true)
   const result = await new Promise<{ ok: boolean; report: Record<string, unknown> }>((resolve) => {
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: Record<string, unknown> }) => resolve(r))
     setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 90 s'] } }), 90_000)
@@ -194,10 +203,36 @@ async function testCapture(store: SessionStore): Promise<number> {
     ok(session.state === 'stopped', `estado stopped (${session.state})`, failures)
     const j = JSON.parse(readFileSync(join(store.dirOf(session.id), 'session.json'), 'utf8')) as Session
     ok(j.state === 'stopped' && j.durationMs === session.durationMs, 'session.json persistido', failures)
+    // F6: a trilha do cursor fica em cursor.json; o session.json continua com o mesmo esquema e as mesmas chaves
+    let parsedOk = true
+    try {
+      parseSession(j)
+    } catch {
+      parsedOk = false
+    }
+    ok(parsedOk && SessionSchema.strict().safeParse(j).success, 'session.json passa no SessionSchema inalterado (sem chaves desconhecidas)', failures)
+    const expectedKeys = ['version', 'id', 'createdAt', 'state', 'source', 'video', 'systemAudio', 'tracks', 'pauses', 'pip', 'strokes', 'clearEvents', 'markers', 'engine', 'files', 'durationMs', 'bytes', ...(session.webcam ? ['webcam'] : []), ...(session.mic ? ['mic'] : [])].sort()
+    ok(JSON.stringify(Object.keys(j).sort()) === JSON.stringify(expectedKeys), `session.json com as mesmas chaves de antes (${Object.keys(j).sort().join(',')})`, failures)
+    const sv = videos[0]
+    cursorReport.recording = await checkCursorAfterRecording(
+      {
+        st: cursorSt,
+        sessionDir: store.dirOf(session.id),
+        rec,
+        video: { width: sv?.width ?? 0, height: sv?.height ?? 0, durationMs: sv?.durationMs ?? p.durationMs, fps: sv?.fps ?? session.video.fps },
+        rendererClicks: (result.report.cursorClicks as { x: number; y: number; rendererMediaMs: number; mainMediaMs: number | null }[] | undefined) ?? [],
+        flashes: (result.report.flashes as { mediaMs: number; color: 'green' | 'black'; wallMs: number }[] | undefined) ?? [],
+        flashPaints: (result.report.flashPaints as { id: string; renderTime: number }[] | undefined) ?? [],
+        clockVsPts: (result.report.clockVsPts as { clockStartMs: number | null; firstMediaMs: number | null } | undefined) ?? null,
+        win
+      },
+      okc
+    )
+    ok(((result.report.cursorClicks as unknown[] | undefined) ?? []).length === 1, 'cursor: renderer injetou 1 clique sintético', failures)
     // E2E do editor (scripts/qa/editor-e2e.mjs) reaproveita a gravação: CIALIGHT_CAPTURE_KEEP=1 não apaga
     if (!process.env.CIALIGHT_CAPTURE_KEEP) await store.delete(session.id).catch(() => {})
   }
-  writeFileSync(join(outDir, 'capture-report.json'), JSON.stringify({ result, failures }, null, 2))
+  writeFileSync(join(outDir, 'capture-report.json'), JSON.stringify({ result, cursor: cursorReport, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE CAPTURA PASSOU')
   return failures.length ? 1 : 0
 }
