@@ -1,6 +1,6 @@
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'fs'
 import { join } from 'path'
-import { parseProject } from '@shared/editor/schema'
+import { parseProject, toDiskProject } from '@shared/editor/schema'
 import { projectDurationUs, updateAsset } from '@shared/editor/ops'
 import { sessionRefs } from '@shared/editor/fromSession'
 import type { Asset, Project } from '@shared/editor/project'
@@ -87,7 +87,8 @@ export class ProjectStore {
     mkdirSync(dir, { recursive: true })
     const file = join(dir, 'project.json')
     const tmp = `${file}.tmp`
-    const json = JSON.stringify(p, null, 2)
+    // formato que a v1.3 instalada também lê (toDiskProject); o cache guarda o modelo
+    const json = JSON.stringify(toDiskProject(p), null, 2)
     writeFileSync(tmp, json, 'utf8')
     renameSync(tmp, file)
     this.cache.set(p.id.toLowerCase(), p)

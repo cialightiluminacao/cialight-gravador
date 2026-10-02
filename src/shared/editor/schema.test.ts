@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { parseProject, validateProject } from './schema'
+import { parseProject, toDiskProject, validateProject } from './schema'
+import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
 import type { Asset, MediaItem, Project, TextItem } from './project'
 import { resolveFrame } from './resolve'
@@ -147,3 +148,35 @@ describe('schema F4: propriedades que viraram animáveis (compatível com v1.1�
     expect(() => parseProject(JSON.parse(JSON.stringify(p)))).toThrow(/Projeto inválido/)
   })
 })
+
+describe('toDiskProject: a v1.3 instalada continua lendo o que o build novo grava', () => {
+  it('sem keys nas propriedades novas: compacta para número, v1.3 lê, e o parse novo volta ao mesmo projeto', () => {
+    const p = parseProject(fixture)
+    const disk = JSON.parse(JSON.stringify(toDiskProject(p)))
+    const v13 = parseProjectV13(disk)
+    expect(v13.success).toBe(true)
+    expect(disk.tracks[0].items[0].visual.crop).toEqual({ l: 0.1, t: 0, r: 0.05, b: 0.02 })
+    expect(disk.tracks[0].items[0].visual.adjust).toEqual({ brightness: 0.1, contrast: 0.2, saturation: -0.3 })
+    expect(disk.tracks[0].items[0].visual.radius).toBe(12)
+    expect(disk.tracks[2].items[0].style.size).toBe(48)
+    // o arquivo da v1.3 é igual ao que ela mesma gravaria (o fixture)
+    expect(disk).toEqual(fixture)
+    expect(parseProject(disk)).toEqual(p)
+    // não muda o objeto recebido
+    expect((p.tracks[0].items[0] as MediaItem).visual!.crop.l).toEqual({ value: 0.1 })
+  })
+  it('projeto novo da fábrica também é legível pela v1.3', () => {
+    const p = withItems([createMediaItem(asset, 0, 'video')])
+    expect(parseProjectV13(JSON.parse(JSON.stringify(toDiskProject(p)))).success).toBe(true)
+  })
+  it('com keys nas propriedades novas fica Anim (a v1.3 não lê — recurso da v1.4)', () => {
+    const p = parseProject(fixture)
+    ;(p.tracks[0].items[0] as MediaItem).visual!.crop.l = { value: 0, keys: [{ tUs: 0, value: 0, ease: 'linear' }, { tUs: 1000, value: 0.2, ease: 'in' }] }
+    const disk = JSON.parse(JSON.stringify(toDiskProject(p)))
+    expect(disk.tracks[0].items[0].visual.crop.l.keys).toHaveLength(2)
+    expect(disk.tracks[0].items[0].visual.crop.t).toBe(0)
+    expect(parseProjectV13(disk).success).toBe(false)
+    expect(parseProject(disk)).toEqual(p)
+  })
+})
+

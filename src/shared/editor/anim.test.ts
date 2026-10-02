@@ -100,3 +100,47 @@ describe('corte exato de curvas (subEase / insertKeyExact)', () => {
     }
   })
 })
+
+describe('corte exato com bezier de x1 > x2 (x quase parado no meio)', () => {
+  const hard: import('./project').Ease[] = [{ bezier: [0.9, 0, 0.1, 1] }, { bezier: [1, 0, 0, 1] }, { bezier: [0.95, 0.2, 0.05, 0.8] }]
+  const curve = (e: import('./project').Ease) => ({ value: 0, keys: [{ tUs: 0, value: 10, ease: e }, { tUs: 1_000_000, value: 110, ease: 'linear' as const }] })
+  const RANGE = 100, TOL = 1e-6 * RANGE
+  // pontos de teste fora da vizinhança imediata da tangente vertical de x(u) (mal condicionada em qualquer forma)
+  const grid = Array.from({ length: 201 }, (_, i) => i * 5_000)
+  it('subEase devolve controles x em [0,1] só quando o pedaço é exato; senão insertKeyExact subdivide', () => {
+    for (const e of hard) {
+      for (const [p0, p1] of [[0, 0.3], [0.3, 1], [0.2, 0.7], [0.45, 0.55]]) {
+        const s = subEase(e, p0, p1)
+        if (typeof s !== 'object') continue
+        expect(s.bezier[0]).toBeGreaterThanOrEqual(0)
+        expect(s.bezier[2]).toBeLessThanOrEqual(1)
+      }
+    }
+  })
+  it('insertKeyExact não muda a curva (erro ≤ 1e-6 da faixa)', () => {
+    for (const e of hard) {
+      const a = curve(e)
+      for (const at of [1, 123_457, 300_000, 500_000, 637_001, 999_999]) {
+        const b = insertKeyExact(a, at)
+        expect(b.keys!.some((k) => k.tUs === at)).toBe(true)
+        for (const k of b.keys!) if (typeof k.ease === 'object') { expect(k.ease.bezier[0]).toBeGreaterThanOrEqual(0); expect(k.ease.bezier[0]).toBeLessThanOrEqual(1); expect(k.ease.bezier[2]).toBeGreaterThanOrEqual(0); expect(k.ease.bezier[2]).toBeLessThanOrEqual(1) }
+        for (const t of grid) expect(Math.abs(evalAnim(b, t) - evalAnim(a, t))).toBeLessThanOrEqual(TOL)
+      }
+    }
+  })
+  it('sliceKeys: pedaços contínuos com a curva original (erro ≤ 1e-6 da faixa)', () => {
+    for (const e of hard) {
+      const a = curve(e)
+      for (const cut of [370_000, 500_000, 512_345]) {
+        const L = sliceKeys(a, 0, cut), R = sliceKeys(a, cut, 1_000_000)
+        expect(Math.abs(evalAnim(L, cut) - evalAnim(R, 0))).toBeLessThanOrEqual(TOL)
+        for (const t of grid) {
+          const got = t <= cut ? evalAnim(L, t) : evalAnim(R, t - cut)
+          expect(Math.abs(got - evalAnim(a, t))).toBeLessThanOrEqual(TOL)
+        }
+      }
+      const M = sliceKeys(a, 200_000, 800_000)
+      for (const t of grid.filter((x) => x >= 200_000 && x <= 800_000)) expect(Math.abs(evalAnim(M, t - 200_000) - evalAnim(a, t))).toBeLessThanOrEqual(TOL)
+    }
+  })
+})

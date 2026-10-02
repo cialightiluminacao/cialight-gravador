@@ -1,40 +1,32 @@
+// Cópia literal do schema de projeto da v1.3 publicada (src/shared/editor/schema.ts no commit e7cc387, só a parte
+// zod + migrateProject/parseProject). O app instalado v1.3 abre os mesmos projetos que o build novo grava: o que
+// toDiskProject produz sem os recursos novos (keys em corte/ajuste/raio/tamanho do texto) tem de continuar válido lá.
 import { z } from 'zod'
-import { frameDurUs, itemEndUs } from './time'
-import { MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, Item, Project, VisualProps } from './project'
-import { itemAnimEntries, type AnimPath } from './animPaths'
 
 const us = z.number().int()
-const unit = z.number().min(0).max(1)
-// bezier estilo CSS: x1, x2 ∈ [0,1] (x monotônico); y livre (overshoot)
 const ease = z.union([
   z.enum(['linear', 'hold', 'in', 'out', 'inOut']),
-  z.object({ bezier: z.tuple([unit, z.number(), unit, z.number()]) })
+  z.object({ bezier: z.tuple([z.number(), z.number(), z.number(), z.number()]) })
 ])
 const anim = z.object({
   value: z.number(),
   keys: z.array(z.object({ tUs: us, value: z.number(), ease })).optional()
 })
-/**
- * Propriedade que virou animável na F4 (corte, ajuste, raio, tamanho do texto): projetos v1.1–v1.3 gravavam o número;
- * o schema aceita os dois e normaliza para `{ value }` (sem mudar `version`: o arquivo antigo é um caso particular).
- */
-const animOrNumber = z.union([z.number().transform((value) => ({ value })), anim])
 
 const animPreset = z.enum(['fade', 'slideL', 'slideR', 'slideU', 'slideD', 'zoom', 'pop'])
 const presetAnim = z.object({ preset: animPreset, durationUs: us })
 const transform = z.object({ x: anim, y: anim, scale: anim, rotation: anim, opacity: anim })
 const visual = z.object({
   transform,
-  crop: z.object({ l: animOrNumber, t: animOrNumber, r: animOrNumber, b: animOrNumber }),
+  crop: z.object({ l: z.number(), t: z.number(), r: z.number(), b: z.number() }),
   fit: z.enum(['contain', 'cover', 'fill']),
   fadeInUs: us,
   fadeOutUs: us,
   animIn: presetAnim.optional(),
   animOut: presetAnim.optional(),
-  adjust: z.object({ brightness: animOrNumber, contrast: animOrNumber, saturation: animOrNumber }).optional(),
+  adjust: z.object({ brightness: z.number(), contrast: z.number(), saturation: z.number() }).optional(),
   shape: z.enum(['rect', 'rounded', 'circle']).optional(),
-  radius: animOrNumber.optional(),
+  radius: z.number().optional(),
   border: z.object({ width: z.number(), color: z.string() }).optional(),
   mirror: z.boolean().optional()
 })
@@ -68,7 +60,7 @@ const mediaItem = z.object({
 })
 const textStyle = z.object({
   font: z.string(),
-  size: animOrNumber,
+  size: z.number(),
   weight: z.number(),
   color: z.string(),
   background: z.string().optional(),
@@ -159,7 +151,7 @@ const track = z.object({
   items: z.array(item)
 })
 
-export const ProjectSchema: z.ZodType<Project> = z.object({
+export const ProjectSchemaV13 = z.object({
   version: z.literal(1),
   id: z.string().min(1),
   name: z.string(),
@@ -181,12 +173,7 @@ export const ProjectSchema: z.ZodType<Project> = z.object({
     .optional()
 })
 
-/**
- * Version 1; lança se a versão for maior que a suportada. Faixas de efeitos anteriores ao papel (F2 até a revisão
- * final): faixa de vídeo sem papel chamada "Efeitos"/"Efeitos N" e só com efeitos (ou vazia) ganha role 'effects'.
- * Não muda o objeto recebido.
- */
-export function migrateProject(json: unknown): unknown {
+export function migrateProjectV13(json: unknown): unknown {
   const v = (json as { version?: unknown } | null)?.version
   if (typeof v === 'number' && v > 1) throw new Error(`Versão de projeto não suportada: ${v}`)
   const tracks = (json as { tracks?: unknown } | null)?.tracks
@@ -200,89 +187,7 @@ export function migrateProject(json: unknown): unknown {
   return { ...(json as object), tracks: tracks.map((t) => (isLegacyFx(t) ? { ...(t as object), role: 'effects' } : t)) }
 }
 
-export function parseProject(json: unknown): Project {
-  const r = ProjectSchema.safeParse(migrateProject(json))
-  if (!r.success) {
-    const msg = r.error.issues.map((i) => `${i.path.join('.') || '(raiz)'}: ${i.message}`).join('; ')
-    throw new Error(`Projeto inválido: ${msg}`)
-  }
-  return r.data
-}
-
-/** Anim sem keys → número (como a v1.3 gravava); com keys fica Anim. */
-const compact = (a: Anim<number>): Anim<number> | number => (a.keys && a.keys.length > 0 ? a : a.value)
-function diskVisual(v: VisualProps): unknown {
-  const c = v.crop, ad = v.adjust
-  return {
-    ...v,
-    crop: { l: compact(c.l), t: compact(c.t), r: compact(c.r), b: compact(c.b) },
-    ...(ad ? { adjust: { brightness: compact(ad.brightness), contrast: compact(ad.contrast), saturation: compact(ad.saturation) } } : {}),
-    ...(v.radius ? { radius: compact(v.radius) } : {})
-  }
-}
-
-/**
- * Forma gravada no disco (project.json e versões): as propriedades que viraram animáveis na F4 (corte, ajuste, raio,
- * tamanho do texto) voltam a número quando não têm keys. Assim a v1.3 instalada — que divide a pasta de projetos e
- * recusa (e trocaria por uma versão antiga) o que o schema dela não aceita — continua abrindo todo projeto que não usa
- * keys nessas propriedades. parseProject aceita as duas formas. Não muda o projeto recebido.
- */
-export function toDiskProject(p: Project): unknown {
-  const item = (it: Item): unknown => {
-    switch (it.type) {
-      case 'media':
-        return it.visual ? { ...it, visual: diskVisual(it.visual) } : it
-      case 'text':
-        return { ...it, style: { ...it.style, size: compact(it.style.size) }, visual: diskVisual(it.visual) }
-      case 'shape':
-        return { ...it, visual: diskVisual(it.visual) }
-      default:
-        return it
-    }
-  }
-  return { ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map(item) })) }
-}
-
-/** Nome da propriedade nas mensagens (os de antes da F4 mantidos: volume, x, strength…). */
-const animLabel = (pt: AnimPath): string => (pt === 'audio.volume' ? 'volume' : /^(transform|region)\./.test(pt) ? pt.split('.')[1] : pt)
-
-/** Invariantes semânticas; devolve mensagens em português (vazio = válido). */
-export function validateProject(p: Project): string[] {
-  const errs: string[] = []
-  const assets = new Map(p.assets.map((a) => [a.id, a]))
-  const tol = frameDurUs(p.canvas.fps)
-  for (const tr of p.tracks) {
-    // compara com o maior fim acumulado (um item longo pode cobrir vários seguintes)
-    const sorted = [...tr.items].sort((a, b) => a.startUs - b.startUs)
-    let maxEndItem: Item | null = null
-    for (const cur of sorted) {
-      if (maxEndItem && cur.startUs < itemEndUs(maxEndItem)) errs.push(`Faixa "${tr.name}": item ${cur.id} sobrepõe o item ${maxEndItem.id}`)
-      if (!maxEndItem || itemEndUs(cur) > itemEndUs(maxEndItem)) maxEndItem = cur
-    }
-    for (const it of tr.items) {
-      const tag = `Faixa "${tr.name}", item ${it.id}`
-      if (it.durationUs < MIN_ITEM_US) errs.push(`${tag}: duração menor que o mínimo (${MIN_ITEM_US} µs)`)
-      if (it.type === 'media') {
-        if (it.speed < MIN_SPEED || it.speed > MAX_SPEED) errs.push(`${tag}: velocidade fora do intervalo ${MIN_SPEED}–${MAX_SPEED}`)
-        const a = assets.get(it.assetId)
-        if (!a) errs.push(`${tag}: asset ${it.assetId} não existe`)
-        else if (a.durationUs != null && a.kind !== 'image' && !it.freeze && it.inUs + it.durationUs * it.speed > a.durationUs + tol) {
-          errs.push(`${tag}: trecho de origem excede a duração do asset`)
-        }
-        if (it.visual && tr.kind !== 'video') errs.push(`${tag}: item visual só pode ficar em faixa de vídeo`)
-      } else if (tr.kind !== 'video') {
-        errs.push(`${tag}: item visual só pode ficar em faixa de vídeo`)
-      }
-      for (const [pt, an] of itemAnimEntries(it)) {
-        const name = animLabel(pt)
-        const keys = an.keys ?? []
-        for (let i = 0; i < keys.length; i++) {
-          // tempo repetido também é inválido: evalAnim divide por (k1.tUs − k0.tUs)
-          if (i > 0 && keys[i].tUs <= keys[i - 1].tUs) errs.push(`${tag}: keyframes de ${name} fora de ordem ou com tempo repetido`)
-          if (keys[i].tUs < 0 || keys[i].tUs > it.durationUs) errs.push(`${tag}: keyframe de ${name} fora de [0, duração]`)
-        }
-      }
-    }
-  }
-  return errs
+/** parseProject da v1.3 (sem lançar): sucesso = a v1.3 abre o arquivo. */
+export function parseProjectV13(json: unknown): ReturnType<typeof ProjectSchemaV13.safeParse> {
+  return ProjectSchemaV13.safeParse(migrateProjectV13(json))
 }

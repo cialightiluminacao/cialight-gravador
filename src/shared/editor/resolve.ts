@@ -84,7 +84,8 @@ export function visualStateAt(v: VisualProps, itemDur: Us, local: Us): { rect: R
   const t = v.transform
   let cx = evalAnim(t.x, local)
   let cy = evalAnim(t.y, local)
-  let opacity = evalAnim(t.opacity, local)
+  // presa antes de fades/presets: overshoot (> 1) não pode encurtar o fade nem passar de opaco
+  let opacity = clamp(evalAnim(t.opacity, local), 0, 1)
   const remaining = itemDur - local
   if (v.fadeInUs > 0 && local < v.fadeInUs) opacity *= clamp(local / v.fadeInUs, 0, 1)
   if (v.fadeOutUs > 0 && remaining < v.fadeOutUs) opacity *= clamp(remaining / v.fadeOutUs, 0, 1)
@@ -101,7 +102,13 @@ export function visualStateAt(v: VisualProps, itemDur: Us, local: Us): { rect: R
 
 const ev = (a: Anim<number>, local: Us): number => evalAnim(a, local)
 const cropAt = (c: VisualProps['crop'], local: Us): CropValues => ({ l: ev(c.l, local), t: ev(c.t, local), r: ev(c.r, local), b: ev(c.b, local) })
-const adjustAt = (a: NonNullable<VisualProps['adjust']>, local: Us): AdjustValues => ({ brightness: ev(a.brightness, local), contrast: ev(a.contrast, local), saturation: ev(a.saturation, local) })
+/**
+ * Ajuste preso a [−1, 1] (ADJUST_RANGE): faixa útil do shader (brilho somado; contraste e saturação × (1 + v) — abaixo
+ * de −1 inverteriam). Overshoot de curva não sai dela.
+ */
+export const ADJUST_RANGE = { min: -1, max: 1 } as const
+const adj = (a: Anim<number>, local: Us): number => clamp(ev(a, local), ADJUST_RANGE.min, ADJUST_RANGE.max)
+const adjustAt = (a: NonNullable<VisualProps['adjust']>, local: Us): AdjustValues => ({ brightness: adj(a.brightness, local), contrast: adj(a.contrast, local), saturation: adj(a.saturation, local) })
 
 /**
  * O efeito layers[i] age no quadro? Escopo `below`: sempre. Escopo `track`: só se, pulando os outros efeitos `track`

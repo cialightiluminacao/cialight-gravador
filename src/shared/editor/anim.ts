@@ -105,25 +105,53 @@ function splitBez(p: Pt[], t: number): [Pt[], Pt[]] {
 }
 const clamp01 = (v: number): number => Math.min(1, Math.max(0, v))
 
+/** Pedaço [u0,u1] (parâmetro) do bezier renormalizado; ok = os controles x ficam em [0,1] (o pedaço é exato). */
+function bezierPiece(b: Bez, u0: number, u1: number): { bezier: Bez; ok: boolean } | 'flat' {
+  let seg: Pt[] = [[0, 0], [b[0], b[1]], [b[2], b[3]], [1, 1]]
+  if (u0 > 0) seg = splitBez(seg, u0)[1]
+  if (u1 < 1) seg = splitBez(seg, (u1 - u0) / (1 - u0))[0]
+  const [x0, y0] = seg[0], [x3, y3] = seg[3]
+  if (Math.abs(y3 - y0) < 1e-12) {
+    // pontas com o mesmo y: constante se os controles também estão lá; senão não há renormalização (não exato)
+    return Math.abs(seg[1][1] - y0) < 1e-12 && Math.abs(seg[2][1] - y0) < 1e-12 ? 'flat' : { bezier: b, ok: false }
+  }
+  if (!(x3 - x0 > 1e-12)) return { bezier: b, ok: false }
+  const nx = (x: number): number => (x - x0) / (x3 - x0)
+  const ny = (y: number): number => (y - y0) / (y3 - y0)
+  const X1 = nx(seg[1][0]), X2 = nx(seg[2][0])
+  const ok = X1 >= -1e-9 && X1 <= 1 + 1e-9 && X2 >= -1e-9 && X2 <= 1 + 1e-9
+  return { bezier: [clamp01(X1), ny(seg[1][1]), clamp01(X2), ny(seg[2][1])], ok }
+}
+
+/**
+ * Parâmetros internos (u) onde cortar [u0,u1] para cada pedaço ser exato como bezier de x em [0,1]. Com x1 > x2 o
+ * x(u) quase para no meio e um pedaço que o cruza teria controles fora de [0,1] (aproximação ruim): corta na
+ * inflexão de x(u) e, se preciso, ao meio, recursivamente. Pedaço com pontas no mesmo y também é cortado.
+ */
+function bezierBreaksU(b: Bez, u0: number, u1: number, depth = 0): number[] {
+  const r = bezierPiece(b, u0, u1)
+  if (r === 'flat' || r.ok || depth >= 24 || u1 - u0 < 1e-9) return []
+  const cx = 3 * b[0], ex = 3 * (b[2] - b[0]) - cx, ax = 1 - cx - ex
+  let um = ax !== 0 ? -ex / (3 * ax) : NaN // x''(u) = 0
+  if (!(um > u0 + 1e-9 && um < u1 - 1e-9)) um = (u0 + u1) / 2
+  return [...bezierBreaksU(b, u0, um, depth + 1), um, ...bezierBreaksU(b, um, u1, depth + 1)]
+}
+
 /**
  * Ease do pedaço [p0,p1] (0 ≤ p0 < p1 ≤ 1) de um trecho com `e`, renormalizado para [0,1] nos dois eixos: o trecho
- * cortado ali, com os valores das pontas, reproduz a curva original. Exato para linear, hold, in, out, bezier e para
- * cada metade de inOut (polinômios cúbicos viram bezier com x em terços); um pedaço de inOut que cruza o meio é
- * aproximado (insertKeyExact corta no meio antes). Pedaço sem variação (y igual nas pontas) mantém `e`.
+ * cortado ali, com os valores das pontas, reproduz a curva original. Exato para linear, hold, in, out e para cada
+ * metade de inOut (polinômios cúbicos viram bezier com x em terços). Bezier: exato quando os controles do pedaço
+ * ficam em [0,1] — senão (x1 > x2 cruzando o meio, ou pontas com o mesmo y) é aproximado; insertKeyExact evita esses
+ * pedaços cortando antes (bezierBreaksU). Um pedaço de inOut que cruza o meio também é aproximado (idem).
  */
 export function subEase(e: Ease, p0: number, p1: number): Ease {
   if (e === 'linear' || e === 'hold' || (p0 <= 0 && p1 >= 1)) return e
   if (typeof e === 'object') {
     const b = e.bezier
-    const u0 = p0 <= 0 ? 0 : bezierT(b, p0), u1 = p1 >= 1 ? 1 : bezierT(b, p1)
-    let seg: Pt[] = [[0, 0], [b[0], b[1]], [b[2], b[3]], [1, 1]]
-    if (u0 > 0) seg = splitBez(seg, u0)[1]
-    if (u1 < 1) seg = splitBez(seg, (u1 - u0) / (1 - u0))[0]
-    const [x0, y0] = seg[0], [x3, y3] = seg[3]
-    if (!(x3 - x0 > 1e-12) || Math.abs(y3 - y0) < 1e-12) return e
-    const nx = (x: number): number => clamp01((x - x0) / (x3 - x0))
-    const ny = (y: number): number => (y - y0) / (y3 - y0)
-    return { bezier: [nx(seg[1][0]), ny(seg[1][1]), nx(seg[2][0]), ny(seg[2][1])] }
+    const r = bezierPiece(b, p0 <= 0 ? 0 : bezierT(b, p0), p1 >= 1 ? 1 : bezierT(b, p1))
+    // pedaço plano: valores iguais nas pontas e no meio, qualquer curva serve
+    if (r === 'flat') return 'linear'
+    return r.ok ? { bezier: r.bezier } : r.bezier === b ? e : { bezier: r.bezier }
   }
   // polinômio cúbico g no pedaço: f(q) = (g(p0 + d·q) − g(p0)) / (g(p1) − g(p0)) = c1·q + c2·q² + (1 − c1 − c2)·q³,
   // que é o bezier [1/3, c1/3, 2/3, (c2 + 2·c1)/3] (x em terços ⇒ x(u) = u); c1 e c2 saem de f(1/3) e f(2/3)
@@ -142,9 +170,10 @@ function insertAt<T>(keys: Keyframe<T>[], key: Keyframe<T>): Keyframe<T>[] {
 }
 
 /**
- * Key novo em tUs sem mudar a curva: o valor é o avaliado ali e o trecho que o contém é repartido com subEase (inOut
- * é cortado no meio antes, para cada pedaço ser uma cúbica só). Já existe key exatamente em tUs ou não há keys →
- * igual. Antes do 1º / depois do último: key com o valor da ponta (trecho constante).
+ * Key novo em tUs sem mudar a curva: o valor é o avaliado ali e o trecho que o contém é repartido em pedaços exatos
+ * (subEase). inOut é cortado no meio antes (cada metade é uma cúbica só); bezier ganha keys extras onde um pedaço não
+ * seria exato (bezierBreaksU: x1 > x2, pontas com o mesmo y). Já existe key exatamente em tUs ou não há keys → igual.
+ * Antes do 1º / depois do último: key com o valor da ponta (trecho constante).
  */
 export function insertKeyExact(a: Anim<number>, tUs: Us): Anim<number> {
   const k = a.keys
@@ -153,13 +182,28 @@ export function insertKeyExact(a: Anim<number>, tUs: Us): Anim<number> {
   if (tUs < k[0].tUs || tUs > k[k.length - 1].tUs) return { ...a, keys: insertAt(k, { tUs, value, ease: 'linear' }) }
   const i = k.findIndex((x) => x.tUs > tUs) - 1
   const k0 = k[i], k1 = k[i + 1]
+  const span = k1.tUs - k0.tUs
   if (k0.ease === 'inOut') {
-    const mid = k0.tUs + Math.round((k1.tUs - k0.tUs) / 2)
+    const mid = k0.tUs + Math.round(span / 2)
     if (mid > k0.tUs && mid < k1.tUs && mid !== tUs) return insertKeyExact(insertKeyExact(a, mid), tUs)
   }
-  const p = (tUs - k0.tUs) / (k1.tUs - k0.tUs)
-  const keys = k.map((x) => (x === k0 ? { ...x, ease: subEase(k0.ease, 0, p) } : x))
-  return { ...a, keys: insertAt(keys, { tUs, value, ease: subEase(k0.ease, p, 1) }) }
+  const p = (tUs - k0.tUs) / span
+  // instantes (µs inteiros) que repartem o trecho: tUs e, no bezier, os cortes extras dos dois pedaços
+  const cuts = new Set<Us>([tUs])
+  if (typeof k0.ease === 'object') {
+    const b = k0.ease.bezier, up = bezierT(b, p)
+    for (const u of [...bezierBreaksU(b, 0, up), ...bezierBreaksU(b, up, 1)]) {
+      const t = k0.tUs + Math.round(bx(b, u) * span)
+      if (t > k0.tUs && t < k1.tUs) cuts.add(t)
+    }
+  }
+  const times = [k0.tUs, ...[...cuts].sort((x, y) => x - y), k1.tUs]
+  const pieces: Keyframe<number>[] = []
+  for (let j = 0; j < times.length - 1; j++) {
+    const ease = subEase(k0.ease, (times[j] - k0.tUs) / span, (times[j + 1] - k0.tUs) / span)
+    pieces.push(j === 0 ? { ...k0, ease } : { tUs: times[j], value: times[j] === tUs ? value : evalAnim(a, times[j]), ease })
+  }
+  return { ...a, keys: [...k.slice(0, i), ...pieces, ...k.slice(i + 1)] }
 }
 
 /**

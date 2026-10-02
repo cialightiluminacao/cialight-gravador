@@ -144,6 +144,17 @@ describe('resolveFrame: propriedades animáveis da F4', () => {
     expect(m.opacity).toBe(0)
     expect(m.radius).toBe(0)
   })
+  it('opacidade com overshoot é presa antes dos fades/presets; ajuste preso a [−1, 1]', () => {
+    const { p, v } = base()
+    const q = ops.updateItem<MediaItem>(p, v, (d) => {
+      d.visual!.transform.opacity = { value: 3 } // > 1: sem a trava antes, o fade de 1 s chegaria a 1 já em 1/3 s
+      d.visual!.fadeInUs = S
+      d.visual!.adjust = { brightness: k(0, 4, { bezier: [0.3, 0, 0.7, 1] }), contrast: { value: -3 }, saturation: { value: 2 } }
+    })
+    const at = (t: number) => resolveFrame(q, t).find((l): l is MediaLayer => l.kind === 'media')!
+    expect(at(S / 2).opacity).toBeCloseTo(0.5)
+    expect(at(9 * S).adjust).toEqual({ brightness: 1, contrast: -1, saturation: 1 })
+  })
   it('texto: tamanho animado avaliado no estilo da camada', () => {
     const p = createEmptyProject('t')
     p.tracks[0].items = [{ id: 'tx', type: 'text', startUs: 0, durationUs: 10 * S, text: 'a', style: { font: 'Inter', size: k(10, 30), weight: 400, color: '#fff', align: 'left', lineHeight: 1 }, visual: defaultVisual() }]

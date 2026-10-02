@@ -2,6 +2,7 @@
 import { evalAnim } from './anim'
 import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
+import { layerBase } from './layerGeometry'
 import { visualStateAt, visualTrackBelow } from './resolve'
 
 export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget' | 'unlinkedOverEdited' | 'transformedUnderEffect'
@@ -97,27 +98,34 @@ function mediaBox(p: Project, it: MediaItem, W: number, H: number): Box | null {
 const FOLLOW_TOL = 0.01
 const FOLLOW_TOL_DEG = 1
 
-/** O clipe move o conteúdo no quadro: x/y/escala/rotação com keys ou animação de entrada/saída que não é só fade. */
+/**
+ * O clipe move o conteúdo no quadro: x/y/escala/rotação ou corte com keys, ou animação de entrada/saída que não é só
+ * fade. zoom/pop ainda não têm geometria no resolve (F4 Task 5 a põe em visualStateAt) e por ora não movem nada.
+ */
 function clipMoves(m: MediaItem): boolean {
   const v = m.visual
   if (!v) return false
   const t = v.transform
-  return animated(t.x, t.y, t.scale, t.rotation) || (!!v.animIn && v.animIn.preset !== 'fade') || (!!v.animOut && v.animOut.preset !== 'fade')
+  return animated(t.x, t.y, t.scale, t.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b) || (!!v.animIn && v.animIn.preset !== 'fade') || (!!v.animOut && v.animOut.preset !== 'fade')
 }
 
 /**
  * Primeiro instante (absoluto) de [a, b) em que a região do efeito deixa de acompanhar o conteúdo do clipe; null =
- * acompanha. A região é levada ao espaço do conteúdo (desfaz centro, rotação e escala do clipe — a mesma geometria
- * do resolve, com animações de entrada/saída): acompanhar = centro, tamanho e rotação constantes nesse espaço (em
- * relação ao início do trecho em comum clipe ∩ efeito), com tolerância de FOLLOW_TOL do quadro medida na tela. Amostras: pontas, keys do clipe e
- * da região, janelas das animações de entrada/saída e 3 pontos entre cada par (curvas não lineares).
+ * acompanha. A região é levada ao espaço do conteúdo — desfaz centro, rotação, escala e espelho do clipe (geometria do
+ * resolve, com animações de entrada/saída) e fit e corte (layerBase, a mesma conta do compositor). Acompanhar =
+ * ponto da fonte sob o centro, tamanho e rotação constantes nesse espaço em relação ao início do trecho em comum
+ * clipe ∩ efeito, com tolerância de FOLLOW_TOL do quadro medida na tela. Amostras: pontas, keys do clipe (inclusive
+ * corte) e da região, janelas das animações de entrada/saída e 3 pontos entre cada par (curvas não lineares).
  */
-function unfollowedAt(fx: EffectItem, m: MediaItem, a: Us, b: Us, W: number, H: number): Us | null {
+function unfollowedAt(p: Project, fx: EffectItem, m: MediaItem, a: Us, b: Us, W: number, H: number): Us | null {
   const v = m.visual!
-  const t = v.transform, r = fx.region
+  const t = v.transform, r = fx.region, c = v.crop
+  // fonte exibida (sem dados de vídeo: o próprio quadro)
+  const info = p.assets.find((x) => x.id === m.assetId)?.video
+  const src = info && info.width > 0 && info.height > 0 ? { w: info.width, h: info.height, rotation: info.rotation } : { w: W, h: H, rotation: 0 as const }
   const base = [a, b - 1]
   const add = (offset: Us, ...as: Anim<number>[]): void => { for (const x of as) for (const k of x.keys ?? []) base.push(offset + k.tUs) }
-  add(m.startUs, t.x, t.y, t.scale, t.rotation)
+  add(m.startUs, t.x, t.y, t.scale, t.rotation, c.l, c.t, c.r, c.b)
   add(fx.startUs, r.x, r.y, r.w, r.h, r.rotation)
   if (v.animIn) base.push(m.startUs + v.animIn.durationUs)
   if (v.animOut) base.push(itemEndUs(m) - v.animOut.durationUs)
@@ -129,25 +137,34 @@ function unfollowedAt(fx: EffectItem, m: MediaItem, a: Us, b: Us, W: number, H: 
     if (n !== undefined) for (let j = 1; j < 4; j++) times.push(x + Math.round(((n - x) * j) / 4))
   })
   const tol = FOLLOW_TOL * Math.max(W, H)
-  type Pose = { qx: number; qy: number; w: number; h: number; rot: number; s: number }
+  // pose da região no espaço do conteúdo: ponto da fonte exibida (px) sob o centro, tamanho em px da fonte, rotação
+  // relativa; f = px do quadro por px da fonte (para medir o desvio na tela)
+  type Pose = { qx: number; qy: number; w: number; h: number; rot: number; fx: number; fy: number }
   const pose = (at: Us): Pose | null => {
-    const rect = visualStateAt(v, m.durationUs, at - m.startUs).rect
-    const s = rect.scale
-    if (s < 1e-6) return null // conteúdo invisível neste instante
+    const local = at - m.startUs
+    const rect = visualStateAt(v, m.durationUs, local).rect
+    const g = layerBase({ l: evalAnim(c.l, local), t: evalAnim(c.t, local), r: evalAnim(c.r, local), b: evalAnim(c.b, local) }, v.fit, src, { w: W, h: H })
+    const sx = g.bw * rect.scale, sy = g.bh * rect.scale
+    if (sx < 1e-6 || sy < 1e-6) return null // conteúdo invisível neste instante
     const lf = at - fx.startUs
     const dx = (evalAnim(r.x, lf) - rect.cx) * W, dy = (evalAnim(r.y, lf) - rect.cy) * H
     const th = (rect.rotation * Math.PI) / 180, cos = Math.cos(th), sin = Math.sin(th)
-    // espaço do conteúdo (px com escala 1, eixos do clipe): R(−θ)·(região − centro) / escala
+    // quad local da camada (−½..½), como matrix.layerMatrix: R(−θ)·(região − centro) / tamanho; espelhar inverte x
+    let ax = (cos * dx + sin * dy) / sx
+    const ay = (-sin * dx + cos * dy) / sy
+    if (v.mirror) ax = -ax
+    const [u0, v0, u1, v1] = g.uv
+    const fxs = sx / g.cw, fys = sy / g.ch
     return {
-      qx: (cos * dx + sin * dy) / s, qy: (-sin * dx + cos * dy) / s,
-      w: (Math.abs(evalAnim(r.w, lf)) * W) / s, h: (Math.abs(evalAnim(r.h, lf)) * H) / s,
-      rot: evalAnim(r.rotation, lf) - rect.rotation, s
+      qx: (u0 + (ax + 0.5) * (u1 - u0)) * g.dw, qy: (v0 + (ay + 0.5) * (v1 - v0)) * g.dh,
+      w: (Math.abs(evalAnim(r.w, lf)) * W) / fxs, h: (Math.abs(evalAnim(r.h, lf)) * H) / fys,
+      rot: evalAnim(r.rotation, lf) - rect.rotation, fx: fxs, fy: fys
     }
   }
   const off = (ref: Pose, c: Pose | null): boolean => {
     if (!c) return false
     const dRot = Math.abs(((((c.rot - ref.rot) % 360) + 540) % 360) - 180)
-    return Math.hypot(c.qx - ref.qx, c.qy - ref.qy) * c.s > tol || Math.abs(c.w - ref.w) * c.s > tol || Math.abs(c.h - ref.h) * c.s > tol || dRot > FOLLOW_TOL_DEG
+    return Math.hypot((c.qx - ref.qx) * c.fx, (c.qy - ref.qy) * c.fy) > tol || Math.abs(c.w - ref.w) * c.fx > tol || Math.abs(c.h - ref.h) * c.fy > tol || dRot > FOLLOW_TOL_DEG
   }
   // referência: o início do trecho em comum (não o da consulta), para o resultado não depender da janela pedida
   let ref: Pose | null = pose(Math.max(m.startUs, fx.startUs))
@@ -240,7 +257,7 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
           for (const m of t.items) {
             if (m.type !== 'media' || m.linkId !== it.linkId || m.enabled === false || !clipMoves(m)) continue
             const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
-            const at = a < b ? unfollowedAt(it, m, a, b, W, H) : null
+            const at = a < b ? unfollowedAt(p, it, m, a, b, W, H) : null
             if (at !== null) moved = moved === null ? at : Math.min(moved, at)
           }
         }

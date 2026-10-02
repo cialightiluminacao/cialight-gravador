@@ -5,6 +5,8 @@
 // canvas (y para baixo); `rotation` em graus, horária na tela, em torno do centro (em pixels, sem
 // distorcer pelo aspecto do canvas).
 
+import { layerBase } from '@shared/editor/layerGeometry'
+
 export type Mat3 = Float32Array
 export type Rotation = 0 | 90 | 180 | 270
 
@@ -23,32 +25,11 @@ export interface LayerGeometry {
   size: [number, number]
 }
 
-const MIN_SPAN = 1e-4
-const clamp01 = (v: number): number => Math.min(1, Math.max(0, v))
-
 export function layerMatrix(layer: LayerGeometryInput, src: { w: number; h: number; rotation: Rotation }, canvas: { w: number; h: number }): LayerGeometry {
-  const { l, t, r, b } = layer.crop
-  const u0 = clamp01(l)
-  const v0 = clamp01(t)
-  const u1 = Math.max(u0 + MIN_SPAN, clamp01(1 - r))
-  const v1 = Math.max(v0 + MIN_SPAN, clamp01(1 - b))
-  const turned = src.rotation === 90 || src.rotation === 270
-  const dw = Math.max(1, turned ? src.h : src.w)
-  const dh = Math.max(1, turned ? src.w : src.h)
-  const cw = dw * (u1 - u0)
-  const ch = dh * (v1 - v0)
+  // corte e fit: a mesma conta da privacidade (shared/editor/layerGeometry)
+  const { uv, bw, bh } = layerBase(layer.crop, layer.fit, src, canvas)
   const W = canvas.w
   const H = canvas.h
-  let bw: number
-  let bh: number
-  if (layer.fit === 'fill') {
-    bw = W
-    bh = H
-  } else {
-    const k = layer.fit === 'cover' ? Math.max(W / cw, H / ch) : Math.min(W / cw, H / ch)
-    bw = cw * k
-    bh = ch * k
-  }
   const sx = bw * layer.rect.scale
   const sy = bh * layer.rect.scale
   const cx = layer.rect.cx * W
@@ -63,7 +44,7 @@ export function layerMatrix(layer: LayerGeometryInput, src: { w: number; h: numb
   const m10 = (-2 / H) * sin * sx
   const m11 = (-2 / H) * cos * sy
   const m12 = 1 - (2 / H) * (cy - (sin * sx) / 2 - (cos * sy) / 2)
-  return { mat: new Float32Array([m00, m10, 0, m01, m11, 0, m02, m12, 1]), uv: [u0, v0, u1, v1], size: [sx, sy] }
+  return { mat: new Float32Array([m00, m10, 0, m01, m11, 0, m02, m12, 1]), uv, size: [sx, sy] }
 }
 
 /** Aplica a matriz (coluna-maior) a um ponto do quad local. */

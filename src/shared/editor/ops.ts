@@ -1660,7 +1660,7 @@ export function copyKeyframes(p: Project, itemId: string, opts?: { paths?: AnimP
 /**
  * Cola keyframes no item a partir de atUs (absoluto, dentro do item): tempos relativos preservados e presos à
  * duração do item (o que passar dela é cortado com key de borda exato, sem salto — pasteKeys). Propriedades que o
- * item não tem (ex.: tamanho do texto num vídeo) são ignoradas; nenhuma aplicável → igual.
+ * item não tem (ex.: tamanho do texto num vídeo) e a intensidade numa Tarja são ignoradas; nenhuma aplicável → igual.
  */
 export function pasteKeyframes(p: Project, itemId: string, clip: KeyframeClipboard, atUs: Us): Project {
   const f = mustFind(p, itemId)
@@ -1669,6 +1669,8 @@ export function pasteKeyframes(p: Project, itemId: string, clip: KeyframeClipboa
   if (local < 0 || local > f.item.durationUs) throw new EditError('bounds', 'Instante fora do item')
   const changes: [AnimPath, Anim<number>][] = []
   for (const [pt, keys] of Object.entries(clip.keys) as [AnimPath, Keyframe<number>[]][]) {
+    // Tarja não tem intensidade animável (convertEffects tira os keys): não cola nela
+    if (pt === 'strength' && f.item.type === 'effect' && f.item.effect === 'solid') continue
     const a = getAnim(f.item, pt)
     if (a && keys.length) changes.push([pt, pasteKeys(a, keys, local, f.item.durationUs)])
   }

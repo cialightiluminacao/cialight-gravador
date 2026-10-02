@@ -155,3 +155,21 @@ describe('setKeyEase / copiar e colar keyframes', () => {
     expect(() => ops.pasteKeyframes(p, v, c, 11 * S)).toThrow(/fora do item/)
   })
 })
+
+describe('pasteKeyframes em efeitos', () => {
+  it('Tarja (solid) não recebe keys de intensidade; a região sim', () => {
+    let p = createEmptyProject('t')
+    const a = ops.addEffect(p, 'blur', 0, { durationUs: 4 * S })
+    p = ops.toggleKeyframe(a.project, a.itemId, 'strength', 0)
+    p = ops.toggleKeyframe(p, a.itemId, 'region.x', 0)
+    const clip = ops.copyKeyframes(p, a.itemId)!
+    expect(Object.keys(clip.keys).sort()).toEqual(['region.x', 'strength'])
+    const b = ops.addEffect(p, 'solid', 5 * S, { durationUs: 2 * S })
+    const q = ops.pasteKeyframes(b.project, b.itemId, clip, 5 * S)
+    const fx = byId<import('./project').EffectItem>(q, b.itemId)
+    expect(fx.strength.keys).toBeUndefined()
+    expect(fx.region.x.keys).toHaveLength(1)
+    expect(ops.pasteKeyframes(b.project, b.itemId, { keys: { strength: clip.keys.strength } }, 5 * S)).toBe(b.project)
+  })
+})
+

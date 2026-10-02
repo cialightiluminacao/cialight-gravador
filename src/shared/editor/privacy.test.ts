@@ -184,5 +184,34 @@ describe('privacyWarnings: clipe se move sob efeito vinculado (transformedUnderE
     expect(privacyWarnings(off, 0, 10 * S).map((w) => w.kind)).toEqual(['disabled'])
     // opacidade animada não move o conteúdo
     expect(tue(scene((m) => { m.visual!.transform.opacity = lin(1, 0.2) }))).toEqual([])
+    // zoom/pop ainda sem geometria (Task 5): não disparam
+    expect(tue(scene((m) => { m.visual!.animIn = { preset: 'zoom', durationUs: S }; m.visual!.animOut = { preset: 'pop', durationUs: S } }))).toEqual([])
+  })
+  it('corte animado conta como movimento: região parada dispara', () => {
+    expect(tue(scene((m) => { m.visual!.crop.l = lin(0, 0.5) }))).toHaveLength(1)
+    expect(tue(scene((m) => { m.visual!.crop.b = lin(0, 0.3) }))).toHaveLength(1)
+  })
+  it('corte animado com região que acompanha (fit esticar: x = (U − l)/(1 − l)) não dispara', () => {
+    // ponto U = 0,75 da fonte e largura 0,1 da fonte; keys da região a cada 0,5 s (entre eles, < 1 % do quadro)
+    const keys = (f: (l: number) => number) => ({ value: f(0), keys: Array.from({ length: 21 }, (_, i) => ({ tUs: i * S / 2, value: f(0.5 * i / 20), ease: 'linear' as const })) })
+    const follow = scene((m, fx) => {
+      m.visual!.fit = 'fill'
+      m.visual!.crop.l = lin(0, 0.5)
+      fx.region.x = keys((l) => (0.75 - l) / (1 - l))
+      fx.region.w = keys((l) => 0.1 / (1 - l))
+    })
+    expect(tue(follow)).toEqual([])
+    // a mesma região parada dispara
+    expect(tue(scene((m) => { m.visual!.fit = 'fill'; m.visual!.crop.l = lin(0, 0.5) }))).toHaveLength(1)
+  })
+  it('corte parado não atrapalha: zoom com região que acompanha continua sem aviso (com espelho também)', () => {
+    const follow = (mirror: boolean) => scene((m, fx) => {
+      m.visual!.crop = { l: { value: 0.2 }, t: { value: 0.1 }, r: { value: 0 }, b: { value: 0 } }
+      m.visual!.mirror = mirror
+      m.visual!.transform.scale = lin(1, 2)
+      fx.region.x = lin(0.3, 0.1); fx.region.y = lin(0.3, 0.1); fx.region.w = lin(0.1, 0.2); fx.region.h = lin(0.1, 0.2)
+    })
+    expect(tue(follow(false))).toEqual([])
+    expect(tue(follow(true))).toEqual([])
   })
 })

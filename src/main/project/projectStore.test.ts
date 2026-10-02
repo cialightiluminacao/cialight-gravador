@@ -4,8 +4,9 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { ProjectStore } from './projectStore'
 import { SessionStore } from '../session/sessionStore'
-import { createEmptyProject } from '@shared/editor/factory'
-import type { Asset, Project } from '@shared/editor/project'
+import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
+import type { Asset, MediaItem, Project } from '@shared/editor/project'
+import { parseProjectV13 } from '@shared/__fixtures__/projectSchemaV13'
 import { sourceFingerprint } from '@shared/editor/audioProcess'
 
 function mk(id: string, updatedAt: string): Project {
@@ -217,6 +218,33 @@ describe('ProjectStore', () => {
     expect(onDisk.assets.map((a) => [a.id, a.status, a.peaks])).toEqual([['d1', 'ready', undefined], ['a1', 'ready', 'cache/a1.peaks.bin']])
     expect(onDisk.updatedAt).toBe('2026-10-02T00:00:00.000Z')
     expect(store.cached('p-a').assets.find((a) => a.id === 'a1')?.peaks).toBe('cache/a1.peaks.bin')
+  })
+
+  it('F4: project.json, versões e applyAssetPatch gravam no formato que a v1.3 lê (Anim sem keys → número)', () => {
+    const vid: Asset = { id: 'v1', name: 'v', kind: 'video', source: { type: 'file', path: 'C:/m/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 10_000_000, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: 1_000_000 }, status: 'ready' }
+    const p = mk('p-a', '2026-10-01T10:00:00.000Z')
+    p.assets = [vid]
+    const m = createMediaItem(vid, 0, 'video')
+    m.visual = { ...m.visual!, crop: { l: { value: 0.1 }, t: { value: 0 }, r: { value: 0 }, b: { value: 0.2 } }, radius: { value: 8 }, adjust: { brightness: { value: 0.1 }, contrast: { value: 0 }, saturation: { value: 0 } } }
+    p.tracks[0].items = [m]
+    store.create(p)
+    const files = () => [join(root, 'p-a', 'project.json'), ...readdirSync(join(root, 'p-a', 'versions')).map((n) => join(root, 'p-a', 'versions', n))]
+    const check = (): void => {
+      for (const f of files()) {
+        const json = JSON.parse(readFileSync(f, 'utf8'))
+        expect(json.tracks[0].items[0].visual.crop).toEqual({ l: 0.1, t: 0, r: 0, b: 0.2 })
+        expect(json.tracks[0].items[0].visual.radius).toBe(8)
+        expect(parseProjectV13(json).success).toBe(true)
+      }
+    }
+    check()
+    store.cacheAssets('p-a', [{ ...vid, id: 'a2' }])
+    clock += 1e13
+    store.applyAssetPatch('p-a', 'a2', { status: 'ready' }, '2026-10-02T00:00:00.000Z')
+    expect(files().length).toBe(3)
+    check()
+    // ao abrir, volta ao modelo (Anim)
+    expect((store.load('p-a').tracks[0].items[0] as MediaItem).visual!.crop.l).toEqual({ value: 0.1 })
   })
 
   it('applyAssetPatch de asset que não existe em lugar nenhum lança', () => {
