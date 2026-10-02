@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
-import { ANIM_PRESETS, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, AnimPreset, EffectItem, EffectRegion, Item, PresetAnim, Project, VisualProps } from './project'
+import { ANIM_PRESETS, DEFAULT_TEXT_SHADOW, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
+import type { Anim, AnimPreset, EffectItem, EffectRegion, Item, PresetAnim, Project, Track, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
 import { conservativeRegion } from './contentPose'
@@ -79,24 +79,37 @@ const mediaItem = z.object({
   visual: visual.optional(),
   transitionIn: transition.optional()
 })
-const textStyle = z.object({
-  font: z.string(),
-  size: animOrNumber,
-  weight: z.number(),
-  color: z.string(),
-  background: z.string().optional(),
-  stroke: z.object({ width: z.number(), color: z.string() }).optional(),
-  shadow: z.boolean().optional(),
-  align: z.enum(['left', 'center', 'right']),
-  lineHeight: z.number()
-})
+// F5 (v1.5): itálico, largura máxima, fundo com margem/cantos e sombra com parâmetros — opcionais, a v1.3 os descarta.
+// `shadow` (boolean da v1.3) e `shadowStyle` ficam coerentes: projeto antigo com `shadow: true` ganha a sombra padrão.
+const textStyle = z
+  .object({
+    font: z.string(),
+    size: animOrNumber,
+    weight: z.number(),
+    color: z.string(),
+    background: z.string().optional(),
+    stroke: z.object({ width: z.number(), color: z.string() }).optional(),
+    shadow: z.boolean().optional(),
+    align: z.enum(['left', 'center', 'right']),
+    lineHeight: z.number(),
+    italic: z.boolean().optional(),
+    maxWidth: z.number().optional(),
+    padding: z.number().optional(),
+    backgroundRadius: z.number().optional(),
+    shadowStyle: z.object({ color: z.string(), blur: z.number(), dx: z.number(), dy: z.number() }).optional()
+  })
+  .transform((st) => {
+    if (st.shadowStyle) return st.shadow ? st : { ...st, shadow: true }
+    return st.shadow ? { ...st, shadowStyle: { ...DEFAULT_TEXT_SHADOW } } : st
+  })
 const textItem = z.object({
   ...itemBase,
   type: z.literal('text'),
   text: z.string(),
   style: textStyle,
   visual,
-  transitionIn: transition.optional()
+  transitionIn: transition.optional(),
+  counter: z.object({ from: z.number(), to: z.number() }).optional()
 })
 const shapeItem = z.object({
   ...itemBase,
@@ -105,7 +118,10 @@ const shapeItem = z.object({
   fill: z.string(),
   stroke: z.string(),
   strokeWidth: z.number(),
-  visual
+  visual,
+  box: z.object({ w: z.number(), h: z.number() }).optional(),
+  cornerRadius: z.number().optional(),
+  spotlight: z.object({ dim: z.number() }).optional()
 })
 const effectRegion = z.object({ shape: z.enum(['rect', 'ellipse']), x: anim, y: anim, w: anim, h: anim, rotation: anim })
 const effectItem = z.object({
@@ -172,9 +188,11 @@ const track = z.object({
   hidden: z.boolean(),
   locked: z.boolean(),
   volume: z.number(),
-  role: z.enum(['voice', 'music', 'sfx', 'effects']).optional(),
+  role: z.enum(['voice', 'music', 'sfx', 'effects', 'captions']).optional(),
+  // faixa de legendas no disco (a v1.3 recusa role 'captions'): sem `role` e com captionsV15 — o parse devolve o papel
+  captionsV15: z.boolean().optional(),
   items: z.array(item)
-})
+}).transform(({ captionsV15, ...t }) => (captionsV15 && t.kind === 'video' && t.role === undefined ? { ...t, role: 'captions' as const } : t))
 
 export const ProjectSchema: z.ZodType<Project> = z.object({
   version: z.literal(1),
@@ -209,8 +227,9 @@ export function migrateProject(json: unknown): unknown {
   const tracks = (json as { tracks?: unknown } | null)?.tracks
   if (!Array.isArray(tracks)) return json
   const isLegacyFx = (t: unknown): boolean => {
-    const x = t as { kind?: unknown; name?: unknown; role?: unknown; items?: unknown }
-    return x?.kind === 'video' && x.role === undefined && typeof x.name === 'string' && /^Efeitos( \d+)?$/.test(x.name) &&
+    const x = t as { kind?: unknown; name?: unknown; role?: unknown; items?: unknown; captionsV15?: unknown }
+    // faixa de legendas no disco (sem role, captionsV15) nunca vira de efeitos, nem vazia e chamada "Efeitos"
+    return x?.kind === 'video' && x.role === undefined && x.captionsV15 !== true && typeof x.name === 'string' && /^Efeitos( \d+)?$/.test(x.name) &&
       Array.isArray(x.items) && x.items.every((i) => (i as { type?: unknown })?.type === 'effect')
   }
   if (!tracks.some(isLegacyFx)) return json
@@ -320,7 +339,8 @@ export function toDiskProject(p: Project): unknown {
       case 'media':
         return it.visual ? { ...it, visual: diskVisual(it.visual) } : it
       case 'text':
-        return { ...it, style: { ...it.style, size: compact(it.style.size) }, visual: diskVisual(it.visual) }
+        // shadow (boolean da v1.3) coerente com os parâmetros da sombra; os campos da v1.5 a v1.3 descarta
+        return { ...it, style: { ...it.style, size: compact(it.style.size), ...(it.style.shadowStyle ? { shadow: true } : {}) }, visual: diskVisual(it.visual) }
       case 'shape':
         return { ...it, visual: diskVisual(it.visual) }
       case 'effect':
@@ -329,7 +349,15 @@ export function toDiskProject(p: Project): unknown {
         return it
     }
   }
-  return { ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map(item) })) }
+  // faixa de legendas: a v1.3 recusa role 'captions' — vai sem papel (para ela, uma faixa de vídeo com textos) e com
+  // captionsV15, que o parse devolve a role 'captions'
+  const track = (t: Track): unknown => {
+    const items = t.items.map(item)
+    if (t.role !== 'captions') return { ...t, items }
+    const { role: _role, ...rest } = t
+    return { ...rest, captionsV15: true, items }
+  }
+  return { ...p, tracks: p.tracks.map(track) }
 }
 
 /** Nome da propriedade nas mensagens (os de antes da F4 mantidos: volume, x, strength…). */
@@ -340,6 +368,12 @@ export function validateProject(p: Project): string[] {
   const errs: string[] = []
   const assets = new Map(p.assets.map((a) => [a.id, a]))
   const tol = frameDurUs(p.canvas.fps)
+  const captions = p.tracks.filter((t) => t.role === 'captions')
+  if (captions.length > 1) errs.push('Há mais de uma faixa de legendas')
+  for (const tr of captions) {
+    if (tr.kind !== 'video') errs.push(`Faixa "${tr.name}": a faixa de legendas precisa ser de vídeo`)
+    for (const it of tr.items) if (it.type !== 'text') errs.push(`Faixa "${tr.name}", item ${it.id}: a faixa de legendas só aceita textos`)
+  }
   for (const tr of p.tracks) {
     // compara com o maior fim acumulado (um item longo pode cobrir vários seguintes)
     const sorted = [...tr.items].sort((a, b) => a.startUs - b.startUs)
