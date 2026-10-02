@@ -70,10 +70,11 @@ void main() {
     vec4 c = vec4(u_color, 1.0);
     o = p < 0.5 ? mix(texture(u_a, uv), c, 2.0 * p) : mix(c, texture(u_b, uv), 2.0 * p - 1.0);
   } else if (u_mode == 2) {
-    // deslizar: A deslocado p·dir, B deslocado (p − 1)·dir (entra pelo lado oposto); não se sobrepõem
+    // deslizar: A deslocado p·dir, B deslocado (p − 1)·dir (entra pelo lado oposto). As coberturas são disjuntas e
+    // complementares (na coluna da emenda somam 1): soma simples — com "over" a emenda deixaria ver 25 % do que está abaixo
     vec4 a = at(u_a, uv - u_dir * p, 1.0);
     vec4 b = at(u_b, uv - u_dir * (p - 1.0), 1.0);
-    o = a + b * (1.0 - a.a);
+    o = a + b;
   } else if (u_mode == 3) {
     // cortina: s = posição ao longo do sentido da borda (0 onde ela começa); B atrás da borda, borda suave de ${WIPE_SOFT}
     // da largura; a borda vai de −½ suave a 1 + ½ suave (p = 0 é só A, p = 1 só B)

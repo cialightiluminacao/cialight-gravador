@@ -650,7 +650,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
     check(pv.frames === 30 && pv.whiteMax === 0, `transição ${pv.kind}, tarja ${pv.side === 'A' ? 'vinculada a A (termina no corte)' : 'ancorada em B (começa no corte)'}: nenhum pixel branco em ${pv.frames} quadros da janela (máx. ${pv.whiteMax}, ${pv.whiteFrames} quadros com branco)`, failures)
     check(pv.controlWhiteMax > 1000, `transição ${pv.kind}, controle sem tarja (${pv.side}): o quadrado branco aparece (${pv.controlWhiteMax} px)`, failures)
   }
-  check((tr?.privacy?.length ?? 0) === 6, `transições: 6 cenários de privacidade (${tr?.privacy?.length})`, failures)
+  check((tr?.privacy?.length ?? 0) === 8, `transições: 8 cenários de privacidade (${tr?.privacy?.length})`, failures)
   const tc = tr?.trackScope?.centers ?? []
   check(tc.length === 3 && tc.every((c) => Math.abs(c[0] - 0x12) <= 1 && Math.abs(c[1] - 0x34) <= 1 && Math.abs(c[2] - 0x56) <= 1), `transição: efeito \`track\` na faixa da transição cobre a composição (centro ${JSON.stringify(tc)} = #123456)`, failures)
   const be = tr?.blurEdge
@@ -659,6 +659,12 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
     const md = pr.meanDiff ?? []
     check(md.length === pr.frames.length && md.length === 3 && md.every((d) => d <= 4), `transição ${pr.kind}: exportação = preview nos quadros ${pr.frames.map((f) => f.frame).join('/')} (diferença média por canal ${JSON.stringify(md)} ≤ 4) ${pr.exportError ?? ''}`, failures)
   }
+  const ss = tr?.slideSeam
+  check(!!ss && ss.minSum >= 0.9 * Math.min(...ss.colorSums), `transição slideL: emenda sem deixar ver o fundo (menor soma RGB perto da borda ${ss?.minSum} ≥ 90 % de ${ss ? Math.min(...ss.colorSums) : '?'})`, failures)
+  const sa = tr?.sameAsset
+  console.log(`transição com o mesmo asset em A e B — fim da janela: ${JSON.stringify(sa)}`)
+  // sem slot estável (medido em 2026-10-02): 26,8 + 43,3 + 25,1 = 95 ms nos 3 quadros após a janela, mediana 14,3
+  check(!!sa && !sa.error && sa.after3Ms <= 3 * sa.medianMs + 15, `transição com o mesmo asset em A e B: sem engasgo no fim da janela (3 quadros seguintes ${sa?.after3Ms} ms ≤ 3 × mediana ${sa?.medianMs} + 15; 1º ${sa?.boundaryMs} ms) ${sa?.error ?? ''}`, failures)
   const tb = tr?.bench
   console.log(`transições — desempenho 1080p (${tr?.renderer}): crossfade ${JSON.stringify(tb?.crossfade)} ms; blur ${JSON.stringify(tb?.blur)} ms`)
   check(!!tb && !tb.error && !!tb.crossfade && !!tb.blur && tb.crossfade.mean < 20 && tb.blur.mean < 20, `transições: 1080p < 20 ms/quadro (compositor + GPU; alvo 12) — crossfade média ${tb?.crossfade?.mean} / p95 ${tb?.crossfade?.p95}, blur média ${tb?.blur?.mean} / p95 ${tb?.blur?.p95} ${tb?.error ?? ''}`, failures)

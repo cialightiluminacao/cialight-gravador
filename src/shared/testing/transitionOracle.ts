@@ -93,6 +93,13 @@ export interface TransitionReport {
   /** quadros do preview (amostra a cada PARITY_STRIDE px) para comparar com a exportação no main */
   parity?: { kind: TransitionKind; exportPath?: string; exportError?: string; fromUs: number; frames: { frame: number; preview: number[] }[]; meanDiff?: number[] }[]
   bench?: { crossfade?: TransitionBench; blur?: TransitionBench; error?: string }
+  /** slideL: menor soma R+G+B nos 8 px de cada lado da emenda (instantes 0,25/0,5/0,75) — sem emenda escura */
+  slideSeam?: { minSum: number; colorSums: [number, number] }
+  /**
+   * A e B do MESMO asset (trechos diferentes): reprodução sequencial atravessando o fim da janela (2,5 s) — tempo do
+   * quadro inteiro (decodificação inclusa) no 1º quadro depois da janela, a soma dos 3 primeiros e a mediana dos de regime
+   */
+  sameAsset?: { boundaryMs: number; after3Ms: number; medianMs: number; maxMs: number; frameMs?: number[]; error?: string }
 }
 
 /** Passo da amostra de paridade (px) e deslocamento: pontos (STRIDE·i + 1, STRIDE·j + 1). */

@@ -31,7 +31,7 @@ import { FILE_PROTOCOL } from '@shared/ipc'
 import { h264LevelFor } from '@/engine/encoderSupport'
 import { Compositor, type SourceMeta } from './compositor/compositor'
 import { DecoderPool } from './decoderPool'
-import { firstDrawUs, flatLayers } from './layerSources'
+import { assignSlots, decodedLayers, firstDrawUs, flatLayers, type SlotMap } from './layerSources'
 import { loadFonts, registerAppFonts } from './text/fonts'
 import { projectFontRequests, type FontRequest } from './text/fontRequests'
 import { fontReady } from './text/textRaster'
@@ -62,6 +62,8 @@ const sessions = new Map<string, { load: Promise<void>; session: Session | null;
 let annCanvas: OffscreenCanvas | null = null
 // itens já aquecidos nesta reprodução (zera ao pausar/seek)
 const prefetched = new Set<string>()
+// slots de decoder do último quadro composto (assignSlots: o item mantém o iterador de um quadro para o outro)
+let lastSlots: SlotMap = new Map()
 // último quadro pedido (redesenho quando uma fonte pendente carrega) e se há redesenho por fazer
 let lastFrame: FrameMsg | null = null
 let fontRedraw = false
@@ -246,16 +248,18 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
   const missing = new Set<string>()
   const missingAnnotations = new Set<string>()
   const frames: VideoFrame[] = []
-  // mesmo asset em mais de uma camada no quadro: cada uma com seu slot (iterador próprio)
-  const slots = new Map<string, number>()
-  const used: [string, number][] = []
+  // mesmo asset em mais de uma camada no quadro: cada uma com seu slot (iterador próprio), estável entre quadros
+  const flat = flatLayers(layers)
+  const slots = assignSlots(decodedLayers(p.assets, flat), lastSlots)
+  lastSlots = slots
+  const used: [string, number][] = [...slots.values()].map((s): [string, number] => [s.assetId, s.slot])
 
   try {
     // allSettled + try/catch por camada: nenhuma camada aborta a coleta das outras, e todo quadro
     // obtido entra em `frames` antes do finally (sem vazamento quando uma camada falha).
-    // fontes também das camadas de A e B das transições (flatLayers); slots na ordem de desenho
+    // fontes também das camadas de A e B das transições (flatLayers)
     await Promise.allSettled(
-      flatLayers(layers).map(async (layer) => {
+      flat.map(async (layer) => {
         if (layer.kind === 'annotations') {
           await loadSession(layer.sessionId)
           if (!sessions.get(layer.sessionId)?.session) missingAnnotations.add(layer.sessionId)
@@ -273,9 +277,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
                 meta.set(layer.itemId, { w: bmp.width, h: bmp.height, rotation: 0 })
               }
             } else {
-              const slot = slots.get(asset.id) ?? 0
-              slots.set(asset.id, slot + 1)
-              used.push([asset.id, slot])
+              const slot = slots.get(layer.itemId)?.slot ?? 0
               const sample = await pool.frameAt(asset.id, layer.srcUs, sequential, slot)
               if (sample) {
                 try {
@@ -348,22 +350,15 @@ function prefetchUpcoming(p: Project, tUs: number, used: [string, number][]): [s
       if (item.type !== 'media' || item.enabled === false) continue
       const atUs = firstDrawUs(track, item)
       if (atUs <= tUs || atUs > tUs + PREFETCH_US) continue
-      // slots como em composeAt: ordem de desenho das camadas de vídeo com asset disponível (A/B das transições inclusos)
-      const slots = new Map<string, number>()
-      for (const layer of flatLayers(resolveFrame(p, atUs))) {
-        if (layer.kind !== 'media' || layer.srcUs === null) continue
-        const asset = p.assets.find((a) => a.id === layer.assetId)
-        if (!asset || asset.status === 'missing') continue
-        const slot = slots.get(asset.id) ?? 0
-        slots.set(asset.id, slot + 1)
-        if (layer.itemId !== item.id) continue
-        if (busyKeys.has(`${asset.id}#${slot}`)) break
-        keep.push([asset.id, slot])
-        if (!prefetched.has(item.id)) {
-          prefetched.add(item.id)
-          pool.prefetch(asset.id, layer.srcUs, slot)
-        }
-        break
+      // slot que composeAt vai dar ao item quando ele aparecer (assignSlots a partir dos slots do quadro atual)
+      const flat = flatLayers(resolveFrame(p, atUs))
+      const layer = flat.find((l) => l.kind === 'media' && l.itemId === item.id)
+      const s = assignSlots(decodedLayers(p.assets, flat), lastSlots).get(item.id)
+      if (!s || layer?.kind !== 'media' || layer.srcUs === null || busyKeys.has(`${s.assetId}#${s.slot}`)) continue
+      keep.push([s.assetId, s.slot])
+      if (!prefetched.has(item.id)) {
+        prefetched.add(item.id)
+        pool.prefetch(s.assetId, layer.srcUs, s.slot)
       }
     }
   }

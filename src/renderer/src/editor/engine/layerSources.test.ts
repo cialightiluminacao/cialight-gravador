@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { resolveFrame, type MediaLayer } from '@shared/editor/resolve'
 import { S, fx, project, tr, track, vclip, vid } from '@shared/editor/__fixtures__/transitionScenes'
-import { firstDrawUs, flatLayers } from './layerSources'
+import { assignSlots, decodedLayers, firstDrawUs, flatLayers } from './layerSources'
 
 // A [0, 4 s) e B [4 s, 8 s) do MESMO asset (trechos diferentes), crossfade de 1 s: janela [3,5 s, 4,5 s)
 const scene = (bOver: Parameters<typeof vclip>[4] = {}) =>
@@ -48,5 +48,38 @@ describe('firstDrawUs', () => {
     const p = scene()
     const hidden = { ...p.tracks[0], hidden: true }
     expect(firstDrawUs(hidden, hidden.items[1])).toBe(4 * S)
+  })
+})
+
+describe('assignSlots / decodedLayers', () => {
+  const L = (itemId: string, assetId = 'a'): { itemId: string; assetId: string } => ({ itemId, assetId })
+
+  it('sem histórico: slots na ordem de desenho, por asset', () => {
+    const s = assignSlots([L('A'), L('X', 'x'), L('B')], new Map())
+    expect([...s]).toEqual([['A', { assetId: 'a', slot: 0 }], ['X', { assetId: 'x', slot: 0 }], ['B', { assetId: 'a', slot: 1 }]])
+  })
+
+  it('o item mantém o slot do quadro anterior (B do mesmo asset não troca de iterador no fim da janela)', () => {
+    const inWindow = assignSlots([L('A'), L('B')], new Map())
+    expect(inWindow.get('B')!.slot).toBe(1)
+    const after = assignSlots([L('B')], inWindow)
+    expect(after.get('B')!.slot).toBe(1)
+    // item novo pega o menor slot livre, sem roubar o de quem já tinha
+    const next = assignSlots([L('C'), L('B')], after)
+    expect(next.get('B')!.slot).toBe(1)
+    expect(next.get('C')!.slot).toBe(0)
+  })
+
+  it('slot de outro asset no histórico não vale', () => {
+    const prev = new Map([['A', { assetId: 'b', slot: 3 }]])
+    expect(assignSlots([L('A')], prev).get('A')!.slot).toBe(0)
+  })
+
+  it('decodedLayers: só mídia de vídeo decodificada com asset disponível', () => {
+    const p = scene()
+    const flat = flatLayers(resolveFrame(p, 3_800_000))
+    expect(decodedLayers(p.assets, flat)).toEqual([L('A'), L('B'), L('P')])
+    const missing = { ...p.assets[0], status: 'missing' as const }
+    expect(decodedLayers([missing], flat)).toEqual([])
   })
 })

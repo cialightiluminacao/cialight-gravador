@@ -173,10 +173,26 @@ export async function transitionCheck(outDir: string | null): Promise<Transition
     }
     report.kinds = kinds
 
+    // emenda do deslizar: a coluna onde A e B se encontram é a média das duas, sem deixar ver o fundo (preto) abaixo
+    {
+      const p = plain('slideL')
+      use(p)
+      let minSum = Infinity
+      for (const lin of LINEAR) {
+        const tUs = WIN_START + Math.round(lin * D)
+        const pr = progressAt(p, tUs)!
+        const d = await frame(client, tUs)
+        const edge = Math.round((1 - pr.p) * W)
+        for (let x = Math.max(0, edge - 8); x < Math.min(W, edge + 8); x++) minSum = Math.min(minSum, rgbAt(d, x, H / 2).reduce((s0, c) => s0 + c, 0))
+      }
+      const sum = (c: Rgb): number => c[0] + c[1] + c[2]
+      report.slideSeam = { minSum, colorSums: [sum(A), sum(B)] }
+    }
+
     // 2. privacidade: quadrado branco coberto por tarja vinculada a A (termina no corte) ou ancorada em B (começa no
     // corte); TODOS os quadros da janela, sem nenhum branco visível. Controle: sem a tarja o branco aparece.
     const privacy: TransitionPrivacyRun[] = []
-    for (const kind of ['slideL', 'zoomIn', 'crossfade'] as const) {
+    for (const kind of ['slideL', 'zoomIn', 'crossfade', 'blur'] as const) {
       for (const side of ['A', 'B'] as const) {
         const withFx = side === 'A'
           ? scene(base, kind, { a: src.redBox, b: src.blue, linkA: true, fx: [tarja('i_tarja', 0, CUT, { linkId: 'l_a' })] })
@@ -248,6 +264,24 @@ export async function transitionCheck(outDir: string | null): Promise<Transition
       bench[kind] = benchStats(b.drawMs)
     }
     report.bench = bench
+
+    // mesmo asset em A e B: o slot de decoder de B não muda no fim da janela (assignSlots) — sem engasgo ali
+    try {
+      const same = scene(base, 'crossfade', { a: src.redBox, b: src.redBox })
+      use(same)
+      const startN = WIN_FRAMES.last - 9 // 10 quadros antes do fim da janela e 10 depois
+      await client.testBench(frameToUs(startN - 5, FPS), 5, FPS)
+      const b = await client.testBench(frameToUs(startN, FPS), 20, FPS)
+      const ms = b.frameMs
+      const boundary = ms[WIN_FRAMES.last + 1 - startN]
+      // mediana dos quadros de regime (sem o 1º do bench nem os 3 a partir do fim da janela)
+      const others = ms.filter((_, i) => i > 0 && (i < WIN_FRAMES.last + 1 - startN || i > WIN_FRAMES.last + 3 - startN)).sort((x, y) => x - y)
+      const r2 = (v: number): number => Math.round(v * 100) / 100
+      const i0 = WIN_FRAMES.last + 1 - startN
+      report.sameAsset = { boundaryMs: r2(boundary ?? NaN), after3Ms: r2(ms[i0] + ms[i0 + 1] + ms[i0 + 2]), medianMs: r2(others[Math.floor(others.length / 2)] ?? NaN), maxMs: r2(Math.max(...ms)), frameMs: ms.map(r2), ...(b.error ? { error: b.error } : {}) }
+    } catch (e) {
+      report.sameAsset = { boundaryMs: NaN, after3Ms: NaN, medianMs: NaN, maxMs: NaN, error: e instanceof Error ? e.message : String(e) }
+    }
   } catch (e) {
     report.error = e instanceof Error ? (e.stack ?? e.message) : String(e)
   } finally {
