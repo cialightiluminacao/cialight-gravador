@@ -1,11 +1,12 @@
 // Avisos de privacidade: efeitos fracos demais, desativados ou com mídia por cima, num intervalo da timeline. Puro.
 import { evalAnim } from './anim'
-import { clipFrameAt, clipMoves, contentPose, followCheckTimes, poseError, regionTouchesClip, regionValuesAt, type ContentPose } from './contentPose'
-import type { Anim, EffectItem, Item, MediaItem, Project, Track, Us } from './project'
+import { regionTouchesOver } from './attachment'
+import { clipMoves, contentPose, followCheckTimes, poseError, regionAnimated, type ContentPose } from './contentPose'
+import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
-import { visualTrackBelow } from './resolve'
+import { attachedMedia, clipFrameAt, effectRegionAt, visualTrackBelow } from './resolve'
 
-export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget' | 'unlinkedOverEdited' | 'transformedUnderEffect' | 'unlinkedOverMoving'
+export type PrivacyWarningKind = 'weakBlur' | 'weakPixelate' | 'disabled' | 'covered' | 'noTarget' | 'unlinkedOverEdited' | 'transformedUnderEffect' | 'unlinkedOverMoving' | 'attachLost'
 /**
  * `tUs`: instante (absoluto, dentro do intervalo) que "Revisar" mostra — o mais fraco, o início da sobreposição…
  * `mediaItemId` (transformedUnderEffect, unlinkedOverMoving): o clipe que se move — o alvo de "Ajustar efeitos ao
@@ -31,8 +32,9 @@ const MSG = {
   covered: 'Há mídia acima deste efeito; ela não será borrada',
   noTarget: "Efeito 'só a faixa abaixo' sem mídia embaixo neste trecho",
   unlinkedOverEdited: 'Efeito não vinculado sobre um trecho invertido — confira se ainda cobre o conteúdo',
-  transformedUnderEffect: 'O clipe se move (zoom, pan ou animação) e a região deste efeito não acompanha: o conteúdo pode sair de baixo dele',
-  unlinkedOverMoving: 'Efeito não vinculado sobre um clipe que se move (zoom, pan ou animação): a região não acompanha o conteúdo'
+  transformedUnderEffect: 'O clipe se move (zoom, pan, animação ou keys da região) e a região deste efeito não acompanha: o conteúdo pode sair de baixo dela',
+  unlinkedOverMoving: 'Clipe não vinculado que se move sob este efeito: a região não acompanha o conteúdo dele',
+  attachLost: 'O clipe ao qual este efeito estava ancorado foi apagado ou desativado: a região ficou parada onde estava'
 } as const
 
 /**
@@ -62,7 +64,7 @@ const animated = (...as: Anim<number>[]): boolean => as.some((a) => (a.keys?.len
 /** Caixa (px do quadro) que contém a região + borda suave; null = quadro inteiro ou animada (sem teste de espaço). */
 function regionBox(fx: EffectItem, W: number, H: number): Box | null {
   const r = fx.region
-  if (fx.invert || animated(r.x, r.y, r.w, r.h, r.rotation)) return null
+  if (fx.attach || fx.invert || animated(r.x, r.y, r.w, r.h, r.rotation)) return null
   const w = Math.abs(r.w.value) * W
   const h = Math.abs(r.h.value) * H
   const th = (r.rotation.value * Math.PI) / 180
@@ -109,20 +111,14 @@ const FOLLOW_TOL_DEG = 1
  * geometria do resolve, com animações de entrada/saída — e fit e corte por layerBase, a mesma conta do compositor).
  * Acompanhar = ponto da fonte sob o centro, tamanho e rotação constantes nesse espaço em relação ao início do trecho
  * em comum clipe ∩ efeito, com tolerância de FOLLOW_TOL do quadro medida na tela (poseError). Amostras:
- * followCheckTimes. `touch`: só conta desvio enquanto a região encosta na camada em algum instante amostrado (efeito
- * não vinculado: o que fica longe do clipe não esconde nada dele).
+ * followCheckTimes. A região é a do quadro (effectRegionAt: ancorada a outro clipe, como o resolve a desenha).
  */
-function unfollowedAt(p: Project, fx: EffectItem, m: MediaItem, a: Us, b: Us, touch = false): Us | null {
-  const W = p.canvas.width, H = p.canvas.height
-  const tol = FOLLOW_TOL * Math.max(W, H)
+function unfollowedAt(p: Project, fx: EffectItem, m: MediaItem, a: Us, b: Us): Us | null {
+  const tol = FOLLOW_TOL * Math.max(p.canvas.width, p.canvas.height)
   const times = followCheckTimes(fx, m, a, b)
-  if (touch && !times.some((at) => {
-    const cf = clipFrameAt(p, m, at)
-    return !!cf && regionTouchesClip(fx, regionValuesAt(fx, at), cf, W, H)
-  })) return null
   const pose = (at: Us): ContentPose | null => {
     const cf = clipFrameAt(p, m, at)
-    return cf ? contentPose(cf, regionValuesAt(fx, at), W, H) : null // null = conteúdo invisível neste instante
+    return cf ? contentPose(cf, effectRegionAt(p, fx, at)) : null // null = conteúdo invisível neste instante
   }
   const off = (ref: ContentPose, c: ContentPose | null): boolean => {
     if (!c) return false
@@ -153,24 +149,6 @@ function unfollowedAt(p: Project, fx: EffectItem, m: MediaItem, a: Us, b: Us, to
     return hi
   }
   return null
-}
-
-/**
- * Primeiro instante de [from, to) em que a região do efeito não acompanha um clipe que se move (das faixas `trackOk`,
- * filtrado por `mediaOk`), com o clipe; null = acompanha todos.
- */
-function firstUnfollowed(p: Project, fx: EffectItem, trackOk: (t: Track) => boolean, mediaOk: (m: MediaItem) => boolean, from: Us, to: Us, touch: boolean): { tUs: Us; mediaItemId: string } | null {
-  let best: { tUs: Us; mediaItemId: string } | null = null
-  for (const t of p.tracks) {
-    if (!trackOk(t)) continue
-    for (const m of t.items) {
-      if (m.type !== 'media' || m.enabled === false || !mediaOk(m) || !clipMoves(m)) continue
-      const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), to)
-      const at = a < b ? unfollowedAt(p, fx, m, a, b, touch) : null
-      if (at !== null && (!best || at < best.tUs)) best = { tUs: at, mediaItemId: m.id }
-    }
-  }
-  return best
 }
 
 const disjoint = (a: Box | null, b: Box | null): boolean => !!a && !!b && (a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 <= b.y0 || b.y1 <= a.y0)
@@ -229,18 +207,33 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
         }
       }
       if (rev !== null) out.push({ itemId: it.id, kind: 'unlinkedOverEdited', message: MSG.unlinkedOverEdited, tUs: rev })
-      // clipe vinculado com zoom/pan/animação de movimento sob uma região que não acompanha (F4): o efeito é em
-      // coordenadas do quadro, então o conteúdo sensível sai de baixo dele ("Ajustar efeitos ao movimento")
-      const linked = !!it.linkId && p.tracks.some((t) => t.items.some((m) => m.type !== 'effect' && m.linkId === it.linkId))
-      if (linked) {
-        const moved = firstUnfollowed(p, it, (t) => t.kind === 'video' && !t.hidden, (m) => m.linkId === it.linkId, from, Math.min(e, hi), false)
-        if (moved) out.push({ itemId: it.id, kind: 'transformedUnderEffect', message: MSG.transformedUnderEffect, tUs: moved.tUs, mediaItemId: moved.mediaItemId })
-      } else {
-        // sem vínculo, sobre um clipe que se move e que ele esconde (faixas abaixo; escopo `track`: só a faixa-alvo),
-        // encostando nele: não se ajusta sozinho — "Vincular e ajustar"
-        const below = (t: Track): boolean => t.kind === 'video' && !t.hidden && (target ? t.id === target : p.tracks.indexOf(t) < ti)
-        const moved = firstUnfollowed(p, it, below, () => true, from, Math.min(e, hi), true)
-        if (moved) out.push({ itemId: it.id, kind: 'unlinkedOverMoving', message: MSG.unlinkedOverMoving, tUs: moved.tUs, mediaItemId: moved.mediaItemId })
+      // âncora perdida: o clipe foi apagado ou desativado — a região ficou parada na caixa de reserva
+      const own = it.attach ? attachedMedia(p, it) : null
+      if (it.attach && !own) out.push({ itemId: it.id, kind: 'attachLost', message: MSG.attachLost, tUs: from })
+      // clipes que se movem sob a região sem que ela os acompanhe (F4). O ancorado acompanha o próprio clipe por
+      // construção; qualquer outro clipe que se move, cruza o efeito no tempo e encosta na região é conferido: do grupo
+      // de vínculo do efeito (qualquer faixa) → transformedUnderEffect ("Ancorar ao clipe"); fora dele, nas faixas que o
+      // efeito esconde (abaixo; escopo `track`: a faixa-alvo) → unlinkedOverMoving ("Vincular e ancorar"). Efeito sem
+      // âncora com keys na região sobre clipe do grupo parado também é conferido (a região anda e o conteúdo não).
+      const keyed = !it.attach && regionAnimated(it)
+      const moved: Partial<Record<'transformedUnderEffect' | 'unlinkedOverMoving', { tUs: Us; mediaItemId: string }>> = {}
+      p.tracks.forEach((t, mi) => {
+        if (t.kind !== 'video' || t.hidden) return
+        for (const m of t.items) {
+          if (m.type !== 'media' || !m.visual || m.enabled === false || m.id === own?.id) continue
+          const inGroup = !!it.linkId && m.linkId === it.linkId
+          if (!inGroup && !(target ? t.id === target : mi < ti)) continue
+          if (!clipMoves(m) && !(inGroup && keyed)) continue
+          const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
+          if (a >= b || !regionTouchesOver(p, it, m, a, b)) continue
+          const at = unfollowedAt(p, it, m, a, b)
+          const kind = inGroup ? 'transformedUnderEffect' : 'unlinkedOverMoving'
+          if (at !== null && (!moved[kind] || at < moved[kind]!.tUs)) moved[kind] = { tUs: at, mediaItemId: m.id }
+        }
+      })
+      for (const kind of ['transformedUnderEffect', 'unlinkedOverMoving'] as const) {
+        const w = moved[kind]
+        if (w) out.push({ itemId: it.id, kind, message: MSG[kind], tUs: w.tUs, mediaItemId: w.mediaItemId })
       }
     }
   })

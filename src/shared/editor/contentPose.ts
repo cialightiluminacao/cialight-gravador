@@ -1,17 +1,21 @@
-// Pose de uma região de efeito no espaço do conteúdo de um clipe de mídia (pura). A privacidade (transformedUnderEffect,
-// unlinkedOverMoving) e o "Ajustar efeitos ao movimento" (followTransform) usam esta mesma conta: o ajuste leva a
-// região de volta ao quadro pela inversa exata, então o aviso some por construção.
-import { evalAnim } from './anim'
-import { layerBase, type LayerBase } from './layerGeometry'
-import type { Anim, EffectItem, MediaItem, Project, Us } from './project'
-import { visualStateAt } from './resolve'
+// Geometria entre o quadro e o espaço do conteúdo de um clipe de mídia (pura, sem depender do resolve). Usada pelo
+// resolve (efeito ancorado: região guardada no espaço do conteúdo, levada à tela em cada instante), pela privacidade
+// (transformedUnderEffect, unlinkedOverMoving) e pelas operações de ancorar/desancorar (followTransform).
+import type { LayerBase } from './layerGeometry'
+import type { Anim, EffectItem, MediaItem, Us } from './project'
 import { itemEndUs } from './time'
 
-/** Região no quadro (normalizada, centro) e rotação em graus — os valores de EffectRegion num instante. */
+/**
+ * Região: centro, tamanho e rotação (graus). No quadro: normalizada ao quadro. Ancorada (espaço do conteúdo): centro
+ * e tamanho em fração da fonte exibida (já girada, sem corte) e rotação no espaço da fonte.
+ */
 export interface RegionValues { x: number; y: number; w: number; h: number; rotation: number }
 
-/** Geometria do clipe num instante: centro (normalizado), rotação, tamanho da camada (px do quadro), espelho e base. */
-export interface ClipFrame { cx: number; cy: number; rotation: number; sx: number; sy: number; mirror: boolean; g: LayerBase }
+/**
+ * Geometria do clipe num instante: centro (normalizado), rotação, tamanho da camada (px do quadro), espelho, base
+ * (fit/corte) e o tamanho do quadro W×H (px).
+ */
+export interface ClipFrame { cx: number; cy: number; rotation: number; sx: number; sy: number; mirror: boolean; g: LayerBase; W: number; H: number }
 
 /**
  * Pose da região no espaço do conteúdo: ponto da fonte exibida (px) sob o centro, tamanho em px da fonte e rotação
@@ -20,6 +24,9 @@ export interface ClipFrame { cx: number; cy: number; rotation: number; sx: numbe
 export interface ContentPose { qx: number; qy: number; w: number; h: number; rot: number; fx: number; fy: number }
 
 const animated = (...as: Anim<number>[]): boolean => as.some((a) => (a.keys?.length ?? 0) > 0)
+
+/** A região do efeito tem keys (x, y, w, h ou rotação)? */
+export const regionAnimated = (fx: EffectItem): boolean => animated(fx.region.x, fx.region.y, fx.region.w, fx.region.h, fx.region.rotation)
 
 /**
  * O clipe move o conteúdo no quadro: x/y/escala/rotação ou corte com keys, ou animação de entrada/saída que não é só
@@ -32,65 +39,13 @@ export function clipMoves(m: MediaItem): boolean {
   return animated(t.x, t.y, t.scale, t.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b) || (!!v.animIn && v.animIn.preset !== 'fade') || (!!v.animOut && v.animOut.preset !== 'fade')
 }
 
-/** Valores da região do efeito no instante absoluto `at`. */
-export function regionValuesAt(fx: EffectItem, at: Us): RegionValues {
-  const r = fx.region, lf = at - fx.startUs
-  return { x: evalAnim(r.x, lf), y: evalAnim(r.y, lf), w: evalAnim(r.w, lf), h: evalAnim(r.h, lf), rotation: evalAnim(r.rotation, lf) }
-}
-
-/**
- * Geometria do clipe no instante absoluto `at` (geometria do resolve, com animações de entrada/saída, e fit/corte por
- * layerBase — a mesma conta do compositor). null = conteúdo invisível (escala ~0) ou clipe sem propriedades visuais.
- */
-export function clipFrameAt(p: Project, m: MediaItem, at: Us): ClipFrame | null {
-  const v = m.visual
-  if (!v) return null
-  const W = p.canvas.width, H = p.canvas.height
-  // fonte exibida (sem dados de vídeo: o próprio quadro)
-  const info = p.assets.find((x) => x.id === m.assetId)?.video
-  const src = info && info.width > 0 && info.height > 0 ? { w: info.width, h: info.height, rotation: info.rotation } : { w: W, h: H, rotation: 0 as const }
-  const local = at - m.startUs
-  const rect = visualStateAt(v, m.durationUs, local).rect
-  const c = v.crop
-  const g = layerBase({ l: evalAnim(c.l, local), t: evalAnim(c.t, local), r: evalAnim(c.r, local), b: evalAnim(c.b, local) }, v.fit, src, { w: W, h: H })
-  const sx = g.bw * rect.scale, sy = g.bh * rect.scale
-  if (sx < 1e-6 || sy < 1e-6) return null
-  return { cx: rect.cx, cy: rect.cy, rotation: rect.rotation, sx, sy, mirror: !!v.mirror, g }
-}
-
 /** Região do quadro → pose no espaço do conteúdo (como matrix.layerMatrix: R(−θ)·(região − centro) / tamanho). */
-export function contentPose(cf: ClipFrame, r: RegionValues, W: number, H: number): ContentPose {
-  const dx = (r.x - cf.cx) * W, dy = (r.y - cf.cy) * H
-  const th = (cf.rotation * Math.PI) / 180, cos = Math.cos(th), sin = Math.sin(th)
-  // quad local da camada (−½..½); espelhar inverte x
-  let ax = (cos * dx + sin * dy) / cf.sx
-  const ay = (-sin * dx + cos * dy) / cf.sy
-  if (cf.mirror) ax = -ax
+export function contentPose(cf: ClipFrame, r: RegionValues): ContentPose {
+  const { W, H } = cf
+  const q = toSource(cf, r.x * W, r.y * H)
   const g = cf.g
-  const [u0, v0, u1, v1] = g.uv
   const fx = cf.sx / g.cw, fy = cf.sy / g.ch
-  return {
-    qx: (u0 + (ax + 0.5) * (u1 - u0)) * g.dw, qy: (v0 + (ay + 0.5) * (v1 - v0)) * g.dh,
-    w: (Math.abs(r.w) * W) / fx, h: (Math.abs(r.h) * H) / fy,
-    rot: r.rotation - cf.rotation, fx, fy
-  }
-}
-
-/** Inversa de contentPose: a região do quadro que cobre a pose `q` do conteúdo com o clipe na geometria `cf`. */
-export function regionFromPose(cf: ClipFrame, q: Pick<ContentPose, 'qx' | 'qy' | 'w' | 'h' | 'rot'>, W: number, H: number): RegionValues {
-  const g = cf.g
-  const [u0, v0, u1, v1] = g.uv
-  let ax = (q.qx / g.dw - u0) / (u1 - u0) - 0.5
-  const ay = (q.qy / g.dh - v0) / (v1 - v0) - 0.5
-  if (cf.mirror) ax = -ax
-  const lx = ax * cf.sx, ly = ay * cf.sy
-  const th = (cf.rotation * Math.PI) / 180, cos = Math.cos(th), sin = Math.sin(th)
-  const fx = cf.sx / g.cw, fy = cf.sy / g.ch
-  return {
-    x: cf.cx + (cos * lx - sin * ly) / W, y: cf.cy + (sin * lx + cos * ly) / H,
-    w: (q.w * fx) / W, h: (q.h * fy) / H,
-    rotation: q.rot + cf.rotation
-  }
+  return { qx: q.x, qy: q.y, w: (Math.abs(r.w) * W) / fx, h: (Math.abs(r.h) * H) / fy, rot: r.rotation - cf.rotation, fx, fy }
 }
 
 /**
@@ -101,6 +56,89 @@ export function poseError(ref: ContentPose, cur: ContentPose): { px: number; deg
   const deg = Math.abs(((((cur.rot - ref.rot) % 360) + 540) % 360) - 180)
   const px = Math.max(Math.hypot((cur.qx - ref.qx) * cur.fx, (cur.qy - ref.qy) * cur.fy), Math.abs(cur.w - ref.w) * cur.fx, Math.abs(cur.h - ref.h) * cur.fy)
   return { px, deg }
+}
+
+/** Ponto da fonte exibida (px) → ponto do quadro (px). */
+function toScreen(cf: ClipFrame, qx: number, qy: number): { x: number; y: number } {
+  const g = cf.g
+  const [u0, v0, u1, v1] = g.uv
+  let ax = (qx / g.dw - u0) / (u1 - u0) - 0.5
+  const ay = (qy / g.dh - v0) / (v1 - v0) - 0.5
+  if (cf.mirror) ax = -ax
+  const lx = ax * cf.sx, ly = ay * cf.sy
+  const th = (cf.rotation * Math.PI) / 180, cos = Math.cos(th), sin = Math.sin(th)
+  return { x: cf.cx * cf.W + cos * lx - sin * ly, y: cf.cy * cf.H + sin * lx + cos * ly }
+}
+
+/** Ponto do quadro (px) → ponto da fonte exibida (px). */
+function toSource(cf: ClipFrame, X: number, Y: number): { x: number; y: number } {
+  const dx = X - cf.cx * cf.W, dy = Y - cf.cy * cf.H
+  const th = (cf.rotation * Math.PI) / 180, cos = Math.cos(th), sin = Math.sin(th)
+  let ax = (cos * dx + sin * dy) / cf.sx
+  const ay = (-sin * dx + cos * dy) / cf.sy
+  if (cf.mirror) ax = -ax
+  const g = cf.g
+  const [u0, v0, u1, v1] = g.uv
+  return { x: (u0 + (ax + 0.5) * (u1 - u0)) * g.dw, y: (v0 + (ay + 0.5) * (v1 - v0)) * g.dh }
+}
+
+/** Fonte → quadro preserva ângulos (escala igual nos dois eixos, com ou sem espelho)? */
+const conformal = (cf: ClipFrame): boolean => {
+  const fx = cf.sx / cf.g.cw, fy = cf.sy / cf.g.ch
+  return Math.abs(fx - fy) <= 1e-9 * Math.max(fx, fy)
+}
+
+/**
+ * Retângulo (centro c, meia-largura hw, meia-altura hh, ângulo a em graus) → seus 4 cantos.
+ */
+function corners(cx: number, cy: number, hw: number, hh: number, deg: number): { x: number; y: number }[] {
+  const t = (deg * Math.PI) / 180, cos = Math.cos(t), sin = Math.sin(t)
+  return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([i, j]) => ({ x: cx + cos * i * hw - sin * j * hh, y: cy + sin * i * hw + cos * j * hh }))
+}
+
+/** Meias-extensões dos pontos em torno de c ao longo dos eixos girados `deg`. */
+function extents(pts: { x: number; y: number }[], c: { x: number; y: number }, deg: number): [number, number] {
+  const t = (deg * Math.PI) / 180, cos = Math.cos(t), sin = Math.sin(t)
+  let ex = 0, ey = 0
+  for (const p of pts) {
+    const dx = p.x - c.x, dy = p.y - c.y
+    ex = Math.max(ex, Math.abs(cos * dx + sin * dy))
+    ey = Math.max(ey, Math.abs(-sin * dx + cos * dy))
+  }
+  return [ex, ey]
+}
+
+/** Folga da região ancorada na tela (px de cada lado): conservadora contra arredondamentos. */
+export const ATTACH_PAD_PX = 1
+
+/**
+ * Região ancorada (espaço do conteúdo) → região do quadro com o clipe na geometria `cf`. Os 4 cantos vão à tela e a
+ * região é o retângulo que os envolve no ângulo da região na tela (rotação do clipe ± a da região; espelho inverte):
+ * exato quando o clipe tem a mesma escala nos dois eixos, conservador quando não (fit esticar); elipse num mapeamento
+ * não conforme cresce √2 (a elipse que contém o retângulo). Folga de ATTACH_PAD_PX px.
+ */
+export function contentToScreen(cf: ClipFrame, c: RegionValues, shape: 'rect' | 'ellipse', pad = ATTACH_PAD_PX): RegionValues {
+  const { g, W, H } = cf
+  const pts = corners(c.x * g.dw, c.y * g.dh, (Math.abs(c.w) * g.dw) / 2, (Math.abs(c.h) * g.dh) / 2, c.rotation).map((p) => toScreen(cf, p.x, p.y))
+  const center = toScreen(cf, c.x * g.dw, c.y * g.dh)
+  const a = cf.rotation + (cf.mirror ? -c.rotation : c.rotation)
+  let [ex, ey] = extents(pts, center, a)
+  if (shape === 'ellipse' && !conformal(cf)) { ex *= Math.SQRT2; ey *= Math.SQRT2 }
+  return { x: center.x / W, y: center.y / H, w: (2 * ex + 2 * pad) / W, h: (2 * ey + 2 * pad) / H, rotation: a }
+}
+
+/**
+ * Região do quadro → região ancorada (espaço do conteúdo) com o clipe na geometria `cf`: inversa de contentToScreen
+ * (sem a folga; exata no mapeamento conforme, envolvente no outro).
+ */
+export function screenToContent(cf: ClipFrame, r: RegionValues, shape: 'rect' | 'ellipse'): RegionValues {
+  const { g, W, H } = cf
+  const pts = corners(r.x * W, r.y * H, (Math.abs(r.w) * W) / 2, (Math.abs(r.h) * H) / 2, r.rotation).map((p) => toSource(cf, p.x, p.y))
+  const center = toSource(cf, r.x * W, r.y * H)
+  const phi = cf.mirror ? -(r.rotation - cf.rotation) : r.rotation - cf.rotation
+  let [ex, ey] = extents(pts, center, phi)
+  if (shape === 'ellipse' && !conformal(cf)) { ex *= Math.SQRT2; ey *= Math.SQRT2 }
+  return { x: center.x / g.dw, y: center.y / g.dh, w: (2 * ex) / g.dw, h: (2 * ey) / g.dh, rotation: phi }
 }
 
 /**
@@ -136,13 +174,20 @@ function rotatedBox(cx: number, cy: number, w: number, h: number, deg: number, p
 }
 
 /**
- * A região do efeito (com a borda suave) encosta na camada do clipe neste instante? Pelas caixas alinhadas aos eixos
- * (conservador: girado pode dizer que sim sem tocar). Invertido esconde o quadro todo fora da região: sempre sim.
+ * A região (do quadro) do efeito, com a borda suave, encosta na camada do clipe neste instante? Pelas caixas alinhadas
+ * aos eixos (conservador: girado pode dizer que sim sem tocar). Invertido esconde o quadro todo fora da região: sim.
  */
-export function regionTouchesClip(fx: EffectItem, r: RegionValues, cf: ClipFrame, W: number, H: number): boolean {
+export function regionTouchesClip(fx: EffectItem, r: RegionValues, cf: ClipFrame): boolean {
+  const { W, H } = cf
   if (fx.invert) return true
   const w = Math.abs(r.w) * W, h = Math.abs(r.h) * H
   const a = rotatedBox(r.x * W, r.y * H, w, h, r.rotation, Math.max(0, fx.feather) * Math.min(w, h) / 2)
   const b = rotatedBox(cf.cx * W, cf.cy * H, cf.sx, cf.sy, cf.rotation)
   return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1 && b.x1 > 0 && b.x0 < W && b.y1 > 0 && b.y0 < H
+}
+
+/** Caixa alinhada aos eixos (normalizada ao quadro) que envolve a região do quadro `r`. */
+export function regionAabb(r: RegionValues, W: number, H: number): { x0: number; y0: number; x1: number; y1: number } {
+  const b = rotatedBox(r.x * W, r.y * H, Math.abs(r.w) * W, Math.abs(r.h) * H, r.rotation)
+  return { x0: b.x0 / W, y0: b.y0 / H, x1: b.x1 / W, y1: b.y1 / H }
 }

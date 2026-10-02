@@ -1,11 +1,10 @@
 import * as Popover from '@radix-ui/react-popover'
 import { SlidersHorizontal } from 'lucide-react'
 import { toast } from 'sonner'
-import { fitEffectsToMotion, linkAndFitEffect } from '@shared/editor/followTransform'
+import { attachEffects, effectsOverClip } from '@shared/editor/followTransform'
 import { findItem } from '@shared/editor/ops'
-import { privacyWarnings } from '@shared/editor/privacy'
 import type { Ease, Project } from '@shared/editor/project'
-import { applyZoom, aspectRect, linkedEffectIds, ZOOM_MAX_DUR_US, ZOOM_MIN_DUR_US, type ZoomEdit, type ZoomRect } from '@shared/editor/zoom'
+import { applyZoom, aspectRect, ZOOM_MAX_DUR_US, ZOOM_MIN_DUR_US, type ZoomEdit, type ZoomRect } from '@shared/editor/zoom'
 import { Select, Tip, Toggle } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
 import { useViewerTool } from '../../state/viewerTool'
@@ -18,8 +17,8 @@ import { startViewerGesture } from './viewerGesture'
 // enquadramento-alvo. Ao soltar, o clipe de mídia de cima sob o ponto onde o arraste começou ganha keyframes de
 // escala/posição no playhead (shared/editor/zoom: o retângulo vai ao quadro inteiro em "duração", com o ease escolhido;
 // opcionalmente volta ao normal depois de N s; "sem bordas pretas" prende a posição). Um passo de desfazer.
-// Privacidade: clipe com efeitos vinculados → aviso (a região do efeito é do quadro e não acompanha o zoom) com
-// "Ajustar efeitos ao movimento" (followTransform) e "Ver efeito"; efeito solto sobre o clipe → "Vincular e ajustar".
+// Privacidade: efeitos sem âncora sobre o clipe → aviso (a região é do quadro e não acompanha o zoom) com "Ancorar
+// efeitos ao clipe" (vinculados) / "Vincular e ancorar" (soltos) e "Ver efeito" (warnLinkedEffects).
 
 const EASES: { value: string; label: string; ease: Ease }[] = [
   { value: 'inOut', label: 'Suavizar ambos', ease: 'inOut' },
@@ -86,55 +85,67 @@ export function runZoomEdit(itemId: string, edit: (p: Project) => ZoomEdit): boo
 }
 
 /**
- * Zoom/pan/Ken Burns aplicado num clipe com efeitos de privacidade: a região do efeito fica parada no quadro enquanto o
- * conteúdo se move. Efeitos vinculados → aviso com "Ajustar efeitos ao movimento" (followTransform: a região passa a
- * acompanhar o clipe; um passo de desfazer) e "Ver efeito". Sem vinculados, efeitos soltos sobre o clipe que não
- * acompanham (unlinkedOverMoving) → "Vincular e ajustar" (nunca ajusta sozinho).
+ * Zoom/pan/Ken Burns aplicado num clipe com efeitos de privacidade por cima: a região de um efeito sem âncora fica
+ * parada no quadro enquanto o conteúdo se move. Efeitos do grupo de vínculo cuja região encosta no clipe →
+ * "Ancorar efeitos ao clipe" (só esses; a região passa a acompanhar o conteúdo, inclusive edições futuras); efeitos
+ * soltos sobre o clipe → "Vincular e ancorar" (todos eles); "Ver efeito(s)" seleciona. Os já ancorados acompanham sozinhos.
  */
 export function warnLinkedEffects(itemId: string): void {
   const p = useEditorStore.getState().project
   if (!p) return
-  const fx = linkedEffectIds(p, itemId)
-  const loose = fx.length > 0 ? [] : [...new Set(privacyWarnings(p, 0, Number.MAX_SAFE_INTEGER).filter((w) => w.kind === 'unlinkedOverMoving' && w.mediaItemId === itemId).map((w) => w.itemId))]
-  const ids = fx.length > 0 ? fx : loose
-  if (ids.length === 0) return
-  const one = ids.length === 1
-  const alive = (): string[] => {
-    const q = useEditorStore.getState().project
-    return q ? ids.filter((id) => findItem(q, id)) : []
+  let over: { linked: string[]; unlinked: string[] }
+  try {
+    over = effectsOverClip(p, itemId)
+  } catch {
+    return
   }
-  // ações embaixo do texto (com dois botões lado a lado o sonner espreme o texto numa coluna estreita)
+  const ids = [...over.linked, ...over.unlinked]
+  if (ids.length === 0) return
+  const alive = (list: string[]): string[] => {
+    const q = useEditorStore.getState().project
+    return q ? list.filter((id) => findItem(q, id)) : []
+  }
+  // ações embaixo do texto (com botões lado a lado o sonner espreme o texto numa coluna estreita)
   let toastId: string | number = 0
   const run = (fn: () => void) => () => {
     toast.dismiss(toastId)
     fn()
   }
   const view = run(() => {
-    const live = alive()
+    const live = alive(ids)
     if (live.length) useEditorStore.getState().select(live)
   })
-  const adjust = run(() => {
-    const live = alive()
-    if (fx.length > 0) {
-      if (live.length && useEditorStore.getState().apply((r) => fitEffectsToMotion(r, itemId, live))) toast.success(live.length === 1 ? 'Efeito ajustado ao movimento do clipe' : 'Efeitos ajustados ao movimento do clipe')
-    } else if (live.length && useEditorStore.getState().apply((r) => live.reduce((acc, id) => linkAndFitEffect(acc, id, itemId), r))) toast.success('Vinculado e ajustado ao movimento do clipe')
+  const anchor = run(() => {
+    const live = alive(over.linked)
+    if (live.length && useEditorStore.getState().apply((r) => attachEffects(r, itemId, live))) toast.success(live.length === 1 ? 'Efeito ancorado ao clipe' : 'Efeitos ancorados ao clipe')
   })
-  const title = fx.length > 0
-    ? (one ? 'Este clipe tem um efeito de privacidade vinculado' : `Este clipe tem ${ids.length} efeitos de privacidade vinculados`)
-    : (one ? 'Há um efeito de privacidade sem vínculo sobre este clipe' : `Há ${ids.length} efeitos de privacidade sem vínculo sobre este clipe`)
-  const text = fx.length > 0
-    ? 'A região do efeito não acompanha o zoom: o conteúdo protegido pode sair de baixo dela.'
-    : 'A região não acompanha o zoom. Vincule o efeito ao clipe para ela seguir o movimento.'
+  const linkAnchor = run(() => {
+    const live = alive(over.unlinked)
+    if (live.length && useEditorStore.getState().apply((r) => attachEffects(r, itemId, live))) toast.success(live.length === 1 ? 'Efeito vinculado e ancorado ao clipe' : 'Efeitos vinculados e ancorados ao clipe')
+  })
+  const one = ids.length === 1
+  const title = one ? 'Há um efeito de privacidade sobre este clipe' : `Há ${ids.length} efeitos de privacidade sobre este clipe`
+  const text = over.unlinked.length
+    ? 'A região não acompanha o zoom: o conteúdo protegido pode sair de baixo dela. Vincule e ancore o efeito ao clipe para ele seguir o movimento.'
+    : 'A região não acompanha o zoom: o conteúdo protegido pode sair de baixo dela. Ancore o efeito ao clipe para ele seguir o movimento.'
+  const btn = 'h-7 rounded-md px-2.5 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-surface-3'
   toastId = toast.warning(title, {
     duration: 15_000,
     description: (
       <div className="space-y-2">
         <p>{text}</p>
         <div className="flex flex-wrap gap-1.5">
-          <button type="button" data-follow-toast="" className="h-7 rounded-md bg-accent px-2.5 text-[11px] font-semibold text-white hover:brightness-110" onClick={adjust}>
-            {fx.length > 0 ? 'Ajustar efeitos ao movimento' : 'Vincular e ajustar'}
-          </button>
-          <button type="button" className="h-7 rounded-md border border-border-strong px-2.5 text-[11px] font-medium text-fg-2 hover:text-fg" onClick={view}>
+          {over.linked.length ? (
+            <button type="button" data-follow-toast="anchor" className={`${btn} bg-accent font-semibold text-white hover:brightness-110`} onClick={anchor}>
+              {over.linked.length === 1 ? 'Ancorar efeito ao clipe' : 'Ancorar efeitos ao clipe'}
+            </button>
+          ) : null}
+          {over.unlinked.length ? (
+            <button type="button" data-follow-toast="link" className={`${btn} ${over.linked.length ? 'border border-accent text-fg' : 'bg-accent text-white'} font-semibold hover:brightness-110`} onClick={linkAnchor}>
+              Vincular e ancorar
+            </button>
+          ) : null}
+          <button type="button" className={`${btn} border border-border-strong font-medium text-fg-2 hover:text-fg`} onClick={view}>
             {one ? 'Ver efeito' : 'Ver efeitos'}
           </button>
         </div>

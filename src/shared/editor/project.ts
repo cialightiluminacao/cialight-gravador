@@ -76,7 +76,16 @@ export interface EffectItem extends ItemBase {
    * (projetos antigos) = faixa de vídeo visível logo abaixo do efeito; qualquer edição grava a faixa atual aqui.
    */
   targetTrackId?: string
+  /**
+   * Ancorado a um clipe de mídia: a região (anims de `region`) fica no ESPAÇO DO CONTEÚDO dele — centro e tamanho em
+   * fração da fonte exibida, rotação relativa à do clipe — e o resolve a leva ao quadro em cada instante
+   * (contentPose.contentToScreen), seguindo zoom/pan/corte/rotação/animação e edições futuras do clipe. `fallback`:
+   * caixa do quadro (normalizada, sem rotação) que envolve a região ao longo do efeito, atualizada a cada edição
+   * enquanto o clipe existe; usada se ele for apagado ou desativado (aviso attachLost).
+   */
+  attach?: EffectAttach
 }
+export interface EffectAttach { mediaItemId: string; fallback?: { x: number; y: number; w: number; h: number } }
 /** autoFadeMs: sumiço automático dos traços (como settings.annotations.autoFadeSec da v1); null/ausente = ficam até apagar. */
 export interface AnnotationsItem extends ItemBase { type: 'annotations'; sessionId: string; inUs: Us; autoFadeMs?: number | null }
 export type Item = MediaItem | TextItem | ShapeItem | EffectItem | AnnotationsItem

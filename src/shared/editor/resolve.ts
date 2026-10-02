@@ -1,7 +1,9 @@
 // Resolve o estado do quadro em um instante da timeline: lista de camadas (fundo → topo)
 // consumida pelo compositor (preview e export). Pura, sem DOM/Electron.
 import { easeValue, evalAnim } from './anim'
+import { ATTACH_PAD_PX, contentToScreen, type ClipFrame, type RegionValues } from './contentPose'
 import { defaultVisual } from './factory'
+import { layerBase } from './layerGeometry'
 import type { Anim, AnimPreset, Asset, EffectItem, Item, MediaItem, Project, ShapeItem, TextStyle, Track, TransitionKind, Us, VisualProps } from './project'
 import { frameDurUs } from './time'
 
@@ -100,6 +102,59 @@ export function visualStateAt(v: VisualProps, itemDur: Us, local: Us): { rect: R
   return { rect: { cx, cy, scale: Math.max(0, evalAnim(t.scale, local)), rotation: evalAnim(t.rotation, local) }, opacity: clamp(opacity, 0, 1) }
 }
 
+/**
+ * Geometria do clipe no instante absoluto `at` (geometria de visualStateAt, com animações de entrada/saída, e fit/corte
+ * por layerBase — a mesma conta do compositor). null = conteúdo invisível (escala ~0; `allowEmpty` devolve assim mesmo)
+ * ou clipe sem propriedades visuais.
+ */
+export function clipFrameAt(p: Project, m: MediaItem, at: Us, allowEmpty = false): ClipFrame | null {
+  const v = m.visual
+  if (!v) return null
+  const W = p.canvas.width, H = p.canvas.height
+  // fonte exibida (sem dados de vídeo: o próprio quadro)
+  const info = p.assets.find((x) => x.id === m.assetId)?.video
+  const src = info && info.width > 0 && info.height > 0 ? { w: info.width, h: info.height, rotation: info.rotation } : { w: W, h: H, rotation: 0 as const }
+  const local = at - m.startUs
+  const rect = visualStateAt(v, m.durationUs, local).rect
+  const c = v.crop
+  const g = layerBase({ l: evalAnim(c.l, local), t: evalAnim(c.t, local), r: evalAnim(c.r, local), b: evalAnim(c.b, local) }, v.fit, src, { w: W, h: H })
+  const sx = g.bw * rect.scale, sy = g.bh * rect.scale
+  if (!allowEmpty && (sx < 1e-6 || sy < 1e-6)) return null
+  return { cx: rect.cx, cy: rect.cy, rotation: rect.rotation, sx, sy, mirror: !!v.mirror, g, W, H }
+}
+
+/** Clipe ao qual o efeito está ancorado, se ainda existe como mídia visual numa faixa de vídeo e está ativo; senão null. */
+export function attachedMedia(p: Project, fx: EffectItem): MediaItem | null {
+  const id = fx.attach?.mediaItemId
+  if (!id) return null
+  for (const t of p.tracks) {
+    if (t.kind !== 'video') continue
+    const m = t.items.find((i) => i.id === id)
+    if (m) return m.type === 'media' && m.visual && m.enabled !== false ? m : null
+  }
+  return null
+}
+
+/**
+ * Região do efeito NO QUADRO no instante absoluto tUs. Sem âncora: as anims da região. Ancorado: as anims estão no
+ * espaço do conteúdo do clipe e vão à tela pela geometria dele neste instante (conservadora, contentToScreen); clipe
+ * apagado ou desativado: a caixa `fallback` (elipse: a que contém a caixa). `pad`: folga da região ancorada (px de
+ * cada lado; desancorar assa sem ela, para a região não encolher no espaço do conteúdo quando o clipe se aproxima).
+ */
+export function effectRegionAt(p: Project, fx: EffectItem, tUs: Us, pad = ATTACH_PAD_PX): RegionValues {
+  const r = fx.region, local = tUs - fx.startUs
+  const v = { x: evalAnim(r.x, local), y: evalAnim(r.y, local), w: evalAnim(r.w, local), h: evalAnim(r.h, local), rotation: evalAnim(r.rotation, local) }
+  if (!fx.attach) return v
+  const m = attachedMedia(p, fx)
+  if (!m) {
+    const f = fx.attach.fallback
+    if (!f) return v
+    const k = r.shape === 'ellipse' ? Math.SQRT2 : 1
+    return { x: f.x, y: f.y, w: f.w * k, h: f.h * k, rotation: 0 }
+  }
+  return contentToScreen(clipFrameAt(p, m, tUs, true)!, v, r.shape, pad)
+}
+
 const ev = (a: Anim<number>, local: Us): number => evalAnim(a, local)
 const cropAt = (c: VisualProps['crop'], local: Us): CropValues => ({ l: ev(c.l, local), t: ev(c.t, local), r: ev(c.r, local), b: ev(c.b, local) })
 /**
@@ -176,10 +231,9 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
         break
       }
       case 'effect': {
-        const r = item.region
         layers.push({
           kind: 'effect', itemId: item.id, trackId: track.id, effect: item.effect, targetTrackId: item.targetTrackId ?? visualTrackBelow(p, track.id),
-          region: { shape: r.shape, x: ev(r.x, local), y: ev(r.y, local), w: ev(r.w, local), h: ev(r.h, local), rotation: ev(r.rotation, local) },
+          region: { shape: item.region.shape, ...effectRegionAt(p, item, tUs) },
           strength: ev(item.strength, local), feather: item.feather, color: item.color, invert: item.invert, scope: item.scope
         })
         break

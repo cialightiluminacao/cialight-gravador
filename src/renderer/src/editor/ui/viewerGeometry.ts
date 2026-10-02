@@ -2,8 +2,9 @@
 // teste de clique e a matemática da manipulação direta (snap ao centro, escala por canto, rotação);
 // regiões dos efeitos de privacidade (desenhar, mover, redimensionar, guias do quadro).
 import { evalAnim } from '@shared/editor/anim'
-import { setAnimValue } from '@shared/editor/ops'
-import { resolveFrame } from '@shared/editor/resolve'
+import { screenToContent } from '@shared/editor/contentPose'
+import { findItem, setAnimValue } from '@shared/editor/ops'
+import { attachedMedia, clipFrameAt, effectRegionAt, resolveFrame } from '@shared/editor/resolve'
 import type { EffectItem, Project, Us } from '@shared/editor/project'
 import { layerMatrix, type Rotation } from '../engine/compositor/matrix'
 
@@ -115,23 +116,17 @@ export function effectBoxes(p: Project, tUs: Us): RegionBox[] {
     if (t.kind !== 'video' || t.hidden) continue
     const it = t.items.find((i) => tUs >= i.startUs && tUs < i.startUs + i.durationUs)
     if (!it || it.type !== 'effect' || it.enabled === false) continue
-    out.push({ ...regionBoxOf(it, tUs - it.startUs, p.canvas.width, p.canvas.height), ...(t.locked ? { locked: true } : {}) })
+    out.push({ ...regionBoxOf(p, it, tUs), ...(t.locked ? { locked: true } : {}) })
   }
   return out
 }
 
-/** Região do efeito no instante local (µs desde o início do item), em pixels. */
-export function regionBoxOf(it: EffectItem, localUs: Us, W: number, H: number): RegionBox {
-  const r = it.region
-  return {
-    itemId: it.id,
-    shape: r.shape,
-    cx: evalAnim(r.x, localUs) * W,
-    cy: evalAnim(r.y, localUs) * H,
-    w: evalAnim(r.w, localUs) * W,
-    h: evalAnim(r.h, localUs) * H,
-    rotation: evalAnim(r.rotation, localUs)
-  }
+/** Região do efeito NO QUADRO no instante tUs (absoluto), em pixels — ancorada: como o resolve a desenha. */
+export function regionBoxOf(p: Project, it: EffectItem, tUs: Us): RegionBox {
+  const W = p.canvas.width
+  const H = p.canvas.height
+  const r = effectRegionAt(p, it, tUs)
+  return { itemId: it.id, shape: it.region.shape, cx: r.x * W, cy: r.y * H, w: r.w * W, h: r.h * H, rotation: r.rotation }
 }
 
 /** (x, y) dentro da região (retângulo ou elipse, rotacionada), com folga em px para fora. */
@@ -268,14 +263,30 @@ const REGION_KEYS = ['x', 'y', 'w', 'h', 'rotation'] as const
 export type RegionValues = Record<(typeof REGION_KEYS)[number], number>
 
 /**
- * Grava em tUs (absoluto) só as propriedades da região que mudaram em relação a `from`: propriedade
- * animada ganha/atualiza o key no playhead; sem keys muda o valor fixo (setAnimValue).
+ * Grava em tUs (absoluto) só as propriedades da região que mudaram em relação a `from` (valores do QUADRO): propriedade
+ * animada ganha/atualiza o key no playhead; sem keys muda o valor fixo (setAnimValue). Efeito ancorado: a mudança é
+ * levada ao espaço do conteúdo do clipe nesse instante (screenToContent de `from` e do novo, somando a diferença ao
+ * valor guardado — a folga de 1 px da tela não se acumula); âncora perdida → não edita.
  */
 export function writeRegion(p: Project, itemId: string, tUs: Us, from: RegionValues, next: Partial<RegionValues>): Project {
+  const fx = findItem(p, itemId)?.item
+  let base: RegionValues = from
+  let target: Partial<RegionValues> = next
+  if (fx?.type === 'effect' && fx.attach) {
+    const m = attachedMedia(p, fx)
+    const cf = m && clipFrameAt(p, m, tUs)
+    if (!cf) return p
+    const shape = fx.region.shape
+    const c0 = screenToContent(cf, from, shape)
+    const c1 = screenToContent(cf, { ...from, ...next }, shape)
+    const local = tUs - fx.startUs
+    base = Object.fromEntries(REGION_KEYS.map((k) => [k, evalAnim(fx.region[k], local)])) as RegionValues
+    target = Object.fromEntries(REGION_KEYS.map((k) => [k, base[k] + c1[k] - c0[k]]))
+  }
   let q = p
   for (const k of REGION_KEYS) {
-    const v = next[k]
-    if (v === undefined || Math.abs(v - from[k]) < 1e-9) continue
+    const v = target[k]
+    if (v === undefined || Math.abs(v - base[k]) < 1e-9) continue
     q = setAnimValue(q, itemId, `region.${k}`, tUs, v)
   }
   return q

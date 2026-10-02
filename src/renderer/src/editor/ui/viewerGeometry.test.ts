@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
-import { addAsset, addEffect, insertItems, setAnimValue, setItemEnabled, toggleKeyframe, updateTrack } from '@shared/editor/ops'
-import type { Asset, EffectItem, Project } from '@shared/editor/project'
-import { cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, type RegionBox } from './viewerGeometry'
+import { attachEffects } from '@shared/editor/followTransform'
+import { addAsset, addEffect, insertItems, setAnimValue, setItemEnabled, toggleKeyframe, updateItem, updateTrack } from '@shared/editor/ops'
+import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/project'
+import { cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionBoxOf, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, type RegionBox } from './viewerGeometry'
 
 const asset = (id: string, w: number, h: number): Asset => ({ id, name: id, kind: 'video', source: { type: 'generated', file: `${id}.mp4` }, durationUs: 5_000_000, status: 'ready', video: { width: w, height: h, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: 1_000_000 } })
 
@@ -191,6 +192,28 @@ describe('viewerGeometry — regiões de efeito', () => {
     // mesmo instante de novo: atualiza o key existente
     expect(fx(writeRegion(m, a.itemId, 3_000_000, { ...from, x: 0.7 }, { x: 0.8 })).region.x.keys!.map((x) => x.value)).toEqual([0.5, 0.8])
     expect(writeRegion(a.project, a.itemId, 2_000_000, from, { ...from })).toBe(a.project)
+  })
+
+  it('efeito ancorado: a caixa é a da tela (zoom 2× do clipe) e arrastar grava relativo ao conteúdo, sem acumular a folga', () => {
+    const p0 = project()
+    const full = p0.tracks[0].items[0].id
+    const a = addEffect(p0, 'blur', 0, { durationUs: 4_000_000, region: { x: 0.3, y: 0.5, w: 0.2, h: 0.2 } })
+    let p = attachEffects(a.project, full, [a.itemId])
+    p = updateItem<MediaItem>(p, full, (d) => { d.visual!.transform.scale = { value: 2 } })
+    const fx = (q: Project): EffectItem => q.tracks.flatMap((t) => t.items).find((i) => i.id === a.itemId) as EffectItem
+    // conteúdo 0,3 → tela ½ + 2·(0,3 − ½) = 0,1; largura 0,4 (+ 1 px de cada lado)
+    const box = regionBoxOf(p, fx(p), 1_000_000)
+    expect(box.cx / 1920).toBeCloseTo(0.1, 9)
+    expect(box.w).toBeCloseTo(0.4 * 1920 + 2, 6)
+    expect(effectBoxes(p, 1_000_000).find((b) => b.itemId === a.itemId)).toMatchObject({ cx: box.cx, w: box.w })
+    // arrastar +0,1 do quadro = +0,05 no conteúdo (escala 2); a largura guardada não muda
+    const from = { x: box.cx / 1920, y: box.cy / 1080, w: box.w / 1920, h: box.h / 1080, rotation: box.rotation }
+    const q = writeRegion(p, a.itemId, 1_000_000, from, { x: from.x + 0.1 })
+    expect(fx(q).region.x.value).toBeCloseTo(0.35, 9)
+    expect(fx(q).region.w.value).toBeCloseTo(0.2, 9)
+    // âncora perdida (clipe desativado): não edita
+    const lost = setItemEnabled(p, [full], false)
+    expect(writeRegion(lost, a.itemId, 1_000_000, from, { x: 0.9 })).toBe(lost)
   })
 
   it('keyframeAt: losango só com key de região a ±meio quadro', () => {

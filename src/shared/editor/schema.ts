@@ -104,7 +104,8 @@ const effectItem = z.object({
   color: z.string(),
   invert: z.boolean(),
   scope: z.enum(['below', 'track']),
-  targetTrackId: z.string().optional()
+  targetTrackId: z.string().optional(),
+  attach: z.object({ mediaItemId: z.string(), fallback: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional() }).optional()
 })
 const annotationsItem = z.object({ ...itemBase, type: z.literal('annotations'), sessionId: z.string(), inUs: us, autoFadeMs: z.number().nonnegative().nullable().optional() })
 const item = z.discriminatedUnion('type', [mediaItem, textItem, shapeItem, effectItem, annotationsItem])

@@ -1,4 +1,5 @@
 import { addEffect, findItem } from '@shared/editor/ops'
+import { attachedMedia } from '@shared/editor/resolve'
 import type { Project, Us } from '@shared/editor/project'
 import { frameDurUs } from '@shared/editor/time'
 import { cn } from '@/lib/cn'
@@ -12,7 +13,8 @@ import { startViewerGesture } from './viewerGesture'
 // arrastando (Shift: elipse; Alt: a partir do centro); o efeito selecionado mostra a região com alças
 // (cantos/bordas redimensionam — Shift mantém a proporção, Alt a partir do centro —, alça de cima
 // gira — Shift: 15° —, arrastar o interior move), guias de centro/bordas do quadro com snap de 1 %.
-// Propriedade animada ganha key no playhead; senão muda o valor fixo. Cada gesto = um passo de desfazer.
+// Propriedade animada ganha key no playhead; senão muda o valor fixo. Cada gesto = um passo de desfazer. Efeito
+// ancorado: a caixa é a da tela (como o resolve desenha) e o arraste é gravado relativo ao conteúdo (writeRegion).
 
 export type RegionGesture = { kind: 'move' } | { kind: 'resize'; handle: RegionHandle } | { kind: 'rotate' }
 
@@ -37,9 +39,10 @@ export function selectedRegion(p: Project, itemId: string, tUs: Us): { box: Regi
   const local = tUs - f.item.startUs
   if (local < 0 || local >= f.item.durationUs) return null
   return {
-    box: regionBoxOf(f.item, local, p.canvas.width, p.canvas.height),
+    box: regionBoxOf(p, f.item, tUs),
     locked: f.track.locked,
-    inactive: f.item.enabled === false || f.track.hidden,
+    // âncora perdida (clipe apagado/desativado): a caixa de reserva não se edita
+    inactive: f.item.enabled === false || f.track.hidden || (!!f.item.attach && !attachedMedia(p, f.item)),
     keyed: keyframeAt(f.item, local, frameDurUs(p.canvas.fps) / 2)
   }
 }
@@ -48,7 +51,7 @@ export function startRegionGesture(e: React.PointerEvent, itemId: string, g: Reg
   const st = useEditorStore.getState()
   const p = st.project
   const f = p && findItem(p, itemId)
-  if (!p || !f || f.item.type !== 'effect' || f.track.locked || f.item.enabled === false || f.track.hidden) return
+  if (!p || !f || f.item.type !== 'effect' || f.track.locked || f.item.enabled === false || f.track.hidden || (f.item.attach && !attachedMedia(p, f.item))) return
   const tUs = st.playheadUs
   const local = tUs - f.item.startUs
   if (local < 0 || local >= f.item.durationUs) return
@@ -56,7 +59,7 @@ export function startRegionGesture(e: React.PointerEvent, itemId: string, g: Reg
   e.preventDefault()
   const W = p.canvas.width
   const H = p.canvas.height
-  const b0 = regionBoxOf(f.item, local, W, H)
+  const b0 = regionBoxOf(p, f.item, tUs)
   const v0: RegionValues = { x: b0.cx / W, y: b0.cy / H, w: b0.w / W, h: b0.h / H, rotation: b0.rotation }
   const from = ctx.toCanvas(e)
 

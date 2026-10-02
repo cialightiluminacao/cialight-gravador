@@ -95,8 +95,9 @@ interface Parity { maxDiff: number; meanDiff: number; neighborMeanDiff: number; 
 interface ZoomScenario { before: RedBlob | null; after: RedBlob | null; mid: RedBlob | null; error?: string }
 interface ZoomReport { error?: string; full?: ZoomScenario; cropped?: ZoomScenario; exportPath?: string; exportError?: string }
 type Legib = { c: number; lap: number }
-interface FollowInstant { frame: number; tUs: number; box: PxBox; ref: Legib; preview: Legib; unadjusted: Legib; exported?: Legib }
-interface FollowReport { error?: string; instants?: FollowInstant[]; keys?: number; exportPath?: string; exportError?: string }
+interface FollowInstant { frame: number; tUs: number; box: PxBox; ref: Legib; preview: Legib; unadjusted?: Legib; exported?: Legib }
+interface FollowRun { instants: FollowInstant[]; exportPath?: string; exportError?: string }
+interface FollowReport { error?: string; attached?: FollowRun; later?: FollowRun }
 
 interface StretchReport {
   error?: string
@@ -285,21 +286,21 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       result.report.zoom!.exportError = e instanceof Error ? e.message : String(e)
     }
   }
-  // "Ajustar efeitos ao movimento": legibilidade do texto nos mesmos quadros da exportação (contraste e laplaciano ÷
-  // os do quadro sem efeito que o harness mediu no preview, na mesma caixa)
-  const follow = result.report.follow
-  if (follow?.exportPath && follow.instants) {
+  // "Ancorar ao clipe": legibilidade do texto nos mesmos quadros das duas exportações (com âncora; e depois de uma
+  // edição posterior do zoom) — contraste e laplaciano ÷ os do quadro sem efeito que o harness mediu, na mesma caixa
+  for (const [tag, run] of [['ancorado', result.report.follow?.attached], ['depois', result.report.follow?.later]] as const) {
+    if (!run?.exportPath) continue
     try {
-      for (const ins of follow.instants) {
-        const raw = join(dir, `follow-${ins.frame}.rgb`)
+      for (const ins of run.instants) {
+        const raw = join(dir, `follow-${tag}-${ins.frame}.rgb`)
         // meio quadro antes: o ffmpeg entrega o 1º quadro com pts ≥ -ss, o próprio quadro `frame`
-        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', ((ins.frame - 0.5) / 30).toFixed(4), '-i', follow.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do ajuste ao movimento' })
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', ((ins.frame - 0.5) / 30).toFixed(4), '-i', run.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do efeito ancorado' })
         const d = new Uint8Array(readFileSync(raw))
         const r4 = (v: number): number => Math.round(v * 1e4) / 1e4
         ins.exported = { c: r4(localContrast(d, 1920, 1080, ins.box, 4, 3) / ins.ref.c), lap: r4(laplacianVar(d, 1920, 1080, ins.box, 4, 3) / ins.ref.lap) }
       }
     } catch (e) {
-      follow.exportError = e instanceof Error ? e.message : String(e)
+      run.exportError = e instanceof Error ? e.message : String(e)
     }
   }
   win.destroy()
@@ -451,14 +452,17 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!ex && !!pv && Math.abs(ex.cx - 960) <= 2 && Math.abs(ex.cy - 540) <= 2 && Math.abs(ex.cx - pv.cx) <= 2 && Math.abs(ex.cy - pv.cy) <= 2 && Math.abs(Math.sqrt(ex.n / pv.n) - 1) <= 0.15, `zoom: exportação = preview — quadro final exportado: centro do alvo ${at(ex)}, ${ex?.w}×${ex?.h} px (preview ${at(pv)}, ${pv?.w}×${pv?.h}) ±2 px ${zr?.exportError ?? ''}`, failures)
 
   const fl = r.follow
-  console.log(`ajuste ao movimento: ${JSON.stringify(fl)}`)
-  check(!!fl && !fl.error && (fl.instants?.length ?? 0) >= 5, `ajuste ao movimento: harness sem erro, ${fl?.instants?.length ?? 0} instantes (${fl?.error ?? ''})`, failures)
-  const fmt = (ls: Legib[]): string => ls.map((l) => `${l.c.toFixed(3)}/${l.lap.toFixed(3)}`).join(' ')
-  const ins = fl?.instants ?? []
+  console.log(`efeito ancorado: ${JSON.stringify(fl)}`)
+  check(!!fl && !fl.error && (fl.attached?.instants.length ?? 0) >= 5 && (fl.later?.instants.length ?? 0) >= 5, `efeito ancorado: harness sem erro (${fl?.error ?? ''})`, failures)
+  const fmt = (ls: (Legib | undefined)[]): string => ls.map((l) => (l ? `${l.c.toFixed(3)}/${l.lap.toFixed(3)}` : '—')).join(' ')
   const unreadable = (l: Legib | undefined): boolean => !!l && l.c < 0.15 && l.lap < 0.2
-  check(ins.length >= 5 && ins.every((i) => unreadable(i.preview)), `ajuste ao movimento (preview): blur vinculado + zoom 2× ajustado → texto ilegível em todos os ${ins.length} instantes (contraste/laplaciano ${fmt(ins.map((i) => i.preview))}; < 0,15 / < 0,2)`, failures)
-  check(ins.length >= 5 && ins.every((i) => unreadable(i.exported)), `ajuste ao movimento (exportação): texto ilegível em todos os ${ins.length} quadros exportados (${fmt(ins.map((i) => i.exported ?? { c: NaN, lap: NaN }))}) ${fl?.exportError ?? ''}`, failures)
-  check(ins.some((i) => i.unadjusted.c >= 0.15), `ajuste ao movimento (controle): sem o ajuste o texto fica legível em algum instante do zoom (contraste ${ins.map((i) => i.unadjusted.c.toFixed(3)).join(' ')})`, failures)
+  for (const [tag, run] of [['blur ancorado + zoom 2×', fl?.attached], ['edição posterior do zoom (efeito intocado)', fl?.later]] as const) {
+    const ins = run?.instants ?? []
+    check(ins.length >= 5 && ins.every((i) => unreadable(i.preview)), `efeito ancorado — ${tag} (preview): texto ilegível em todos os ${ins.length} instantes (contraste/laplaciano ${fmt(ins.map((i) => i.preview))}; < 0,15 / < 0,2)`, failures)
+    check(ins.length >= 5 && ins.every((i) => unreadable(i.exported)), `efeito ancorado — ${tag} (exportação): texto ilegível em todos os ${ins.length} quadros exportados (${fmt(ins.map((i) => i.exported))}) ${run?.exportError ?? ''}`, failures)
+  }
+  const ctl = fl?.attached?.instants ?? []
+  check(ctl.some((i) => (i.unadjusted?.c ?? 0) >= 0.15), `efeito ancorado (controle): sem âncora o texto fica legível em algum instante do zoom (contraste ${ctl.map((i) => i.unadjusted?.c.toFixed(3)).join(' ')})`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

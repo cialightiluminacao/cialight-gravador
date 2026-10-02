@@ -1,6 +1,7 @@
 import { produce } from 'immer'
 import { copyKeys, evalAnim, insertKeyExact, pasteKeys, removeKey, setEase, setKey, setValue, sliceKeys } from './anim'
 import { ANIM_PATHS, assignAnim, getAnim, mapItemAnims as mapAnims, mapVisualAnims as mapVisual, type AnimPath } from './animPaths'
+import { maintainAttachments } from './attachment'
 import { createEffectItem, createMediaItem } from './factory'
 import { sourceTimeUs, visualTrackBelow } from './resolve'
 import type { EffectPresetId, EffectRegionInit } from './factory'
@@ -44,11 +45,15 @@ function stampLegacyTargets(d: Project): void {
   }
 }
 
-/** produce do immer com stampLegacyTargets antes da receita (toda edição grava as ligações antigas). */
+/**
+ * produce do immer com stampLegacyTargets antes da receita (toda edição grava as ligações antigas) e as âncoras dos
+ * efeitos mantidas depois (maintainAttachments: pedaço certo do clipe e caixa de reserva).
+ */
 function edit(p: Project, recipe: (d: Project) => void): Project {
   return produce(p, (d) => {
     stampLegacyTargets(d)
     recipe(d)
+    maintainAttachments(d)
   })
 }
 
@@ -1062,6 +1067,7 @@ export function deleteRanges(p: Project, ranges: readonly { fromUs: Us; toUs: Us
       for (const m of d.markers) m.tUs -= shiftOf(m.tUs)
     }
     finalize(d)
+    maintainAttachments(d)
   })
 }
 

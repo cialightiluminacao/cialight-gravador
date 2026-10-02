@@ -1,16 +1,17 @@
-// QA do "Ajustar efeitos ao movimento" (F4 Task 4) via CDP, com eventos de ponteiro/teclado sintéticos despachados no
-// elemento real sob o ponto (document.elementFromPoint) — nunca entrada do sistema operacional.
+// QA do "Ancorar ao clipe" (F4 Task 4) via CDP, com eventos de ponteiro/teclado sintéticos despachados no elemento real
+// sob o ponto (document.elementFromPoint) — nunca entrada do sistema operacional.
 //
 // uso (depois de `npm run build`):
 //   node scripts/qa/editor-f4-follow.mjs            → abre o app (CIALIGHT_QA=editor-fixture, CIALIGHT_RAW_DIR=test-out/raw),
 //                                                   testa e fecha
 //   node scripts/qa/editor-f4-follow.mjs --attach   → usa um app já aberto com --remote-debugging-port=9333
 //
-// Confere: zoom num clipe com blur vinculado → toast com "Ajustar efeitos ao movimento" e "Ver efeito"; a ação grava
-// keys na região (um passo de desfazer) e o aviso do inspetor some; a região na tela acompanha o conteúdo (contorno da
-// região no visualizador × o ponto do conteúdo levado pelo zoom); botão "Ajustar efeito ao movimento" no inspetor do
-// efeito; efeito solto + Ken Burns → aviso unlinkedOverMoving com "Vincular e ajustar" (toast e inspetor), que vincula
-// ao grupo do clipe e ajusta. Screenshots em docs/qa/editor-f4/.
+// Confere: zoom num clipe com blur vinculado → toast com "Ancorar efeito ao clipe" e "Ver efeito" (botões com foco
+// visível); ancorar grava attach (um passo de desfazer, sem keys) e a região na tela acompanha o conteúdo — inclusive
+// depois de um segundo zoom feito mais tarde, sem novo aviso; inspetor com a chave "Ancorado ao clipe: <nome>"; arrastar
+// a região no visualizador grava relativo ao conteúdo; desligar a chave desancora (assa keys do quadro, sem aviso);
+// sem âncora, o aviso do inspetor traz "Ancorar ao clipe"; efeito solto + Ken Burns → "Vincular e ancorar" (toast e
+// inspetor), que vincula ao grupo do clipe e ancora; clipe desativado → aviso attachLost. Screenshots em docs/qa/editor-f4/.
 import { spawn, execFileSync } from 'child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
@@ -172,17 +173,32 @@ async function main() {
     warnings: () => [...document.querySelectorAll('[data-privacy-warnings] p')].map((p) => p.textContent),
     followBtn: () => document.querySelector('[data-follow-motion]'),
     toastBtn: (label) => [...document.querySelectorAll('[data-sonner-toast] button')].find((b) => b.textContent.trim() === label),
+    attachRow: () => document.querySelector('[data-attach-row]'),
     outline: (id) => {
       const e = document.querySelector('[data-region-outline="' + id + '"], [data-region-handles="' + id + '"], [data-region-inactive="' + id + '"]')
       if (!e) return null
       const r = e.getBoundingClientRect(); const o = window.__zm.el('[data-viewer-overlay]').getBoundingClientRect(); const k = o.width / window.__zm.st().project.canvas.width
       return { cx: (r.left + r.width / 2 - o.left) / k, cy: (r.top + r.height / 2 - o.top) / k, w: r.width / k, h: r.height / k }
+    },
+    // pose do clipe no instante (camada em tela cheia): ponto p do conteúdo vai a x·W + s·(p − W/2)
+    pose: (id, t) => {
+      const tr = window.__zm.item(id).visual.transform
+      const ev = (a) => { const k = a.keys; if (!k || !k.length) return a.value; if (t <= k[0].tUs) return k[0].value; if (t >= k[k.length - 1].tUs) return k[k.length - 1].value; return null }
+      return { s: ev(tr.scale), x: ev(tr.x), y: ev(tr.y) }
     }
   }; return 1`)
   const v = await ev(`return T.items().find((i) => i.assetId === 'a_qa_video' && i.visual).id`)
   await ev(`T.st().select([]); return 1`)
+  const near = (a, b) => Math.abs(a - b) < 20
+  /** Contorno da região no fim do último zoom do clipe × o ponto (450, 400) e o tamanho 300×200 levados pela pose. */
+  const followsAtEnd = async (fx) => {
+    const g = await ev(`const s = T.keys('${v}', 'scale'); const end = s[s.length - 1][0]; await T.seek(end); await T.wait(300); return { box: __fl.outline('${fx}'), pose: __fl.pose('${v}', end) }`)
+    const { s, x, y } = g.pose
+    const ex = { cx: x * 1920 + s * (450 - 960), cy: y * 1080 + s * (400 - 540), w: 300 * s, h: 200 * s }
+    return { ok: !!g.box && near(g.box.cx, ex.cx) && near(g.box.cy, ex.cy) && near(g.box.w, ex.w) && near(g.box.h, ex.h), got: g.box, ex }
+  }
 
-  console.log('zoom num clipe com blur vinculado: oferta "Ajustar efeitos ao movimento"')
+  console.log('zoom num clipe com blur vinculado: oferta "Ancorar efeito ao clipe"')
   let fx
   {
     // blur desenhado (B) a 0,5 s: centro (450, 400), 300×200 px, vinculado ao vídeo; zoom 4× em (480, 300) a 2 s
@@ -190,39 +206,78 @@ async function main() {
       const fx = T.st().selection[0]; const linked = !!T.item(fx).linkId && T.item(fx).linkId === T.item('${v}').linkId
       await T.key('z'); await T.seek(2e6); await T.drag(T.toScreen(240, 165), T.toScreen(720, 380)); await T.wait(500)
       const toast = T.toasts().find((t) => t.includes('privacidade'))
-      return { fx, linked, toast, adjust: !!__fl.toastBtn('Ajustar efeitos ao movimento'), view: !!__fl.toastBtn('Ver efeito'), s: T.keys('${v}', 'scale').length }`)
+      const btn = __fl.toastBtn('Ancorar efeito ao clipe')
+      return { fx, linked, toast, anchor: !!btn, view: !!__fl.toastBtn('Ver efeito'), focusRing: !!btn && btn.className.includes('focus-visible:ring-2'), s: T.keys('${v}', 'scale').length }`)
     fx = r.fx
-    check('zoom com blur vinculado: toast com "Ajustar efeitos ao movimento" e "Ver efeito"', r.linked && r.s > 0 && !!r.toast && r.adjust && r.view, r)
+    check('zoom com blur vinculado: toast com "Ancorar efeito ao clipe" e "Ver efeito" (foco visível)', r.linked && r.s > 0 && !!r.toast && r.toast.includes('não acompanha o zoom') && r.anchor && r.view && r.focusRing, r)
     await shot('f4-follow-01-oferta.png')
-    const a = await ev(`const p0 = T.past(); await T.click(__fl.toastBtn('Ajustar efeitos ao movimento')); await T.wait(400)
-      return { p0, past: T.past(), keys: __fl.region('${fx}'), toast: T.toasts().find((t) => t.includes('ajustado')) }`)
-    check('ajustar: keys na região do efeito (x/y/w/h), um passo de desfazer, toast de confirmação', a.past === a.p0 + 1 && a.keys[0] >= 2 && a.keys[2] >= 2 && !!a.toast, a)
-    // no fim do zoom: o centro da região (450, 400) e o tamanho 300×200 levados pela escala/posição do clipe
-    const g = await ev(`T.st().select(['${fx}']); const s = T.keys('${v}', 'scale'); const end = s[s.length - 1]; await T.seek(end[0]); await T.wait(300)
-      return { box: __fl.outline('${fx}'), warnings: __fl.warnings(), btn: !!__fl.followBtn(), s: end[1], x: T.keys('${v}', 'x').at(-1)[1], y: T.keys('${v}', 'y').at(-1)[1] }`)
-    // camada em tela cheia: ponto p do conteúdo vai a x·W + s·(p − W/2)
-    const ex = { cx: g.x * 1920 + g.s * (450 - 960), cy: g.y * 1080 + g.s * (400 - 540), w: 300 * g.s, h: 200 * g.s }
-    const near = (a, b) => Math.abs(a - b) < 20
-    check('a região na tela acompanha o conteúdo no fim do zoom (centro e tamanho pela escala, ±1 % do quadro)', !!g.box && near(g.box.cx, ex.cx) && near(g.box.cy, ex.cy) && near(g.box.w, ex.w) && near(g.box.h, ex.h), { got: g.box, ex })
-    check('inspetor do efeito ajustado: sem aviso de movimento nem botão', !g.warnings.some((w) => w.includes('se move')) && !g.btn, g)
-    await ev(`const s = T.keys('${v}', 'scale'); await T.seek(Math.round((s[0][0] + s[1][0]) / 2)); return 1`)
-    await shot('f4-follow-02-ajustado.png')
+    const a = await ev(`const p0 = T.past(); await T.click(__fl.toastBtn('Ancorar efeito ao clipe')); await T.wait(400)
+      return { p0, past: T.past(), attach: T.item('${fx}').attach?.mediaItemId, keys: __fl.region('${fx}'), toast: T.toasts().find((t) => t.includes('ancorado')) }`)
+    check('ancorar: attach no vídeo, um passo de desfazer, sem keys na região, toast de confirmação', a.past === a.p0 + 1 && a.attach === v && a.keys.every((n) => n === 0) && !!a.toast, a)
+    const f = await followsAtEnd(fx)
+    check('a região na tela acompanha o conteúdo no fim do zoom (centro e tamanho pela escala, ±1 % do quadro)', f.ok, f)
+    await ev(`T.st().select(['${fx}']); const s = T.keys('${v}', 'scale'); await T.seek(Math.round((s[0][0] + s[1][0]) / 2)); await T.wait(300); return 1`)
+    await shot('f4-follow-02-ancorado.png')
   }
 
-  console.log('botão no inspetor do efeito')
+  console.log('zoom posterior: a âncora acompanha sozinha')
   {
-    const r = await ev(`await T.key('Escape'); await T.key('z', { ctrlKey: true }); await T.wait(200); T.st().select(['${fx}']); await T.settle(); await T.wait(300)
-      return { keys: __fl.region('${fx}'), warnings: __fl.warnings(), btn: __fl.followBtn()?.textContent, kind: __fl.followBtn()?.dataset.followMotion }`)
-    check('Ctrl+Z desfaz o ajuste; o inspetor mostra o aviso com "Ajustar efeito ao movimento"', r.keys.every((n) => n === 0) && r.warnings.some((w) => w.includes('a região deste efeito não acompanha')) && r.btn === 'Ajustar efeito ao movimento' && r.kind === 'transformedUnderEffect', r)
-    await shot('f4-follow-03-inspetor-aviso.png')
-    const a = await ev(`const p0 = T.past(); __fl.followBtn().scrollIntoView({ block: 'center' }); await T.wait(150); await T.click(__fl.followBtn()); await T.wait(300)
-      return { p0, past: T.past(), keys: __fl.region('${fx}'), warnings: __fl.warnings(), btn: !!__fl.followBtn() }`)
-    check('botão do inspetor: ajusta (um passo) e o aviso some', a.past === a.p0 + 1 && a.keys[0] >= 2 && !a.warnings.some((w) => w.includes('não acompanha')) && !a.btn, a)
-    // desfaz: ajuste, zoom e o efeito desenhado
-    await ev(`await T.key('Escape'); for (let k = 0; k < 3; k++) await T.key('z', { ctrlKey: true }); await T.wait(200); return 1`)
+    const r = await ev(`T.st().select([]); await T.settle(); await T.seek(5e6); await T.drag(T.toScreen(300, 250), T.toScreen(700, 470)); await T.wait(500)
+      return { toast: T.toasts().filter((t) => t.includes('privacidade')).length, s: T.keys('${v}', 'scale').length, attach: T.item('${fx}').attach?.mediaItemId }`)
+    check('segundo zoom mais tarde: nenhum aviso novo para o efeito ancorado', r.s >= 4 && r.attach === v && r.toast <= 1, r)
+    const f = await followsAtEnd(fx)
+    check('…e a região acompanha o fim do novo zoom sem nenhuma edição no efeito', f.ok, f)
+    await ev(`await T.key('z'); return 1`)
+    await shot('f4-follow-03-zoom-posterior.png')
   }
 
-  console.log('efeito solto + Ken Burns: "Vincular e ajustar"')
+  console.log('inspetor: chave "Ancorado ao clipe", arrastar relativo ao conteúdo, desancorar')
+  {
+    const r = await ev(`const s = T.keys('${v}', 'scale'); await T.seek(s[s.length - 1][0]); T.st().select(['${fx}']); await T.settle(); await T.wait(300)
+      const row = __fl.attachRow(); const sw = row?.querySelector('[role="switch"]'); row?.scrollIntoView({ block: 'center' }); await T.wait(150)
+      return { text: row?.textContent, on: sw?.getAttribute('aria-checked'), warnings: __fl.warnings() }`)
+    check('inspetor: "Ancorado ao clipe: <nome do clipe>" ligado, sem avisos de movimento', !!r.text && r.text.includes('Ancorado ao clipe: testsrc2-voz.mp4') && r.on === 'true' && !r.warnings.some((w) => w.includes('não acompanha')), r)
+    await shot('f4-follow-04-inspetor-ancorado.png')
+    // arrastar a região +80 px de tela no fim do zoom: o conteúdo anda 80 / escala
+    // no fim do 1º zoom (2,5 s; a região fica dentro do quadro): escala = largura na tela (sem a folga de 2 px) ÷ 300
+    const d = await ev(`await T.seek(2.5e6); await T.wait(300)
+      const b = __fl.outline('${fx}'); const pose = { s: (b.w - 2) / 300 }; const x0 = T.item('${fx}').region.x.value; const w0 = T.item('${fx}').region.w.value; const p0 = T.past()
+      const from = T.toScreen(b.cx, b.cy); const to = T.toScreen(b.cx + 80, b.cy)
+      await T.drag(from, to); await T.wait(200)
+      return { past: T.past(), p0, dx: T.item('${fx}').region.x.value - x0, dw: T.item('${fx}').region.w.value - w0, s: pose.s, keys: __fl.region('${fx}') }`)
+    check('arrastar a região ancorada: o conteúdo anda 80 px ÷ escala (fração da fonte), largura igual, um passo', d.past === d.p0 + 1 && Math.abs(d.dx - 80 / (d.s * 1920)) < 0.002 && Math.abs(d.dw) < 1e-9, d)
+    await ev(`await T.key('z', { ctrlKey: true }); await T.wait(200); return 1`)
+    const off = await ev(`const sw = __fl.attachRow().querySelector('[role="switch"]'); sw.scrollIntoView({ block: 'center' }); await T.wait(150); const p0 = T.past(); await T.click(sw); await T.wait(300)
+      return { p0, past: T.past(), attach: T.item('${fx}').attach, keys: __fl.region('${fx}'), warnings: __fl.warnings(), text: __fl.attachRow()?.textContent }`)
+    check('desligar a chave desancora: keys do quadro assados (acompanham), sem aviso, um passo', off.past === off.p0 + 1 && !off.attach && off.keys[0] >= 2 && !off.warnings.some((w) => w.includes('não acompanha')) && off.text.includes('Ancorar ao clipe'), off)
+    await shot('f4-follow-05-desancorado.png')
+    await ev(`await T.key('z', { ctrlKey: true }); await T.wait(200); return 1`)
+  }
+
+  console.log('sem âncora: botão "Ancorar ao clipe" no aviso do inspetor')
+  {
+    // desfaz o 2º zoom e a ancoragem: efeito vinculado sem âncora sob o zoom
+    const r = await ev(`await T.key('z', { ctrlKey: true }); await T.key('z', { ctrlKey: true }); await T.wait(200); T.st().select(['${fx}']); await T.settle(); await T.wait(300)
+      return { attach: !!T.item('${fx}').attach, warnings: __fl.warnings(), btn: __fl.followBtn()?.textContent, kind: __fl.followBtn()?.dataset.followMotion }`)
+    check('sem âncora: aviso com "Ancorar ao clipe"', !r.attach && r.warnings.some((w) => w.includes('a região deste efeito não acompanha')) && r.btn === 'Ancorar ao clipe' && r.kind === 'transformedUnderEffect', r)
+    await shot('f4-follow-06-inspetor-aviso.png')
+    const a = await ev(`const p0 = T.past(); __fl.followBtn().scrollIntoView({ block: 'center' }); await T.wait(150); await T.click(__fl.followBtn()); await T.wait(300)
+      return { p0, past: T.past(), attach: T.item('${fx}').attach?.mediaItemId, warnings: __fl.warnings(), btn: !!__fl.followBtn() }`)
+    check('botão do inspetor: ancora (um passo) e o aviso some', a.past === a.p0 + 1 && a.attach === v && !a.warnings.some((w) => w.includes('não acompanha')) && !a.btn, a)
+  }
+
+  console.log('âncora perdida: clipe desativado')
+  {
+    const r = await ev(`T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === '${v}' ? { ...i, enabled: false } : i)) })) }))
+      await T.settle(); T.st().select(['${fx}']); await T.settle(); await T.wait(300); __fl.attachRow()?.scrollIntoView({ block: 'center' })
+      return { warnings: __fl.warnings(), text: __fl.attachRow()?.textContent }`)
+    check('clipe desativado: aviso attachLost e a chave diz "clipe apagado ou desativado"', r.warnings.some((w) => w.includes('estava ancorado')) && r.text.includes('apagado ou desativado'), r)
+    await shot('f4-follow-07-ancora-perdida.png')
+    // desfaz: desativar, ancorar, zoom, efeito desenhado
+    await ev(`await T.key('Escape'); for (let k = 0; k < 4; k++) await T.key('z', { ctrlKey: true }); await T.wait(200); return 1`)
+  }
+
+  console.log('efeito solto + Ken Burns: "Vincular e ancorar"')
   {
     const r = await ev(`if (T.zoomBtn().getAttribute('aria-pressed') === 'true') await T.key('z')
       const clean = !T.item('${fx}') && T.keys('${v}', 'scale').length === 0
@@ -234,19 +289,18 @@ async function main() {
       T.st().select(['${v}']); await T.settle(); await T.wait(300)
       const btn = T.el('button[aria-label="Ken Burns: Aproximar indo para baixo e à direita"]'); btn.scrollIntoView({ block: 'center' }); await T.wait(200)
       await T.click(btn); await T.wait(500)
-      return { clean, fx, unlinked: !T.item(fx).linkId, toast: T.toasts().find((t) => t.includes('sem vínculo')), btn: !!__fl.toastBtn('Vincular e ajustar') }`)
+      return { clean, fx, unlinked: !T.item(fx).linkId, toast: T.toasts().find((t) => t.includes('privacidade')), btn: !!__fl.toastBtn('Vincular e ancorar') }`)
     fx = r.fx
-    check('Ken Burns com efeito solto sobre o clipe: toast "sem vínculo" com "Vincular e ajustar"', r.clean && r.unlinked && !!r.toast && r.btn, r)
-    await shot('f4-follow-04-solto-toast.png')
+    check('Ken Burns com efeito solto sobre o clipe: toast com "Vincular e ancorar"', r.clean && r.unlinked && !!r.toast && r.btn, r)
+    await shot('f4-follow-08-solto-toast.png')
     const i = await ev(`T.st().select(['${fx}']); await T.settle(); await T.wait(300)
-      return { warnings: __fl.warnings(), btn: __fl.followBtn()?.textContent, kind: __fl.followBtn()?.dataset.followMotion, keys: __fl.region('${fx}') }`)
-    check('inspetor do efeito solto: aviso unlinkedOverMoving com "Vincular e ajustar" (não ajusta sozinho)', i.warnings.some((w) => w.includes('não vinculado')) && i.btn === 'Vincular e ajustar' && i.kind === 'unlinkedOverMoving' && i.keys.every((n) => n === 0), i)
-    await shot('f4-follow-05-solto-inspetor.png')
+      return { warnings: __fl.warnings(), btn: __fl.followBtn()?.textContent, kind: __fl.followBtn()?.dataset.followMotion, attach: !!T.item('${fx}').attach }`)
+    check('inspetor do efeito solto: aviso unlinkedOverMoving com "Vincular e ancorar" (não ancora sozinho)', i.warnings.some((w) => w.includes('não vinculado')) && i.btn === 'Vincular e ancorar' && i.kind === 'unlinkedOverMoving' && !i.attach, i)
     const a = await ev(`const p0 = T.past(); const group = T.item('${v}').linkId; __fl.followBtn().scrollIntoView({ block: 'center' }); await T.wait(150); await T.click(__fl.followBtn()); await T.wait(300)
-      return { p0, past: T.past(), group, link: T.item('${fx}').linkId, videoLink: T.item('${v}').linkId, keys: __fl.region('${fx}'), warnings: __fl.warnings(), btn: !!__fl.followBtn() }`)
-    check('"Vincular e ajustar": entra no grupo do clipe (o clipe mantém o vínculo), keys na região, sem avisos, um passo', a.past === a.p0 + 1 && !!a.group && a.link === a.group && a.videoLink === a.group && a.keys[2] >= 2 && a.warnings.length === 0 && !a.btn, a)
+      return { p0, past: T.past(), group, link: T.item('${fx}').linkId, videoLink: T.item('${v}').linkId, attach: T.item('${fx}').attach?.mediaItemId, warnings: __fl.warnings(), btn: !!__fl.followBtn() }`)
+    check('"Vincular e ancorar": entra no grupo do clipe (o clipe mantém o vínculo), ancora, sem avisos, um passo', a.past === a.p0 + 1 && !!a.group && a.link === a.group && a.videoLink === a.group && a.attach === v && a.warnings.length === 0 && !a.btn, a)
     await ev(`await T.seek(8e6); return 1`)
-    await shot('f4-follow-06-vinculado-ajustado.png')
+    await shot('f4-follow-09-vinculado-ancorado.png')
     await ev(`await T.key('Escape'); for (let k = 0; k < 4; k++) await T.key('z', { ctrlKey: true }); return 1`)
   }
 }

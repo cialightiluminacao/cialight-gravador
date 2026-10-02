@@ -1,10 +1,11 @@
 import { useMemo } from 'react'
 import { Maximize, Move, ShieldAlert } from 'lucide-react'
 import { toast } from 'sonner'
-import { fitEffectsToMotion, linkAndFitEffect } from '@shared/editor/followTransform'
-import { convertEffects, scopeTargetTrack, setAnimValue, setEffectScope, setItemEnabled, type AnimPath } from '@shared/editor/ops'
+import { attachCandidate, attachEffects, detachEffect } from '@shared/editor/followTransform'
+import { convertEffects, findItem, scopeTargetTrack, setAnimValue, setEffectScope, setItemEnabled, type AnimPath } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarningKind } from '@shared/editor/privacy'
 import type { EffectItem, Project } from '@shared/editor/project'
+import { effectRegionAt } from '@shared/editor/resolve'
 import { itemEndUs } from '@shared/editor/time'
 import { Segmented, Toggle } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
@@ -18,7 +19,8 @@ import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient
 // escopo e a região (posição, tamanho, rotação). Intensidade e região são animáveis (KeyframeButton);
 // editar grava como no visualizador (setAnimValue no playhead: com keys cria/atualiza o key, sem keys
 // muda o valor fixo). Avisos de privacidade do trecho do efeito aparecem no topo; o de clipe que se move traz
-// "Ajustar efeito ao movimento" (vinculado) ou "Vincular e ajustar" (solto).
+// "Ancorar ao clipe" (vinculado) ou "Vincular e ancorar" (solto). Ancorado (chave "Ancorado ao clipe: <nome>"): os
+// campos da região são relativos à imagem do clipe (fração da fonte; rotação relativa) e o resolve os leva ao quadro.
 
 const TYPE_OPTIONS: { value: EffectItem['effect']; label: string }[] = [
   { value: 'blur', label: 'Blur' },
@@ -52,11 +54,15 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
   const values = { x: animAt(r.x, local), y: animAt(r.y, local), w: animAt(r.w, local), h: animAt(r.h, local), rotation: animAt(r.rotation, local) }
   const warnings = useMemo(() => privacyWarnings(project, item.startUs, itemEndUs(item)).filter((w) => w.itemId === id), [project, item, id])
   const enabled = item.enabled !== false
-  // a região passa a acompanhar o clipe que se move (followTransform); solto: entra no grupo do clipe antes
+  // ancora no clipe que se move (followTransform); solto: entra no grupo do clipe antes
   const followMotion = (kind: PrivacyWarningKind, mediaItemId: string): void => {
-    const ok = apply((p) => (kind === 'unlinkedOverMoving' ? linkAndFitEffect(p, id, mediaItemId) : fitEffectsToMotion(p, mediaItemId, [id])))
-    if (ok) toast.success(kind === 'unlinkedOverMoving' ? 'Vinculado e ajustado ao movimento do clipe' : 'Efeito ajustado ao movimento do clipe')
+    const ok = apply((p) => (kind === 'unlinkedOverMoving' ? attachEffects(p, mediaItemId, [id]) : attachEffects(p, mediaItemId, [id])))
+    if (ok) toast.success(kind === 'unlinkedOverMoving' ? 'Vinculado e ancorado ao clipe' : 'Efeito ancorado ao clipe')
   }
+  // clipe da âncora (ou o que o efeito pode ancorar: o do grupo de vínculo); âncora perdida = clipe apagado/desativado
+  const candidate = useMemo(() => attachCandidate(project, id), [project, id])
+  const lost = !!item.attach && !candidate
+  const clipName = candidate ? (candidate.name ?? project.assets.find((a) => a.id === candidate.assetId)?.name ?? 'clipe') : ''
   const kf = (path: AnimPath, label: string): React.JSX.Element => <KeyframeButton item={item} path={path} label={label} disabled={locked} />
   // faixa bloqueada: nenhum controle edita
   const lock = <T extends { value: string }>(opts: T[]): (T & { disabled?: boolean })[] => (locked ? opts.map((o) => ({ ...o, disabled: true })) : opts)
@@ -80,7 +86,7 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
                   onClick={() => followMotion(w.kind, w.mediaItemId!)}
                 >
                   <Move className="h-3 w-3" />
-                  {w.kind === 'transformedUnderEffect' ? 'Ajustar efeito ao movimento' : 'Vincular e ajustar'}
+                  {w.kind === 'transformedUnderEffect' ? 'Ancorar ao clipe' : 'Vincular e ancorar'}
                 </button>
               ) : null}
             </div>
@@ -114,6 +120,23 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
       </PanelSection>
 
       <PanelSection title="Região">
+        {item.attach || candidate ? (
+          <div className="mb-1 space-y-1" data-attach-row="">
+            <div className="flex min-h-7 items-center justify-between gap-2 text-[11px]">
+              <span className="min-w-0 truncate text-muted" title={clipName}>
+                {lost ? 'Ancorado a um clipe apagado ou desativado' : <>{item.attach ? 'Ancorado ao clipe' : 'Ancorar ao clipe'}: <span className="text-fg">{clipName}</span></>}
+              </span>
+              <Toggle
+                size="sm"
+                checked={!!item.attach}
+                disabled={locked || (!item.attach && !candidate)}
+                onCheckedChange={(on) => apply((p) => (on && candidate ? attachEffects(p, candidate.id, [id]) : detachEffect(p, id)))}
+                aria-label="Ancorado ao clipe"
+              />
+            </div>
+            {item.attach && !lost ? <p className="text-[10.5px] leading-snug text-muted">Posição e tamanho relativos à imagem do clipe: zoom, pan, corte e rotação dele são acompanhados.</p> : null}
+          </div>
+        ) : null}
         <NumberField label="Posição X" value={values.x * 100} precision={1} step={0.1} unit="%" disabled={locked} onChange={(n) => setAnim('region.x', n / 100)} title="Centro da região (horizontal)" trailing={kf('region.x', 'Posição X')} />
         <NumberField label="Posição Y" value={values.y * 100} precision={1} step={0.1} unit="%" disabled={locked} onChange={(n) => setAnim('region.y', n / 100)} title="Centro da região (vertical)" trailing={kf('region.y', 'Posição Y')} />
         <NumberField label="Largura" value={values.w * 100} min={1} max={400} precision={1} step={0.1} unit="%" disabled={locked} onChange={(n) => setAnim('region.w', n / 100)} trailing={kf('region.w', 'Largura')} />
@@ -123,7 +146,7 @@ export function EffectPanel({ project, item, locked }: { project: Project; item:
           type="button"
           disabled={locked}
           className="mt-1 flex h-7 w-full items-center justify-center gap-1.5 rounded-md border border-border bg-bg-2 text-[11px] font-medium text-fg-2 hover:border-border-strong hover:text-fg disabled:opacity-40"
-          onClick={() => apply((p) => writeRegion(p, id, tUs, values, FULL_FRAME))}
+          onClick={() => apply((p) => writeRegion(p, id, tUs, effectRegionAt(p, findItem(p, id)!.item as EffectItem, tUs), FULL_FRAME))}
         >
           <Maximize className="h-3 w-3" /> Ajustar ao quadro inteiro
         </button>
