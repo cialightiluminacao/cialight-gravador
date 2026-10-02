@@ -135,6 +135,7 @@ const asset = z.object({
   peaks: z.string().optional(),
   speech: z.string().optional(),
   loudness: z.object({ integrated: z.number(), truePeak: z.number(), lra: z.number() }).optional(),
+  processedAudio: z.array(z.string()).optional(),
   status: z.enum(['ready', 'processing', 'missing', 'error']),
   error: z.string().optional()
 })

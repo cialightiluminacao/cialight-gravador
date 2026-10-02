@@ -7,6 +7,7 @@ import type { Asset, Project } from '@shared/editor/project'
 import type { ProjectSummary } from '@shared/ipc'
 import type { SessionStore } from '../session/sessionStore'
 import { derivedComplete } from '../media/proxyPolicy'
+import { isAudioProcessKey, processedAudioRel } from '@shared/editor/audioProcess'
 
 // Projetos do editor: uma pasta por projeto em <projectsRoot>/<projectId>/ com project.json
 // (escrita atômica), versions/NNN.json (histórico de segurança), proxies/, cache/, generated/.
@@ -134,7 +135,7 @@ export class ProjectStore {
   withMediaStatus(p: Project): Project {
     let changed = false
     const sessionExists = this.deps.sessionMediaExists
-    const assets = p.assets.map((a): Asset => {
+    const withStatus = (a: Asset): Asset => {
       if (a.source.type === 'session') {
         if (!sessionExists) return a
         const present = sessionExists(a.source.sessionId)
@@ -154,7 +155,18 @@ export class ProjectStore {
       if (status === a.status) return a
       changed = true
       return { ...a, status }
-    })
+    }
+    // áudio pré-processado é cache: chave sem arquivo (projeto aberto em outro PC) ou de parâmetros antigos sai da
+    // lista, e o editor reprocessa se o item ainda pede
+    const withProcessed = (a: Asset): Asset => {
+      if (!a.processedAudio) return a
+      const keep = a.processedAudio.filter((k) => isAudioProcessKey(k) && existsSync(this.filePath(p.id, processedAudioRel(a.id, k))))
+      if (keep.length === a.processedAudio.length) return a
+      changed = true
+      const { processedAudio: _, ...rest } = a
+      return keep.length ? { ...rest, processedAudio: keep } : rest
+    }
+    const assets = p.assets.map((a) => withProcessed(withStatus(a)))
     return changed ? { ...p, assets } : p
   }
 
@@ -258,6 +270,16 @@ export class ProjectStore {
     this.cache.delete(id.toLowerCase())
     if (!existsSync(dir)) return
     await this.deps.trash(dir)
+  }
+
+  /**
+   * Versão de áudio pré-processada (generated/<asset>.audio-<chave>.m4a). Resolve pela chave (validada) sem exigir
+   * que `processedAudio` do projeto em memória já a liste: o renderer pode ainda não ter salvo o resultado.
+   */
+  processedAudioPath(p: Project, assetId: string, key: string): string {
+    if (!p.assets.some((x) => x.id === assetId)) throw new Error(`asset não encontrado: ${assetId}`)
+    if (!isAudioProcessKey(key)) throw new Error(`chave de áudio processado inválida: ${key}`)
+    return this.filePath(p.id, processedAudioRel(assetId, key))
   }
 
   assetPath(p: Project, assetId: string, variant: AssetVariant, sessionsStore: SessionStore): string {

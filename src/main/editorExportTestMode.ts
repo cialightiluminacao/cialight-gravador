@@ -18,6 +18,9 @@ import { startExportJob } from './export/exportJob'
 import { cachedEncoderProbe } from './export/encoderProbe'
 import { probe } from './media/probe'
 import { assetFromInfo } from './media/ingest'
+import { processAudioFile } from './media/audioProcess'
+import { processedAudioRel } from '@shared/editor/audioProcess'
+import { rnnoiseDir } from './export/ffmpegPath'
 import { isFastStart, makeSyntheticSession } from './testFixtures'
 import { loadPage, preloadPath } from './windows/recorderWindow'
 
@@ -57,6 +60,8 @@ const SPEED_ID = 'p-editor-export-velocidade'
 const VOICE_HZ = 220
 // reverso (F3): testsrc2 [2 s, 5 s) de trás para frente × ffmpeg -vf reverse
 const REVERSE_ID = 'p-editor-export-reverso'
+// redução de ruído (F3): voz em rajada (1–3 s de 5 s) + ruído branco −30 dBFS, item com denoise e o processado pronto
+const DENOISE_ID = 'p-editor-export-ruido'
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
 
@@ -76,6 +81,8 @@ interface HarnessReport {
   speed?: ExportOut
   speedAgain?: ExportOut
   reverse?: ExportOut
+  denoise?: ExportOut
+  denoiseOff?: ExportOut
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
 }
 
@@ -250,6 +257,15 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(REVERSE_ID), { recursive: true, force: true })
   projects.create(reverseProject)
 
+  // redução de ruído: o arquivo processado é gerado pelo mesmo caminho do main (media.processAudio) em generated/
+  const noisyVoice = join(dir, 'voz-ruido.m4a')
+  await gen(['-f', 'lavfi', '-i', `aevalsrc='${voiceExpr}*between(t,1,3)':s=48000:d=5`, '-f', 'lavfi', '-i', 'anoisesrc=color=white:r=48000:a=0.05477:d=5:seed=3', '-filter_complex', '[0][1]amix=inputs=2:normalize=0,pan=stereo|c0=c0|c1=c0', '-c:a', 'aac', '-b:a', '192k', noisyVoice], 'editor-export: voz com ruído')
+  const aNoisy: Asset = { ...assetFromInfo('a_ruido', noisyVoice, statSync(noisyVoice), await probe(noisyVoice)), status: 'ready', processedAudio: ['dn-sh'] }
+  const dnAdded = addMediaFromAsset(addAsset({ ...createEmptyProject('Ruído', { width: W, height: H, fps: FPS, background: '#000000' }), id: DENOISE_ID }, aNoisy), aNoisy.id, 0)
+  rmSync(projects.dirOf(DENOISE_ID), { recursive: true, force: true })
+  projects.create(updateItem<MediaItem>(dnAdded.project, dnAdded.itemIds[0], (d) => { d.audio.denoise = true }))
+  await processAudioFile(noisyVoice, '0:a:0', projects.filePath(DENOISE_ID, processedAudioRel(aNoisy.id, 'dn-sh')), { denoise: true, normalize: false }, { modelDir: rnnoiseDir(), durationUs: 5_000_000, dualMono: false })
+
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
   const session = await makeSyntheticSession(sessions, SESSION_ID)
@@ -264,7 +280,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, denoiseProjectId: DENOISE_ID, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -432,6 +448,19 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     let diff = 0
     for (let i = 0; i < Math.min(a.length, b.length); i++) diff = Math.max(diff, Math.abs(a[i] - b[i]))
     check(a.length > 0 && a.length === b.length && diff === 0, `velocidade: exportação determinística — PCM estéreo decodificado idêntico nas duas exportações (${a.length} × ${b.length} amostras, diferença máx. ${diff})`, failures)
+  }
+
+  // ---- redução de ruído: a exportação lê a versão processada; desligada, volta ao original ----
+  const dnOn = r.denoise?.path
+  const dnOff = r.denoiseOff?.path
+  check(!!dnOn && !!dnOff && existsSync(dnOn) && existsSync(dnOff), `ruído: exportado com e sem a redução (${dnOn ?? r.denoise?.error} | ${dnOff ?? r.denoiseOff?.error})`, failures)
+  if (dnOn && dnOff && existsSync(dnOn) && existsSync(dnOff)) {
+    for (const [a, b] of [[0.1, 0.9], [3.4, 4.8]]) {
+      const src = await rmsDb(join(dir, 'voz-ruido.m4a'), a, b)
+      const on = await rmsDb(dnOn, a, b)
+      const off = await rmsDb(dnOff, a, b)
+      check(Math.abs(off - src) <= 1.5 && off - on >= 10, `ruído: pausa ${a}–${b} s — fonte ${src.toFixed(1)} dB, desligado ${off.toFixed(1)} dB (= fonte ±1,5), tratado ${on.toFixed(1)} dB (≥ 10 dB abaixo)`, failures)
+    }
   }
 
   // ---- reverso × ffmpeg -vf reverse ----

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from './factory'
 import type { Asset, MediaItem, Project } from './project'
 import * as ops from './ops'
-import { gainAt, planAudio, shuttleSegments, SHUTTLE_AUDIO_MAX_RATE, type AudioSegment } from './audioPlan'
+import { audioProcessPending, gainAt, pendingAudioProcessing, planAudio, shuttleSegments, SHUTTLE_AUDIO_MAX_RATE, type AudioSegment } from './audioPlan'
 
 const S = 1_000_000
 const vid = (): Asset => ({ id: 'a1', name: 'a1', kind: 'video', source: { type: 'file', path: 'C:/a.mp4', size: 1, mtimeMs: 1 }, durationUs: 10 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
@@ -91,7 +91,7 @@ describe('planAudio', () => {
 
 describe('shuttleSegments (J/K/L: áudio do preview em taxa ≠ 1)', () => {
   const seg = (over: Partial<AudioSegment> = {}): AudioSegment => ({
-    itemId: 'i', assetId: 'a1', startUs: 3 * S, durationUs: 4 * S, srcInUs: S, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
+    itemId: 'i', assetId: 'a1', sourceKey: 'a1', processKey: null, startUs: 3 * S, durationUs: 4 * S, srcInUs: S, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
     gain: [{ tUs: 3 * S, gain: 0 }, { tUs: 4 * S, gain: 1 }, { tUs: 7 * S, gain: 1 }], ...over
   })
   it('1× devolve os mesmos segmentos', () => {
@@ -124,5 +124,61 @@ describe('shuttleSegments (J/K/L: áudio do preview em taxa ≠ 1)', () => {
     expect(SHUTTLE_AUDIO_MAX_RATE).toBe(2)
     expect(() => shuttleSegments([seg()], 4)).toThrow()
     expect(() => shuttleSegments([seg()], -1)).toThrow()
+  })
+})
+
+describe('planAudio: redução de ruído / normalização (pré-processamento em cache)', () => {
+  const flags = (p: Project, a: string, denoise: boolean, normalize: boolean): Project => ops.updateItem<MediaItem>(p, a, (d) => { d.audio.denoise = denoise; d.audio.normalize = normalize })
+  const ready = (p: Project, keys: string[]): Project => ops.updateAsset(p, 'a1', { processedAudio: keys })
+  it('sem flags: fonte = original, nada pendente', () => {
+    const { p } = base()
+    expect(planAudio(p)[0]).toMatchObject({ sourceKey: 'a1', processKey: null })
+  })
+  it('flag ligada e o processado ainda não pronto: original + chave pedida (indicador "processando")', () => {
+    const { p, a } = base()
+    const s = planAudio(flags(p, a, true, false))[0]
+    expect(s).toMatchObject({ sourceKey: 'a1', processKey: 'dn-sh' })
+    expect(audioProcessPending(s)).toBe(true)
+  })
+  it('processado pronto: lê a versão processada; desligar volta ao original sem reprocessar; religar reusa o cache', () => {
+    const { p, a } = base()
+    const q = ready(flags(p, a, true, true), ['dn-sh_ln-i16-tp1.5'])
+    const s = planAudio(q)[0]
+    expect(s).toMatchObject({ sourceKey: 'a1~dn-sh_ln-i16-tp1.5', processKey: 'dn-sh_ln-i16-tp1.5' })
+    expect(audioProcessPending(s)).toBe(false)
+    const off = flags(q, a, false, false)
+    expect(planAudio(off)[0]).toMatchObject({ sourceKey: 'a1', processKey: null })
+    expect(planAudio(flags(off, a, true, true))[0].sourceKey).toBe('a1~dn-sh_ln-i16-tp1.5')
+  })
+  it('a chave segue a combinação de flags: só normalizar não usa o arquivo com ruído reduzido', () => {
+    const { p, a } = base()
+    const q = ready(flags(p, a, false, true), ['dn-sh'])
+    expect(planAudio(q)[0]).toMatchObject({ sourceKey: 'a1', processKey: 'ln-i16-tp1.5' })
+  })
+  it('bypassProcessing (comparar A/B): todos os itens leem o original', () => {
+    const { p, a } = base()
+    const q = ready(flags(p, a, true, false), ['dn-sh'])
+    expect(planAudio(q, { bypassProcessing: true })[0]).toMatchObject({ sourceKey: 'a1', processKey: 'dn-sh' })
+  })
+  it('shuttle preserva a fonte do segmento', () => {
+    const { p, a } = base()
+    const q = ready(flags(p, a, true, false), ['dn-sh'])
+    expect(shuttleSegments(planAudio(q), 2)[0].sourceKey).toBe('a1~dn-sh')
+  })
+})
+
+describe('pendingAudioProcessing (o que o editor pede ao main)', () => {
+  const flags = (p: Project, a: string, denoise: boolean, normalize: boolean): Project => ops.updateItem<MediaItem>(p, a, (d) => { d.audio.denoise = denoise; d.audio.normalize = normalize })
+  it('pares (asset, chave) pedidos e não prontos, sem repetição, só de assets prontos', () => {
+    const { p, a } = base()
+    expect(pendingAudioProcessing(p)).toEqual([])
+    const q = flags(p, a, true, true)
+    expect(pendingAudioProcessing(q)).toEqual([{ assetId: 'a1', key: 'dn-sh_ln-i16-tp1.5', opts: { denoise: true, normalize: true } }])
+    // dois itens do mesmo asset com as mesmas flags: um pedido só
+    const r = ops.addMediaFromAsset(q, 'a1', 20 * S)
+    const both = flags(r.project, r.itemIds[1], true, true)
+    expect(pendingAudioProcessing(both)).toHaveLength(1)
+    expect(pendingAudioProcessing(ops.updateAsset(q, 'a1', { processedAudio: ['dn-sh_ln-i16-tp1.5'] }))).toEqual([])
+    expect(pendingAudioProcessing(ops.updateAsset(q, 'a1', { status: 'processing' }))).toEqual([])
   })
 })

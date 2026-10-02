@@ -20,6 +20,7 @@ jobs:
           key: electron-${{ hashFiles('package-lock.json') }}
       - run: npm ci
       - run: npm run fetch:ffmpeg
+      - run: npm run fetch:models
       - run: npm run typecheck
       - run: npm test
       - name: Empacotar e publicar na release

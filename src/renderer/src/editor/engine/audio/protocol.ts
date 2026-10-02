@@ -3,8 +3,9 @@ import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 
 export type AudioIn =
-  // useProxy: mesma variante do vídeo no preview (o proxy tem o áudio a:0 em AAC)
-  | { t: 'project'; project: Project; mediaUrls: MediaUrls; useProxy: boolean }
+  // useProxy: mesma variante do vídeo no preview (o proxy tem o áudio a:0 em AAC);
+  // bypassProcessing: comparar A/B (segurando o botão) — toca o original mesmo com o áudio processado pronto
+  | { t: 'project'; project: Project; mediaUrls: MediaUrls; useProxy: boolean; bypassProcessing?: boolean }
   // mixa [fromUs, fromUs + frames/48 kHz); rate (shuttle J/K/L, 0 < rate ≤ 2): os frames cobrem frames·rate da timeline
   | { t: 'render'; fromUs: Us; frames: number; seq: number; rate?: number }
   | { t: 'cancel' } // seek/pausa: descarta os pedidos na fila e o aquecimento ainda não iniciado

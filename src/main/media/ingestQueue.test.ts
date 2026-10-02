@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { basename, dirname, join } from 'path'
 import type { Asset } from '@shared/editor/project'
+import type { IngestJob } from '@shared/ipc'
 import type { MediaInfo } from './probe'
 
 // Fila com ffmpeg falso: cada etapa vira uma promessa controlada pelo teste, para medir a
@@ -77,6 +78,14 @@ vi.mock('./analysis', async (orig) => ({
   buildSpeech: (_i: string, _f: string, _d: number, opts: { signal?: AbortSignal }) => gate('light', 'speech', opts.signal, { version: 1, intervals: [] }),
   buildLoudness: (_i: string, _d: number, opts: { signal?: AbortSignal }) => gate('light', 'loudness', opts.signal, { integrated: -23, truePeak: -1, lra: 4 }),
   buildThumb: async (_i: string, file: string) => file
+}))
+
+vi.mock('./audioProcess', async (orig) => ({
+  ...(await orig<typeof import('./audioProcess')>()),
+  processAudioFile: (_i: string, _m: string, out: string, _o: unknown, run: { signal?: AbortSignal; onProgress?: (p: number) => void }) => {
+    run.onProgress?.(40)
+    return gate('heavy', `audio:${basename(out)}`, run.signal)
+  }
 }))
 
 const { IngestQueue } = await import('./ingest')
@@ -214,5 +223,61 @@ describe('IngestQueue', () => {
     await drain()
     expect(h.calls).toHaveLength(0)
     expect(done[0].patch).toEqual({})
+  })
+
+  describe('processAudio (redução de ruído/normalização em cache)', () => {
+    const jobs: IngestJob[] = []
+    beforeEach(() => {
+      jobs.length = 0
+      queue.on('progress', (j) => jobs.push(j))
+    })
+    const ready = (): Asset => ({ ...asset('a'), status: 'ready' })
+
+    it('gera no slot pesado o arquivo da chave em generated/, com progresso por chave e sem emitir done', async () => {
+      const p = queue.processAudio('p', ready(), { denoise: true, normalize: true })
+      await flush()
+      expect(h.calls.map((c) => [c.kind, c.what])).toEqual([['heavy', 'audio:a.audio-dn-sh_ln-i16-tp1.5.m4a']])
+      expect(queue.busy('p')).toBe(true)
+      h.calls[0].resolve()
+      await expect(p).resolves.toEqual({ key: 'dn-sh_ln-i16-tp1.5', rel: 'generated/a.audio-dn-sh_ln-i16-tp1.5.m4a' })
+      expect(jobs.some((j) => j.step === 'audioProcess' && j.key === 'dn-sh_ln-i16-tp1.5' && j.percent === 40)).toBe(true)
+      expect(done).toHaveLength(0)
+      expect(queue.busy('p')).toBe(false)
+    })
+
+    it('arquivo já existe (cache): devolve na hora sem ffmpeg', async () => {
+      const file = join(dir, 'p', 'generated', 'a.audio-dn-sh.m4a')
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, 'x')
+      await expect(queue.processAudio('p', ready(), { denoise: true, normalize: false })).resolves.toEqual({ key: 'dn-sh', rel: 'generated/a.audio-dn-sh.m4a' })
+      expect(h.calls).toHaveLength(0)
+    })
+
+    it('pedidos repetidos da mesma chave compartilham a execução; chaves diferentes e a ingestão do asset não se cancelam', async () => {
+      const a = queue.processAudio('p', ready(), { denoise: true, normalize: false })
+      const b = queue.processAudio('p', ready(), { denoise: true, normalize: false })
+      const c = queue.processAudio('p', ready(), { denoise: false, normalize: true })
+      queue.enqueue('p', ready(), { analyzeAudio: true })
+      await drain()
+      await expect(a).resolves.toMatchObject({ key: 'dn-sh' })
+      await expect(b).resolves.toMatchObject({ key: 'dn-sh' })
+      await expect(c).resolves.toMatchObject({ key: 'ln-i16-tp1.5' })
+      expect(h.calls.filter((x) => x.what.startsWith('audio:')).map((x) => x.what).sort()).toEqual(['audio:a.audio-dn-sh.m4a', 'audio:a.audio-ln-i16-tp1.5.m4a'])
+      expect(h.calls.every((x) => !x.signal?.aborted)).toBe(true)
+      expect(done).toHaveLength(1) // a análise de áudio
+    })
+
+    it('cancelar o projeto rejeita com CancelledError e libera a fila', async () => {
+      const p = queue.processAudio('p', ready(), { denoise: true, normalize: false })
+      await flush()
+      queue.cancel('p')
+      await expect(p).rejects.toThrow('cancelado')
+      expect(queue.busy('p')).toBe(false)
+    })
+
+    it('sem flags ou asset sem áudio: erro (nada a processar)', async () => {
+      await expect(queue.processAudio('p', ready(), { denoise: false, normalize: false })).rejects.toThrow()
+      await expect(queue.processAudio('p', { ...ready(), audio: undefined }, { denoise: true, normalize: false })).rejects.toThrow()
+    })
   })
 })

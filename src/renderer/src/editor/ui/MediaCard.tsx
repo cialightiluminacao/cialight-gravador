@@ -11,7 +11,7 @@ import { mediaUrl, projectFileUrl } from './mediaImport'
 
 export const ASSET_MIME = 'application/x-cialight-asset'
 
-const STEP_LABEL: Record<IngestStep, string> = { probe: 'Analisando', proxy: 'Gerando proxy', intermediate: 'Convertendo', filmstrip: 'Miniaturas', peaks: 'Forma de onda', speech: 'Detectando fala', loudness: 'Medindo volume' }
+const STEP_LABEL: Record<IngestStep, string> = { probe: 'Analisando', proxy: 'Gerando proxy', intermediate: 'Convertendo', filmstrip: 'Miniaturas', peaks: 'Forma de onda', speech: 'Detectando fala', loudness: 'Medindo volume', audioProcess: 'Processando áudio' }
 
 export function shortDuration(us: Us | null): string {
   if (us === null) return ''

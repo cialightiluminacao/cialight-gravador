@@ -1,0 +1,18 @@
+{
+  "note": "Modelos baixados por scripts/fetch-models.mjs (sha256 pinado; espelho próprio primeiro, origem como fallback). Não versionados no git; empacotados por extraResources em <instalação>/resources/models.",
+  "models": [
+    {
+      "id": "rnnoise-sh",
+      "file": "rnnoise/sh.rnnn",
+      "description": "RNNoise somnolent-hogwash-2018-09-01 (fala em ambiente de gravação) — redução de ruído do editor (ffmpeg arnndn)",
+      "source": "https://github.com/GregorR/rnnoise-models/tree/3eee541a283fd3b8f81b85b1748e3b9ccbefa04d/somnolent-hogwash-2018-09-01",
+      "license": "README do repositório: \"With the exception of the tools/ directory and this file, none of this work is creative and thus none of it is subject to copyright.\"",
+      "urls": [
+        "https://github.com/cialightiluminacao/cialight-gravador/releases/download/deps-rnnoise-sh-2018-09-01/sh.rnnn",
+        "https://raw.githubusercontent.com/GregorR/rnnoise-models/3eee541a283fd3b8f81b85b1748e3b9ccbefa04d/somnolent-hogwash-2018-09-01/sh.rnnn"
+      ],
+      "sha256": "70bb6685eb0c2a1d18e2918dca3fbfbd39317010b1802eb1b6ea73a92f3fdec0",
+      "size": 297646
+    }
+  ]
+}

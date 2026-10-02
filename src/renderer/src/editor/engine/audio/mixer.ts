@@ -28,10 +28,11 @@ const GAIN_STEP = 64
 const frameAtOrAfter = (fromUs: Us, tUs: Us): number => Math.ceil(((tUs - fromUs) * SR) / 1e6)
 const usAtFrame = (fromUs: Us, frame: number): Us => fromUs + Math.round((frame * 1e6) / SR)
 
+/** `sources`: fontes de PCM por AudioSegment.sourceKey (original = assetId; processada = assetId~chave). */
 export function mixBlock(segments: AudioSegment[], fromUs: Us, frames: number, sources: Map<string, PcmSource>): Float32Array {
   const out = new Float32Array(frames * 2)
   for (const seg of segments) {
-    const src = seg.mode === 'mute' ? undefined : sources.get(seg.assetId)
+    const src = seg.mode === 'mute' ? undefined : sources.get(seg.sourceKey)
     if (!src) continue
     const endUs = seg.startUs + seg.durationUs
     const i0 = Math.max(0, frameAtOrAfter(fromUs, seg.startUs))

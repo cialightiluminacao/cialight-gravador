@@ -10,6 +10,7 @@ import { log } from './log'
 // a Range (o <video> da revisão faz seek; mediabunny UrlSource lê por faixas).
 // Hosts reservados (sessionIds são timestamps, sem colisão):
 //   media/<projectId>/<assetId>?v=original|proxy|intermediate → só assets registrados no project.json
+//   media/<projectId>/<assetId>?v=audio&k=<chave>              → áudio pré-processado (generated/, audioProcess.ts)
 //   project/<projectId>/<rel>                                  → arquivo da pasta do projeto
 // Com scheme "standard" o host chega em minúsculo; o cache de projetos é indexado em minúsculo.
 
@@ -51,6 +52,7 @@ function resolveFile(url: URL, store: SessionStore, projects: ProjectStore): str
     const [projectId, assetId] = parts
     if (!projectId || !assetId || parts.length !== 2) return null
     const v = url.searchParams.get('v') ?? 'original'
+    if (v === 'audio') return projects.processedAudioPath(projects.cached(projectId), assetId, url.searchParams.get('k') ?? '')
     if (v !== 'original' && v !== 'proxy' && v !== 'intermediate') return null
     return projects.assetPath(projects.cached(projectId), assetId, v, store)
   }

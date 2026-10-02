@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from 'fs'
 import { basename, dirname } from 'path'
 import type { Asset } from '@shared/editor/project'
+import { audioProcessKey, processedAudioRel, type AudioProcessOpts } from '@shared/editor/audioProcess'
 import type { HwEncoder } from '@shared/types'
 import type { IngestJob, IngestStep } from '@shared/ipc'
 import { probe, type MediaInfo } from './probe'
@@ -8,11 +9,14 @@ import { audioIntermediateArgs, intermediateArgs, needsProxy, proxyArgs } from '
 import { FfmpegError } from '../export/ffmpegRunner'
 import { runWithEncoderFallback } from '../export/encoderFallback'
 import { buildFilmstrip, buildLoudness, buildPeaks, buildSpeech, buildThumb, CancelledError, runToFile } from './analysis'
+import { processAudioFile } from './audioProcess'
 
 // Fila de ingestão: por asset, probe → (proxy | intermediário) em paralelo com filmstrip, peaks, fala e loudness.
 // Concorrência: 1 job pesado (transcodificação) + 2 leves (probe/filmstrip/peaks/fala/loudness).
 // Ao terminar um asset emite 'done' com o patch (caminhos relativos à pasta do projeto);
 // quem persiste o patch é decidido pelo chamador (ver registro do domínio `media` em ipc.ts).
+// "Processar áudio" (redução de ruído/normalização, processAudio): job pesado por (asset, chave), à parte das
+// execuções de ingestão do asset (uma não cancela a outra); devolve o arquivo gerado em vez de emitir 'done'.
 
 export type { IngestJob, IngestStep }
 
@@ -36,6 +40,8 @@ export interface IngestDeps {
    * cache; nunca dispara o probe aqui): falha do ffmpeg com um tenta o próximo, terminando em libx264.
    */
   encoders: () => HwEncoder[]
+  /** Pasta do modelo RNNoise (resources/models/rnnoise) para a redução de ruído. */
+  rnnoiseDir?: () => string
   log?: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void }
 }
 
@@ -107,6 +113,8 @@ export class IngestQueue {
   private light = new Slots(2)
   /** Execução vigente de cada asset: projectId → assetId → seu AbortController. */
   private active = new Map<string, Map<string, AbortController>>()
+  /** processAudio em curso: projectId|assetId|chave → promessa (pedidos repetidos compartilham a execução). */
+  private audioRuns = new Map<string, Promise<{ key: string; rel: string }>>()
   private progressFns: ProgressFn[] = []
   private doneFns: DoneFn[] = []
 
@@ -145,6 +153,54 @@ export class IngestQueue {
         if (m?.get(asset.id) === ctl) m.delete(asset.id)
         if (m && m.size === 0 && this.active.get(projectId) === m) this.active.delete(projectId)
       })
+  }
+
+  /**
+   * Versão pré-processada da faixa de áudio do asset (generated/<id>.audio-<chave>.m4a, ver audioProcess.ts). Cache por
+   * (asset, parâmetros): arquivo já existente volta na hora. Job pesado; cancelado por `cancel(projectId)`
+   * (rejeita com CancelledError). Quem grava `processedAudio` no projeto é o chamador (renderer, escritor único).
+   */
+  processAudio(projectId: string, asset: Asset, opts: AudioProcessOpts): Promise<{ key: string; rel: string }> {
+    const key = audioProcessKey(opts)
+    if (!key) return Promise.reject(new Error('nada a processar no áudio'))
+    if (!(asset.kind === 'audio' || asset.audio)) return Promise.reject(new Error('mídia sem áudio'))
+    const rel = processedAudioRel(asset.id, key)
+    const out = this.out(projectId, rel)
+    if (existsSync(out)) return Promise.resolve({ key, rel })
+    const id = `${projectId}|${asset.id}|${key}`
+    const pending = this.audioRuns.get(id)
+    if (pending) return pending
+
+    let input: IngestInput
+    try {
+      input = this.deps.resolveInput(projectId, asset)
+    } catch (e) {
+      return Promise.reject(e)
+    }
+    let runs = this.active.get(projectId)
+    if (!runs) this.active.set(projectId, (runs = new Map()))
+    const runKey = `${asset.id}~audio~${key}`
+    const ctl = new AbortController()
+    runs.set(runKey, ctl)
+    const job = { projectId, assetId: asset.id, step: 'audioProcess' as const, key }
+    const p = this.step(this.heavy, ctl.signal, job, (onProgress) =>
+      processAudioFile(input.path, input.audioMap ?? '0:a:0', out, opts, {
+        modelDir: this.deps.rnnoiseDir?.() ?? '',
+        durationUs: asset.durationUs ?? 0,
+        dualMono: asset.audio?.channels === 1,
+        signal: ctl.signal,
+        onProgress
+      })
+    )
+      .then(() => ({ key, rel }))
+      .finally(() => {
+        this.audioRuns.delete(id)
+        const m = this.active.get(projectId)
+        if (m?.get(runKey) === ctl) m.delete(runKey)
+        if (m && m.size === 0 && this.active.get(projectId) === m) this.active.delete(projectId)
+      })
+    this.audioRuns.set(id, p)
+    return p
   }
 
   /** Cancela tudo do projeto (fila e ffmpeg em execução); nenhum 'done' é emitido para eles. */

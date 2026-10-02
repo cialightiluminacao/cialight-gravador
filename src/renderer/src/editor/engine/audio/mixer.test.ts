@@ -25,8 +25,9 @@ function sine(hz: number, amp: number): PcmSource {
 function seg(over: Partial<AudioSegment> = {}): AudioSegment {
   const startUs = over.startUs ?? 0
   const durationUs = over.durationUs ?? 2_000_000
+  const assetId = over.assetId ?? 'a1'
   return {
-    itemId: 'i1', assetId: 'a1', startUs, durationUs, srcInUs: 0, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
+    itemId: 'i1', assetId, sourceKey: assetId, processKey: null, startUs, durationUs, srcInUs: 0, speed: 1, reverse: false, preservePitch: true, keepFastAudio: false, mode: 'copy',
     gain: [{ tUs: startUs, gain: 1 }, { tUs: startUs + durationUs, gain: 1 }],
     ...over
   }
@@ -59,6 +60,13 @@ describe('mixBlock', () => {
     const p = peak(out)
     expect(p).toBeLessThanOrEqual(1)
     expect(p).toBeGreaterThan(0.9)
+  })
+
+  it('lê a fonte do segmento (sourceKey): versão processada quando pronta, original senão', () => {
+    const processed = seg({ sourceKey: 'a1~dn-sh', processKey: 'dn-sh' })
+    const sources = new Map([['a1', sine(1000, 0.8)], ['a1~dn-sh', sine(1000, 0.2)]])
+    expect(peak(mixBlock([processed], 0, 4800, sources))).toBeCloseTo(0.2, 2)
+    expect(peak(mixBlock([seg()], 0, 4800, sources))).toBeCloseTo(0.8, 2)
   })
 
   it('segmento fora do bloco → zeros', () => {

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { basename, extname, join } from 'path'
-import { statSync } from 'fs'
+import { readdirSync, rmSync, statSync } from 'fs'
 import { IPC, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
 import { getSettings, outputDir, rawDir, setSettings } from './settings/settingsStore'
@@ -22,6 +22,8 @@ import { broadcastCommand, getPhase, setBarState, setPhaseValue } from './record
 import { applyHotkeys, getHotkeyStatus } from './hotkeys/globalShortcuts'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { encoderFallbackChain } from '@shared/encoderCache'
+import type { AudioProcessOpts } from '@shared/editor/audioProcess'
+import { rnnoiseDir } from './export/ffmpegPath'
 import { buildReviewAssets } from './export/reviewAssets'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
@@ -79,6 +81,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     resolveInput: resolveIngestInput,
     // só lê o cache do probe de encoders (o probe grava settings.json); sem cache → libx264
     encoders: () => encoderFallbackChain(cachedEncoderProbe()),
+    rnnoiseDir,
     log
   })
   // só o editor (janela do gravador) mostra o progresso: barra e overlays ocultas não precisam dele
@@ -259,6 +262,11 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       ...(a.audio ? { audio: { ...a.audio, decodable: audioDecodable } } : {})
     }, { analyzeAudio: !!opts?.analyzeAudio })
   })
+  ipcMain.handle(IPC.media.processAudio, (_e, projectId: string, assetId: string, opts: AudioProcessOpts) => {
+    const a = projects.cached(projectId).assets.find((x) => x.id === assetId)
+    if (!a) throw new Error(`Asset não encontrado: ${assetId}`)
+    return ingest.processAudio(projectId, a, { denoise: !!opts?.denoise, normalize: !!opts?.normalize })
+  })
   ipcMain.handle(IPC.media.relink, async (_e, projectId: string, assetId: string, newPath: string) => {
     const a = projects.cached(projectId).assets.find((x) => x.id === assetId)
     if (!a) throw new Error(`Asset não encontrado: ${assetId}`)
@@ -267,7 +275,14 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     if (info.kind !== a.kind) throw new Error('O arquivo escolhido não é do mesmo tipo da mídia original')
     const fresh = assetFromInfo(a.id, newPath, statSync(newPath), info)
     // derivados do arquivo antigo deixam de valer (undefined explícito: o renderer aplica com updateAsset)
-    const next: Asset = { ...fresh, name: a.name, proxy: undefined, intermediate: undefined, filmstrip: undefined, filmstripInfo: undefined, peaks: undefined, speech: undefined, loudness: undefined, error: undefined }
+    const next: Asset = { ...fresh, name: a.name, proxy: undefined, intermediate: undefined, filmstrip: undefined, filmstripInfo: undefined, peaks: undefined, speech: undefined, loudness: undefined, processedAudio: undefined, error: undefined }
+    // áudio pré-processado do arquivo antigo: o nome é por (asset, chave), então apagar evita reusar o cache errado
+    try {
+      const gen = join(projects.dirOf(projectId), 'generated')
+      for (const f of readdirSync(gen)) if (f.startsWith(`${assetId}.audio-`)) rmSync(join(gen, f), { force: true })
+    } catch (e) {
+      log.warn(`relink ${assetId}: não foi possível apagar o áudio processado antigo`, e)
+    }
     projects.cacheAssets(projectId, [next])
     return next
   })

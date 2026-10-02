@@ -29,9 +29,9 @@ export interface ProjectSummary {
   originSessionId?: string
 }
 
-export type IngestStep = 'probe' | 'proxy' | 'intermediate' | 'filmstrip' | 'peaks' | 'speech' | 'loudness'
-/** Progresso de uma etapa da ingestão de um asset (0–100). */
-export interface IngestJob { projectId: string; assetId: string; step: IngestStep; percent: number }
+export type IngestStep = 'probe' | 'proxy' | 'intermediate' | 'filmstrip' | 'peaks' | 'speech' | 'loudness' | 'audioProcess'
+/** Progresso de uma etapa da ingestão de um asset (0–100). `key`: chave do pré-processamento de áudio (step 'audioProcess'). */
+export interface IngestJob { projectId: string; assetId: string; step: IngestStep; percent: number; key?: string }
 /** Resultado da ingestão de um asset: patch para ops.updateAsset (caminhos relativos à pasta do projeto). */
 export interface IngestDone { projectId: string; assetId: string; patch: Partial<Asset> }
 
@@ -227,6 +227,12 @@ export interface IpcApi {
      * analyzeAudio: só fala + loudness de um asset já pronto (sem probe/proxy); falha não altera o status.
      */
     enqueue(projectId: string, assetId: string, opts: { decodable: boolean; audioDecodable?: boolean; analyzeAudio?: boolean }): Promise<void>
+    /**
+     * Redução de ruído e/ou normalização (−16 LUFS) da faixa de áudio do asset, em cache por (asset, parâmetros) em
+     * generated/. Resolve com a chave pronta quando o arquivo existe (na hora, se já estava em cache); o renderer
+     * acrescenta a chave a `asset.processedAudio`. Progresso por `onProgress` (step 'audioProcess', com `key`).
+     */
+    processAudio(projectId: string, assetId: string, opts: { denoise: boolean; normalize: boolean }): Promise<{ key: string; rel: string }>
     /** Novo caminho para um asset de arquivo (ausente/movido): devolve o asset atualizado com status 'processing'; o renderer aplica e chama `enqueue`. */
     relink(projectId: string, assetId: string, newPath: string): Promise<Asset>
     /**
@@ -352,6 +358,7 @@ export const IPC = {
   media: {
     import: 'media:import',
     enqueue: 'media:enqueue',
+    processAudio: 'media:processAudio',
     relink: 'media:relink',
     setOpenProject: 'media:setOpenProject',
     progress: 'media:progress',

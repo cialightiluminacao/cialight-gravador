@@ -12,3 +12,12 @@ export function ffmpegPath(): string {
 export function ffprobePath(): string {
   return join(ffmpegDir(), 'ffprobe.exe')
 }
+
+// Modelos (resources/models/, baixados por scripts/fetch-models.mjs; empacotado: process.resourcesPath/models).
+export function modelsDir(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'models') : join(app.getAppPath(), 'resources', 'models')
+}
+/** Pasta do modelo RNNoise da redução de ruído (o ffmpeg roda com cwd aqui; ver media/audioProcess.ts). */
+export function rnnoiseDir(): string {
+  return join(modelsDir(), 'rnnoise')
+}

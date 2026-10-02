@@ -45,4 +45,11 @@ describe('mediaUrlsFor', () => {
     const q = { ...project([asset('a b')]), id: 'p x' }
     expect(mediaUrlsFor(q, 'export')['a b'].original).toBe('cialight-file://media/p%20x/a%20b?v=original')
   })
+
+  it('áudio pré-processado pronto: URL por chave (preview e exportação); chaves inválidas ficam de fora', () => {
+    const q = project([asset('a_dn', { processedAudio: ['dn-sh', 'dn-old'] })])
+    for (const mode of ['preview', 'export'] as const) {
+      expect(mediaUrlsFor(q, mode).a_dn).toEqual({ original: `${base('a_dn')}?v=original`, audio: { 'dn-sh': `${base('a_dn')}?v=audio&k=dn-sh` } })
+    }
+  })
 })

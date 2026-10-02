@@ -29,9 +29,9 @@ export class AudioClient {
     })
   }
 
-  /** useProxy: mesma variante usada pelo vídeo no preview. */
-  setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean): void {
-    this.send({ t: 'project', project, mediaUrls, useProxy })
+  /** useProxy: mesma variante usada pelo vídeo no preview. bypassProcessing: A/B, toca o original sem ruído/normalização. */
+  setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean, bypassProcessing = false): void {
+    this.send({ t: 'project', project, mediaUrls, useProxy, ...(bypassProcessing ? { bypassProcessing } : {}) })
   }
 
   /**

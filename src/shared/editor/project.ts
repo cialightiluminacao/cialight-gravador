@@ -28,6 +28,11 @@ export interface Asset {
   /** Intervalos de fala (cache/<id>.speech.json, ver speech.ts) e loudness da faixa de áudio analisada na ingestão. */
   speech?: string
   loudness?: { integrated: number; truePeak: number; lra: number }
+  /**
+   * Chaves (audioProcess.ts) das versões de áudio pré-processadas (ruído/normalização) já prontas em
+   * generated/<id>.audio-<chave>.m4a. Cache: arquivo ausente ao abrir (outro PC) tira a chave e o editor reprocessa.
+   */
+  processedAudio?: string[]
   status: 'ready' | 'processing' | 'missing' | 'error'; error?: string
 }
 export type AnimPreset = 'fade' | 'slideL' | 'slideR' | 'slideU' | 'slideD' | 'zoom' | 'pop'

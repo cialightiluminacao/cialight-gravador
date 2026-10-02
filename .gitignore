@@ -3,6 +3,8 @@ out/
 release/
 resources/ffmpeg/*
 !resources/ffmpeg/VERSION.json
+resources/models/*
+!resources/models/models.json
 spike-out/
 *.log
 .env

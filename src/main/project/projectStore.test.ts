@@ -114,6 +114,26 @@ describe('ProjectStore', () => {
     expect(() => store.assetPath(p, 's', 'proxy', sessions)).toThrow()
   })
 
+  it('processedAudioPath: arquivo em generated/ por (asset, chave); chave inválida ou asset desconhecido lança', () => {
+    const base = { name: 'x', kind: 'audio' as const, durationUs: 1, status: 'ready' as const }
+    const p = { ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets: [{ ...base, id: 'm', source: { type: 'session' as const, sessionId: 's', stream: 'mic' as const } }] }
+    expect(store.processedAudioPath(p, 'm', 'dn-sh')).toBe(join(root, 'p-a', 'generated', 'm.audio-dn-sh.m4a'))
+    expect(() => store.processedAudioPath(p, 'm', '../x')).toThrow()
+    expect(() => store.processedAudioPath(p, 'zz', 'dn-sh')).toThrow()
+  })
+
+  it('withMediaStatus tira de processedAudio as chaves sem arquivo (outro PC) ou de parâmetros antigos', () => {
+    const p0 = mk('p-a', '2026-10-01T10:00:00.000Z')
+    store.create(p0)
+    writeFileSync(join(root, 'p-a', 'generated', 'm.audio-dn-sh.m4a'), 'x')
+    writeFileSync(join(root, 'p-a', 'generated', 'm.audio-dn-old.m4a'), 'x')
+    const base = { name: 'x', kind: 'audio' as const, durationUs: 1, status: 'ready' as const, source: { type: 'session' as const, sessionId: 's', stream: 'mic' as const } }
+    const p = { ...p0, assets: [{ ...base, id: 'm', processedAudio: ['dn-sh', 'ln-i16-tp1.5', 'dn-old'] }, { ...base, id: 'n', processedAudio: ['dn-sh'] }] }
+    const r = store.withMediaStatus(p)
+    expect(r.assets.map((a) => a.processedAudio)).toEqual([['dn-sh'], undefined])
+    expect(store.withMediaStatus(r)).toBe(r)
+  })
+
   it('create recusa sobrescrever um projeto existente', () => {
     const p = mk('p-a', '2026-10-01T10:00:00.000Z')
     store.create(p)

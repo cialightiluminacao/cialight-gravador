@@ -80,6 +80,7 @@ const api: IpcApi = {
   media: {
     import: (projectId, paths) => ipcRenderer.invoke(IPC.media.import, projectId, paths),
     enqueue: (projectId, assetId, opts) => ipcRenderer.invoke(IPC.media.enqueue, projectId, assetId, opts),
+    processAudio: (projectId, assetId, opts) => ipcRenderer.invoke(IPC.media.processAudio, projectId, assetId, opts),
     relink: (projectId, assetId, newPath) => ipcRenderer.invoke(IPC.media.relink, projectId, assetId, newPath),
     setOpenProject: (projectId) => ipcRenderer.invoke(IPC.media.setOpenProject, projectId),
     onProgress: (cb) => on(IPC.media.progress, cb),

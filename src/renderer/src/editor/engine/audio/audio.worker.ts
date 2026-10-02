@@ -7,6 +7,9 @@
 // (chave itemId) com a posição contínua entre blocos — o mesmo caminho no preview e na exportação.
 // Shuttle (J/K/L até 2×, só preview): o pedido traz `rate`; o bloco é mixado no tempo do shuttle (t/rate) com os
 // segmentos de shuttleSegments (velocidade × rate, esticados), e devolvido com o fromUs da timeline.
+// Redução de ruído/normalização: cada segmento lê a fonte do seu sourceKey — o original do asset ou a versão
+// pré-processada em generated/ (arquivo só de áudio, faixa única); `bypassProcessing` (A/B) força o original.
+import { splitAudioSourceKey } from '@shared/editor/audioProcess'
 import { planAudio, shuttleSegments, type AudioSegment } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
@@ -36,7 +39,7 @@ self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
   try {
     switch (m.t) {
       case 'project':
-        setProject(m.project, m.mediaUrls, m.useProxy)
+        setProject(m.project, m.mediaUrls, m.useProxy, !!m.bypassProcessing)
         break
       case 'render':
         enqueue(m, post)
@@ -71,30 +74,39 @@ function enqueue(m: Extract<AudioIn, { t: 'render' }>, reply: RenderMsg['reply']
   if (!busy) void pump()
 }
 
-function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean): void {
-  segments = planAudio(project)
+function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean, bypassProcessing: boolean): void {
+  segments = planAudio(project, { bypassProcessing })
   shuttle = new Map()
   stretch.retain(new Set(segments.filter((s) => s.mode === 'stretch').map((s) => s.itemId)))
-  const used = new Set(segments.filter((s) => s.mode !== 'mute').map((s) => s.assetId))
-  for (const [id, src] of sources) {
-    const want = used.has(id) ? sourceFor(project, id, mediaUrls, useProxy) : null
+  const used = new Set(segments.filter((s) => s.mode !== 'mute').map((s) => s.sourceKey))
+  for (const [key, src] of sources) {
+    const want = used.has(key) ? sourceFor(project, key, mediaUrls, useProxy) : null
     if (!want || want.url !== src.url || want.trackIndex !== src.trackIndex) {
       src.dispose()
-      sources.delete(id)
+      sources.delete(key)
     }
   }
-  for (const id of used) {
-    if (sources.has(id)) continue
-    const want = sourceFor(project, id, mediaUrls, useProxy)
-    if (want) sources.set(id, new AssetPcm(want.url, want.trackIndex, { stretch, onError: (message) => post({ t: 'error', message, assetId: id }) }))
+  for (const key of used) {
+    if (sources.has(key)) continue
+    const want = sourceFor(project, key, mediaUrls, useProxy)
+    const assetId = splitAudioSourceKey(key).assetId
+    if (want) sources.set(key, new AssetPcm(want.url, want.trackIndex, { stretch, onError: (message) => post({ t: 'error', message, assetId }) }))
   }
 }
 
-/** URL e faixa de áudio do asset. O índice a:N vale só para o arquivo original (proxy e intermediário levam só a:0). */
-function sourceFor(project: Project, assetId: string, mediaUrls: MediaUrls, useProxy: boolean): { url: string; trackIndex: number | null } | null {
+/**
+ * URL e faixa de áudio de uma fonte (sourceKey). O índice a:N vale só para o arquivo original (proxy e
+ * intermediário levam só a:0); a versão pré-processada é um arquivo só de áudio (faixa principal).
+ */
+function sourceFor(project: Project, sourceKey: string, mediaUrls: MediaUrls, useProxy: boolean): { url: string; trackIndex: number | null } | null {
+  const { assetId, processKey } = splitAudioSourceKey(sourceKey)
   const asset = project.assets.find((a) => a.id === assetId)
   const u = mediaUrls[assetId]
   if (!asset || !u) return null
+  if (processKey) {
+    const url = u.audio?.[processKey]
+    return url ? { url, trackIndex: null } : null
+  }
   const multi = asset.audioTrackIndex !== undefined
   if (useProxy && u.proxy && !multi) return { url: u.proxy, trackIndex: null }
   if (asset.intermediate) return { url: u.original, trackIndex: multi ? 0 : null }
@@ -143,7 +155,7 @@ function prepare(segs: AudioSegment[], fromUs: Us, frames: number, stale: () => 
   const blockEnd = fromUs + Math.round((frames * 1e6) / SR)
   const jobs: Promise<void>[] = []
   for (const seg of segs) {
-    const src = seg.mode === 'mute' ? undefined : sources.get(seg.assetId)
+    const src = seg.mode === 'mute' ? undefined : sources.get(seg.sourceKey)
     const a = Math.max(fromUs, seg.startUs)
     const b = Math.min(blockEnd, seg.startUs + seg.durationUs)
     if (!src || b <= a) continue

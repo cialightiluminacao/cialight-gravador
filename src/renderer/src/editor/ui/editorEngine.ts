@@ -72,16 +72,19 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
   // store → workers, no máximo uma vez por quadro de tela
   let raf = 0
   let lastProject: unknown = null
+  let lastBypass = false
   let lastSelection: unknown = null
   const flush = (): void => {
     raf = 0
     const s = useEditorStore.getState()
     if (!s.project) return
-    if (s.project !== lastProject) {
-      lastProject = s.project
+    if (s.project !== lastProject || s.audioBypass !== lastBypass) {
       const urls = mediaUrlsFor(s.project, 'preview')
-      render.setProject(s.project, urls, true)
-      audio.setProject(s.project, urls, true)
+      if (s.project !== lastProject) render.setProject(s.project, urls, true)
+      // comparar A/B (botão segurado no inspetor de áudio): toca o original sem ruído/normalização
+      audio.setProject(s.project, urls, true, s.audioBypass)
+      lastProject = s.project
+      lastBypass = s.audioBypass
     }
     if (s.selection !== lastSelection) {
       lastSelection = s.selection
@@ -95,7 +98,7 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
   }
   const unsub = useEditorStore.subscribe((s, prev) => {
     if (prev.playing && !s.playing) render.idle()
-    if (s.project !== prev.project || s.selection !== prev.selection || (!s.playing && s.playheadUs !== prev.playheadUs)) schedule()
+    if (s.project !== prev.project || s.audioBypass !== prev.audioBypass || s.selection !== prev.selection || (!s.playing && s.playheadUs !== prev.playheadUs)) schedule()
   })
   schedule()
 

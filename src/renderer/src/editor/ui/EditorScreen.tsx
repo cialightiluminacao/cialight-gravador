@@ -8,6 +8,8 @@ import { shortcutFor } from '../shortcuts'
 import { createEditorEngine, type EditorEngine } from './editorEngine'
 import { runShortcut, seekTo } from './editorActions'
 import { enqueuePending, importPaths } from './mediaImport'
+import { startAudioProcessing } from './audioProcessing'
+import { audioSourceKey } from '@shared/editor/audioProcess'
 import { TopBar } from './TopBar'
 import { ExportDialog } from './ExportDialog'
 import { MediaBin } from './MediaBin'
@@ -65,7 +67,13 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     // QA (fora do pacote): store e motor acessíveis por CDP
     if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
     const offProgress = api.media.onProgress((j) => {
-      if (j.projectId.toLowerCase() === projectId.toLowerCase()) useEditorStore.getState().setIngest(j.assetId, { step: j.step, percent: j.percent })
+      if (j.projectId.toLowerCase() !== projectId.toLowerCase()) return
+      const st = useEditorStore.getState()
+      // pré-processamento de áudio: progresso por asset~chave (quem encerra é o pedido em audioProcessing.ts)
+      if (j.step === 'audioProcess' && j.key) {
+        const id = audioSourceKey(j.assetId, j.key)
+        if (st.audioJobs[id] && j.percent < 100) st.setAudioJob(id, { percent: j.percent })
+      } else st.setIngest(j.assetId, { step: j.step, percent: j.percent })
     })
     const offDone = api.media.onDone((d) => {
       if (d.projectId.toLowerCase() !== projectId.toLowerCase()) return
@@ -93,13 +101,17 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       await flushAutosave()
     })
     void api.app.setEditorMode(true)
+    let stopAudioProcessing: (() => void) | null = null
     void (async () => {
       try {
         const project = await api.project.load(projectId)
         if (!alive) return
         useEditorStore.getState().open(project)
         await api.media.setOpenProject(project.id)
-        if (alive) enqueuePending(project.id, project.assets)
+        if (!alive) return
+        enqueuePending(project.id, project.assets)
+        // redução de ruído/normalização pedidas e sem o arquivo em cache (ex.: projeto vindo de outro PC): reprocessa
+        stopAudioProcessing = startAudioProcessing(project.id)
       } catch (e) {
         if (!alive) return
         toast.error(`Não foi possível abrir o projeto: ${ipcErrorMessage(e)}`)
@@ -109,6 +121,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
 
     return () => {
       alive = false
+      stopAudioProcessing?.()
       offFlush()
       offProgress()
       offDone()

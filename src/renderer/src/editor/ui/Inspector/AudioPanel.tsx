@@ -1,13 +1,19 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
+import { AlertTriangle, Check, Headphones, Loader2 } from 'lucide-react'
 import type { MediaItem } from '@shared/editor/project'
-import { Slider, Toggle } from '@/components/ui/primitives'
+import { audioProcessKey, audioSourceKey } from '@shared/editor/audioProcess'
+import { Progress, Slider, Toggle } from '@/components/ui/primitives'
+import { cn } from '@/lib/cn'
 import { useEditorStore } from '../../state/editorStore'
+import { retryAudioProcessing } from '../audioProcessing'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
 import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
 
-// Inspetor de áudio do item de mídia: ativar, volume em dB (−60…+12; −60 = mudo) e fades.
+// Inspetor de áudio do item de mídia: ativar, volume em dB (−60…+12; −60 = mudo), fades e o tratamento da voz
+// (redução de ruído e normalização a −16 LUFS, pré-processados em cache — ver audioProcessing.ts), com o estado do
+// processamento e a comparação A/B (segurar o botão toca o original).
 
 const MIN_DB = -60
 const MAX_DB = 12
@@ -58,6 +64,7 @@ export function AudioPanel({ item }: { item: MediaItem }): React.JSX.Element {
           <span>+12</span>
         </div>
       </PanelSection>
+      <VoicePanel item={item} />
       <PanelSection title="Fade de áudio">
         <div className="grid grid-cols-2 gap-x-3">
           <NumberField compact label="Entrada" value={usToSec2(a.fadeInUs)} min={0} max={halfSec} precision={2} step={0.01} unit="s" disabled={!a.enabled} onChange={(n) => editItemTransient<MediaItem>(id, (d) => { d.audio.fadeInUs = sec2ToUs(n) })} />
@@ -65,5 +72,103 @@ export function AudioPanel({ item }: { item: MediaItem }): React.JSX.Element {
         </div>
       </PanelSection>
     </>
+  )
+}
+
+function OptionRow({ label, disabled, children }: { label: string; disabled?: boolean; children: React.ReactNode }): React.JSX.Element {
+  return (
+    <div className={cn('flex min-h-7 items-center justify-between gap-2 text-[11px]', disabled && 'opacity-50')}>
+      <span className="min-w-0 truncate text-muted">{label}</span>
+      {children}
+    </div>
+  )
+}
+
+/** Redução de ruído / normalização do item: switches, estado do processamento e A/B segurando o botão. */
+function VoicePanel({ item }: { item: MediaItem }): React.JSX.Element {
+  const a = item.audio
+  const id = item.id
+  const projectId = useEditorStore((s) => s.project?.id ?? '')
+  const asset = useEditorStore((s) => s.project?.assets.find((x) => x.id === item.assetId))
+  const key = audioProcessKey({ denoise: a.denoise, normalize: a.normalize })
+  const jobId = key ? audioSourceKey(item.assetId, key) : null
+  const job = useEditorStore((s) => (jobId ? s.audioJobs[jobId] : undefined))
+  const bypass = useEditorStore((s) => s.audioBypass)
+  const setBypass = useEditorStore((s) => s.setAudioBypass)
+  const ready = !!key && !!asset?.processedAudio?.includes(key)
+  // soltar o botão fora dele/trocar de item: o A/B nunca fica preso no original
+  useEffect(() => () => useEditorStore.getState().setAudioBypass(false), [id])
+
+  const hold = (on: boolean): void => {
+    if (on !== useEditorStore.getState().audioBypass) setBypass(on)
+  }
+  return (
+    <PanelSection title="Voz">
+      <OptionRow label="Reduzir ruído (voz)" disabled={!a.enabled}>
+        <Toggle size="sm" checked={a.denoise} disabled={!a.enabled} onCheckedChange={(on) => editItem<MediaItem>(id, (d) => { d.audio.denoise = on })} aria-label="Reduzir ruído (voz)" />
+      </OptionRow>
+      <OptionRow label="Normalizar volume (−16 LUFS)" disabled={!a.enabled}>
+        <Toggle size="sm" checked={a.normalize} disabled={!a.enabled} onCheckedChange={(on) => editItem<MediaItem>(id, (d) => { d.audio.normalize = on })} aria-label="Normalizar volume (−16 LUFS)" />
+      </OptionRow>
+      {key ? (
+        <div className="space-y-1.5 pt-0.5" data-audio-process-status={ready ? 'ready' : job && 'error' in job ? 'error' : 'processing'}>
+          {ready ? (
+            <p className="flex items-center gap-1.5 text-[11px] text-ok">
+              <Check className="h-3.5 w-3.5" /> Áudio tratado pronto
+            </p>
+          ) : job && 'error' in job ? (
+            <div className="flex items-start gap-1.5 text-[11px] text-warn" role="alert">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 flex-1">
+                Falha ao processar; tocando o original.{' '}
+                <button type="button" className="underline underline-offset-2 hover:text-fg" onClick={() => retryAudioProcessing(projectId, jobId!)}>
+                  Tentar de novo
+                </button>
+              </span>
+            </div>
+          ) : (
+            <>
+              <p className="flex items-center gap-1.5 text-[11px] text-muted">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {job ? `Processando… ${Math.round(job.percent)}%` : 'Aguardando a mídia…'} <span className="text-muted-2">(tocando o original)</span>
+              </p>
+              {job ? <Progress value={job.percent} tone="info" className="h-1" /> : null}
+            </>
+          )}
+          <button
+            type="button"
+            disabled={!ready}
+            aria-pressed={bypass}
+            className={cn(
+              'flex h-7 w-full select-none items-center justify-center gap-1.5 rounded-lg border text-[11px] font-semibold transition-colors disabled:pointer-events-none disabled:opacity-40',
+              bypass ? 'border-info/50 bg-info/15 text-info' : 'border-border-strong text-fg-2 hover:bg-white/5'
+            )}
+            title="Segure para ouvir o áudio original; solte para voltar ao tratado"
+            onPointerDown={(e) => {
+              hold(true)
+              // captura: soltar fora do botão também encerra a comparação
+              try {
+                e.currentTarget.setPointerCapture(e.pointerId)
+              } catch {
+                // ponteiro já solto/inexistente: o pointerup/blur encerram
+              }
+            }}
+            onPointerUp={() => hold(false)}
+            onPointerCancel={() => hold(false)}
+            onLostPointerCapture={() => hold(false)}
+            onKeyDown={(e) => {
+              if (e.key === ' ' || e.key === 'Enter') {
+                e.preventDefault()
+                hold(true)
+              }
+            }}
+            onKeyUp={() => hold(false)}
+            onBlur={() => hold(false)}
+          >
+            <Headphones className="h-3.5 w-3.5" /> {bypass ? 'Ouvindo o original' : 'Segure para comparar (A/B)'}
+          </button>
+        </div>
+      ) : null}
+    </PanelSection>
   )
 }

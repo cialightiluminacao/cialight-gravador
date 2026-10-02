@@ -114,6 +114,30 @@ describe('editorStore', () => {
     expect(st().project).toBe(st().history.present)
   })
 
+  it('markAudioProcessed acrescenta a chave pronta (união) em todo o histórico, sem entrada de undo', () => {
+    st().apply((p) => ({ ...p, assets: [{ ...asset('x'), processedAudio: ['dn-sh'] }] }))
+    st().apply((p) => addMarker(p, 1))
+    const pastLen = st().history.past.length
+    st().markAudioProcessed('x', 'ln-i16-tp1.5')
+    st().markAudioProcessed('x', 'dn-sh')
+    expect(st().history.past).toHaveLength(pastLen)
+    expect(st().project!.assets[0].processedAudio).toEqual(['dn-sh', 'ln-i16-tp1.5'])
+    st().undo()
+    expect(st().project!.assets[0].processedAudio).toEqual(['dn-sh', 'ln-i16-tp1.5'])
+    st().markAudioProcessed('zz', 'dn-sh') // asset removido nesse meio tempo: ignora
+  })
+
+  it('estado do processamento de áudio e do A/B fica fora do projeto', () => {
+    const p = st().project
+    st().setAudioJob('x~dn-sh', { percent: 30 })
+    st().setAudioBypass(true)
+    expect(st().audioJobs).toEqual({ 'x~dn-sh': { percent: 30 } })
+    expect(st().audioBypass).toBe(true)
+    st().setAudioJob('x~dn-sh', null)
+    expect(st().audioJobs).toEqual({})
+    expect(st().project).toBe(p)
+  })
+
   it('setIngest adiciona e remove', () => {
     st().setIngest('a', { step: 'proxy', percent: 10 })
     expect(st().ingest.a).toEqual({ step: 'proxy', percent: 10 })

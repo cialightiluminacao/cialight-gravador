@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { toast } from 'sonner'
 import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
+import { mergeProcessedAudio } from '@shared/editor/audioProcess'
 import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
 import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from './zoom'
 import { ipcErrorMessage } from '@/lib/ipcError'
@@ -10,6 +11,8 @@ import { ipcErrorMessage } from '@/lib/ipcError'
 // seleção, viewport da timeline e autosave. Operações puras vivem em @shared/editor/ops.
 
 export interface IngestProgress { step: string; percent: number }
+/** Pré-processamento de áudio (redução de ruído/normalização) de um par asset~chave: progresso ou falha. */
+export type AudioJobState = { percent: number } | { error: string }
 
 export interface EditorState {
   history: History<Project>
@@ -29,6 +32,10 @@ export interface EditorState {
   outUs: Us | null
   txBase: Project | null // transação aberta
   ingest: Record<string, IngestProgress>
+  /** Processamentos de áudio em curso/falhos por `assetId~chave` (audioProcess.audioSourceKey). */
+  audioJobs: Record<string, AudioJobState>
+  /** Comparar A/B (botão segurado): o preview toca o original em vez do áudio processado. */
+  audioBypass: boolean
   canUndo: boolean
   canRedo: boolean
 
@@ -39,6 +46,10 @@ export interface EditorState {
   /** Aplica patch em asset SEM entrada de histórico (resultado de ingest); corrige past/present/future. */
   applyAssetPatch(assetId: string, patch: Partial<Asset>): void
   setIngest(assetId: string, progress: IngestProgress | null): void
+  /** Versão de áudio processada pronta: acrescenta a chave a `asset.processedAudio` (sem histórico, como a ingestão). */
+  markAudioProcessed(assetId: string, key: string): void
+  setAudioJob(id: string, state: AudioJobState | null): void
+  setAudioBypass(on: boolean): void
   begin(): void
   commitTx(): void
   cancelTx(): void
@@ -82,6 +93,8 @@ const INITIAL = {
   outUs: null,
   txBase: null,
   ingest: {} as Record<string, IngestProgress>,
+  audioJobs: {} as Record<string, AudioJobState>,
+  audioBypass: false,
 }
 
 export const useEditorStore = create<EditorState>()((set, get) => ({
@@ -130,6 +143,23 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     }
     set({ ...derive(h), txBase: txBase ? fix(txBase) : null, dirty: true })
   },
+
+  markAudioProcessed: (assetId, key) => {
+    const a = get().project?.assets.find((x) => x.id === assetId)
+    if (!a) return
+    const processedAudio = mergeProcessedAudio(a.processedAudio, [key])
+    if (processedAudio !== a.processedAudio) get().applyAssetPatch(assetId, { processedAudio })
+  },
+
+  setAudioJob: (id, state) =>
+    set((s) => {
+      const audioJobs = { ...s.audioJobs }
+      if (state) audioJobs[id] = state
+      else delete audioJobs[id]
+      return { audioJobs }
+    }),
+
+  setAudioBypass: (on) => set({ audioBypass: on }),
 
   setIngest: (assetId, progress) =>
     set((s) => {

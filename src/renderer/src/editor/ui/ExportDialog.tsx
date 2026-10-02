@@ -3,7 +3,7 @@ import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAl
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
 import { contentEndUs, findItem } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
-import { planAudio } from '@shared/editor/audioPlan'
+import { audioProcessPending, planAudio } from '@shared/editor/audioPlan'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, Progress, Segmented } from '@/components/ui/primitives'
 import { PathField } from '@/components/ui/PathField'
@@ -65,7 +65,10 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const size = outputSize(preset, project.canvas)
   const fps = project.canvas.fps
   const videoBps = presetVideoBitrate(preset, fps, durationUs)
-  const hasAudio = planAudio(project).some((s) => s.mode !== 'mute')
+  const audioSegs = planAudio(project)
+  const hasAudio = audioSegs.some((s) => s.mode !== 'mute')
+  // redução de ruído/normalização ainda processando: a exportação sairia com o original nesses trechos
+  const audioPending = audioSegs.some((s) => s.mode !== 'mute' && s.startUs < range.toUs && s.startUs + s.durationUs > range.fromUs && audioProcessPending(s))
   const audioBps = hasAudio ? AUDIO_KBPS * 1000 : 0
   const estimate = estimateBytes(videoBps, audioBps, durationUs)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
@@ -221,6 +224,13 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                     </li>
                   ))}
                 </ul>
+              </div>
+            ) : null}
+
+            {audioPending ? (
+              <div className="flex items-start gap-1.5 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2.5 text-[12px] text-warn" role="status" data-audio-pending="">
+                <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                O tratamento de voz (redução de ruído/normalização) ainda está sendo processado. Exportando agora, esses trechos saem com o áudio original.
               </div>
             ) : null}
 

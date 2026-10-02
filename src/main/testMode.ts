@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import { createHash } from 'crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, join } from 'path'
+import { execFileSync } from 'child_process'
 import type { ExportOptions, ExportPresetId, Session } from '@shared/types'
 import { PRESET_ORDER } from '@shared/presets/presets'
 import type { SessionStore } from './session/sessionStore'
@@ -24,6 +25,8 @@ import { log } from './log'
 import { testEditorRender } from './editorTestMode'
 import { testEditorExport } from './editorExportTestMode'
 import { isFastStart, makeSyntheticSession } from './testFixtures'
+import { rnnoiseDir } from './export/ffmpegPath'
+import { DENOISE_DELAY_SAMPLES } from './media/audioProcess'
 
 // Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render|editor-export). Roda no Electron
 // real com o ffmpeg embutido; escreve um relatório JSON em test-out/ e sai com
@@ -261,6 +264,150 @@ async function decodeInRenderer(store: SessionStore, files: { name: string; path
   })
 }
 
+// ---- redução de ruído e normalização (parte do CIALIGHT_TEST=ingest) ----
+
+const VOICE_TEXT = 'Olá, este é um teste de redução de ruído. A voz deve continuar clara depois do processamento.'
+
+/**
+ * Voz sintética: a do Windows (System.Speech, pt-BR se houver) em WAV mono 48 kHz; sem ela, uma "vogal" harmônica
+ * modulada em sílabas (o RNNoise trata tom puro como ruído, então aí só vale a queda do ruído nas pausas).
+ */
+function synthVoice(out: string): 'tts' | 'harmonic' {
+  const script = [
+    'Add-Type -AssemblyName System.Speech',
+    '$s = New-Object System.Speech.Synthesis.SpeechSynthesizer',
+    "$v = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -eq 'pt-BR' } | Select-Object -First 1",
+    'if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }',
+    '$f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(48000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)',
+    `$s.SetOutputToWaveFile('${out.replace(/'/g, "''")}', $f)`,
+    `$s.Speak('${VOICE_TEXT}')`,
+    '$s.Dispose()'
+  ].join('; ')
+  try {
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 60_000 })
+    if (existsSync(out) && statSync(out).size > 48_000 * 2) return 'tts'
+  } catch (e) {
+    log.warn('voz sintética do Windows indisponível; usando a harmônica', e)
+  }
+  return 'harmonic'
+}
+
+/** Média RMS (dBFS, volumedetect) de [from, to) s do 1º stream de áudio. */
+async function meanDb(file: string, fromS: number, toS: number): Promise<number> {
+  const r = await runFfmpeg(['-hide_banner', '-nostdin', '-i', file, '-map', '0:a:0', '-af', `atrim=${fromS}:${toS},volumedetect`, '-f', 'null', '-progress', 'pipe:1', '-nostats', '-'], { label: 'volumedetect' })
+  const m = /mean_volume:\s*(-?[\d.]+|-inf) dB/.exec(r.stderrTail)
+  return m ? (m[1] === '-inf' ? -120 : Number(m[1])) : NaN
+}
+
+/** PCM mono s16 48 kHz do 1º stream de áudio, decodificado pelo ffmpeg. */
+async function pcmMono(file: string, raw: string): Promise<Int16Array> {
+  await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-map', '0:a:0', '-ac', '1', '-ar', '48000', '-f', 's16le', '-progress', 'pipe:1', '-nostats', raw], { label: 'pcm' })
+  const b = readFileSync(raw)
+  return new Int16Array(b.buffer.slice(b.byteOffset, b.byteOffset + (b.length & ~1)))
+}
+
+/** Atraso (amostras) de `b` em relação a `a` pela correlação cruzada em ±maxLag. */
+function lagOf(a: Int16Array, b: Int16Array, maxLag = 2000): number {
+  let best = -Infinity
+  let lag = 0
+  const n = Math.min(a.length, b.length) - maxLag
+  for (let l = -maxLag; l <= maxLag; l++) {
+    let s = 0
+    for (let i = maxLag; i < n; i += 2) s += a[i] * b[i + l]
+    if (s > best) {
+      best = s
+      lag = l
+    }
+  }
+  return lag
+}
+
+type MkAsset = (id: string, path: string, info: MediaInfo, decodable?: boolean) => Asset
+
+/**
+ * Voz sintética + ruído branco a −30 dBFS: o denoise derruba o ruído nas pausas em ≥ 10 dB (mantendo a voz, com a
+ * do Windows) sem deslocar o áudio; a normalização leva −30 LUFS a −16 ±1 (estéreo e mono tocado nos dois canais);
+ * a 2ª chamada da mesma chave vem do cache; nenhum .part sobra.
+ */
+async function testVoiceProcessing(queue: IngestQueue, mk: MkAsset, gen: (args: string[], label: string) => Promise<unknown>, dir: string, pdir: string, projectId: string, failures: string[]): Promise<void> {
+  const tts = join(dir, 'voz-tts.wav')
+  const voice = join(dir, 'voz.wav')
+  const noisy = join(dir, 'voz-ruido.wav')
+  const kind = synthVoice(tts)
+  // pausas conhecidas: 1 s antes e 2 s depois da fala (harmônica: fala em 1–3 s e 5–7 s de 9 s)
+  let speech: [number, number]
+  let pauses: [number, number][]
+  if (kind === 'tts') {
+    await gen(['-i', tts, '-af', 'adelay=1000,apad=pad_dur=2', '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', voice], 'voz: pausas')
+    const d = ((await probe(voice)).durationUs ?? 0) / 1e6
+    speech = [1.3, d - 2.5]
+    pauses = [[0.1, 0.9], [d - 1.8, d - 0.1]]
+  } else {
+    const v = '0.3*(0.6+0.4*sin(2*PI*4*t))*(sin(2*PI*220*t)+0.5*sin(4*PI*220*t)+0.25*sin(6*PI*220*t))*(between(t,1,3)+between(t,5,7))'
+    await gen(['-f', 'lavfi', '-i', `aevalsrc='${v}':s=48000:d=9`, '-c:a', 'pcm_s16le', voice], 'voz harmônica')
+    speech = [1.2, 2.8]
+    pauses = [[0.1, 0.9], [3.4, 4.6]]
+  }
+  const dur = ((await probe(voice)).durationUs ?? 0) / 1e6
+  // ruído branco uniforme de amplitude a: RMS = a/√3 → −30 dBFS com a = √3·10^(−30/20)
+  await gen(['-i', voice, '-f', 'lavfi', '-i', `anoisesrc=color=white:r=48000:a=${(Math.sqrt(3) * 10 ** (-30 / 20)).toFixed(5)}:d=${dur}:seed=7`, '-filter_complex', '[0][1]amix=inputs=2:normalize=0:duration=first', '-ac', '1', '-c:a', 'pcm_s16le', noisy], 'voz + ruído −30 dB')
+  const aNoisy: Asset = { ...mk('a_noisy', noisy, await probe(noisy)), status: 'ready' }
+
+  const t0 = Date.now()
+  const dn = await queue.processAudio(projectId, aNoisy, { denoise: true, normalize: false })
+  const dnFile = join(pdir, ...dn.rel.split('/'))
+  console.log(`denoise em ${((Date.now() - t0) / 1000).toFixed(1)} s (voz ${kind})`)
+  ok(dn.key === 'dn-sh' && existsSync(dnFile), `denoise: arquivo gerado (${dn.rel})`, failures)
+  for (const [a, b] of pauses) {
+    const before = await meanDb(noisy, a, b)
+    const after = await meanDb(dnFile, a, b)
+    ok(before - after >= 10, `denoise: ruído na pausa ${a.toFixed(1)}–${b.toFixed(1)} s cai ≥ 10 dB (${before} → ${after} dB)`, failures)
+  }
+  const speechBefore = await meanDb(voice, speech[0], speech[1])
+  const speechAfter = await meanDb(dnFile, speech[0], speech[1])
+  console.log(`voz (${kind}): ${speechBefore} dB limpa → ${speechAfter} dB após o denoise`)
+  if (kind === 'tts') ok(Math.abs(speechAfter - speechBefore) <= 3, `denoise: voz preservada ±3 dB (${speechBefore} → ${speechAfter} dB)`, failures)
+  // mesma linha do tempo do original: o atraso do arnndn (480 amostras) é compensado
+  const lag = lagOf(await pcmMono(voice, join(dir, 'voz.s16')), await pcmMono(dnFile, join(dir, 'voz-dn.s16')))
+  ok(Math.abs(lag) <= 2, `denoise: sem deslocamento no tempo (${lag} amostras; atraso bruto do arnndn ${DENOISE_DELAY_SAMPLES})`, failures)
+  const mtime = statSync(dnFile).mtimeMs
+  const t1 = Date.now()
+  const again = await queue.processAudio(projectId, aNoisy, { denoise: true, normalize: false })
+  const cachedMs = Date.now() - t1
+  ok(again.rel === dn.rel && cachedMs < 500 && statSync(dnFile).mtimeMs === mtime, `denoise: 2ª vez vem do cache (${cachedMs} ms)`, failures)
+
+  // normalização: voz estéreo e mono a −30 LUFS → −16 ±1 (o mono é medido como tocado: nos dois canais)
+  const durUs = Math.round(dur * 1e6)
+  const stereoSrc = join(dir, 'voz-estereo.wav')
+  const stereo30 = join(dir, 'voz-30lufs-estereo.wav')
+  const mono30 = join(dir, 'voz-30lufs-mono.wav')
+  await gen(['-i', voice, '-af', 'pan=stereo|c0=c0|c1=c0', '-c:a', 'pcm_s16le', stereoSrc], 'voz estéreo')
+  const l0 = (await buildLoudness(stereoSrc, durUs)).integrated
+  await gen(['-i', stereoSrc, '-af', `volume=${(-30 - l0).toFixed(2)}dB`, '-c:a', 'pcm_s16le', stereo30], 'voz −30 LUFS estéreo')
+  await gen(['-i', stereo30, '-af', 'pan=mono|c0=c0', '-c:a', 'pcm_s16le', mono30], 'voz −30 LUFS mono')
+  const lIn = await buildLoudness(stereo30, durUs)
+  ok(Math.abs(lIn.integrated + 30) <= 0.5, `normalização: entrada a −30 LUFS (${lIn.integrated})`, failures)
+  const upmixed = async (file: string): Promise<{ integrated: number; truePeak: number }> => {
+    const st = join(dir, `${basename(file)}.estereo.wav`)
+    await gen(['-i', file, '-af', 'pan=stereo|c0=c0|c1=c0', '-c:a', 'pcm_s16le', st], 'upmix')
+    return buildLoudness(st, durUs)
+  }
+  for (const [id, file] of [['a_ln_st', stereo30], ['a_ln_mono', mono30]] as const) {
+    const a: Asset = { ...mk(id, file, await probe(file)), status: 'ready' }
+    const r = await queue.processAudio(projectId, a, { denoise: false, normalize: true })
+    const out = join(pdir, ...r.rel.split('/'))
+    const l = id === 'a_ln_st' ? await buildLoudness(out, durUs) : await upmixed(out)
+    ok(r.key === 'ln-i16-tp1.5' && Math.abs(l.integrated + 16) <= 1 && l.truePeak <= -1, `normalização ${id === 'a_ln_st' ? 'estéreo' : 'mono'}: −30 → ${l.integrated} LUFS (alvo −16 ±1), TP ${l.truePeak}`, failures)
+  }
+  // as duas: o ruído sai antes da normalização
+  const both = await queue.processAudio(projectId, aNoisy, { denoise: true, normalize: true })
+  const bothFile = join(pdir, ...both.rel.split('/'))
+  const lb = existsSync(bothFile) ? await upmixed(bothFile) : null
+  ok(both.key === 'dn-sh_ln-i16-tp1.5' && !!lb && Math.abs(lb.integrated + 16) <= 1, `denoise + normalização: ${lb?.integrated} LUFS`, failures)
+  const parts = readdirSync(join(pdir, 'generated')).filter((n) => n.includes('.part'))
+  ok(parts.length === 0, `processar áudio: sem .part em generated/ (${parts.join(', ')})`, failures)
+}
+
 async function testIngest(store: SessionStore): Promise<number> {
   const failures: string[] = []
   const hashBefore = settingsHash()
@@ -312,6 +459,7 @@ async function testIngest(store: SessionStore): Promise<number> {
     projectFile: (pid, rel) => projects.filePath(pid, rel),
     resolveInput: (_pid, a) => ({ path: a.source.type === 'file' ? a.source.path : '' }),
     encoders: () => [encoder],
+    rnnoiseDir,
     log
   })
   const steps = new Set<string>()
@@ -478,6 +626,8 @@ async function testIngest(store: SessionStore): Promise<number> {
   const cancelled = buildSpeech(twoTracks, join(dir, 'cancelada.speech.json'), 10_000_000, { map: '0:a:0', signal: ctl.signal }).then(() => false, (e) => e instanceof Error && e.name === 'CancelledError')
   ctl.abort()
   ok(await cancelled && !readdirSync(dir).some((n) => n.includes('cancelada')), 'análise de fala cancelada: sem resultado nem .part', failures)
+
+  await testVoiceProcessing(queue, mk, gen, dir, pdir, project.id, failures)
 
   // proxy com cada encoder do cache de probe (somente leitura; nada é gravado nas configurações)
   for (const enc of cached?.available ?? []) {

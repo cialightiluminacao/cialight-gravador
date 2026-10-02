@@ -1,5 +1,6 @@
 // Plano de áudio: segmentos com envelope de ganho em tempo absoluto de timeline. Puro.
 import { evalAnim } from './anim'
+import { audioProcessKey, audioSourceKey, parseAudioProcessKey, type AudioProcessOpts } from './audioProcess'
 import type { Project, Us } from './project'
 
 export interface GainPoint { tUs: Us; gain: number } // linear entre pontos
@@ -13,7 +14,22 @@ export interface AudioSegment {
   speed: number; reverse: boolean; preservePitch: boolean; mode: AudioMode; gain: GainPoint[]
   /** "Manter áudio acelerado" do item: acima de 4× continua soando (também no shuttle). */
   keepFastAudio: boolean
+  /**
+   * Fonte de PCM que o mixer lê (audioProcess.audioSourceKey): o original (assetId) ou a versão pré-processada
+   * (assetId~chave) quando o item pede redução de ruído/normalização e o arquivo gerado está pronto.
+   */
+  sourceKey: string
+  /** Chave do pré-processamento pedido pelo item (null = nenhum); pedida e ainda não pronta = "processando". */
+  processKey: string | null
 }
+
+export interface PlanAudioOpts {
+  /** Comparar A/B: lê o original mesmo com o processado pronto. */
+  bypassProcessing?: boolean
+}
+
+/** O item pede pré-processamento que ainda não está pronto (o mixer toca o original enquanto isso). */
+export const audioProcessPending = (s: AudioSegment): boolean => s.processKey !== null && s.sourceKey === s.assetId
 
 /** Acima disso, com tom preservado, o áudio fica mudo (salvo "Manter áudio acelerado"). */
 export const MAX_STRETCH_SPEED = 4
@@ -31,7 +47,7 @@ export function audioMode(speed: number, reverse: boolean, preservePitch: boolea
 }
 
 /** Itens de mídia com áudio habilitado em faixas não mudas cujo asset tem áudio (imagens e freeze ficam de fora). Itens mudos pela velocidade entram com mode 'mute'. */
-export function planAudio(p: Project): AudioSegment[] {
+export function planAudio(p: Project, opts: PlanAudioOpts = {}): AudioSegment[] {
   const out: AudioSegment[] = []
   for (const track of p.tracks) {
     if (track.muted) continue
@@ -53,14 +69,31 @@ export function planAudio(p: Project): AudioSegment[] {
         if (fout > 0 && dur - local < fout) g *= (dur - local) / fout
         return { tUs: item.startUs + local, gain: Math.max(0, g) }
       })
+      const processKey = audioProcessKey({ denoise: a.denoise, normalize: a.normalize })
+      const ready = processKey !== null && !opts.bypassProcessing && (asset.processedAudio ?? []).includes(processKey)
       out.push({
-        itemId: item.id, assetId: item.assetId, startUs: item.startUs, durationUs: dur, srcInUs: item.inUs,
+        itemId: item.id, assetId: item.assetId, sourceKey: audioSourceKey(item.assetId, ready ? processKey : null), processKey, startUs: item.startUs, durationUs: dur, srcInUs: item.inUs,
         speed: item.speed, reverse: item.reverse, preservePitch: a.preservePitch, keepFastAudio: a.keepFastAudio ?? false,
         mode: audioMode(item.speed, item.reverse, a.preservePitch, a.keepFastAudio ?? false), gain
       })
     }
   }
   return out
+}
+
+/**
+ * Pré-processamentos que o plano pede e ainda não estão prontos, um por (asset, chave), só de assets prontos: o
+ * editor os pede ao main (media.processAudio) — inclusive ao abrir o projeto em outro PC sem o cache.
+ */
+export function pendingAudioProcessing(p: Project): { assetId: string; key: string; opts: AudioProcessOpts }[] {
+  const out = new Map<string, { assetId: string; key: string; opts: AudioProcessOpts }>()
+  for (const s of planAudio(p)) {
+    if (!audioProcessPending(s) || s.processKey === null) continue
+    const id = audioSourceKey(s.assetId, s.processKey)
+    if (out.has(id) || p.assets.find((a) => a.id === s.assetId)?.status !== 'ready') continue
+    out.set(id, { assetId: s.assetId, key: s.processKey, opts: parseAudioProcessKey(s.processKey)! })
+  }
+  return [...out.values()]
 }
 
 /** Shuttle (J/K/L) com som: até 2× para frente. Acima disso ou para trás o preview fica mudo. */
