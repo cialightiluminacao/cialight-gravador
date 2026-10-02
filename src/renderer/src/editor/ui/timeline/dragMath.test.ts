@@ -110,8 +110,9 @@ describe('planMove', () => {
 })
 
 describe('gesto e transições', () => {
-  // useTimelineDrag recalcula cada evento a partir de txBase (o projeto do início do gesto): afastar e voltar no mesmo
-  // gesto não perde a transição (só o estado final do gesto conta)
+  // A garantia é do hook: useTimelineDrag recalcula cada evento a partir de txBase (o projeto do início do gesto),
+  // nunca do present transitório. Aqui: o planejamento a partir da mesma base, depois de um evento que removeu a
+  // transição, devolve um projeto (não nulo) que ainda a tem — afastar e voltar no mesmo gesto não a perde
   function encostados(): { base: Project; v0: string; v1: string } {
     const { p, v0, v1 } = fixture()
     const base = ops.addTransition(ops.moveItems(p, [v1], -2 * S), v1, 'crossfade', S)
@@ -123,14 +124,20 @@ describe('gesto e transições', () => {
     const away = planMove(base, { draggedId: v1, ids: [v1], deltaUs: 2 * S, zone: null, includeLinked: true, snap: noSnap, preview: true })
     expect(trIn(away.project!, v1)).toBeUndefined()
     const back = planMove(base, { draggedId: v1, ids: [v1], deltaUs: 0, zone: null, includeLinked: true, snap: noSnap, preview: true })
-    expect(trIn(back.project ?? base, v1)).toEqual({ kind: 'crossfade', durationUs: S })
+    expect(back.error).toBeNull()
+    expect(back.project).not.toBeNull()
+    expect(back.project).not.toBe(away.project)
+    expect(trIn(back.project!, v1)).toEqual({ kind: 'crossfade', durationUs: S })
   })
   it('encolher A e voltar no mesmo gesto de trim mantém a transição', () => {
     const { base, v0, v1 } = encostados()
     const shrink = planTrim(base, { itemId: v0, edge: 'end', deltaUs: -S, ripple: false, includeLinked: true, snap: noSnap })
     expect(trIn(shrink.project!, v1)).toBeUndefined()
     const back = planTrim(base, { itemId: v0, edge: 'end', deltaUs: 0, ripple: false, includeLinked: true, snap: noSnap })
-    expect(trIn(back.project ?? base, v1)).toEqual({ kind: 'crossfade', durationUs: S })
+    expect(back.error).toBeNull()
+    expect(back.project).not.toBeNull()
+    expect(back.project).not.toBe(shrink.project)
+    expect(trIn(back.project!, v1)).toEqual({ kind: 'crossfade', durationUs: S })
   })
 })
 

@@ -87,7 +87,8 @@ describe('addTransition / removeTransition / setTransitionDuration', () => {
     expect(tr(ops.setTransitionDuration(p, b, 1_500_000), b)!.durationUs).toBe(1_500_000)
     expect(tr(ops.setTransitionDuration(p, b, 9 * S), b)!.durationUs).toBe(2 * S)
     expect(tr(ops.setTransitionDuration(p, b, 1), b)!.durationUs).toBe(MIN_TRANSITION_US)
-    expect(code(() => ops.setTransitionDuration(pair().p, pair().b, S))).toMatch(/^(invalid|notFound)/)
+    const bare = pair()
+    expect(code(() => ops.setTransitionDuration(bare.p, bare.b, S))).toBe('invalid: Este clipe não tem transição de entrada')
     const locked = ops.updateTrack(p, p.tracks[0].id, { locked: true })
     expect(code(() => ops.removeTransition(locked, b))).toMatch(/^locked:/)
     expect(code(() => ops.setTransitionDuration(locked, b, S))).toMatch(/^locked:/)
@@ -174,9 +175,25 @@ describe('normalização das transições em toda edição', () => {
     expect(tr(far.project, far.itemIds[0])).toBeUndefined()
     expect(tr(far.project, b)).toEqual({ kind: 'crossfade', durationUs: S })
   })
-  it('desativar A remove a transição de B', () => {
+  it('desativar A ou B mantém a transição (reversível); reativar a devolve intacta; a duração ainda se ajusta', () => {
     const { p, a, b } = withTr(S)
-    expect(tr(ops.setItemEnabled(p, [a], false), b)).toBeUndefined()
+    for (const id of [a, b]) {
+      const off = ops.setItemEnabled(p, [id], false)
+      expect(tr(off, b)).toEqual({ kind: 'crossfade', durationUs: S })
+      expect(validateProject(off)).toEqual([])
+      // uma edição qualquer na faixa com o lado desativado também mantém
+      const edited = ops.updateItem<MediaItem>(off, a, (d) => { d.name = 'A' })
+      expect(tr(edited, b)).toEqual({ kind: 'crossfade', durationUs: S })
+      expect(tr(ops.setTransitionDuration(off, b, 700_000), b)!.durationUs).toBe(700_000)
+      expect(tr(ops.setItemEnabled(edited, [id], true), b)).toEqual({ kind: 'crossfade', durationUs: S })
+    }
+  })
+  it('duração não finita é recusada', () => {
+    const { p, b } = withTr(S)
+    for (const v of [NaN, Infinity, -Infinity]) {
+      expect(code(() => ops.addTransition(p, b, 'crossfade', v))).toBe('invalid: Duração de transição inválida')
+      expect(code(() => ops.setTransitionDuration(p, b, v))).toBe('invalid: Duração de transição inválida')
+    }
   })
   it('não mexe em faixa bloqueada nem em faixas que a op não tocou', () => {
     const { p, a, b } = withTr(S)

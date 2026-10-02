@@ -74,7 +74,10 @@ function edit(p: Project, recipe: (d: Project) => void): Project {
  * Passada única O(itens) depois de toda edição (via edit/deleteRanges): nas faixas que a edição mudou (e não
  * bloqueadas), a transição de entrada de cada item sai se o anterior não estiver encostado/elegível ou se o máximo do
  * par ficar abaixo do mínimo, e é limitada ao máximo (floor(min/2)). Cobre split/trim/move/apagar/velocidade/congelar/
- * ripple/duplicar sem lógica em cada op. Faixas não mudadas ficam intactas (o mesmo objeto).
+ * ripple/duplicar sem lógica em cada op. Faixas não mudadas ficam intactas (o mesmo objeto). `enabled` não conta
+ * (desativar é reversível; quem desenha pula o par). Efeito colateral aceito: qualquer mudança no objeto da faixa —
+ * inclusive só de propriedades dela (desbloquear, ocultar, renomear) — normaliza a faixa toda, então uma transição
+ * inválida gravada fora do editor (ex.: arquivo editado na v1.3) é corrigida/removida nessa hora.
  */
 function normalizeTransitions(prev: Project, next: Project): Project {
   if (prev === next) return next
@@ -1986,6 +1989,7 @@ function transitionPair(p: Project, rightItemId: string): { track: Track; a: Ite
  * Substituir uma transição existente é esta mesma operação.
  */
 export function addTransition(p: Project, rightItemId: string, kind: TransitionKind, durationUs?: Us): Project {
+  if (durationUs !== undefined && !Number.isFinite(durationUs)) throw new EditError('invalid', 'Duração de transição inválida')
   const { track, a, b } = transitionPair(p, rightItemId)
   const why = canTransition(p, track.id, a?.id, b.id)
   if (why) throw new EditError('invalid', why)
@@ -2007,11 +2011,13 @@ export function removeTransition(p: Project, rightItemId: string): Project {
 
 /** Nova duração da transição de B, limitada a [MIN_TRANSITION_US, máximo do par] (gesto de arrastar: em transação). */
 export function setTransitionDuration(p: Project, rightItemId: string, durationUs: Us): Project {
+  if (!Number.isFinite(durationUs)) throw new EditError('invalid', 'Duração de transição inválida')
   const { track, a, b } = transitionPair(p, rightItemId)
   if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) throw new EditError('invalid', 'Este clipe não tem transição de entrada')
-  const why = canTransition(p, track.id, a?.id, b.id)
-  if (why) throw new EditError('invalid', why)
-  const d = clamp(Math.round(durationUs), MIN_TRANSITION_US, maxTransitionUs(a!, b))
+  // regra estrutural (como a normalização): ajustar a duração de uma transição com um lado desativado é permitido
+  if (!transitionPairOk(track, a, b)) throw new EditError('invalid', 'Transição só entre dois clipes encostados na mesma faixa')
+  if (maxTransitionUs(a, b) < MIN_TRANSITION_US) throw new EditError('invalid', 'Clipes curtos demais para a transição')
+  const d = clamp(Math.round(durationUs), MIN_TRANSITION_US, maxTransitionUs(a, b))
   if (d === b.transitionIn.durationUs) return p
   return edit(p, (dr) => {
     ;(mustFind(dr, rightItemId).item as MediaItem).transitionIn!.durationUs = d

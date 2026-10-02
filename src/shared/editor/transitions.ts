@@ -13,8 +13,10 @@ import type { Item, Project, Track, TransitionKind, Us } from './project'
  *  - B fica CONGELADO no primeiro quadro (tempo de timeline cut) antes do corte e toca normal depois.
  * Nunca se mostra conteúdo da fonte fora do trecho aparado (o que foi cortado pode ser sigiloso).
  *
- * Elegíveis: A e B na mesma faixa de vídeo, encostados, ambos ativos (enabled !== false), cada um mídia com
- * visual (inclui imagem) ou texto. Formas, efeitos e anotações não participam.
+ * Elegíveis: A e B na mesma faixa de vídeo, encostados, cada um mídia com visual (inclui imagem) ou texto. Formas,
+ * efeitos e anotações não participam. `enabled` NÃO conta na regra estrutural: desativar A ou B é reversível e a
+ * transição continua gravada (normalização e validateProject a mantêm); quem desenha/mixa pula o par com um lado
+ * desativado (pairActive). Só criar uma transição nova (canTransition/addTransition) exige os dois ativos.
  * Limites: MIN_TRANSITION_US ≤ d ≤ floor(min(A, B) / 2).
  */
 
@@ -35,9 +37,8 @@ export interface TransitionWindow {
   endUs: Us
 }
 
-/** Item que pode participar de uma transição (dos dois lados). */
+/** Tipo de item que pode participar de uma transição (dos dois lados). Ignora `enabled` (ver o modelo acima). */
 export function transitionEligible(it: Item): boolean {
-  if (it.enabled === false) return false
   return (it.type === 'media' && !!it.visual) || it.type === 'text'
 }
 
@@ -46,7 +47,7 @@ export function maxTransitionUs(a: Item, b: Item): Us {
   return Math.floor(Math.min(a.durationUs, b.durationUs) / 2)
 }
 
-/** Par (A, B) válido numa faixa: faixa de vídeo, encostados e elegíveis. Não olha a duração. */
+/** Par (A, B) estruturalmente válido numa faixa: faixa de vídeo, encostados e elegíveis. Não olha a duração nem `enabled`. */
 export function transitionPairOk(track: Track, a: Item | undefined, b: Item): a is Item {
   return !!a && track.kind === 'video' && a.startUs + a.durationUs === b.startUs && transitionEligible(a) && transitionEligible(b)
 }
@@ -86,7 +87,10 @@ function windowAt(track: Track, i: number): TransitionWindow | null {
   return { trackId: track.id, fromId: a.id, toId: b.id, kind: b.transitionIn.kind, durationUs: d, cutUs, startUs, endUs: startUs + d }
 }
 
-/** Todas as janelas válidas do projeto (inclusive faixas ocultas e itens desenhados ou não: quem desenha filtra). O(itens). */
+/**
+ * Todas as janelas estruturalmente válidas do projeto. NÃO filtra faixas ocultas nem itens desativados: quem desenha
+ * ou mixa pula a janela se a faixa estiver oculta ou se algum lado estiver desativado (pairActive). O(itens).
+ */
 export function transitionWindows(p: Project): TransitionWindow[] {
   const out: TransitionWindow[] = []
   for (const t of p.tracks) {
@@ -102,6 +106,7 @@ export function transitionWindows(p: Project): TransitionWindow[] {
 /**
  * Janela que contém tUs na faixa (itens ordenados por startUs, sem sobreposição), ou null. Busca binária: O(log n)
  * por quadro. As janelas nunca se sobrepõem (cada uma ocupa no máximo metade de cada clipe, dividida no corte).
+ * Como transitionWindows, NÃO filtra itens desativados nem faixa oculta: o chamador confere (pairActive).
  */
 export function transitionAt(track: Track, tUs: Us): TransitionWindow | null {
   if (track.kind !== 'video') return null
@@ -115,11 +120,26 @@ export function transitionAt(track: Track, tUs: Us): TransitionWindow | null {
   }
   const i = lo - 1
   // tUs antes do corte (dentro de A = items[i]) → transição para items[i+1]; depois do corte → transição para items[i]
-  for (const j of [i + 1, i]) {
-    const w = windowAt(track, j)
-    if (w && tUs >= w.startUs && tUs < w.endUs) return w
+  const next = windowAt(track, i + 1)
+  if (next && tUs >= next.startUs && tUs < next.endUs) return next
+  const cur = windowAt(track, i)
+  return cur && tUs >= cur.startUs && tUs < cur.endUs ? cur : null
+}
+
+/**
+ * Os dois lados da janela estão ativos (enabled !== false)? Para quem desenha/mixa: par com um lado desativado = corte
+ * seco. O(log n): B é o item que começa no corte e A o anterior.
+ */
+export function pairActive(track: Track, w: TransitionWindow): boolean {
+  const items = track.items
+  let lo = 0, hi = items.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (items[mid].startUs < w.cutUs) lo = mid + 1
+    else hi = mid
   }
-  return null
+  const a = items[lo - 1], b = items[lo]
+  return !!a && !!b && a.id === w.fromId && b.id === w.toId && a.enabled !== false && b.enabled !== false
 }
 
 /** Progresso linear 0–1 da transição em tUs (limitado). */

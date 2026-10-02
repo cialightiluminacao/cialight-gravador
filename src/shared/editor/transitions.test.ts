@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject, defaultVisual } from './factory'
 import type { Item, MediaItem, Project, TextItem, Track, Transition } from './project'
-import { canTransition, frozenTimes, maxTransitionUs, MIN_TRANSITION_US, transitionAt, transitionWindows, windowProgress } from './transitions'
+import { canTransition, frozenTimes, pairActive, maxTransitionUs, MIN_TRANSITION_US, transitionAt, transitionWindows, windowProgress } from './transitions'
 
 const S = 1_000_000
 const clip = (id: string, startUs: number, durationUs: number, transitionIn?: Transition, extra?: Partial<MediaItem>): MediaItem => ({
@@ -44,7 +44,11 @@ describe('transitionWindows / transitionAt', () => {
       track([clip('i', 0, 150_000), clip('j', 150_000, 2 * S, cf(S))], 'video', 'short'),
       track([text('k', 0, 2 * S), clip('l', 2 * S, 2 * S, cf(S)), text('m', 4 * S, 2 * S, cf(300_000))], 'video', 'ok')
     )
-    expect(transitionWindows(p).map((w) => [w.trackId, w.fromId, w.toId, w.durationUs])).toEqual([['ok', 'k', 'l', S], ['ok', 'l', 'm', 300_000]])
+    // item desativado não invalida a janela (regra estrutural); quem desenha pula o par com pairActive
+    expect(transitionWindows(p).map((w) => [w.trackId, w.fromId, w.toId, w.durationUs])).toEqual([['off', 'e', 'f', S], ['ok', 'k', 'l', S], ['ok', 'l', 'm', 300_000]])
+    const byId = new Map(p.tracks.map((t) => [t.id, t]))
+    expect(transitionWindows(p).map((w) => pairActive(byId.get(w.trackId)!, w))).toEqual([false, true, true])
+    expect(transitionAt(byId.get('off')!, 2 * S)).toMatchObject({ fromId: 'e', toId: 'f' })
     expect(canTransition(p, 'gap', 'a', 'b')).toMatch(/encostados/)
     expect(canTransition(p, 'aud', 'c', 'd')).toMatch(/vídeo/)
     expect(canTransition(p, 'off', 'e', 'f')).toMatch(/ativos/)
