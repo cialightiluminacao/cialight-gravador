@@ -111,7 +111,9 @@ interface ReframeReport {
   red?: RedBlob | null; textBox?: PxBox; ref?: Legib; preview?: Legib; control?: Legib; exportPath?: string; exportError?: string
   exported?: { width: number; height: number; red: RedBlob | null; legib?: Legib }
 }
-interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>> }
+interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>>; pip?: PipBlurReport }
+type PxRect4 = { x0: number; y0: number; x1: number; y1: number }
+interface PipBlurReport { error?: string; box?: PxRect4; scissor?: PxRect4; inside?: { rest: number; blur: number }; outsideScissorMaxDiff?: number; haloMean?: number; marginMaxDiff?: number; marginStep?: number }
 
 interface StretchReport {
   error?: string
@@ -545,6 +547,16 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   }
   const e10 = (ea?.blur10?.detail ?? NaN) / (ea?.rest?.detail ?? NaN), e4 = (ea?.blur4?.detail ?? NaN) / (ea?.rest?.detail ?? NaN)
   check(Math.abs(e10 - r10) <= Math.max(0.03, 0.25 * r10) && Math.abs(e4 - r4) <= Math.max(0.03, 0.25 * r4), `exportação = preview (desfoque): energia ÷ repouso 4 px ${f3(e4)} (preview ${f3(r4)}), 10 px ${f3(e10)} (preview ${f3(r10)})`, failures)
+
+  // PiP fora do centro com desfoque de entrada (pendência do F4 Task 5: a "cola" do scissor de layerBlurRect)
+  const pipRun = an?.pip
+  console.log(`PiP com desfoque de entrada: ${JSON.stringify(pipRun)}`)
+  check(!!pipRun && !pipRun.error && !!pipRun.inside, `PiP + desfoque de entrada: harness sem erro (${pipRun?.error ?? ''})`, failures)
+  const pipRatio = pipRun?.inside ? pipRun.inside.blur / pipRun.inside.rest : NaN
+  check(pipRatio < 0.3, `PiP + desfoque de entrada (10 px): energia de detalhe dentro da caixa da camada ÷ a do repouso ${f3(pipRatio)} (< 0,3)`, failures)
+  check(pipRun?.outsideScissorMaxDiff === 0, `PiP + desfoque de entrada: fora da caixa + alcance (scissor ${JSON.stringify(pipRun?.scissor)}) o quadro é idêntico ao do repouso (dif. máx. ${pipRun?.outsideScissorMaxDiff})`, failures)
+  check((pipRun?.haloMean ?? 0) >= 4, `PiP + desfoque de entrada: halo logo fora da caixa (1–3 px; dif. média ${f3(pipRun?.haloMean)} ≥ 4 — o teste da margem não é vazio)`, failures)
+  check((pipRun?.marginMaxDiff ?? 99) <= 2 && (pipRun?.marginStep ?? 99) <= 2, `PiP + desfoque de entrada: sem borda dura na margem do scissor (dif. na faixa de 2 px ${pipRun?.marginMaxDiff} ≤ 2; degrau através da margem ${f3(pipRun?.marginStep)} ≤ 2)`, failures)
 
   const rr = r.reframe
   console.log(`reenquadrar: ${JSON.stringify(rr)}`)
