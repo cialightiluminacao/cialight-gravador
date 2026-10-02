@@ -1,11 +1,11 @@
-import { Copy, Gauge, Link2, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
-import { detachAudio, findItem, linkedIds, linkItems, setSpeed, unlinkItems } from '@shared/editor/ops'
-import type { Marker, Project } from '@shared/editor/project'
+import { Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
+import { convertEffects, detachAudio, findItem, linkedIds, linkItems, setSpeed, unlinkItems } from '@shared/editor/ops'
+import type { EffectItem, Marker, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
 import type { PlaybackController } from '../../engine/PlaybackController'
 import { SHORTCUT_LABELS } from '../../shortcuts'
 import { useEditorStore } from '../../state/editorStore'
-import { deleteSelection, runShortcut, seekTo, splitAtPlayhead } from '../editorActions'
+import { deleteSelection, runShortcut, seekTo, splitAtPlayhead, toggleEnabledSelection } from '../editorActions'
 import type { MenuEntry } from './ContextMenu'
 
 // Entradas dos menus de contexto da linha do tempo (item e marcador).
@@ -14,6 +14,28 @@ import type { MenuEntry } from './ContextMenu'
 const SPEEDS = [0.25, 0.5, 0.75, 1, 1.5, 2, 4, 8]
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 const fmtSpeed = (s: number): string => `${String(s).replace('.', ',')}×`
+const EFFECT_KINDS: { value: EffectItem['effect']; label: string }[] = [
+  { value: 'solid', label: 'Tarja' },
+  { value: 'blur', label: 'Blur' },
+  { value: 'pixelate', label: 'Pixelizar' }
+]
+
+/** "Converter em" (só quando há efeitos na seleção): troca o tipo de todos os efeitos selecionados. */
+function convertEntry(p: Project, sel: string[]): MenuEntry[] {
+  const fx = sel.map((id) => findItem(p, id)?.item).filter((i): i is EffectItem => i?.type === 'effect')
+  if (fx.length === 0) return []
+  const ids = fx.map((i) => i.id)
+  return [
+    {
+      label: 'Converter em',
+      icon: Repeat,
+      sub: EFFECT_KINDS.map((k) => ({
+        label: fx.every((i) => i.effect === k.value) ? `${k.label}  ✓` : k.label,
+        onSelect: () => st().apply((q) => convertEffects(q, ids, k.value))
+      }))
+    }
+  ]
+}
 
 /** Vincular (seleção de 2+ fora de um mesmo grupo) / Desvincular / Separar áudio (vídeo com áudio próprio). */
 function linkEntry(p: Project, itemId: string, selection: string[]): MenuEntry {
@@ -39,6 +61,7 @@ export function itemMenuEntries(p: Project, itemId: string, playback: PlaybackCo
   const media = sel.filter((id) => findItem(p, id)?.item.type === 'media')
   const main = findItem(p, itemId)?.item
   const current = main?.type === 'media' ? main.speed : null
+  const anyOn = sel.some((id) => findItem(p, id)?.item.enabled !== false)
   return [
     { label: 'Dividir no playhead', icon: Scissors, shortcut: SHORTCUT_LABELS.split, disabled: !splittable, onSelect: splitAtPlayhead },
     { label: 'Duplicar', icon: Copy, shortcut: SHORTCUT_LABELS.duplicate, onSelect: () => runShortcut('duplicate', playback) },
@@ -52,6 +75,8 @@ export function itemMenuEntries(p: Project, itemId: string, playback: PlaybackCo
         onSelect: () => st().apply((q) => media.reduce((acc, id) => (findItem(acc, id) ? setSpeed(acc, id, s) : acc), q))
       }))
     },
+    { label: anyOn ? 'Desativar' : 'Ativar', icon: anyOn ? EyeOff : Eye, shortcut: SHORTCUT_LABELS.toggleEnabled, onSelect: () => toggleEnabledSelection(sel) },
+    ...convertEntry(p, sel),
     { separator: true },
     { label: 'Excluir', icon: Trash2, shortcut: SHORTCUT_LABELS.delete, danger: true, onSelect: () => deleteSelection(false) },
     { label: 'Excluir com ripple', icon: Trash2, shortcut: SHORTCUT_LABELS.rippleDelete, danger: true, onSelect: () => deleteSelection(true) }

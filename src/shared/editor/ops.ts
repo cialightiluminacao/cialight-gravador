@@ -5,7 +5,7 @@ import type { EffectPresetId, EffectRegionInit } from './factory'
 import { newId } from './ids'
 import { frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
-import type { Anim, Asset, Item, MediaItem, Project, Track, TrackKind, Us, VisualProps } from './project'
+import type { Anim, Asset, EffectItem, Item, MediaItem, Project, Track, TrackKind, Us, VisualProps } from './project'
 
 // Operações de edição puras: (project, ...) => Project. Lançam EditError quando a operação é inválida.
 
@@ -914,6 +914,95 @@ export function setItemEnabled(p: Project, itemIds: string[], enabled: boolean):
       const it = findItem(d, id)!.item
       if (enabled) delete it.enabled
       else it.enabled = false
+    }
+  })
+}
+
+/** Propriedades que o "keyframe" do item (Alt+K, losango da região) liga/desliga juntas. */
+export function keyframePaths(item: Item, trackKind: TrackKind): AnimPath[] {
+  if (item.type === 'effect') return ['region.x', 'region.y', 'region.w', 'region.h', 'region.rotation']
+  if (item.type === 'media' && (trackKind === 'audio' || !item.visual)) return ['audio.volume']
+  if (item.type === 'annotations') return []
+  return ['transform.x', 'transform.y', 'transform.scale', 'transform.rotation', 'transform.opacity']
+}
+
+/**
+ * Keyframe em grupo em tUs (absoluto): se alguma das propriedades tem key a ±meio quadro, remove os
+ * keys desse instante (de todas); senão adiciona um key com o valor avaliado em cada uma.
+ */
+export function toggleKeyframes(p: Project, itemId: string, paths: AnimPath[], tUs: Us): Project {
+  const f = mustFind(p, itemId)
+  const tol = frameDurUs(p.canvas.fps) / 2
+  const local = tUs - f.item.startUs
+  const any = paths.some((pt) => (getAnim(f.item, pt)?.keys ?? []).some((k) => Math.abs(k.tUs - local) <= tol))
+  let q = p
+  for (const pt of paths) {
+    const near = (getAnim(f.item, pt)?.keys ?? []).some((k) => Math.abs(k.tUs - local) <= tol)
+    if (near === any) q = toggleKeyframe(q, itemId, pt, tUs)
+  }
+  return q
+}
+
+/** Instantes locais (µs) com key em qualquer propriedade do item, ordenados; keys a ±1 µs contam uma vez. */
+export function keyframeTimesUs(item: Item): Us[] {
+  const all = ANIM_PATHS.flatMap((pt) => (getAnim(item, pt)?.keys ?? []).map((k) => k.tUs)).sort((a, b) => a - b)
+  return all.filter((t, i) => i === 0 || t - all[i - 1] > 1)
+}
+
+/** Aplica `fn` a cada propriedade animável do item (draft); null = não muda. Recusa faixa bloqueada. */
+function editAllAnims(p: Project, itemId: string, fn: (a: Anim<number>, durationUs: Us) => Anim<number> | null): Project {
+  const f = mustFind(p, itemId)
+  assertUnlocked(f.track)
+  const changes: [AnimPath, Anim<number>][] = []
+  for (const pt of ANIM_PATHS) {
+    const a = getAnim(f.item, pt)
+    const next = a ? fn(a, f.item.durationUs) : null
+    if (next) changes.push([pt, next])
+  }
+  if (changes.length === 0) return p
+  return produce(p, (d) => {
+    const it = d.tracks[f.trackIndex].items[f.itemIndex]
+    for (const [pt, a] of changes) assignAnim(it, pt, a)
+  })
+}
+
+/**
+ * Move os keys do instante local fromUs (±1 µs, em todas as propriedades) para toUs, preso a
+ * [0, duração]. Um key de outro instante a ±meio quadro do destino é substituído (sem colisão).
+ */
+export function moveKeyframes(p: Project, itemId: string, fromUs: Us, toUs: Us): Project {
+  const tol = frameDurUs(p.canvas.fps) / 2
+  return editAllAnims(p, itemId, (a, dur) => {
+    const to = Math.max(0, Math.min(dur, Math.round(toUs)))
+    const keys = a.keys ?? []
+    const moving = keys.find((k) => Math.abs(k.tUs - fromUs) <= 1)
+    if (!moving || moving.tUs === to) return null
+    const rest = keys.filter((k) => k !== moving && Math.abs(k.tUs - to) > tol)
+    return { ...a, keys: [...rest, { ...moving, tUs: to }].sort((x, y) => x.tUs - y.tUs) }
+  })
+}
+
+/** Remove os keys do instante local tUs (±1 µs) em todas as propriedades do item. */
+export function removeKeyframesAt(p: Project, itemId: string, localUs: Us): Project {
+  return editAllAnims(p, itemId, (a) => {
+    const k = (a.keys ?? []).find((x) => Math.abs(x.tUs - localUs) <= 1)
+    return k ? removeKey(a, k.tUs) : null
+  })
+}
+
+/** Troca o tipo dos efeitos (os outros itens são ignorados). Tarja: borda suave 0 (cor exata, irreversível). */
+export function convertEffects(p: Project, itemIds: string[], effect: EffectItem['effect']): Project {
+  const ids = itemIds.filter((id) => {
+    const f = findItem(p, id)
+    return f?.item.type === 'effect' && (f.item.effect !== effect || (effect === 'solid' && f.item.feather !== 0))
+  })
+  if (ids.length === 0) return p
+  for (const id of ids) assertUnlocked(mustFind(p, id).track)
+  return produce(p, (d) => {
+    for (const id of ids) {
+      const it = findItem(d, id)!.item as EffectItem
+      it.effect = effect
+      if (effect === 'solid') it.feather = 0
     }
   })
 }

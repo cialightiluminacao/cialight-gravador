@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from '@shared/editor/factory'
 import * as ops from '@shared/editor/ops'
-import type { Asset, MediaItem, Project } from '@shared/editor/project'
+import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/project'
 import { snapPoints } from '@shared/editor/snap'
-import { canChangeTrack, dropTarget, edgeScrollPx, EDGE_SCROLL_MAX, fadeHandleLefts, gestureSnapPoints, planFade, planMove, planTrim } from './dragMath'
+import { canChangeTrack, dropTarget, edgeScrollPx, EDGE_SCROLL_MAX, fadeHandleLefts, gestureSnapPoints, keyframeMarkLefts, planFade, planKeyframeDrag, planMove, planTrim } from './dragMath'
 
 const S = 1_000_000
 const vid = (id: string, dur = 10 * S): Asset => ({ id, name: id, kind: 'video', source: { type: 'file', path: `C:/${id}.mp4`, size: 1, mtimeMs: 1 }, durationUs: dur, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
@@ -228,5 +228,53 @@ describe('fadeHandleLefts', () => {
       expect(overlap(r.in, r.out)).toBe(false)
       expect(r.in).toBeLessThan(r.out)
     }
+  })
+})
+
+describe('keyframeMarkLefts (losangos na timeline)', () => {
+  it('posição escala com o zoom e desconta o recorte; centrada no instante', () => {
+    expect(keyframeMarkLefts([0, S, 2 * S], 100, 0, 1000, 10)).toEqual([{ tUs: 0, left: -5 }, { tUs: S, left: 95 }, { tUs: 2 * S, left: 195 }])
+    expect(keyframeMarkLefts([S], 400, 0, 1000, 10)).toEqual([{ tUs: S, left: 395 }])
+    expect(keyframeMarkLefts([S], 100, 50, 1000, 10)).toEqual([{ tUs: S, left: 45 }])
+  })
+  it('só os visíveis no recorte', () => {
+    expect(keyframeMarkLefts([0, S, 3 * S, 5 * S], 100, 200, 250, 10).map((m) => m.tUs)).toEqual([3 * S])
+    expect(keyframeMarkLefts([2 * S + 40_000], 100, 200, 250, 10).map((m) => m.tUs)).toEqual([2 * S + 40_000]) // meio losango ainda aparece
+  })
+})
+
+describe('planKeyframeDrag', () => {
+  /** Efeito em 1–5 s com keys de intensidade nos locais 1 s (10) e 3 s (90). */
+  function fx(): { p: Project; id: string } {
+    const r = ops.addEffect(createEmptyProject('t'), 'blur', S, { durationUs: 4 * S })
+    let p = ops.toggleKeyframe(r.project, r.itemId, 'strength', 2 * S)
+    p = ops.setAnimValue(p, r.itemId, 'strength', 2 * S, 10)
+    p = ops.toggleKeyframe(p, r.itemId, 'strength', 4 * S)
+    p = ops.setAnimValue(p, r.itemId, 'strength', 4 * S, 90)
+    return { p, id: r.itemId }
+  }
+  const keys = (p: Project, id: string) => (ops.findItem(p, id)!.item as EffectItem).strength.keys!.map((k) => [k.tUs, k.value])
+  it('move o key pelo delta, no quadro mais próximo', () => {
+    const { p, id } = fx()
+    const r = planKeyframeDrag(p, { itemId: id, fromUs: S, deltaUs: 530_000 })
+    expect(r.toUs).toBe(1_533_333) // 2,53 s absoluto → quadro 76 @30 = 2 533 333 → local 1 533 333
+    expect(keys(r.project!, id)).toEqual([[r.toUs, 10], [3 * S, 90]])
+  })
+  it('limitado ao item', () => {
+    const { p, id } = fx()
+    expect(planKeyframeDrag(p, { itemId: id, fromUs: S, deltaUs: -5 * S }).toUs).toBe(0)
+    expect(planKeyframeDrag(p, { itemId: id, fromUs: 3 * S, deltaUs: 9 * S }).toUs).toBe(4 * S)
+  })
+  it('soltar sobre outro key o substitui (sem dois keys no mesmo quadro)', () => {
+    const { p, id } = fx()
+    const r = planKeyframeDrag(p, { itemId: id, fromUs: S, deltaUs: 2 * S + 5_000 })
+    expect(keys(r.project!, id)).toEqual([[3 * S, 10]])
+  })
+  it('faixa bloqueada: erro, projeto null', () => {
+    const { p, id } = fx()
+    const locked = ops.updateTrack(p, ops.findItem(p, id)!.track.id, { locked: true })
+    const r = planKeyframeDrag(locked, { itemId: id, fromUs: S, deltaUs: S })
+    expect(r.project).toBeNull()
+    expect(r.error?.code).toBe('locked')
   })
 })

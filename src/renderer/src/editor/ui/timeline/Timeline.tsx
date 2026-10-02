@@ -7,7 +7,7 @@ import { formatTimecodeUs } from '@shared/editor/time'
 import { cn } from '@/lib/cn'
 import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
-import { addAssetAt, registerZoomFit } from '../editorActions'
+import { addAssetAt, registerZoomFit, seekTo } from '../editorActions'
 import { ASSET_MIME } from '../MediaCard'
 import { ContextMenu, type MenuEntry } from './ContextMenu'
 import { HScrollbar } from './HScrollbar'
@@ -158,7 +158,8 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
   )
   const onMarkerMenu = useCallback((m: Marker, x: number, y: number) => setMenu({ x, y, entries: markerMenuEntries(m, playback) }), [playback])
   const closeMenu = useCallback(() => setMenu(null), [])
-  const drag = useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu })
+  const onSeek = useCallback((us: number) => seekTo(playback, us), [playback])
+  const drag = useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu, onSeek })
 
   // ---- soltar mídia da biblioteca no ponto/faixa sob o ponteiro
   const onDrop = (e: React.DragEvent): void => {

@@ -3,11 +3,12 @@ import { defaultVisual } from '@shared/editor/factory'
 import type { MediaItem, VisualProps } from '@shared/editor/project'
 import { Segmented, Tip, Toggle } from '@/components/ui/primitives'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
+import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
 
-// Inspetor de vídeo do item de mídia: transformação (animável: grava no keyframe do playhead quando
-// a propriedade já tem keys), corte, ajuste, forma/borda (PiP), espelhar e fades.
+// Inspetor de vídeo do item de mídia: transformação (animável: ◇ liga o keyframe no playhead; com keys,
+// editar grava no key do playhead), corte, ajuste, forma/borda (PiP), espelhar e fades.
 
 type TKey = keyof VisualProps['transform']
 type V = MediaItem & { visual: VisualProps }
@@ -48,13 +49,11 @@ export function VideoPanel({ item }: { item: V }): React.JSX.Element {
           </Tip>
         }
       >
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-          <NumberField compact label="X" value={animAt(t.x, local) * 100} precision={1} step={0.1} unit="%" onChange={(n) => setT('x', n / 100)} title="Posição horizontal do centro" />
-          <NumberField compact label="Y" value={animAt(t.y, local) * 100} precision={1} step={0.1} unit="%" onChange={(n) => setT('y', n / 100)} title="Posição vertical do centro" />
-        </div>
-        <NumberField label="Escala" value={animAt(t.scale, local) * 100} min={1} max={1000} precision={0} step={0.5} unit="%" onChange={(n) => setT('scale', n / 100)} />
-        <NumberField label="Rotação" value={animAt(t.rotation, local)} min={-360} max={360} precision={1} step={0.5} unit="°" onChange={(n) => setT('rotation', n)} />
-        <NumberField label="Opacidade" value={animAt(t.opacity, local) * 100} min={0} max={100} precision={0} step={0.5} unit="%" onChange={(n) => setT('opacity', n / 100)} />
+        <NumberField label="Posição X" value={animAt(t.x, local) * 100} precision={1} step={0.1} unit="%" onChange={(n) => setT('x', n / 100)} title="Posição horizontal do centro" trailing={<KeyframeButton item={item} path="transform.x" label="Posição X" />} />
+        <NumberField label="Posição Y" value={animAt(t.y, local) * 100} precision={1} step={0.1} unit="%" onChange={(n) => setT('y', n / 100)} title="Posição vertical do centro" trailing={<KeyframeButton item={item} path="transform.y" label="Posição Y" />} />
+        <NumberField label="Escala" value={animAt(t.scale, local) * 100} min={1} max={1000} precision={0} step={0.5} unit="%" onChange={(n) => setT('scale', n / 100)} trailing={<KeyframeButton item={item} path="transform.scale" label="Escala" />} />
+        <NumberField label="Rotação" value={animAt(t.rotation, local)} min={-360} max={360} precision={1} step={0.5} unit="°" onChange={(n) => setT('rotation', n)} trailing={<KeyframeButton item={item} path="transform.rotation" label="Rotação" />} />
+        <NumberField label="Opacidade" value={animAt(t.opacity, local) * 100} min={0} max={100} precision={0} step={0.5} unit="%" onChange={(n) => setT('opacity', n / 100)} trailing={<KeyframeButton item={item} path="transform.opacity" label="Opacidade" />} />
       </PanelSection>
 
       <PanelSection title="Corte">

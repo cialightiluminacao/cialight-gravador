@@ -25,6 +25,9 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
   const drawing = useViewerTool((s) => s.drawing)
   const [guides, setGuides] = useState<Guides>(NO_GUIDES)
   const rootRef = useRef<HTMLDivElement>(null)
+  const clearHover = (): void => {
+    if (rootRef.current) rootRef.current.style.cursor = ''
+  }
   const boxes = useMemo(() => (project && !playing ? itemBoxes(project, playheadUs) : []), [project, playheadUs, playing])
   const regions = useMemo(() => (project && !playing ? effectBoxes(project, playheadUs) : []), [project, playheadUs, playing])
   // saindo da tela no meio de um gesto: cancela; a ferramenta não fica ligada para o próximo projeto
@@ -35,6 +38,8 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
     },
     []
   )
+  // seleção ou ferramenta mudou sem o ponteiro andar: o cursor de mover pode ter ficado velho
+  useEffect(() => clearHover(), [selection, drawing, playheadUs])
   if (!project) return null
   const selId = selection.length === 1 && !playing ? selection[0] : null
   const selectedMedia = selId && !drawing ? boxes.find((b) => b.itemId === selId && editableMedia(project, b.itemId)) : undefined
@@ -77,8 +82,29 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
     }
   }
 
+  // cursor de mover sobre a mídia selecionada (o corpo das alças não captura o ponteiro: quem decide é o
+  // hit-test, com as regiões de efeito por cima). Direto no estilo: sem re-render a cada movimento.
+  const onHover = (e: React.PointerEvent): void => {
+    const root = rootRef.current
+    if (!root) return
+    let cursor = ''
+    if (!drawing && selectedMedia && e.buttons === 0) {
+      const pt = ctx.toCanvas(e)
+      if (!hitTestRegions(regions, pt.x, pt.y) && hitTest(boxes, pt.x, pt.y) === selectedMedia.itemId) cursor = 'move'
+    }
+    if (root.style.cursor !== cursor) root.style.cursor = cursor
+  }
+
   return (
-    <div ref={rootRef} data-viewer-overlay className={cn('absolute inset-0', drawing && 'cursor-crosshair')} style={{ width, height }} onPointerDown={onBackgroundDown}>
+    <div
+      ref={rootRef}
+      data-viewer-overlay
+      className={cn('absolute inset-0', drawing && 'cursor-crosshair')}
+      style={{ width, height }}
+      onPointerDown={onBackgroundDown}
+      onPointerMove={onHover}
+      onPointerLeave={clearHover}
+    >
       {guides.v.map((x) => (
         <div key={`v${x}`} data-guide="v" className="pointer-events-none absolute inset-y-0 w-px bg-accent/80" style={{ left: `calc(${x * 100}% - ${x}px)` }} />
       ))}

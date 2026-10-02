@@ -39,6 +39,17 @@ describe('shortcutFor', () => {
     expect(shortcutFor(key('n'))).toBe('toggleSnap')
   })
 
+  it('keyframes e ativar/desativar (K é pausa → keyframe é Alt+K)', () => {
+    expect(shortcutFor(key('k', { altKey: true }))).toBe('toggleKeyframe')
+    expect(shortcutFor(key('K', { altKey: true, code: 'KeyK' }))).toBe('toggleKeyframe')
+    expect(shortcutFor(key('k'))).toBe('pause')
+    expect(shortcutFor(key('k', { altKey: true, ctrlKey: true }))).toBeNull()
+    expect(shortcutFor(key('['))).toBe('prevKeyframe')
+    expect(shortcutFor(key(']'))).toBe('nextKeyframe')
+    expect(shortcutFor(key('E', { shiftKey: true }))).toBe('toggleEnabled')
+    expect(shortcutFor(key('e'))).toBeNull()
+  })
+
   it('teclas sem atalho e combinações com Alt não fazem nada', () => {
     expect(shortcutFor(key('a'))).toBeNull()
     expect(shortcutFor(key('s', { altKey: true }))).toBeNull()

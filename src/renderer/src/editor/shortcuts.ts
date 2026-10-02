@@ -33,6 +33,10 @@ export type ShortcutAction =
   | 'toggleSnap'
   | 'deselect'
   | 'drawRegion' // B: ferramenta "Desenhar região" do visualizador (Ctrl+B continua sendo dividir)
+  | 'toggleKeyframe' // Alt+K (K sozinho é pausa)
+  | 'prevKeyframe' // [
+  | 'nextKeyframe' // ]
+  | 'toggleEnabled' // Shift+E
 
 export interface KeyLike {
   key: string
@@ -66,7 +70,11 @@ export const SHORTCUT_LABELS: Partial<Record<ShortcutAction, string>> = {
   zoomIn: '+',
   zoomOut: '-',
   zoomFit: 'Shift+Z',
-  drawRegion: 'B'
+  drawRegion: 'B',
+  toggleKeyframe: 'Alt+K',
+  prevKeyframe: '[',
+  nextKeyframe: ']',
+  toggleEnabled: 'Shift+E'
 }
 
 /** Foco em campo editável: atalhos de uma tecla não podem roubar a digitação. */
@@ -97,7 +105,7 @@ export function shortcutFor(e: KeyLike): ShortcutAction | null {
     if (k === 'x' && e.shiftKey) return 'deleteRange'
     return null
   }
-  if (e.altKey) return null
+  if (e.altKey) return !e.shiftKey && (k === 'k' || e.code === 'KeyK') ? 'toggleKeyframe' : null
   switch (k) {
     case ' ':
       return 'playPause'
@@ -134,6 +142,12 @@ export function shortcutFor(e: KeyLike): ShortcutAction | null {
       return 'toggleSnap'
     case 'b':
       return 'drawRegion'
+    case '[':
+      return 'prevKeyframe'
+    case ']':
+      return 'nextKeyframe'
+    case 'e':
+      return e.shiftKey ? 'toggleEnabled' : null
     case 'z':
       return e.shiftKey ? 'zoomFit' : null
     case '+':

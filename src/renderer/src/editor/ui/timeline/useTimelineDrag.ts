@@ -2,10 +2,11 @@ import { useCallback } from 'react'
 import { toast } from 'sonner'
 import { findItem, projectDurationUs } from '@shared/editor/ops'
 import type { Project, Us } from '@shared/editor/project'
-import { itemEndUs } from '@shared/editor/time'
+import { formatTimecodeUs, itemEndUs } from '@shared/editor/time'
 import type { SnapPoint } from '@shared/editor/snap'
 import { useEditorStore } from '../../state/editorStore'
-import { edgeScrollPx, gestureSnapPoints, planFade, planMove, planTrim, type MoveInput, type MovePlan } from './dragMath'
+import { useKeyframeSelection } from '../../state/keyframeSelection'
+import { edgeScrollPx, gestureSnapPoints, planFade, planKeyframeDrag, planMove, planTrim, type MoveInput, type MovePlan } from './dragMath'
 import { HEADER_W, itemsInBox, ROW_H, TOP_PAD, zoneAt, type Layout } from './layout'
 import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
 
@@ -14,6 +15,8 @@ import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
 //    acima da 1ª de vídeo / abaixo da última de áudio cria faixa nova ao soltar)
 //  • borda do item (data-edge) → trim (Ctrl = ripple; Alt ignora o vínculo)
 //  • alça de fade (data-fade) → fade de entrada/saída
+//  • losango de keyframe (data-keyframe) → clique leva o playhead ao key e o seleciona; arrastar muda o
+//    instante (no quadro, preso ao item; soltar sobre outro key o substitui)
 //  • fundo → seleção por caixa (Ctrl/Shift soma); clique simples no fundo limpa a seleção
 // Mover/trim/fade: transação aberta ao passar do limiar; cada evento recalcula a partir da base da
 // transação (lida do store a cada evento: patches de ingestão no meio do gesto entram nela) com
@@ -41,6 +44,8 @@ interface Opts {
   layoutRef: React.RefObject<Layout>
   setOverlay: (o: DragOverlay) => void
   onItemMenu: (itemId: string, clientX: number, clientY: number) => void
+  /** Leva o playhead a `us` (clique num losango de keyframe). */
+  onSeek: (us: Us) => void
 }
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
@@ -64,7 +69,7 @@ export function cancelActiveGesture(): void {
 /** Há gesto em andamento (o atalho global de teclado não roda). */
 export const gestureActive = (): boolean => active !== null
 
-export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu }: Opts): {
+export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu, onSeek }: Opts): {
   onPointerDown: (e: React.PointerEvent<HTMLElement>) => void
   onContextMenu: (e: React.MouseEvent<HTMLElement>) => void
 } {
@@ -105,9 +110,49 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
       const itemEl = target.closest<HTMLElement>('[data-item-id]')
       const edge = target.closest<HTMLElement>('[data-edge]')?.dataset.edge as 'start' | 'end' | undefined
       const fade = target.closest<HTMLElement>('[data-fade]')?.dataset.fade as 'in' | 'out' | undefined
+      const kfAttr = target.closest<HTMLElement>('[data-keyframe]')?.dataset.keyframe
       const id = itemEl?.dataset.itemId
+      // qualquer outro gesto solta o losango selecionado (Delete volta a apagar o item)
+      if (!(id && kfAttr !== undefined)) useKeyframeSelection.getState().set(null)
 
-      if (id && fade) {
+      if (id && kfAttr !== undefined) {
+        // ---------------- losango de keyframe
+        const fromUs = Number(kfAttr)
+        const sel = st().selection
+        if (!(sel.length === 1 && sel[0] === id)) st().select([id])
+        useKeyframeSelection.getState().set({ itemId: id, tUs: fromUs })
+        let failed: string | null = null
+        let toUs = fromUs
+        autoScroll = true
+        onMove = (ev) => {
+          if (!started) {
+            if (Math.abs(ev.clientX - x0) < TRIM_THRESHOLD_PX) return
+            if (!begin('ew-resize')) return finish(false)
+          }
+          const base = txBase()
+          if (!base) return
+          const r = planKeyframeDrag(base, { itemId: id, fromUs, deltaUs: deltaAt(ev) })
+          failed = r.error?.message ?? null
+          toUs = r.toUs
+          st().apply(() => r.project ?? base, { transient: true })
+          const f = findItem(base, id)
+          const row = f ? layoutRef.current.rows.find((x) => x.track.id === f.track.id) : undefined
+          const at = f ? f.item.startUs + toUs : 0
+          setOverlay({ ...NO_OVERLAY, label: row ? { us: at, y: row.y, text: `Keyframe: ${formatTimecodeUs(at, base.canvas.fps)}` } : null })
+        }
+        onEnd = (commit) => {
+          const f = findItem(st().txBase ?? st().project!, id)
+          if (!started) {
+            if (commit && f) onSeek(f.item.startUs + fromUs)
+            return
+          }
+          if (commit && !failed) {
+            st().commitTx()
+            useKeyframeSelection.getState().set({ itemId: id, tUs: toUs })
+          } else st().cancelTx()
+          if (commit && failed) toast.error(failed)
+        }
+      } else if (id && fade) {
         // ---------------- fade (alça no canto superior)
         if (!st().selection.includes(id)) st().select([id])
         let failed: string | null = null
@@ -308,7 +353,7 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
       window.addEventListener('blur', cancel)
       active = { end: finish }
     },
-    [scrollerRef, layoutRef, setOverlay]
+    [scrollerRef, layoutRef, setOverlay, onSeek]
   )
 
   const onContextMenu = useCallback(

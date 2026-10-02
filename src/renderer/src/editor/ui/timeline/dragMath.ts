@@ -1,7 +1,7 @@
-import { addTrack, EditError, findItem, linkedIds, moveItems, trimItem, updateItem } from '@shared/editor/ops'
+import { addTrack, EditError, findItem, linkedIds, moveItems, moveKeyframes, trimItem, updateItem } from '@shared/editor/ops'
 import type { MediaItem, Project, TrackKind, Us } from '@shared/editor/project'
 import { snapDelta, snapPoints, type SnapPoint } from '@shared/editor/snap'
-import { itemEndUs } from '@shared/editor/time'
+import { itemEndUs, snapToFrame } from '@shared/editor/time'
 import type { DropZone } from './layout'
 import { assetProduces } from './assetKinds'
 
@@ -213,4 +213,36 @@ export function fadeHandleLefts(finPx: number, foutPx: number, x0: number, x1: n
   if (outL - inL >= size) return { in: inL, out: outL }
   const meet = Math.min(x1 - size, Math.max(x0 + size, (inL + outL + size) / 2))
   return { in: meet - size, out: meet }
+}
+
+/**
+ * Losangos dos keyframes de um item: `left` (px locais à caixa visível, de tamanho `size`) centrado no
+ * instante local de cada key; só os que aparecem no recorte [0, visW].
+ */
+export function keyframeMarkLefts(timesUs: Us[], pxPerSec: number, clipFrom: number, visW: number, size: number): { tUs: Us; left: number }[] {
+  const out: { tUs: Us; left: number }[] = []
+  for (const tUs of timesUs) {
+    const left = (tUs * pxPerSec) / 1e6 - clipFrom - size / 2
+    if (left + size >= 0 && left <= visW) out.push({ tUs, left })
+  }
+  return out
+}
+
+export interface KeyframeDragInput { itemId: string; /** Instante local do losango no início do gesto. */ fromUs: Us; deltaUs: Us }
+
+/**
+ * Arrastar um losango: os keys do instante andam pelo delta, no quadro do projeto mais próximo, presos ao
+ * item; soltar sobre outro key o substitui (ops.moveKeyframes). toUs = instante local final.
+ */
+export function planKeyframeDrag(base: Project, input: KeyframeDragInput): GestureResult & { toUs: Us } {
+  const f = findItem(base, input.itemId)
+  if (!f) return { project: base, error: null, guideUs: null, toUs: input.fromUs }
+  const abs = snapToFrame(f.item.startUs + input.fromUs + input.deltaUs, base.canvas.fps)
+  const toUs = Math.max(0, Math.min(f.item.durationUs, abs - f.item.startUs))
+  try {
+    return { project: moveKeyframes(base, input.itemId, input.fromUs, toUs), error: null, guideUs: null, toUs }
+  } catch (e) {
+    if (e instanceof EditError) return { project: null, error: e, guideUs: null, toUs: input.fromUs }
+    throw e
+  }
 }

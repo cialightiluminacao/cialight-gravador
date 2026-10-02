@@ -1,12 +1,13 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addMarker, addMediaFromAsset, addTrack, deleteItems, deleteRange, duplicateItems, projectDurationUs, splitAt, trimItem } from '@shared/editor/ops'
+import { addMarker, addMediaFromAsset, addTrack, deleteItems, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, setItemEnabled, splitAt, toggleKeyframes, trimItem } from '@shared/editor/ops'
 import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
 import { frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
 import type { PlaybackController } from '../engine/PlaybackController'
 import type { ShortcutAction } from '../shortcuts'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
+import { useKeyframeSelection } from '../state/keyframeSelection'
 import { useViewerTool } from '../state/viewerTool'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
@@ -103,6 +104,58 @@ export function deleteSelection(ripple: boolean): void {
   if (st().apply((p) => deleteItems(p, selection, { ripple }))) st().select([])
 }
 
+/** Delete com um losango selecionado na linha do tempo: remove os keys daquele instante (não o item). */
+function deleteSelectedKeyframe(): boolean {
+  const kf = useKeyframeSelection.getState().sel
+  const { selection } = st()
+  if (!kf || selection.length !== 1 || selection[0] !== kf.itemId) return false
+  useKeyframeSelection.getState().set(null)
+  st().apply((p) => removeKeyframesAt(p, kf.itemId, kf.tUs))
+  return true
+}
+
+/**
+ * Alt+K: liga/desliga o keyframe no playhead dos itens selecionados que o contêm (efeito: região;
+ * vídeo: transformação; áudio: volume). Tudo num passo de desfazer.
+ */
+export function toggleKeyframeAtPlayhead(): void {
+  const { project, selection, playheadUs } = st()
+  if (!project) return
+  const targets = selection.flatMap((id) => {
+    const f = findItem(project, id)
+    if (!f || playheadUs < f.item.startUs || playheadUs > itemEndUs(f.item)) return []
+    const paths = keyframePaths(f.item, f.track.kind)
+    return paths.length ? [{ id, paths }] : []
+  })
+  if (!targets.length) {
+    toast('Selecione um item sob o playhead para criar um keyframe.')
+    return
+  }
+  st().apply((p) => targets.reduce((q, t) => toggleKeyframes(q, t.id, t.paths, playheadUs), p))
+}
+
+/** [ / ]: vai ao keyframe anterior/próximo (qualquer propriedade) dos itens selecionados. */
+export function jumpToKeyframe(playback: PlaybackController | null, dir: 1 | -1): void {
+  const { project, selection, playheadUs } = st()
+  if (!project) return
+  let best: Us | null = null
+  for (const id of selection) {
+    const t = nextKeyframeUs(project, id, 'any', playheadUs, dir)
+    if (t !== null && (best === null || (dir === 1 ? t < best : t > best))) best = t
+  }
+  if (best === null) return
+  if (st().playing) playback?.pause()
+  seekTo(playback, best)
+}
+
+/** Shift+E / menu: desativa os selecionados (se algum está ativo) ou reativa todos. */
+export function toggleEnabledSelection(ids = st().selection): void {
+  const p = st().project
+  if (!p || !ids.length) return
+  const anyOn = ids.some((id) => findItem(p, id)?.item.enabled !== false)
+  st().apply((q) => setItemEnabled(q, ids, !anyOn))
+}
+
 export async function saveNow(): Promise<void> {
   await flushAutosave()
   if (!st().dirty) toast.success('Projeto salvo.')
@@ -137,7 +190,7 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'split': splitAtPlayhead(); return true
     case 'rippleTrimStart': trimToPlayhead('start'); return true
     case 'rippleTrimEnd': trimToPlayhead('end'); return true
-    case 'delete': deleteSelection(false); return true
+    case 'delete': if (!deleteSelectedKeyframe()) deleteSelection(false); return true
     case 'rippleDelete': deleteSelection(true); return true
     case 'copy':
       if (!s.selection.length) return false
@@ -185,8 +238,13 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
       tool.setDrawing(!tool.drawing)
       return true
     }
+    case 'toggleKeyframe': toggleKeyframeAtPlayhead(); return true
+    case 'prevKeyframe': jumpToKeyframe(playback, -1); return true
+    case 'nextKeyframe': jumpToKeyframe(playback, 1); return true
+    case 'toggleEnabled': toggleEnabledSelection(); return true
     case 'deselect':
       if (s.txBase) s.cancelTx()
+      else if (useKeyframeSelection.getState().sel) useKeyframeSelection.getState().set(null) // Esc primeiro solta o losango
       else if (useViewerTool.getState().drawing) useViewerTool.getState().setDrawing(false) // Esc primeiro sai da ferramenta
       else s.select([])
       return true

@@ -22,12 +22,14 @@ export interface NumberFieldProps {
   className?: string
   /** Rótulo estreito (campos em duas colunas). */
   compact?: boolean
+  /** Controle à direita do campo (ex.: KeyframeButton). */
+  trailing?: React.ReactNode
 }
 
 const DRAG_THRESHOLD_PX = 3
 const WHEEL_COMMIT_MS = 450
 
-export function NumberField({ label, value, onChange, min = -Infinity, max = Infinity, step = 1, precision = 0, unit, disabled, title, className, compact }: NumberFieldProps): React.JSX.Element {
+export function NumberField({ label, value, onChange, min = -Infinity, max = Infinity, step = 1, precision = 0, unit, disabled, title, className, compact, trailing }: NumberFieldProps): React.JSX.Element {
   const [draft, setDraft] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const wheelTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -173,6 +175,7 @@ export function NumberField({ label, value, onChange, min = -Infinity, max = Inf
         />
         {unit ? <span className="pointer-events-none pr-2 text-[10px] text-muted-2">{unit}</span> : null}
       </span>
+      {trailing}
     </div>
   )
 }

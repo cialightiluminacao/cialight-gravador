@@ -3,6 +3,7 @@ import type { MediaItem } from '@shared/editor/project'
 import { Slider, Toggle } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
+import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
 
@@ -31,7 +32,7 @@ export function AudioPanel({ item }: { item: MediaItem }): React.JSX.Element {
         title="Áudio"
         aside={<Toggle size="sm" checked={a.enabled} onCheckedChange={(on) => editItem<MediaItem>(id, (d) => { d.audio.enabled = on })} aria-label="Ativar áudio do item" />}
       >
-        <NumberField label="Volume" value={db} min={MIN_DB} max={MAX_DB} precision={1} step={0.1} unit="dB" disabled={!a.enabled} onChange={setDb} title="−60 dB = sem som" />
+        <NumberField label="Volume" value={db} min={MIN_DB} max={MAX_DB} precision={1} step={0.1} unit="dB" disabled={!a.enabled} onChange={setDb} title="−60 dB = sem som" trailing={<KeyframeButton item={item} path="audio.volume" label="Volume" />} />
         <Slider
           aria-label="Volume em dB"
           min={MIN_DB}

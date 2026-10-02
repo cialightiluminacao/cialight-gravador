@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { Film, Image as ImageIcon, Layers, Music, SlidersHorizontal } from 'lucide-react'
+import { Film, Image as ImageIcon, Layers, Music, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { findItem, linkedIds } from '@shared/editor/ops'
 import type { Item, MediaItem, Project, VisualProps } from '@shared/editor/project'
 import { formatTimecodeUs } from '@shared/editor/time'
+import type { PlaybackController } from '../../engine/PlaybackController'
 import { Select, Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
 import { NumberField } from './NumberField'
@@ -10,13 +11,15 @@ import { ColorInput, FieldRow, PanelSection } from './common'
 import { VideoPanel } from './VideoPanel'
 import { AudioPanel } from './AudioPanel'
 import { SpeedPanel } from './SpeedPanel'
+import { EffectPanel } from './EffectPanel'
+import { InspectorPlayback } from './KeyframeButton'
 import { ITEM_TYPE_LABEL, itemLabel } from '../itemLabel'
 
 // Inspetor (coluna direita): propriedades do item selecionado; sem seleção, as do projeto.
 
 const FPS_OPTIONS = [24, 25, 30, 50, 60].map((f) => ({ value: String(f), label: `${f} fps` }))
 
-export function Inspector(): React.JSX.Element {
+export function Inspector({ playback }: { playback: PlaybackController | null }): React.JSX.Element {
   const project = useEditorStore((s) => s.project)
   const selection = useEditorStore((s) => s.selection)
   const found = project && selection.length === 1 ? findItem(project, selection[0]) : null
@@ -32,8 +35,8 @@ export function Inspector(): React.JSX.Element {
   } else if (found) {
     const asset = found.item.type === 'media' ? project.assets.find((a) => a.id === (found.item as MediaItem).assetId) : undefined
     title = itemLabel(project, found.item)
-    icon = found.track.kind === 'audio' ? <Music className="h-3.5 w-3.5" /> : asset?.kind === 'image' ? <ImageIcon className="h-3.5 w-3.5" /> : <Film className="h-3.5 w-3.5" />
-    body = <ItemPanels key={found.item.id} project={project} item={found.item} trackKind={found.track.kind} />
+    icon = found.track.kind === 'audio' ? <Music className="h-3.5 w-3.5" /> : found.item.type === 'effect' ? <Sparkles className="h-3.5 w-3.5" /> : asset?.kind === 'image' ? <ImageIcon className="h-3.5 w-3.5" /> : <Film className="h-3.5 w-3.5" />
+    body = <ItemPanels key={found.item.id} project={project} item={found.item} trackKind={found.track.kind} locked={found.track.locked} />
   } else body = <ProjectPanel project={project} />
 
   return (
@@ -44,13 +47,25 @@ export function Inspector(): React.JSX.Element {
           {title}
         </h2>
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">{body}</div>
+      <InspectorPlayback.Provider value={playback}>
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">{body}</div>
+      </InspectorPlayback.Provider>
     </aside>
   )
 }
 
-function ItemPanels({ project, item, trackKind }: { project: Project; item: Item; trackKind: 'video' | 'audio' }): React.JSX.Element {
+function ItemPanels({ project, item, trackKind, locked }: { project: Project; item: Item; trackKind: 'video' | 'audio'; locked: boolean }): React.JSX.Element {
   const [tab, setTab] = useState(trackKind === 'video' ? 'video' : 'audio')
+  if (item.type === 'effect') {
+    return (
+      <>
+        <div className="border-b border-border px-3 py-2">
+          <Timing item={item} fps={project.canvas.fps} />
+        </div>
+        <EffectPanel project={project} item={item} locked={locked} />
+      </>
+    )
+  }
   if (item.type !== 'media') {
     return (
       <PanelSection title={ITEM_TYPE_LABEL[item.type]}>

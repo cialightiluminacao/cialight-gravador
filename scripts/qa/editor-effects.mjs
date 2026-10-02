@@ -12,7 +12,7 @@
 // ligados, mover em dois instantes e conferir a interpolação no store e nos pixels (readPixels).
 // Screenshots em docs/qa/editor-f2/.
 import { spawn, execFileSync } from 'child_process'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
 import electronPath from 'electron'
 
@@ -21,6 +21,7 @@ const PORT = process.env.CDP_PORT ?? '9333'
 const ATTACH = process.argv.includes('--attach')
 const SHOTS = join(ROOT, 'docs', 'qa', 'editor-f2')
 const SETTINGS = join(process.env.APPDATA ?? '', 'cialight-gravador', 'settings.json')
+const FFMPEG = join(ROOT, 'resources', 'ffmpeg', 'ffmpeg.exe')
 
 mkdirSync(SHOTS, { recursive: true })
 const settingsBefore = existsSync(SETTINGS) ? readFileSync(SETTINGS) : null
@@ -87,6 +88,7 @@ async function viewport(w, h) {
 }
 
 let failures = 0
+let task4 = null // efeito desativado (Task 4) para conferir na exportação
 function check(name, ok, detail) {
   console.log(`${ok ? '  ✔' : '  ✘'} ${name}${ok ? '' : `  → ${JSON.stringify(detail)}`}`)
   if (!ok) failures++
@@ -149,7 +151,40 @@ window.__fx = (() => {
     }
     return { W, H, count: cols.length, first: cols[0] ?? -1, last: cols[cols.length - 1] ?? -1, mid: cols.length ? (cols[0] + cols[cols.length - 1]) / 2 / W : -1 }
   }
-  return { st, settle, el, topAt, overlay, at, center, down, move, up, drag, click, key, items, effects, fx, region, past, seek, tool, rowMatches }
+  /** Campo do inspetor por rótulo: digita o valor e confirma (blur), como o usuário. */
+  const setField = async (label, value) => {
+    const input = el('[aria-label="Inspetor"] input[aria-label="' + label + '"]')
+    input.focus()
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, String(value))
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.blur()
+    await settle()
+  }
+  /** Botão de keyframe (prev | toggle | next) de uma propriedade no inspetor. */
+  const kf = (path, which) => el('[aria-label="Inspetor"] [data-kf-path="' + path + '"] [data-kf="' + which + '"]')
+  /** Clique completo (pointerdown, pointerup, click) no elemento real mais ao topo sobre o centro de e. */
+  const clickEl = async (e) => {
+    e.scrollIntoView({ block: 'nearest' })
+    const c = center(e)
+    const t = topAt(c.x, c.y)
+    t.dispatchEvent(pe('pointerdown', c.x, c.y))
+    t.dispatchEvent(pe('pointerup', c.x, c.y))
+    t.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: c.x, clientY: c.y, button: 0 }))
+    await settle()
+  }
+  const diamonds = (id) => [...document.querySelectorAll('[data-item-id="' + id + '"] [data-keyframe]')]
+  const diamond = (id, tUs) => el('[data-item-id="' + id + '"] [data-keyframe="' + tUs + '"]')
+  const keysOf = (a) => (a.keys || []).map((k) => [k.tUs, Math.round(k.value * 1e6) / 1e6])
+  const menuItem = (text) => [...document.querySelectorAll('[data-timeline-menu] [role="menuitem"]')].find((x) => x.textContent.includes(text))
+  /** Menu de contexto (botão direito) no item da timeline, no elemento real sob o ponto. */
+  const contextMenu = async (id) => {
+    const r = el('[data-item-id="' + id + '"]').getBoundingClientRect()
+    const x = r.left + Math.min(40, r.width / 2), y = r.top + 8
+    topAt(x, y).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2 }))
+    await settle()
+    await new Promise((res) => setTimeout(res, 250))
+  }
+  return { st, settle, el, topAt, overlay, at, center, down, move, up, drag, click, key, items, effects, fx, region, past, seek, tool, rowMatches, setField, kf, clickEl, diamonds, diamond, keysOf, menuItem, contextMenu }
 })()
 'ok'`
 
@@ -332,6 +367,88 @@ async function main() {
     check('faixa bloqueada: clique na região seleciona a mídia abaixo, não o efeito', locked.sel.length === 1 && locked.sel[0] !== id, locked)
   }
 
+
+  console.log('Task 4: inspetor do efeito, botões de keyframe, losangos, Alt+K, [ ], ativar/desativar')
+  {
+    const A = 1_000_000
+    // efeito novo (blur) embaixo, longe da tarja verde; a faixa "Efeitos" está bloqueada → "Efeitos 2"
+    await ev(`await T.seek(${A}); T.st().select([]); await T.key('b'); document.querySelector('[data-viewer-toolbar] [aria-label^="Blur"]').click(); await T.settle(); return 1`)
+    const E = await ev(`await T.drag(T.at(0.3, 0.75), T.at(0.6, 0.92)); await T.key('Escape'); return T.effects().at(-1).id`)
+    await sleep(400)
+    const panel = await ev(`const ins = T.el('[aria-label="Inspetor"]'); return { text: ins.textContent, paths: [...ins.querySelectorAll('[data-kf-path]')].map((e) => e.dataset.kfPath), track: T.fx('${E}').track }`)
+    check('inspetor do efeito: tipo, forma, intensidade, borda, inverter, escopo, região com keyframes', ['Blur', 'Pixelizar', 'Tarja', 'Retângulo', 'Elipse', 'Intensidade', 'Borda suave', 'Borrar tudo menos a região', 'Tudo abaixo', 'Só a faixa abaixo', 'Ajustar ao quadro inteiro'].every((w) => panel.text.includes(w)) && ['strength', 'region.x', 'region.y', 'region.w', 'region.h', 'region.rotation'].every((p) => panel.paths.includes(p)) && !panel.text.includes('próxima versão'), panel)
+    await shot('effects-11-inspetor.png')
+
+    // keyframes pelo inspetor: ◇ em A, valor em A+2 s cria o 2º key
+    const k1 = await ev(`const p0 = T.past(); await T.clickEl(T.kf('strength', 'toggle')); await T.clickEl(T.kf('region.x', 'toggle')); return { p0, past: T.past(), s: T.keysOf(T.fx('${E}').strength), x: T.keysOf(T.fx('${E}').region.x), pressed: T.kf('strength', 'toggle').getAttribute('aria-pressed') }`)
+    check('◇ cria key no playhead (intensidade e X), 1 passo cada, botão marcado', k1.past === k1.p0 + 2 && k1.s.length === 1 && k1.s[0][0] === 0 && k1.x.length === 1 && k1.pressed === 'true', k1)
+    const k2 = await ev(`await T.seek(${A + 2_000_000}); const p0 = T.past(); const pressed = T.kf('strength', 'toggle').getAttribute('aria-pressed'); await T.setField('Intensidade', 20); await T.setField('Posição X', 70); return { p0, past: T.past(), pressed, s: T.keysOf(T.fx('${E}').strength), x: T.keysOf(T.fx('${E}').region.x), w: T.fx('${E}').region.w }`)
+    check('fora de key: ◇ vazio; editar campo animado cria o key (1 passo por campo); largura segue fixa', k2.pressed === 'false' && k2.past === k2.p0 + 2 && JSON.stringify(k2.s) === JSON.stringify([[0, 60], [2_000_000, 20]]) && k2.x.length === 2 && k2.x[1][0] === 2_000_000 && k2.x[1][1] === 0.7 && !k2.w.keys, k2)
+    const nav = await ev(`await T.clickEl(T.kf('strength', 'prev')); await new Promise((r) => setTimeout(r, 200)); const a = T.st().playheadUs; const prevOff = T.kf('strength', 'prev').disabled; await T.clickEl(T.kf('strength', 'next')); await new Promise((r) => setTimeout(r, 200)); return { a, b: T.st().playheadUs, prevOff, nextOff: T.kf('strength', 'next').disabled }`)
+    check('◀ ▶ navegam entre os keys (e desabilitam nas pontas)', nav.a === A && nav.b === A + 2_000_000 && nav.prevOff && nav.nextOff, nav)
+    await sleep(300)
+    await shot('effects-12-keyframes-inspetor.png')
+
+    // losangos na timeline
+    const d0 = await ev(`return T.diamonds('${E}').map((d) => Number(d.dataset.keyframe))`)
+    check('timeline: um losango por instante com key (0 e 2 s)', JSON.stringify(d0) === JSON.stringify([0, 2_000_000]), d0)
+    const dc = await ev(`await T.seek(${A + 500_000}); await T.clickEl(T.diamond('${E}', 0)); await new Promise((r) => setTimeout(r, 200)); return { ph: T.st().playheadUs, sel: T.st().selection }`)
+    check('clicar no losango leva o playhead ao key', dc.ph === A && dc.sel.join() === E, dc)
+    const dd = await ev(`const pps = T.st().zoomPxPerSec; const p0 = T.past(); const c = T.center(T.diamond('${E}', 2000000)); await T.drag(c, { x: c.x + pps * 0.5, y: c.y + 6 }); const f = T.fx('${E}'); return { p0, past: T.past(), s: T.keysOf(f.strength), x: T.keysOf(f.region.x), d: T.diamonds('${E}').map((d) => Number(d.dataset.keyframe)) }`)
+    const moved = dd.s[1]?.[0]
+    check('arrastar o losango muda o instante dos keys (todas as propriedades), 1 passo', dd.past === dd.p0 + 1 && Math.abs(moved - 2_500_000) <= 34_000 && dd.x[1][0] === moved && dd.s[1][1] === 20 && dd.d[1] === moved, dd)
+    const dl = await ev(`const c = T.center(T.diamond('${E}', ${moved})); const pps = T.st().zoomPxPerSec; await T.drag(c, { x: c.x + pps * 99, y: c.y }); const f = T.fx('${E}'); const out = { s: T.keysOf(f.strength), dur: f.durationUs }; T.st().undo(); await T.settle(); return out`)
+    check('arraste limitado ao fim do item', dl.s[1][0] === dl.dur, dl)
+    const dcol = await ev(`const c = T.center(T.diamond('${E}', ${moved})); const z = T.center(T.diamond('${E}', 0)); await T.drag(c, { x: z.x + 1, y: c.y }); const f = T.fx('${E}'); const out = { s: T.keysOf(f.strength), x: T.keysOf(f.region.x) }; T.st().undo(); await T.settle(); return out`)
+    check('soltar sobre outro key o substitui (um key só, com o valor arrastado)', dcol.s.length === 1 && dcol.s[0][1] === 20 && dcol.x.length === 1 && dcol.x[0][1] === 0.7, dcol)
+    await ev(`await T.clickEl(T.diamond('${E}', ${moved})); return 1`)
+    await sleep(200)
+    await shot('effects-13-losangos.png')
+    const del = await ev(`const p0 = T.past(); await T.key('Delete'); const f = T.fx('${E}'); return { p0, past: T.past(), exists: !!f, s: f ? T.keysOf(f.strength) : null, x: f ? T.keysOf(f.region.x) : null }`)
+    check('Delete com losango selecionado remove os keys do instante (o item fica)', del.exists && del.past === del.p0 + 1 && del.s.length === 1 && del.x.length === 1, del)
+    await ev(`T.st().undo(); await T.settle(); return 1`)
+
+    // Alt+K e [ ]
+    const ak = await ev(`T.st().select(['${E}']); await T.seek(${A + 1_000_000}); const p0 = T.past(); await T.key('k', { altKey: true }); const f = T.fx('${E}'); const on = { y: T.keysOf(f.region.y), w: T.keysOf(f.region.w), x: T.keysOf(f.region.x), playing: T.st().playing }; await T.key('k', { altKey: true }); const g = T.fx('${E}'); return { p0, past: T.past(), on, off: { y: g.region.y, x: T.keysOf(g.region.x) } }`)
+    check('Alt+K liga keys da região no playhead (todas) e desliga de novo; não toca/pausa', ak.on.y.length === 1 && ak.on.y[0][0] === 1_000_000 && ak.on.w.length === 1 && ak.on.x.length === 3 && !ak.off.y.keys && ak.off.x.length === 2 && ak.past === ak.p0 + 2 && !ak.on.playing, ak)
+    const br = await ev(`await T.seek(${A + 1_000_000}); await T.key(']'); await new Promise((r) => setTimeout(r, 200)); const n = T.st().playheadUs; await T.key('['); await new Promise((r) => setTimeout(r, 200)); const p = T.st().playheadUs; await T.key('['); await new Promise((r) => setTimeout(r, 200)); return { n, p, p2: T.st().playheadUs }`)
+    check('] / [ vão ao próximo/anterior keyframe', br.n === A + moved && br.p === A && br.p2 === A, { br, expected: A + moved })
+
+    // keyframe em vídeo (transformação) e áudio (volume): botão do inspetor e losango na timeline
+    const vk = await ev(`await T.seek(3_000_000); T.st().select(['${videoId}']); await T.settle(); await new Promise((r) => setTimeout(r, 200)); const p0 = T.past(); await T.clickEl(T.kf('transform.opacity', 'toggle')); const v = T.items().find((i) => i.id === '${videoId}'); const out = { p0, past: T.past(), keys: T.keysOf(v.visual.transform.opacity), d: T.diamonds('${videoId}').length, paths: [...document.querySelectorAll('[aria-label="Inspetor"] [data-kf-path]')].map((e) => e.dataset.kfPath) }; T.st().undo(); await T.settle(); return out`)
+    check('vídeo: ◇ de opacidade cria key e o losango aparece no item de vídeo', vk.past === vk.p0 + 1 && vk.keys.length === 1 && vk.d === 1 && ['transform.x', 'transform.y', 'transform.scale', 'transform.rotation', 'transform.opacity'].every((p) => vk.paths.includes(p)), vk)
+    const au = await ev(`const music = T.items().find((i) => i.assetId === 'a_qa_music' && !i.visual); await T.seek(music.startUs + 1_000_000); T.st().select([music.id]); await T.settle(); await new Promise((r) => setTimeout(r, 200)); const p0 = T.past(); await T.clickEl(T.kf('audio.volume', 'toggle')); const m = T.items().find((i) => i.id === music.id); await new Promise((r) => setTimeout(r, 150)); return { p0, past: T.past(), keys: T.keysOf(m.audio.volume), d: T.diamonds(music.id).length }`)
+    check('áudio: ◇ de volume cria key e o losango aparece no item de áudio', au.past === au.p0 + 1 && au.keys.length === 1 && au.d === 1, au)
+    await ev(`T.el('[data-timeline-lanes]').scrollTop = 9999; await T.settle(); return 1`)
+    await sleep(200)
+    await shot('effects-14-losango-audio.png')
+    await ev(`T.el('[data-timeline-lanes]').scrollTop = 0; T.st().undo(); await T.settle(); return 1`)
+
+    // menu: Converter em Tarja (marrom) e Desativar; Shift+E; some no preview
+    await ev(`await T.seek(${A + 1_000_000}); T.st().select(['${E}']); await T.settle(); return 1`)
+    const menu = await ev(`await T.contextMenu('${E}'); return [...document.querySelectorAll('[data-timeline-menu] [role="menuitem"]')].map((x) => x.textContent)`)
+    check('menu do efeito: Desativar (Shift+E) e Converter em', menu.some((t) => t.includes('Desativar') && t.includes('Shift+E')) && menu.some((t) => t.includes('Converter em')), menu)
+    await ev(`const sub = T.menuItem('Converter em'); sub.click(); await T.settle(); await new Promise((r) => setTimeout(r, 300)); return 1`)
+    await shot('effects-15-menu-converter.png')
+    const conv = await ev(`const p0 = T.past(); const it = [...document.querySelectorAll('[role="menuitem"]')].find((x) => x.textContent.trim().startsWith('Tarja')); it.click(); await T.settle(); await new Promise((r) => setTimeout(r, 200)); const f = T.fx('${E}'); return { p0, past: T.past(), effect: f.effect, feather: f.feather }`)
+    check('Converter em → Tarja: tipo trocado, borda suave 0, 1 passo', conv.effect === 'solid' && conv.feather === 0 && conv.past === conv.p0 + 1, conv)
+    await ev(`const c = T.el('[aria-label="Inspetor"] input[type="color"]'); c.focus(); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(c, '#a05020'); c.dispatchEvent(new Event('input', { bubbles: true })); c.blur(); await T.settle(); await new Promise((r) => setTimeout(r, 400)); return 1`)
+    const reg = await ev(`return T.region('${E}')`)
+    const on1 = await ev(`return await T.rowMatches(${reg.y}, [0xa0, 0x50, 0x20])`)
+    check('tarja marrom no preview', (await ev(`return T.fx('${E}').color`)) === '#a05020' && near(on1.count / on1.W, reg.w, 0.01), { on1, reg })
+    const off = await ev(`const p0 = T.past(); await T.key('E', { shiftKey: true }); await new Promise((r) => setTimeout(r, 400)); return { p0, past: T.past(), enabled: T.fx('${E}').enabled, ui: !!document.querySelector('[data-item-id="${E}"][data-disabled]'), toggle: document.querySelector('[aria-label="Inspetor"] [aria-label="Ativar efeito"]')?.getAttribute('aria-checked'), warn: document.querySelector('[data-privacy-warnings]')?.textContent ?? '' }`)
+    const off1 = await ev(`return await T.rowMatches(${reg.y}, [0xa0, 0x50, 0x20])`)
+    check('Shift+E desativa (1 passo): item apagado na timeline, chave do inspetor desligada, aviso de privacidade', off.enabled === false && off.past === off.p0 + 1 && off.ui && off.toggle === 'false' && off.warn.includes('desativado'), off)
+    check('desativado some do preview', off1.count === 0, off1)
+    await shot('effects-16-desativado.png')
+    // cursor de mover sobre a mídia selecionada (o corpo das alças não captura o ponteiro)
+    const cur = await ev(`T.st().select(['${videoId}']); await T.settle(); const hover = (fx, fy) => { const p = T.at(fx, fy); T.topAt(p.x, p.y).dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: p.x, clientY: p.y, pointerType: 'mouse', buttons: 0 })); return T.overlay().style.cursor }; const media = hover(0.1, 0.5); const green = T.region(T.effects().find((f) => f.color === '#12ff34').id); const lockedRegion = hover(green.x, green.y); T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => (t.locked ? { ...t, locked: false } : t)) })); await T.settle(); const onRegion = hover(green.x, green.y); T.st().undo(); await T.settle(); T.st().select([]); await T.settle(); const unselected = hover(0.1, 0.5); return { media, lockedRegion, onRegion, unselected }`)
+    check('cursor de mover sobre a mídia selecionada (região bloqueada deixa passar; região clicável e sem seleção não)', cur.media === 'move' && cur.lockedRegion === 'move' && cur.onRegion === '' && cur.unselected === '', cur)
+    // linha da tarja verde (ativa, faixa bloqueada) no mesmo instante, para o controle positivo
+    const greenY = await ev(`return T.region(T.effects().find((f) => f.color === '#12ff34').id).y`)
+    task4 = { E, reg, tUs: A + 1_000_000, greenY }
+  }
+
   await viewport(1920, 1080)
   await sleep(600)
   await ev(`await T.seek(2_000_000); await T.key('b'); return 1`)
@@ -340,6 +457,44 @@ async function main() {
   check('1920×1080: a barra não cobre o quadro', ov.bar[1] <= ov.frame[0], ov)
   await shot('effects-09-1920x1080.png')
   await ev(`await T.key('Escape'); return 1`)
+
+  console.log('exportação: o efeito desativado não aparece; a tarja verde (ativa) sim')
+  if (task4) {
+    const OUT = join(ROOT, 'test-out', 'qa-effects-export')
+    rmSync(OUT, { recursive: true, force: true })
+    mkdirSync(OUT, { recursive: true })
+    await ev(`window.__qaEditor.exportDir = ${JSON.stringify(OUT)}; T.st().select([]); return 1`)
+    await ev(`[...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar')).click(); await new Promise((r) => setTimeout(r, 500)); [...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.includes('WhatsApp')).click(); await new Promise((r) => setTimeout(r, 200)); [...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === 'Exportar').click(); return 1`)
+    let text = ''
+    for (let i = 0; i < 1200; i++) {
+      text = await ev(`return document.querySelector('[role="dialog"]')?.textContent ?? ''`)
+      if (text.includes('Vídeo exportado') || text.includes('falhou')) break
+      await sleep(100)
+    }
+    const files = readdirSync(OUT).filter((f) => f.endsWith('.mp4'))
+    check('exportação concluída', text.includes('Vídeo exportado') && files.length === 1, { text: text.slice(0, 200), files })
+    if (files.length === 1) {
+      const W = 1280, H = 720
+      const raw = execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-ss', String(task4.tUs / 1e6 + 0.02), '-i', join(OUT, files[0]), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 64 << 20 })
+      // só dentro da largura da região (o testsrc2 tem barras de cor parecidas fora dela)
+      const count = (fy, rgb, tol, fx0 = 0, fx1 = 1) => {
+        const y = Math.round(fy * H)
+        let n = 0
+        for (let x = Math.round(fx0 * W); x < Math.round(fx1 * W); x++) {
+          const i = (y * W + x) * 3
+          if (Math.abs(raw[i] - rgb[0]) <= tol && Math.abs(raw[i + 1] - rgb[1]) <= tol && Math.abs(raw[i + 2] - rgb[2]) <= tol) n++
+        }
+        return n
+      }
+      const r = task4.reg
+      const span = Math.round(r.w * W)
+      const offPx = count(r.y, [0xa0, 0x50, 0x20], 24, r.x - r.w / 2, r.x + r.w / 2)
+      const green = count(task4.greenY, [0x12, 0xff, 0x34], 40)
+      console.log(`    marrom na região: ${offPx}/${span} px; verde: ${green} px`)
+      check('exportação: tarja desativada ausente (região), tarja ativa presente', offPx < span * 0.05 && green > W * 0.05, { offPx, span, green })
+    }
+    await ev(`[...document.querySelectorAll('[role="dialog"] button')].find((b) => /Fechar|Concluir/.test(b.textContent) || b.getAttribute('aria-label') === 'Fechar')?.click(); return 1`)
+  }
 }
 
 try {
