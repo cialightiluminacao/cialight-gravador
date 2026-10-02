@@ -182,7 +182,7 @@ export interface RegionSample { t: Us; r: RegionValues; must: boolean }
  *   cobre o desvio máximo da interpolação (centro ≤ tol, meio-tamanho ≤ tol/2 em cada eixo, rotação ≤ tolDeg num raio
  *   de meia-diagonal R): μ = tol + tol·√2/2 + R·tolDeg. Retângulo: meias-larguras − μ; elipse: × (1 − μ/min(a, b))
  *   (a elipse assim encolhida, somada a um disco de raio μ, cabe na original) ⇒ o buraco interpolado cabe no de cada
- *   amostra;
+ *   amostra. Amostra que não comporta o encolhimento (meio-lado < μ: buraco de ~8–9 px ou menos) vira buraco nulo e key;
  * - 'grow' (cobrir com garantia): o mesmo μ para fora — retângulo: meias-larguras + μ; elipse: × (1 + μ/min(a, b))
  *   (contém a original somada a um disco de raio μ) ⇒ a região interpolada contém a de cada amostra.
  */
@@ -198,7 +198,12 @@ export function simplifyRegionSamples(input: RegionSample[], shape: EffectRegion
       : ((k) => [hx * k, hy * k])(Math.max(0, 1 + (sign * mu) / Math.max(1e-9, Math.min(hx, hy))))
     return { ...r, w: (2 * ex) / W, h: (2 * ey) / H }
   }
-  const samples = margin === 'none' ? input : input.map((s) => ({ ...s, r: adjust(s.r) }))
+  // buraco menor que a margem (< 2μ, ≈ 8–9 px): não dá para encolher o bastante — vira buraco nulo e key (a
+  // simplificação descartava a amostra presa em 0 e a reta vizinha deixava um buraco de ~2 px até tol fora do centro)
+  const samples = margin === 'none' ? input : input.map((s) => {
+    const r = adjust(s.r)
+    return margin === 'shrink' && !(r.w > 0 && r.h > 0) ? { ...s, r: { ...r, w: 0, h: 0 }, must: true } : { ...s, r }
+  })
   const err = (k: number, i: number, j: number): number => {
     const si = samples[i], sj = samples[j], sk = samples[k]
     const u = (sk.t - si.t) / (sj.t - si.t)

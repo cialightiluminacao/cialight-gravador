@@ -5,11 +5,12 @@ import { NO_HOLE, toScreen, type RegionValues } from './contentPose'
 import { evalAnim } from './anim'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
 import { attachCandidate, attachEffects, detachEffect, effectsOverClip } from './followTransform'
-import { deleteItems, duplicateItems, findItem, setItemEnabled, updateAsset } from './ops'
+import { deleteItems, duplicateItems, findItem, setItemEnabled, updateAsset, updateItem } from './ops'
 import { privacyWarnings } from './privacy'
 import type { Anim, Asset, Ease, EffectItem, MediaItem, PresetAnim, Project, Us } from './project'
 import { clipFrameAt, effectRegionAt } from './resolve'
 import { parseProject, toDiskProject } from './schema'
+import { frameToUs } from './time'
 import { applyKenBurns } from './zoom'
 
 // Revisão do modelo de âncora (F4 Task 4): formato do disco legível sem vazamento pela v1.3, clipe desativado, efeito
@@ -373,6 +374,46 @@ describe('efeito invertido dentro do clipe: o buraco desenhado cabe no buraco ex
     expect(fxOf(d).attach).toBeUndefined()
     holeContained(q, (t) => effectRegionAt(d, fxOf(d), t), 0.25)
   })
+  it.each([
+    ['movimento linear', 'linear', 0.42],
+    ['movimento com curva', 'inOut', 0.3]
+  ] as const)('desancorar um buraco minúsculo (< 9 px), %s: vira buraco nulo, nunca maior que o exato (denso, 1/240 s)', (_n, ease, x1) => {
+    // buraco de 24 px que encolhe até 2 px no conteúdo enquanto o clipe aproxima 1→2× e anda: na tela, 24 → 4 px
+    const q0 = inverted(attached(scene((m) => { m.visual!.transform.scale = anim(1, 2, ease); m.visual!.transform.x = anim(0.5, x1, ease) })))
+    const q = updateItem<EffectItem>(q0, 'fx', (d) => {
+      d.region.w = anim(24 / W, 2 / W)
+      d.region.h = anim(24 / H, 2 / H)
+    })
+    const d = detachEffect(q, 'fx')
+    const fx = fxOf(q)
+    const side = (t: Us): number => {
+      const tru = trueHole(q, fx, t)
+      return Math.min(...[0, 1].map((i) => Math.hypot(tru[i + 1][0] - tru[i][0], tru[i + 1][1] - tru[i][1])))
+    }
+    // em cada quadro do projeto (instantes amostrados): buraco exato abaixo de 2μ (≈ 8,2 px, o encolhimento que cobre a
+    // interpolação) → buraco nulo; antes, o encolhimento parava em 0 e a simplificação descartava essas amostras,
+    // deixando um buraco de 1–2 px até 2,4 px fora do centro (vazava ~2 px do conteúdo ao lado)
+    let open = 0, closed = 0
+    for (let k = 0; k < 300; k++) {
+      const t = frameToUs(k, 30), r = effectRegionAt(d, fxOf(d), t)
+      if (!(r.w > 0 && r.h > 0)) closed++
+      else {
+        open++
+        if (side(t) < 8) throw new Error(`buraco assado de ${(r.w * W).toFixed(2)} px onde o exato tem ${side(t).toFixed(2)} px (${t})`)
+      }
+    }
+    expect(open).toBeGreaterThan(0)
+    expect(closed).toBeGreaterThan(0)
+    // e em todo instante (1/240 s) o buraco assado cabe no exato
+    for (let t = fx.startUs; t < fx.startUs + fx.durationUs; t += Math.round(S / 240)) {
+      const r = effectRegionAt(d, fxOf(d), t)
+      if (!(r.w > 0 && r.h > 0)) continue
+      const inside = convexTest(trueHole(q, fx, t), 1e-3)
+      const bad = border(r, 'rect', 4).find((pt) => !inside(pt))
+      if (bad) throw new Error(`buraco assado sai do exato em ${t}: ${bad} (${JSON.stringify(r)})`)
+    }
+  })
+
   it('mapeamento conforme (fit conter): o buraco é o exato menos a folga de 1 px', () => {
     const q = inverted(attached(scene((m, fx) => { m.visual!.transform.scale = anim(1, 2); fx.region.rotation = { value: 30 } })))
     const n = effectRegionAt(inverted(q), fxOf(q), 5 * S, 0), r = screen(q, 5 * S)
