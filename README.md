@@ -47,7 +47,17 @@ Editor multi-faixa dentro do app: **Histórico → Editar** (ou **Projetos → N
 - **Silêncios:** **Silêncios** na barra da linha do tempo abre o painel **Remover silêncios**: escolha as faixas de referência (padrão: as de Voz), a duração mínima e a margem, veja os cortes em vermelho na régua e aplique — todas as faixas são cortadas juntas, em sincronia, num passo de desfazer.
 - **Narração:** **Narração** na barra da linha do tempo grava direto na timeline: escolha o microfone (sem processamento), "ouvir o vídeo enquanto grava", contagem 3-2-1 e Espaço/Esc para parar. O arquivo fica em `generated/` dentro do projeto e entra na faixa **Narração** (Voz) no ponto do playhead; microfone desconectado ou janela que cai não perdem o que já foi gravado.
 
-- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3)
+**Keyframes e movimento (v1.4.0):**
+
+- **Keyframes:** posição, escala, rotação e opacidade da mídia, região e intensidade dos efeitos e volume têm keyframes no inspetor (◇, `Alt+K`); corte, raio dos cantos, ajustes de cor e tamanho do texto também são animáveis no projeto (o Ken Burns de um PiP, por exemplo, anima o corte) e aparecem nas linhas de keyframes. A seta no item da linha do tempo abre **uma linha por propriedade animada**, com a mini-curva e losangos coloridos pela curva: clique/Shift/caixa seleciona, arrastar move o grupo, `Delete` apaga, `Ctrl+C`/`Ctrl+V` copiam e colam no playhead (tempos relativos mantidos).
+- **Curvas:** botão direito num losango (ou no ◇ do inspetor) abre o **editor de curvas** do trecho que começa nele: Linear, Segurar, Suavizar entrada/saída/ambos, Overshoot ou uma curva personalizada arrastando as alças (bezier). Dividir, aparar, cortar silêncios e congelar mantêm a forma exata da curva.
+- **Zoom/pan:** a ferramenta **Zoom** (`Z`) desenha no visualizador o enquadramento-alvo (na proporção do quadro) sobre o clipe sob o ponteiro e grava os keyframes de escala/posição no playhead, com duração, curva, "Voltar ao normal depois de N s" e "Sem bordas pretas" no botão de opções. **Ken Burns** no inspetor do vídeo: aproximação lenta do clipe inteiro numa das quatro diagonais (num PiP o movimento é feito pelo corte, a caixa fica parada).
+- **Animações de entrada e saída:** grade de cartões no inspetor (Entrada / Saída / Combinação) com Fade, Deslizar (4 lados), Zoom, Pop, Girar, Quicar e Desfoque, com prévia animada no cartão, duração e curva (vídeo e imagem; texto e forma quando chegarem na F5).
+- **Efeitos ancorados ao clipe:** um blur/pixelizar/tarja **ancorado** acompanha o conteúdo do clipe em qualquer zoom, pan, Ken Burns, corte animado ou animação de entrada/saída, inclusive editados depois. Ao dar zoom (ou Ken Burns, ou uma animação com movimento) num clipe com efeito de privacidade vinculado, o aviso oferece **Ancorar efeito ao clipe** (ou **Vincular e ancorar** para um efeito solto); no inspetor do efeito, a chave **Ancorado ao clipe** liga/desliga a âncora (desancorar grava keyframes no quadro que reproduzem o movimento). O diálogo de exportação avisa quando um efeito não acompanha o movimento, quando o clipe da âncora sumiu ou quando o efeito passa do fim do clipe.
+- **Reenquadrar:** **Reenquadrar** na barra de cima converte o projeto para **9:16**, **1:1** ou **4:5**, em "Preencher" (com **pontos de foco**: clique no visualizador marca o ponto que fica no centro naquele instante; a câmera vai suave de um ponto ao outro e o ponto continua no centro durante um zoom do clipe) ou "Caber inteiro". O padrão é **Criar cópia** ("<nome> (Vertical)", numa pasta própria com os proxies, sem reprocessar a mídia) — o original fica intacto; "Este projeto" aplica em um passo de desfazer. PiP e textos mantêm o tamanho relativo; os efeitos de privacidade continuam sobre o mesmo conteúdo (ancorados ou ajustados ao novo quadro) e o painel lista o que precisa de conferência (efeito fora do novo quadro, buraco do "Borrar tudo menos…" fechado, anotações).
+- **Compatibilidade:** projetos salvos pela v1.4 continuam abrindo na v1.3, **exceto** os que usam recursos novos sem equivalente nela (keyframes em corte, ajustes, raio ou tamanho do texto; Ken Burns num PiP): esses só abrem na v1.4 — atualize todas as máquinas. Efeitos ancorados e as animações Girar/Quicar/Desfoque abrem na v1.3 de forma segura (região fixa que cobre todo o movimento — no "Borrar tudo menos…" ancorado, o quadro inteiro borrado; animação trocada por Fade/Deslizar).
+
+- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4)
 - Checklist manual: [docs/qa-checklist.md](docs/qa-checklist.md) (seção Editor)
 
 QA automatizado via CDP (eventos sintéticos na página, sem mexer no mouse/teclado do Windows; tudo em `test-out/`), depois de `npm run build`:
@@ -70,9 +80,17 @@ node scripts/qa/editor-f3-narration.mjs  # narração com o microfone falso (= n
 node scripts/qa/editor-f3-e2e.mjs     # F3 ponta a ponta: gravação com pausas → remover silêncios → música → narração
                                       # → clipe a 2× → Alta 1080p → ffmpeg confere duração, ducking (−12 dB),
                                       # tom preservado (Goertzel) e a narração no lugar
+node scripts/qa/editor-f4-keyframes.mjs  # linhas de keyframes por propriedade, seleção, copiar/colar, editor de curvas
+node scripts/qa/editor-f4-zoom.mjs    # ferramenta Zoom (Z), opções, enquadramento-alvo, Ken Burns (tela cheia e PiP)
+node scripts/qa/editor-f4-follow.mjs  # Ancorar ao clipe: oferta no zoom, região acompanha, desancorar, âncora perdida
+node scripts/qa/editor-f4-anim.mjs    # animações de entrada/saída: cartões, duração, curva, combinação, texto
+node scripts/qa/editor-f4-reframe.mjs # Reenquadrar: painel, pontos de foco, este projeto × criar cópia
+node scripts/qa/editor-f4-e2e.mjs     # F4 ponta a ponta: blur vinculado → zoom 2× → Ancorar → Pop/Desfoque → curva
+                                      # personalizada → Alta 1080p → Reenquadrar 9:16 (cópia, foco) → Vertical 9:16;
+                                      # ffmpeg confere tamanhos, durações, o foco no centro e o texto ilegível no zoom
 ```
 
-Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/` e `docs/qa/editor-f3/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
+Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/` e `docs/qa/editor-f4/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
 
 ## Estrutura
 
