@@ -41,4 +41,11 @@ describe('SpeechLoader (fala do ducking no audio worker)', () => {
     await l.plan({ v: 'u' }, (sp) => { got = sp }, (m) => errors.push(m))
     expect(Object.keys(got as object)).toEqual(['v'])
   })
+
+  it('margem/mescla do chamador (remover silêncios: sem margem) em vez do padrão', async () => {
+    const l = new SpeechLoader(async () => file, () => {}, { padUs: 0, mergeGapUs: 0 })
+    expect((await l.load({ v: 'u' })).v).toEqual([{ fromUs: 2 * S, toUs: 4 * S }])
+    const d = new SpeechLoader(async () => file, () => {})
+    expect((await d.load({ v: 'u' })).v).toEqual([{ fromUs: 2 * S - 120_000, toUs: 4 * S + 120_000 }])
+  })
 })

@@ -1,7 +1,10 @@
-// Carregamento da fala para o ducking no audio worker (sem dependência do worker, testável): lê os speech.json pela
-// URL (cache por URL; falha não fica em cache e é avisada uma vez por URL) e monta o plano com a fala sem nunca
-// rejeitar — erro ao montar mantém o plano anterior (sem fala) e é avisado.
+// Carregamento da fala (sem dependência do worker, testável): lê os speech.json pela URL (cache por URL; falha não
+// fica em cache e é avisada uma vez por URL). No audio worker (ducking) monta o plano com a fala sem nunca rejeitar —
+// erro ao montar mantém o plano anterior (sem fala) e é avisado; no diálogo "Remover silêncios" (thread principal)
+// carrega a fala sem margem nem mescla (SILENCE_SPEECH_OPTS).
 import { speechFromFile, type SpeechFile, type SpeechInterval } from '@shared/editor/speech'
+
+type SpeechOpts = Parameters<typeof speechFromFile>[1]
 
 export type FetchJson = (url: string) => Promise<unknown>
 
@@ -16,8 +19,8 @@ export class SpeechLoader {
   private readonly cache = new Map<string, Promise<SpeechInterval[] | null>>()
   private readonly reported = new Set<string>()
 
-  /** onFailed(assetId): speech.json que não carregou (uma vez por URL). */
-  constructor(private readonly fetchJson: FetchJson, private readonly onFailed: (assetId: string) => void) {}
+  /** onFailed(assetId): speech.json que não carregou (uma vez por URL). opts: margem/mescla (padrão: SPEECH_DEFAULTS). */
+  constructor(private readonly fetchJson: FetchJson, private readonly onFailed: (assetId: string) => void, private readonly opts: SpeechOpts = {}) {}
 
   /** Intervalos de fala por assetId (urls: assetId → URL do speech.json); o que não carregar fica de fora. */
   async load(urls: Record<string, string>): Promise<Record<string, SpeechInterval[]>> {
@@ -27,7 +30,7 @@ export class SpeechLoader {
         let p = this.cache.get(url)
         if (!p) {
           p = this.fetchJson(url)
-            .then((json) => (isSpeechFile(json) ? speechFromFile(json) : null))
+            .then((json) => (isSpeechFile(json) ? speechFromFile(json, this.opts) : null))
             .catch(() => null)
           this.cache.set(url, p)
         }

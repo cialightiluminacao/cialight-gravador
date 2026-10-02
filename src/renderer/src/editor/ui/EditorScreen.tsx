@@ -12,6 +12,8 @@ import { startAudioProcessing } from './audioProcessing'
 import { audioSourceKey } from '@shared/editor/audioProcess'
 import { TopBar } from './TopBar'
 import { ExportDialog } from './ExportDialog'
+import { SilenceDialog } from './SilenceDialog'
+import { useSilencePreview } from '../state/silencePreview'
 import { MediaBin } from './MediaBin'
 import { Viewer } from './Viewer'
 import { Inspector } from './Inspector/Inspector'
@@ -26,7 +28,7 @@ import { viewerGestureActive } from './viewer/viewerGesture'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string }
+    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string }
   }
 }
 
@@ -65,7 +67,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     setEngine(eng)
     const stopAutosave = startAutosave((p) => api.project.save(p))
     // QA (fora do pacote): store e motor acessíveis por CDP
-    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
+    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
     const offProgress = api.media.onProgress((j) => {
       if (j.projectId.toLowerCase() !== projectId.toLowerCase()) return
       const st = useEditorStore.getState()
@@ -126,6 +128,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       offProgress()
       offDone()
       eng.playback.pause()
+      useSilencePreview.getState().close()
       engineRef.current = null
       if (window.__qaEditor?.engine === eng) delete window.__qaEditor
       void (async () => {
@@ -239,6 +242,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       <div className="min-h-0 shrink-0" style={{ height: timelineH }}>
         {loaded ? <Timeline playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
       </div>
+      {loaded ? <SilenceDialog /> : null}
       {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} onSeek={(us) => seekTo(engineRef.current?.playback ?? null, us)} /> : null}
     </div>
   )

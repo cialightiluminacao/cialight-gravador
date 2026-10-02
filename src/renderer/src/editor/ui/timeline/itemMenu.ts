@@ -1,10 +1,11 @@
-import { Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
+import { AudioLines, Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
 import { convertEffects, detachAudio, enableGroupIds, findItem, linkedIds, linkItems, setSpeed, unlinkMedia } from '@shared/editor/ops'
 import type { EffectItem, Marker, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
 import type { PlaybackController } from '../../engine/PlaybackController'
 import { SHORTCUT_LABELS } from '../../shortcuts'
 import { useEditorStore } from '../../state/editorStore'
+import { useSilencePreview } from '../../state/silencePreview'
 import { deleteSelection, runShortcut, seekTo, splitAtPlayhead, toggleEnabledSelection } from '../editorActions'
 import type { MenuEntry } from './ContextMenu'
 
@@ -82,6 +83,10 @@ export function itemMenuEntries(p: Project, itemId: string, playback: PlaybackCo
     },
     { label: anyOn ? 'Desativar' : 'Ativar', icon: anyOn ? EyeOff : Eye, shortcut: SHORTCUT_LABELS.toggleEnabled, onSelect: () => toggleEnabledSelection(sel) },
     ...convertEntry(p, sel),
+    // item com som: abre o "Remover silêncios" com a faixa dele como voz de referência
+    ...(main?.type === 'media' && p.assets.find((a) => a.id === main.assetId)?.audio && !main.freeze
+      ? [{ label: 'Remover silêncios…', icon: AudioLines, onSelect: () => useSilencePreview.getState().openDialog(findItem(p, itemId)?.track.id ?? null) }]
+      : []),
     { separator: true },
     { label: 'Excluir', icon: Trash2, shortcut: SHORTCUT_LABELS.delete, danger: true, onSelect: () => deleteSelection(false) },
     { label: 'Excluir com ripple', icon: Trash2, shortcut: SHORTCUT_LABELS.rippleDelete, danger: true, onSelect: () => deleteSelection(true) }

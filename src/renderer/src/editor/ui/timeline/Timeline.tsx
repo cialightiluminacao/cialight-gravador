@@ -7,6 +7,7 @@ import { formatTimecodeUs } from '@shared/editor/time'
 import { cn } from '@/lib/cn'
 import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
+import { useSilencePreview } from '../../state/silencePreview'
 import { addAssetAt, addEffectAt, registerZoomFit, seekTo } from '../editorActions'
 import { effectFromDrag, isEffectDrag } from '../EffectLibrary'
 import { ASSET_MIME } from '../MediaCard'
@@ -45,6 +46,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
   const selection = useEditorStore((s) => s.selection)
   const inUs = useEditorStore((s) => s.inUs)
   const outUs = useEditorStore((s) => s.outUs)
+  const silenceCuts = useSilencePreview((s) => s.cuts)
   const [viewW, setViewW] = useState(0)
   const [overlay, setOverlay] = useState<DragOverlay>(NO_OVERLAY)
   const [menu, setMenu] = useState<{ x: number; y: number; entries: MenuEntry[] } | null>(null)
@@ -263,11 +265,14 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
           <div className="shrink-0" style={{ width: HEADER_W }} />
           <HScrollbar viewW={viewW} durationUs={durationUs} />
         </div>
-        {/* sobreposições que não rolam na vertical: faixa I/O, linha guia do ímã e playhead */}
+        {/* sobreposições que não rolam na vertical: faixa I/O, cortes do "Remover silêncios", linha guia do ímã e playhead */}
         <div className="pointer-events-none absolute right-0 top-0 overflow-hidden" style={{ left: HEADER_W, bottom: SCROLLBAR_H }}>
           {inUs !== null || outUs !== null ? (
             <span className="absolute bottom-0 bg-accent/[0.06]" style={{ top: RULER_H, left: Math.max(0, inUs !== null ? x(inUs) : 0), right: outUs !== null ? Math.max(0, viewW - x(outUs)) : 0 }} />
           ) : null}
+          {silenceCuts.map((c) => (
+            <span key={c.fromUs} className="absolute bottom-0 bg-danger/[0.16]" style={{ top: RULER_H, left: x(c.fromUs), width: Math.max(1, x(c.toUs) - x(c.fromUs)) }} />
+          ))}
           {overlay.guideUs !== null ? <span data-snap-guide="" className="absolute inset-y-0 z-30 w-px bg-warn shadow-[0_0_4px_var(--warn)]" style={{ left: Math.round(x(overlay.guideUs)) }} /> : null}
           <Playhead viewW={viewW} />
         </div>

@@ -1,17 +1,18 @@
 import { memo } from 'react'
-import { Bookmark, Eraser, Magnet, Maximize2, Redo2, Scissors, Trash2, Undo2, ZoomIn, ZoomOut } from 'lucide-react'
+import { AudioLines, Bookmark, Eraser, Magnet, Maximize2, Redo2, Scissors, Trash2, Undo2, ZoomIn, ZoomOut } from 'lucide-react'
 import { formatTimecodeUs } from '@shared/editor/time'
 import { Slider, Tip } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
 import type { PlaybackController } from '../../engine/PlaybackController'
 import { SHORTCUT_LABELS, type ShortcutAction } from '../../shortcuts'
 import { useEditorStore } from '../../state/editorStore'
+import { useSilencePreview } from '../../state/silencePreview'
 import { runShortcut } from '../editorActions'
 import { ZOOM_MAX, ZOOM_MIN } from '../../state/zoom'
 
 // Barra da linha do tempo: dividir, apagar, desfazer/refazer, ímã, marcador, entrada/saída e
-// "Apagar trecho I–O", zoom (−, slider logarítmico, +, ajustar). Tudo passa por runShortcut,
-// o mesmo caminho dos atalhos de teclado.
+// "Apagar trecho I–O", "Remover silêncios" (abre o painel), zoom (−, slider logarítmico, +, ajustar).
+// Tudo, menos "Remover silêncios", passa por runShortcut, o mesmo caminho dos atalhos de teclado.
 
 const LOG_RANGE = Math.log(ZOOM_MAX / ZOOM_MIN)
 const zoomToSlider = (z: number): number => (Math.log(z / ZOOM_MIN) / LOG_RANGE) * 1000
@@ -49,6 +50,7 @@ export const TimelineToolbar = memo(function TimelineToolbar({ playback, onZoom 
   const inUs = useEditorStore((s) => s.inUs)
   const outUs = useEditorStore((s) => s.outUs)
   const fps = useEditorStore((s) => s.project?.canvas.fps ?? 30)
+  const silenceOpen = useSilencePreview((s) => s.open)
   const range = inUs !== null && outUs !== null && outUs > inUs
   return (
     <div className="flex h-9 shrink-0 items-center gap-0.5 border-b border-border bg-surface/80 px-2" role="toolbar" aria-label="Ferramentas da linha do tempo">
@@ -64,6 +66,18 @@ export const TimelineToolbar = memo(function TimelineToolbar({ playback, onZoom 
       <Btn label="Marcar entrada" action="markIn" playback={playback} text="I" active={inUs !== null} />
       <Btn label="Marcar saída" action="markOut" playback={playback} text="O" active={outUs !== null} />
       <Btn label="Apagar trecho I–O" action="deleteRange" playback={playback} icon={Eraser} disabled={!range} />
+      <Sep />
+      <Tip content="Remover silêncios…">
+        <button
+          type="button"
+          aria-label="Remover silêncios"
+          aria-pressed={silenceOpen}
+          onClick={() => useSilencePreview.getState().openDialog()}
+          className={cn('flex h-7 items-center gap-1 rounded-md px-1.5 text-[11px] font-semibold transition-colors', silenceOpen ? 'bg-accent/15 text-accent' : 'text-fg-2 hover:bg-white/6 hover:text-fg')}
+        >
+          <AudioLines className="h-4 w-4" /> Silêncios
+        </button>
+      </Tip>
       {range ? (
         <span className="ml-1 font-mono text-[10px] text-muted">
           {formatTimecodeUs(inUs, fps)} – {formatTimecodeUs(outUs, fps)}

@@ -3,14 +3,15 @@ import type { Marker, Us } from '@shared/editor/project'
 import { snapDelta, snapPoints } from '@shared/editor/snap'
 import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
+import { useSilencePreview } from '../../state/silencePreview'
 import { seekTo } from '../editorActions'
 import { RULER_H } from './layout'
 import { pxToDurUs, pxToUs, rulerLabel, rulerTicks, SNAP_PX, usToPx } from '../../state/zoom'
 
 // Régua: ticks e timecode desenhados num <canvas> (só a janela visível), faixa I/O destacada e
 // marcadores (triângulos coloridos: clique vai até ele, duplo clique renomeia, botão direito abre
-// o menu). Clicar/arrastar na régua move o playhead (seek); com o ímã ligado encaixa em bordas e
-// marcadores a 8 px.
+// o menu) e os cortes do "Remover silêncios" em pré-visualização (faixas vermelhas). Clicar/arrastar
+// na régua move o playhead (seek); com o ímã ligado encaixa em bordas e marcadores a 8 px.
 
 interface Props {
   viewW: number
@@ -90,6 +91,7 @@ export const Ruler = memo(function Ruler({ viewW, fps, playback, onMarkerMenu }:
   const inUs = useEditorStore((s) => s.inUs)
   const outUs = useEditorStore((s) => s.outUs)
   const markers = useEditorStore((s) => s.project?.markers)
+  const silenceCuts = useSilencePreview((s) => s.cuts)
   const rootRef = useRef<HTMLDivElement>(null)
   const [editing, setEditing] = useState<string | null>(null)
   // arraste em curso: listeners da janela saem também se a régua desmontar no meio
@@ -146,6 +148,11 @@ export const Ruler = memo(function Ruler({ viewW, fps, playback, onMarkerMenu }:
           style={{ left: Math.max(-2, ioL ?? -2), width: Math.max(0, Math.min(viewW + 2, ioR ?? viewW + 2) - Math.max(-2, ioL ?? -2)) }}
         />
       ) : null}
+      {silenceCuts.map((c) => {
+        const l = x(c.fromUs), r = x(c.toUs)
+        if (r < -2 || l > viewW + 2) return null
+        return <span key={c.fromUs} data-silence-cut="" className="pointer-events-none absolute inset-y-0 border-x border-danger/80 bg-danger/35" style={{ left: l, width: Math.max(1, r - l) }} />
+      })}
       <Ticks viewW={viewW} fps={fps} pps={pps} scrollUs={scrollUs} />
       {markers?.map((m) => {
         const mx = x(m.tUs)
