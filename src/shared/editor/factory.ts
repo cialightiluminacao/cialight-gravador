@@ -60,7 +60,7 @@ export function createEffectItem(preset: EffectPresetId, startUs: Us, durationUs
     solid: { effect: 'solid', shape: 'rect', w: 0.4, h: 0.3, strength: 100, feather: 0, invert: false },
     blurFace: { effect: 'blur', shape: 'ellipse', w: 0.18, h: 0.32, strength: 80, feather: 0.3, invert: false },
     blurText: { effect: 'blur', shape: 'rect', w: 0.4, h: 0.08, strength: 80, feather: 0, invert: false },
-    blurAllExcept: { effect: 'blur', shape: 'rect', w: 0.5, h: 0.5, strength: 60, feather: 0.2, invert: true }
+    blurAllExcept: { effect: 'blur', shape: 'rect', w: 0.5, h: 0.5, strength: 80, feather: 0.2, invert: true }
   } as const
   const c = cfg[preset]
   const r = { x: 0.5, y: 0.5, w: c.w, h: c.h, rotation: 0, shape: c.shape as 'rect' | 'ellipse', ...region }

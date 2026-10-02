@@ -1,4 +1,4 @@
-import { addTrack, defaultEffectDurationUs, EditError, findItem, linkedIds, moveItems, moveKeyframes, trimItem, updateItem } from '@shared/editor/ops'
+import { addTrack, defaultEffectDurationUs, EditError, effectTrackAllowed, findItem, linkedIds, moveItems, moveKeyframes, trimItem, updateItem } from '@shared/editor/ops'
 import type { MediaItem, Project, TrackKind, Us } from '@shared/editor/project'
 import { snapDelta, snapPoints, type SnapPoint } from '@shared/editor/snap'
 import { itemEndUs, snapToFrame } from '@shared/editor/time'
@@ -193,17 +193,18 @@ export function dropTarget(p: Project, assetId: string, zone: DropZone): { track
 }
 
 /**
- * Faixa para um efeito solto da biblioteca em atUs: a faixa de vídeo sob o ponteiro, se desbloqueada e
- * livre no intervalo que o efeito ocuparia (nunca sobrescreve mídia); senão undefined → addEffect usa a
- * faixa "Efeitos" (reaproveitada ou criada no topo).
+ * Faixa para um efeito solto da biblioteca em atUs: a faixa de vídeo sob o ponteiro, se livre no intervalo que o
+ * efeito ocuparia (nunca sobrescreve mídia) e aceita por effectTrackAllowed (visível, desbloqueada, sem mídia
+ * visível por cima no intervalo); senão undefined → addEffect usa a faixa "Efeitos" (reaproveitada ou criada no topo).
  */
 export function effectDropTrack(p: Project, zone: DropZone, atUs: Us): string | undefined {
   if (!zone || zone.kind !== 'track') return undefined
   const t = p.tracks.find((x) => x.id === zone.trackId)
-  if (!t || t.kind !== 'video' || t.locked) return undefined
+  if (!t) return undefined
   const s = Math.max(0, Math.round(atUs))
   const e = s + defaultEffectDurationUs(p, s)
-  return t.items.some((i) => i.startUs < e && itemEndUs(i) > s) ? undefined : t.id
+  if (t.items.some((i) => i.startUs < e && itemEndUs(i) > s)) return undefined
+  return effectTrackAllowed(p, t.id, s, e) ? t.id : undefined
 }
 
 export const EDGE_SCROLL_ZONE = 48

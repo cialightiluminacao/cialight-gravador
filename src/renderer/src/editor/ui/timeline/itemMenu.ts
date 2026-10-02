@@ -1,5 +1,5 @@
 import { Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
-import { convertEffects, detachAudio, findItem, linkedIds, linkItems, setSpeed, unlinkItems } from '@shared/editor/ops'
+import { convertEffects, detachAudio, enableGroupIds, findItem, linkedIds, linkItems, setSpeed, unlinkItems } from '@shared/editor/ops'
 import type { EffectItem, Marker, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
 import type { PlaybackController } from '../../engine/PlaybackController'
@@ -62,7 +62,7 @@ export function itemMenuEntries(p: Project, itemId: string, playback: PlaybackCo
   const main = findItem(p, itemId)?.item
   const current = main?.type === 'media' ? main.speed : null
   // mesmo grupo que Shift+E desativa: a seleção e os vinculados
-  const anyOn = [...new Set(sel.flatMap((id) => (findItem(p, id) ? linkedIds(p, id) : [])))].some((id) => findItem(p, id)?.item.enabled !== false)
+  const anyOn = enableGroupIds(p, sel.filter((id) => findItem(p, id)), true).some((id) => findItem(p, id)?.item.enabled !== false)
   return [
     { label: 'Dividir no playhead', icon: Scissors, shortcut: SHORTCUT_LABELS.split, disabled: !splittable, onSelect: splitAtPlayhead },
     { label: 'Duplicar', icon: Copy, shortcut: SHORTCUT_LABELS.duplicate, onSelect: () => runShortcut('duplicate', playback) },

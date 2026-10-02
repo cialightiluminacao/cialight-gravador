@@ -23,6 +23,8 @@ export type InsertMode = 'overwrite' | 'insert'
 
 const end = itemEndUs
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
+/** Nome das faixas de efeitos criadas por addEffect ("Efeitos", "Efeitos 2", …). */
+const FX_TRACK = /^Efeitos( \d+)?$/
 
 // ---------------------------------------------------------------- consultas
 
@@ -35,20 +37,44 @@ export function findItem(p: Project, itemId: string): { track: Track; item: Item
   return null
 }
 
-/** Inclui o próprio item (primeiro); vazio se não existir. */
+/** O grupo `linkId` tem algum item que não é efeito (clipe de vídeo/áudio, etc.)? */
+function groupHasMedia(p: Project, linkId: string): boolean {
+  return p.tracks.some((t) => t.items.some((i) => i.linkId === linkId && i.type !== 'effect'))
+}
+
+/**
+ * Inclui o próprio item (primeiro); vazio se não existir. Efeito vinculado a um clipe é "seguidor": acompanha as
+ * edições do clipe (a partir do clipe vêm todos, inclusive os efeitos), mas a partir do efeito só ele mesmo — mexer
+ * no efeito nunca arrasta o clipe.
+ */
 export function linkedIds(p: Project, itemId: string): string[] {
   const f = findItem(p, itemId)
   if (!f) return []
   const link = f.item.linkId
-  if (!link) return [itemId]
+  if (!link || (f.item.type === 'effect' && groupHasMedia(p, link))) return [itemId]
   const out = [itemId]
   for (const t of p.tracks) for (const i of t.items) if (i.linkId === link && i.id !== itemId) out.push(i.id)
   return out
 }
 
+/** Efeito vinculado a um clipe (segue as edições dele)? */
+function isFollower(p: Project, it: Item): boolean {
+  return it.type === 'effect' && !!it.linkId && groupHasMedia(p, it.linkId)
+}
+
 export function projectDurationUs(p: Project): Us {
   let max = 0
   for (const t of p.tracks) if (!t.hidden) for (const i of t.items) max = Math.max(max, end(i))
+  return max
+}
+
+/**
+ * Fim do conteúdo exportável: como projectDurationUs, mas sem efeitos e sem itens desativados (um efeito solto
+ * depois do fim da mídia não estica a exportação "Tudo" com quadros pretos).
+ */
+export function contentEndUs(p: Project): Us {
+  let max = 0
+  for (const t of p.tracks) if (!t.hidden) for (const i of t.items) if (i.type !== 'effect' && i.enabled !== false) max = Math.max(max, end(i))
   return max
 }
 
@@ -188,7 +214,11 @@ function overwriteRange(track: Track, from: Us, to: Us, cutLinks: Set<string>): 
 function relinkAcross(d: Project, from: Us, to: Us, cutLinks: Set<string>): void {
   for (const link of cutLinks) {
     const members = d.tracks.flatMap((t) => t.items.filter((i) => i.linkId === link))
-    if (!members.some((i) => i.startUs < from) || !members.some((i) => i.startUs >= to)) continue
+    // com clipe no grupo, quem decide a divisão é a mídia (cortar só o efeito seguidor não o desvincula do
+    // clipe); os efeitos vão para o lado em que começam
+    const media = members.filter((i) => i.type !== 'effect')
+    const deciders = media.length ? media : members
+    if (!deciders.some((i) => i.startUs < from) || !deciders.some((i) => i.startUs >= to)) continue
     const n = newId('l_')
     for (const i of members) if (i.startUs >= to) i.linkId = n
   }
@@ -244,17 +274,30 @@ function makeRoom(d: Project, pointUs: Us, D: Us, targetTrackId: string): Us {
  * Desloca itens com startUs ≥ pivot por shift nas faixas desbloqueadas. Ao puxar para trás (shift < 0),
  * faixas fora de `forced` só se movem se o intervalo [pivot+shift, pivot) estiver vazio nelas.
  * Os marcadores ≥ pivot só se deslocam se todas as faixas desbloqueadas foram deslocadas.
+ * Efeitos vinculados a um clipe não decidem pela própria posição nem bloqueiam a faixa: andam junto com a mídia
+ * do grupo (se ela andou), mesmo começando antes do pivô.
  */
 function rippleShift(d: Project, pivotUs: Us, shift: Us, exclude: Set<string>, forced: Set<string>): void {
   if (shift === 0) return
+  const fol = new Set<string>()
+  for (const t of d.tracks) for (const i of t.items) if (isFollower(d, i)) fol.add(i.id)
+  const movedLinks = new Set<string>()
   let all = true
   for (const t of d.tracks) {
     if (t.locked) continue
     if (shift < 0 && !forced.has(t.id)) {
       const g0 = pivotUs + shift
-      if (t.items.some((i) => !exclude.has(i.id) && i.startUs < pivotUs && end(i) > g0)) { all = false; continue }
+      if (t.items.some((i) => !exclude.has(i.id) && !fol.has(i.id) && i.startUs < pivotUs && end(i) > g0)) { all = false; continue }
     }
-    for (const it of t.items) if (!exclude.has(it.id) && it.startUs >= pivotUs) it.startUs += shift
+    for (const it of t.items) {
+      if (exclude.has(it.id) || fol.has(it.id) || it.startUs < pivotUs) continue
+      it.startUs += shift
+      if (it.linkId) movedLinks.add(it.linkId)
+    }
+  }
+  for (const t of d.tracks) {
+    if (t.locked) continue
+    for (const it of t.items) if (fol.has(it.id) && !exclude.has(it.id) && movedLinks.has(it.linkId!)) it.startUs += shift
   }
   if (all) for (const m of d.markers) if (m.tUs >= pivotUs) m.tUs += shift
 }
@@ -282,20 +325,29 @@ function finalize(d: Project): void {
 
 function defaultTrackName(p: Project, kind: TrackKind): string {
   const prefix = kind === 'video' ? 'Vídeo' : 'Áudio'
-  let n = p.tracks.filter((t) => t.kind === kind).length + 1
+  let n = p.tracks.filter((t) => t.kind === kind && !FX_TRACK.test(t.name)).length + 1
   while (p.tracks.some((t) => t.name === `${prefix} ${n}`)) n++
   return `${prefix} ${n}`
 }
 
-/** Cria faixa no draft. Índice padrão: vídeo logo acima da última faixa de vídeo (0 = fundo); áudio no fim. */
+/** Índice logo acima da última faixa de vídeo (0 = fundo). */
+function aboveLastVideo(p: Project): number {
+  let last = -1
+  p.tracks.forEach((t, i) => { if (t.kind === 'video') last = i })
+  return last + 1
+}
+
+/**
+ * Cria faixa no draft. Índice padrão: vídeo logo acima da última faixa de vídeo, mas abaixo do bloco de faixas
+ * "Efeitos" do topo (mídia nova nunca fica por cima dos efeitos de privacidade); áudio no fim.
+ */
 function createTrack(d: Project, kind: TrackKind, index?: number, name?: string): string {
   let at = index
   if (at === undefined) {
     if (kind === 'audio') at = d.tracks.length
     else {
-      let last = -1
-      d.tracks.forEach((t, i) => { if (t.kind === 'video') last = i })
-      at = last + 1
+      at = aboveLastVideo(d)
+      while (at > 0 && d.tracks[at - 1].kind === 'video' && FX_TRACK.test(d.tracks[at - 1].name)) at--
     }
   }
   const id = newId('t_')
@@ -403,14 +455,17 @@ export function insertItems(p: Project, trackId: string, items: Item[], mode: In
   })
 }
 
-/** Escolhe a faixa: explícita; com modo → primeira desbloqueada do tipo; sem modo → primeira livre (ou cria). */
+/**
+ * Escolhe a faixa: explícita; com modo → primeira desbloqueada do tipo; sem modo → primeira livre (ou cria).
+ * Faixas "Efeitos" não recebem mídia automaticamente (ela ficaria por cima dos efeitos das faixas de baixo).
+ */
 function pickTrack(p: Project, kind: TrackKind, explicitId: string | undefined, mode: InsertMode | undefined, s: Us, e: Us): { project: Project; trackId: string; mode: InsertMode } {
   if (explicitId) {
     const t = mustTrack(p, explicitId)
     if (t.kind !== kind) throw new EditError('invalid', `Faixa ${t.name} não é de ${kind === 'video' ? 'vídeo' : 'áudio'}`)
     return { project: p, trackId: t.id, mode: mode ?? 'overwrite' }
   }
-  const candidates = p.tracks.filter((t) => t.kind === kind && !t.locked)
+  const candidates = p.tracks.filter((t) => t.kind === kind && !t.locked && !FX_TRACK.test(t.name))
   const chosen = mode ? candidates[0] : candidates.find((t) => isFree(t, s, e))
   if (chosen) return { project: p, trackId: chosen.id, mode: mode ?? 'overwrite' }
   const r = addTrack(p, kind)
@@ -483,11 +538,20 @@ function sourceExtent(p: Project, it: Item): [Us, Us] {
 /**
  * start: muda startUs e inUs (limitado por inUs ≥ 0 e vizinho anterior); end: muda durationUs (limitado pela
  * fonte e pelo próximo vizinho). ripple: o início fica parado e os itens posteriores (todas as faixas) se deslocam.
+ * Efeitos vinculados ao clipe: o que tem a borda alinhada à borda aparada (±½ quadro) acompanha a borda; os
+ * demais seguem o conteúdo (parados; no ripple pelo início, deslocados junto com o conteúdo do clipe).
  */
 export function trimItem(p: Project, itemId: string, edge: 'start' | 'end', toUs: Us, opts?: { ripple?: boolean; includeLinked?: boolean }): Project {
   const main = mustFind(p, itemId).item
   const ripple = !!opts?.ripple
-  const ids = expand(p, [itemId], opts?.includeLinked ?? true)
+  const tol = frameDurUs(p.canvas.fps) / 2
+  const edgeOf = (it: Item): Us => (edge === 'start' ? it.startUs : end(it))
+  const group = expand(p, [itemId], opts?.includeLinked ?? true)
+  const isFx = (id: string): boolean => id !== itemId && main.type !== 'effect' && mustFind(p, id).item.type === 'effect'
+  const aligned = (id: string): boolean => Math.abs(edgeOf(mustFind(p, id).item) - edgeOf(main)) <= tol
+  const ids = group.filter((id) => !isFx(id) || aligned(id))
+  const fxEdge = new Set(ids.filter(isFx))
+  const fxContent = group.filter((id) => !ids.includes(id))
   const idSet = new Set(ids)
   let delta = Math.round(toUs) - (edge === 'start' ? main.startUs : end(main))
   let lo = -Infinity, hi = Infinity
@@ -521,14 +585,32 @@ export function trimItem(p: Project, itemId: string, edge: 'start' | 'end', toUs
       const f = mustFind(d, id)
       const it = f.item
       forced.add(f.track.id)
+      // efeito alinhado: a borda vai exatamente para a nova borda do clipe
+      const s0 = fxEdge.has(id) ? main.startUs : it.startUs
+      const e0 = fxEdge.has(id) ? end(main) : end(it)
       let n: Item
       if (edge === 'start') {
-        n = sliceItem(it, it.startUs + delta, end(it), false)
-        if (ripple) n = { ...n, startUs: it.startUs }
-      } else n = sliceItem(it, it.startUs, end(it) + delta, false)
+        n = sliceItem(it, s0 + delta, end(it), false)
+        if (ripple) n = { ...n, startUs: s0 }
+      } else n = sliceItem(it, it.startUs, e0 + delta, false)
       f.track.items[f.itemIndex] = n
     }
-    if (ripple) rippleShift(d, end(main), edge === 'start' ? -delta : delta, idSet, forced)
+    // efeitos vinculados que não estão na borda: no ripple acompanham o conteúdo do clipe
+    for (const id of fxContent) {
+      if (!ripple) break
+      const f = mustFind(d, id)
+      const it = f.item
+      if (edge === 'end') {
+        if (it.startUs >= end(main)) f.track.items[f.itemIndex] = { ...it, startUs: it.startUs + delta }
+        continue
+      }
+      if (it.startUs < main.startUs) continue
+      // ripple pelo início: o conteúdo do clipe anda −delta; a parte do efeito sobre o trecho cortado sai
+      const cut = main.startUs + delta
+      if (it.startUs >= cut) f.track.items[f.itemIndex] = { ...it, startUs: it.startUs - delta }
+      else if (end(it) - cut >= MIN_ITEM_US) f.track.items[f.itemIndex] = { ...sliceItem(it, cut, end(it), false), startUs: main.startUs }
+    }
+    if (ripple) rippleShift(d, end(main), edge === 'start' ? -delta : delta, new Set([...idSet, ...fxContent]), forced)
     finalize(d)
   })
 }
@@ -665,12 +747,14 @@ export function detachAudio(p: Project, itemId: string): Project {
   const f = mustFind(p, itemId)
   const it = f.item
   if (it.type !== 'media') throw new EditError('invalid', 'Somente itens de mídia têm áudio')
-  if (it.linkId) return unlinkItems(p, linkedIds(p, itemId))
+  // vinculado a outra mídia (o áudio já separado): desvincula; vinculado só a efeitos ainda separa o áudio
+  const partners = linkedIds(p, itemId).filter((id) => id !== itemId)
+  if (partners.some((id) => mustFind(p, id).item.type !== 'effect')) return unlinkItems(p, linkedIds(p, itemId))
   if (f.track.kind !== 'video') throw new EditError('invalid', 'O item já é de áudio')
   const asset = p.assets.find((a) => a.id === it.assetId)
   if (!it.audio.enabled || !asset?.audio) throw new EditError('invalid', 'O item não tem áudio para separar')
   assertUnlocked(f.track)
-  const linkId = newId('l_')
+  const linkId = it.linkId ?? newId('l_')
   const audioItem: MediaItem = { ...omit(it, 'visual', 'transitionIn'), id: newId('i_'), linkId, audio: { ...it.audio, enabled: true } }
   return produce(p, (d) => {
     const target = d.tracks.find((t) => t.kind === 'audio' && !t.locked && isFree(t, it.startUs, end(it)))
@@ -688,15 +772,29 @@ export function detachAudio(p: Project, itemId: string): Project {
 /**
  * Limita speed a MIN/MAX; durationUs = round(durationUs*old/new) e keyframes escalados no tempo; os
  * vinculados recebem a mesma velocidade. Colisão com o próximo item: ripple (padrão) desloca os posteriores
- * de todas as faixas desbloqueadas; sem ripple lança EditError('overlap').
+ * de todas as faixas desbloqueadas; sem ripple lança EditError('overlap'). Efeitos vinculados acompanham o
+ * conteúdo: o tempo a partir do início do clipe é escalado pela mesma razão (início, duração e keyframes).
  */
 export function setSpeed(p: Project, itemId: string, speed: number, opts?: { ripple?: boolean }): Project {
   const main = mustFind(p, itemId).item
   if (main.type !== 'media') throw new EditError('invalid', 'Velocidade só se aplica a itens de mídia')
   const s = clamp(speed, MIN_SPEED, MAX_SPEED)
-  const changes: { id: string; item: MediaItem; oldEnd: Us }[] = []
+  const changes: { id: string; item: Item; oldEnd: Us; fx?: boolean }[] = []
+  // instante da timeline → instante depois da mudança (o conteúdo do clipe estica/encolhe a partir do início)
+  const r0 = main.speed / s
+  const remap = (t: Us): Us => (t <= main.startUs ? t : main.startUs + Math.round((t - main.startUs) * r0))
   for (const id of linkedIds(p, itemId)) {
     const f = mustFind(p, id)
+    if (f.item.type === 'effect') {
+      if (r0 === 1) continue
+      assertUnlocked(f.track)
+      const fx = f.item
+      const ns = remap(fx.startUs)
+      const dur = Math.max(MIN_ITEM_US, remap(end(fx)) - ns)
+      const scaled = mapAnims(fx, (a) => (a.keys ? { ...a, keys: a.keys.map((k) => ({ ...k, tUs: clamp(remap(fx.startUs + k.tUs) - ns, 0, dur) })) } : a))
+      changes.push({ id, item: { ...scaled, startUs: ns, durationUs: dur }, oldEnd: end(fx), fx: true })
+      continue
+    }
     if (f.item.type !== 'media' || f.item.speed === s) continue
     assertUnlocked(f.track)
     const ratio = f.item.speed / s
@@ -726,7 +824,7 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
     if (n.transitionIn) n = { ...n, transitionIn: { ...n.transitionIn, durationUs: fit(n.transitionIn.durationUs, Math.floor(dur / 2)) } }
     changes.push({ id, item: n, oldEnd: end(f.item) })
   }
-  if (changes.length === 0) return p
+  if (!changes.some((c) => !c.fx)) return p
   const idSet = new Set(changes.map((c) => c.id))
   let collision = false
   for (const c of changes) {
@@ -741,8 +839,10 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
       f.track.items[f.itemIndex] = c.item
     }
     if (collision) {
-      const pivot = Math.min(...changes.map((c) => c.oldEnd))
-      const shift = Math.max(...changes.map((c) => end(c.item) - c.oldEnd))
+      // pivô e deslocamento pela mídia; os efeitos do grupo já foram reposicionados pela escala
+      const media = changes.filter((c) => !c.fx)
+      const pivot = Math.min(...media.map((c) => c.oldEnd))
+      const shift = Math.max(...media.map((c) => end(c.item) - c.oldEnd))
       rippleShift(d, pivot, shift, idSet, new Set())
     }
     finalize(d)
@@ -805,7 +905,8 @@ export function closeGaps(p: Project, trackId: string): Project {
       const delta = cursor - it.startUs
       if (delta !== 0) {
         it.startUs = cursor
-        if (it.linkId && !deltas.has(it.linkId)) deltas.set(it.linkId, delta)
+        // efeito seguidor não arrasta o clipe dele (só a mídia propaga o deslocamento ao grupo)
+        if (it.linkId && !deltas.has(it.linkId) && !isFollower(d, it)) deltas.set(it.linkId, delta)
       }
       cursor = end(it)
     }
@@ -1016,53 +1117,92 @@ export function convertEffects(p: Project, itemIds: string[], effect: EffectItem
 }
 
 /**
- * Ativar/desativar (Shift+E, menu): com vínculo, o grupo todo (vídeo + áudio vinculado). Se algum do grupo
- * está ativo, desativa todos; senão reativa todos.
+ * Itens que ativar/desativar alcança: os dados e, com vínculo, a mídia vinculada — os efeitos vinculados a um
+ * clipe ficam como estão (desativar o clipe não desliga a proteção sobre o que aparece no lugar dele).
+ */
+export function enableGroupIds(p: Project, itemIds: string[], includeLinked: boolean): string[] {
+  const given = new Set(itemIds)
+  return expand(p, itemIds, includeLinked).filter((id) => given.has(id) || mustFind(p, id).item.type !== 'effect')
+}
+
+/**
+ * Ativar/desativar (Shift+E, menu): com vínculo, o grupo todo (vídeo + áudio vinculado; ver enableGroupIds). Se
+ * algum do grupo está ativo, desativa todos; senão reativa todos.
  */
 export function toggleEnabled(p: Project, itemIds: string[], includeLinked: boolean): Project {
-  const ids = expand(p, itemIds, includeLinked)
+  const ids = enableGroupIds(p, itemIds, includeLinked)
   if (ids.length === 0) return p
   const anyOn = ids.some((id) => mustFind(p, id).item.enabled !== false)
   return setItemEnabled(p, ids, !anyOn)
 }
 
-const FX_TRACK = /^Efeitos( \d+)?$/
-
-/**
- * Cria um efeito de privacidade em atUs. Duração padrão: até o fim do item de vídeo sob o playhead
- * (faixa mais alta, sem contar efeitos) ou 5 s. Faixa: a explícita; senão uma faixa de vídeo "Efeitos"
- * acima de todas as demais faixas de vídeo e livre no intervalo; senão cria uma nova no topo.
- */
-/** Duração padrão de um efeito em atUs: até o fim do clipe de vídeo sob ele (faixa mais alta, não-efeito) ou 5 s. */
-export function defaultEffectDurationUs(p: Project, at: Us): Us {
-  const atUs = Math.max(0, Math.round(at))
+/** Clipe visível sob atUs: item não-efeito ativo da faixa de vídeo visível mais alta que tem algo ali. */
+function clipUnder(p: Project, atUs: Us): { track: Track; item: Item } | null {
   for (let i = p.tracks.length - 1; i >= 0; i--) {
     const t = p.tracks[i]
-    if (t.kind !== 'video') continue
-    const under = t.items.find((it) => it.type !== 'effect' && it.startUs <= atUs && atUs < end(it))
-    if (under) return Math.max(MIN_ITEM_US, end(under) - atUs)
+    if (t.kind !== 'video' || t.hidden) continue
+    const under = t.items.find((it) => it.type !== 'effect' && it.enabled !== false && it.startUs <= atUs && atUs < end(it))
+    if (under) return { track: t, item: under }
   }
-  return 5_000_000
+  return null
 }
 
+/** Duração padrão de um efeito em atUs: até o fim do clipe visível sob ele (faixa mais alta, não-efeito) ou 5 s. */
+export function defaultEffectDurationUs(p: Project, at: Us): Us {
+  const atUs = Math.max(0, Math.round(at))
+  const under = clipUnder(p, atUs)
+  return under ? Math.max(MIN_ITEM_US, end(under.item) - atUs) : 5_000_000
+}
+
+/**
+ * Uma faixa pode receber um efeito em [s, e)? Precisa ser de vídeo, visível, desbloqueada e não ter mídia
+ * visível por cima: nenhuma faixa de vídeo visível mais alta com item ativo (não-efeito) no intervalo — essa
+ * mídia sairia sem proteção.
+ */
+export function effectTrackAllowed(p: Project, trackId: string, s: Us, e: Us): boolean {
+  const ti = p.tracks.findIndex((t) => t.id === trackId)
+  const t = p.tracks[ti]
+  if (!t || t.kind !== 'video' || t.hidden || t.locked) return false
+  return !p.tracks.some((o, i) => i > ti && o.kind === 'video' && !o.hidden && o.items.some((it) => it.type !== 'effect' && it.enabled !== false && it.startUs < e && end(it) > s))
+}
+
+/**
+ * Cria um efeito de privacidade em atUs. Duração padrão: até o fim do clipe visível sob o playhead
+ * (faixa mais alta, sem contar efeitos) ou 5 s. Faixa: a explícita, se effectTrackAllowed (senão cai na
+ * automática); automática: uma faixa "Efeitos" visível acima de todas as demais faixas de vídeo e livre no
+ * intervalo; senão cria uma nova no topo. Criado sobre um clipe (de mídia, em outra faixa), o efeito é
+ * vinculado a ele (e ao áudio vinculado): passa a acompanhar mover/aparar/ripple/dividir/apagar/duplicar/velocidade.
+ */
 export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { durationUs?: Us; trackId?: string; region?: EffectRegionInit }): { project: Project; itemId: string } {
   const atUs = Math.max(0, Math.round(at))
   const durationUs = opts?.durationUs === undefined ? defaultEffectDurationUs(p, atUs) : Math.max(MIN_ITEM_US, Math.round(opts.durationUs))
   const item = createEffectItem(preset, atUs, durationUs, opts?.region)
+  let q = p
+  let trackId: string | undefined
   if (opts?.trackId) {
     if (mustTrack(p, opts.trackId).kind !== 'video') throw new EditError('invalid', 'Efeitos só podem ficar em faixas de vídeo')
-    return { project: insertItems(p, opts.trackId, [item], 'overwrite'), itemId: item.id }
+    if (effectTrackAllowed(p, opts.trackId, atUs, atUs + durationUs)) trackId = opts.trackId
   }
-  const lastMedia = p.tracks.reduce((m, t, i) => (t.kind === 'video' && !FX_TRACK.test(t.name) ? i : m), -1)
-  const free = p.tracks.find((t, i) => t.kind === 'video' && i > lastMedia && FX_TRACK.test(t.name) && !t.locked && isFree(t, atUs, atUs + durationUs))
-  let q = p
-  let trackId = free?.id
+  if (!trackId) {
+    const lastMedia = p.tracks.reduce((m, t, i) => (t.kind === 'video' && !FX_TRACK.test(t.name) ? i : m), -1)
+    trackId = p.tracks.find((t, i) => t.kind === 'video' && i > lastMedia && FX_TRACK.test(t.name) && !t.locked && !t.hidden && isFree(t, atUs, atUs + durationUs))?.id
+  }
   if (!trackId) {
     let name = 'Efeitos', n = 2
     while (p.tracks.some((t) => t.name === name)) name = `Efeitos ${n++}`
-    const r = addTrack(p, 'video', undefined, name)
+    const r = addTrack(p, 'video', aboveLastVideo(p), name)
     q = r.project
     trackId = r.trackId
   }
-  return { project: insertItems(q, trackId, [item], 'overwrite'), itemId: item.id }
+  q = insertItems(q, trackId, [item], 'overwrite')
+  // vínculo com o clipe sob o efeito (o de outra faixa: na mesma faixa o efeito o recortaria)
+  const clip = clipUnder(p, atUs)
+  if (clip && clip.item.type === 'media' && clip.track.id !== trackId && !clip.track.locked) {
+    const linkId = clip.item.linkId ?? newId('l_')
+    q = produce(q, (d) => {
+      mustFind(d, clip.item.id).item.linkId = linkId
+      mustFind(d, item.id).item.linkId = linkId
+    })
+  }
+  return { project: q, itemId: item.id }
 }

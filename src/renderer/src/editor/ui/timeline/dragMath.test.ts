@@ -217,6 +217,19 @@ describe('effectDropTrack (soltar efeito da biblioteca na linha do tempo)', () =
     const locked = ops.updateTrack(p, v, { locked: true })
     expect(effectDropTrack(locked, { kind: 'track', trackId: v }, 20 * S)).toBeUndefined()
   })
+  it('nunca numa faixa oculta nem numa faixa abaixo de mídia visível no intervalo (a mídia ficaria por cima)', () => {
+    const { p } = fixture()
+    const low = p.tracks[0].id
+    // trecho livre da faixa de baixo (4–6 s) sob um clipe de uma faixa mais alta
+    const up = ops.addTrack(p, 'video')
+    const q = ops.addMediaFromAsset(up.project, 'a', 4 * S, { videoTrackId: up.trackId }).project
+    expect(effectDropTrack(q, { kind: 'track', trackId: low }, 4 * S)).toBeUndefined()
+    expect(effectDropTrack(ops.updateTrack(q, up.trackId, { hidden: true }), { kind: 'track', trackId: low }, 4 * S)).toBeUndefined() // 5 s invadem v1
+    const free = ops.addTrack(q, 'video', 0) // faixa vazia no fundo, abaixo de tudo
+    expect(effectDropTrack(free.project, { kind: 'track', trackId: free.trackId }, 20 * S)).toBe(free.trackId)
+    expect(effectDropTrack(free.project, { kind: 'track', trackId: free.trackId }, 0)).toBeUndefined() // v0 por cima
+    expect(effectDropTrack(ops.updateTrack(free.project, free.trackId, { hidden: true }), { kind: 'track', trackId: free.trackId }, 20 * S)).toBeUndefined()
+  })
 })
 
 describe('edgeScrollPx', () => {
