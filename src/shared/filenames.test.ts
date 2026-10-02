@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defaultOutputName, numberedName, sanitizeFileName, sessionIdFor, uniqueName } from './filenames'
+import { defaultOutputName, fileNameFromTitle, numberedName, sanitizeFileName, sessionIdFor, uniqueName } from './filenames'
 
 describe('sessionIdFor', () => {
   it('formata com zero à esquerda', () => {
@@ -80,5 +80,15 @@ describe('numberedName', () => {
   })
   it('sem extensão', () => {
     expect(numberedName('x', (n) => n === 'x')).toBe('x (2)')
+  })
+})
+
+describe('fileNameFromTitle (nome padrão da exportação a partir do nome do projeto)', () => {
+  it('data/hora do título viram separadores legíveis em vez de sumir', () => {
+    expect(fileNameFromTitle('Gravação 01/10/2026 21:06')).toBe('Gravação 01-10-2026 21-06')
+  })
+  it('separadores de caminho viram hífen; o resto segue o sanitizeFileName', () => {
+    expect(fileNameFromTitle('Aula\\parte 1: intro?')).toBe('Aula-parte 1- intro')
+    expect(fileNameFromTitle('   ')).toBe('')
   })
 })

@@ -61,6 +61,14 @@ export function sanitizeFileName(name: string): string {
 }
 
 /**
+ * Nome de arquivo a partir de um título (nome do projeto): `/`, `\` e `:` viram hífen em vez de sumir —
+ * "Gravação 01/10/2026 21:06" → "Gravação 01-10-2026 21-06" (e não "Gravação 01102026 2106").
+ */
+export function fileNameFromTitle(title: string): string {
+  return sanitizeFileName(title.replace(/[\\/:]/g, '-'))
+}
+
+/**
  * Garante nome único diante de `existing` (comparação sem diferenciar maiúsculas,
  * como o NTFS): `x.mp4` → `x-2.mp4`, `x-3.mp4`…
  */

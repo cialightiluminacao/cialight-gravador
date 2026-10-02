@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, TriangleAlert, Upload, X } from 'lucide-react'
-import { sanitizeFileName } from '@shared/filenames'
+import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
 import { projectDurationUs } from '@shared/editor/ops'
 import { planAudio } from '@shared/editor/audioPlan'
 import { Button } from '@/components/ui/Button'
@@ -48,7 +48,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
   useEffect(() => {
     if (!open || !project || phase.kind === 'running') return
     setPhase({ kind: 'form' })
-    setFileName(`${sanitizeFileName(project.name) || 'Vídeo'}.mp4`)
+    setFileName(`${fileNameFromTitle(project.name) || 'Vídeo'}.mp4`)
     setRangeMode(hasInOut(projectDurationUs(project), useEditorStore.getState().inUs, useEditorStore.getState().outUs) ? 'inout' : 'all')
   }, [open])
 
