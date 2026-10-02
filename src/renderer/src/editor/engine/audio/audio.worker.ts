@@ -5,7 +5,9 @@
 // render worker de exportação, em ordem e com memória constante (cache LRU de chunks por asset).
 // Velocidade com tom preservado: um StretchBank do worker guarda o stretcher de cada segmento 'stretch'
 // (chave itemId) com a posição contínua entre blocos — o mesmo caminho no preview e na exportação.
-import { planAudio, type AudioSegment } from '@shared/editor/audioPlan'
+// Shuttle (J/K/L até 2×, só preview): o pedido traz `rate`; o bloco é mixado no tempo do shuttle (t/rate) com os
+// segmentos de shuttleSegments (velocidade × rate, esticados), e devolvido com o fromUs da timeline.
+import { planAudio, shuttleSegments, type AudioSegment } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 import { AssetPcm } from './assetPcm'
@@ -20,6 +22,8 @@ const LOOKAHEAD_US = 1_000_000
 const post = (m: AudioOut, transfer: Transferable[] = []): void => (self as unknown as Worker).postMessage(m, transfer)
 
 let segments: AudioSegment[] = []
+// segmentos do shuttle por taxa (refeitos quando o projeto muda)
+let shuttle = new Map<number, AudioSegment[]>()
 const sources = new Map<string, AssetPcm>()
 const stretch = new StretchBank((rate) => createStretcher(rate, 2))
 const queue: RenderMsg[] = []
@@ -69,6 +73,7 @@ function enqueue(m: Extract<AudioIn, { t: 'render' }>, reply: RenderMsg['reply']
 
 function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean): void {
   segments = planAudio(project)
+  shuttle = new Map()
   stretch.retain(new Set(segments.filter((s) => s.mode === 'stretch').map((s) => s.itemId)))
   const used = new Set(segments.filter((s) => s.mode !== 'mute').map((s) => s.assetId))
   for (const [id, src] of sources) {
@@ -104,16 +109,18 @@ async function pump(): Promise<void> {
       const e0 = epoch
       const stale = (): boolean => epoch !== e0
       try {
-        const segs = segments
+        const rate = m.rate ?? 1
+        const segs = segmentsAt(rate)
+        // no shuttle o bloco é mixado no tempo do shuttle (timeline ÷ rate)
+        const fromUs = rate === 1 ? m.fromUs : Math.round(m.fromUs / rate)
         // stretchers do bloco presos até o próximo: o aquecimento à frente não os despeja antes do mixBlock
-        const blockEnd = m.fromUs + Math.round((m.frames * 1e6) / SR)
-        stretch.pin(new Set(segs.filter((s) => s.mode === 'stretch' && s.startUs < blockEnd && s.startUs + s.durationUs > m.fromUs).map((s) => s.itemId)))
-        await prepare(segs, m.fromUs, m.frames, stale)
+        const blockEnd = fromUs + Math.round((m.frames * 1e6) / SR)
+        stretch.pin(new Set(segs.filter((s) => s.mode === 'stretch' && s.startUs < blockEnd && s.startUs + s.durationUs > fromUs).map((s) => s.itemId)))
+        await prepare(segs, fromUs, m.frames, stale)
         if (stale()) continue // cancelado durante a decodificação: o cliente já descartou
-        const pcm = mixBlock(segs, m.fromUs, m.frames, sources as Map<string, PcmSource>)
+        const pcm = mixBlock(segs, fromUs, m.frames, sources as Map<string, PcmSource>)
         m.reply({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm }, [pcm.buffer])
-        const endUs = m.fromUs + Math.round((m.frames * 1e6) / SR)
-        void prepare(segs, endUs, Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
+        void prepare(segs, blockEnd, Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
       } catch (err) {
         m.reply({ t: 'error', message: errMsg(err), seq: m.seq })
       }
@@ -121,6 +128,14 @@ async function pump(): Promise<void> {
   } finally {
     busy = false
   }
+}
+
+/** Segmentos do plano a 1× ou do shuttle a `rate`× (cache por taxa). */
+function segmentsAt(rate: number): AudioSegment[] {
+  if (rate === 1) return segments
+  let s = shuttle.get(rate)
+  if (!s) shuttle.set(rate, (s = shuttleSegments(segments, rate)))
+  return s
 }
 
 /** Decodifica o que os segmentos vão ler em [fromUs, fromUs + frames/SR) — mesma conta de posição do mixBlock. */

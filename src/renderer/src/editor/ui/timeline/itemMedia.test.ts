@@ -13,6 +13,10 @@ describe('sourceUsAt', () => {
     expect(sourceUsAt(item({ reverse: true }), 0)).toBe(6 * S)
     expect(sourceUsAt(item({ reverse: true }), 4 * S)).toBe(2 * S)
   })
+  it('congelado: o mesmo quadro em todo o item (filmstrip e onda)', () => {
+    expect(sourceUsAt(item({ freeze: { atUs: 3 * S } }), 0)).toBe(3 * S)
+    expect(sourceUsAt(item({ freeze: { atUs: 3 * S } }), 2 * S)).toBe(3 * S)
+  })
 })
 
 describe('filmstripSlots', () => {

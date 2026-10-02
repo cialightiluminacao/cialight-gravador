@@ -1,0 +1,153 @@
+import { describe, expect, it } from 'vitest'
+import { createEmptyProject } from './factory'
+import { MIN_ITEM_US, type Asset, type EffectItem, type Item, type MediaItem, type Project } from './project'
+import * as ops from './ops'
+import { validateProject } from './schema'
+import { itemEndUs as end } from './time'
+import { resolveFrame } from './resolve'
+
+// F3 Task 2: congelar quadro (freezeFrameAt) e reverso (setReverse), com vínculos e efeitos seguindo o clipe.
+const S = 1_000_000
+const vid = (id = 'a1', dur = 10 * S): Asset => ({ id, name: id, kind: 'video', source: { type: 'file', path: `C:/${id}.mp4`, size: 1, mtimeMs: 1 }, durationUs: dur, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
+/** Clipe v [0,10 s) na "Vídeo 1" + áudio a vinculado. */
+function base(): { p: Project; v: string; a: string } {
+  const p = ops.addAsset(createEmptyProject('t'), vid())
+  const r = ops.addMediaFromAsset(p, 'a1', 0)
+  return { p: r.project, v: r.itemIds[0], a: r.itemIds[1] }
+}
+const it_ = (p: Project, id: string): Item => ops.findItem(p, id)!.item
+const media = (p: Project, ti: number): MediaItem[] => p.tracks[ti].items as MediaItem[]
+const fx = (p: Project, id: string): EffectItem => it_(p, id) as EffectItem
+/** base + efeito vinculado [2,10) com region.x: 0,2 em 2 s → 0,9 em 10 s (linear). */
+function linked(): { p: Project; v: string; a: string; f: string } {
+  const b = base()
+  const r = ops.addEffect(b.p, 'blur', 2 * S)
+  let p = ops.setAnimValue(r.project, r.itemId, 'region.x', 2 * S, 0.2)
+  p = ops.toggleKeyframe(p, r.itemId, 'region.x', 2 * S)
+  p = ops.toggleKeyframe(p, r.itemId, 'region.x', 10 * S)
+  p = ops.setAnimValue(p, r.itemId, 'region.x', 10 * S, 0.9)
+  return { p, v: b.v, a: b.a, f: r.itemId }
+}
+const fxLayerX = (p: Project, tUs: number): number | undefined => {
+  const l = resolveFrame(p, tUs).find((x) => x.kind === 'effect')
+  return l?.kind === 'effect' ? l.region.x : undefined
+}
+
+describe('freezeFrameAt', () => {
+  it('no meio: divide, insere o quadro congelado do playhead e empurra o resto (todas as faixas)', () => {
+    const { p, v, a } = base()
+    const q = ops.freezeFrameAt(p, v, 4 * S, 2 * S)
+    const vs = media(q, 0)
+    expect(vs.map((i) => [i.startUs, i.durationUs, i.inUs])).toEqual([[0, 4 * S, 0], [4 * S, 2 * S, 4 * S], [6 * S, 6 * S, 4 * S]])
+    expect(vs[0].id).toBe(v)
+    expect(vs[1].freeze).toEqual({ atUs: 4 * S })
+    expect([vs[1].speed, vs[1].reverse, vs[1].audio.enabled]).toEqual([1, false, false])
+    expect(vs[0].freeze).toBeUndefined()
+    expect(vs[2].freeze).toBeUndefined()
+    // áudio vinculado: dividido e empurrado (silêncio durante o congelado)
+    expect(media(q, 1).map((i) => [i.startUs, i.durationUs, i.inUs])).toEqual([[0, 4 * S, 0], [6 * S, 6 * S, 4 * S]])
+    expect(media(q, 1)[0].id).toBe(a)
+    // o pedaço congelado fica no grupo da esquerda; a direita ganha um vínculo próprio
+    expect(vs[1].linkId).toBe(vs[0].linkId)
+    expect(vs[2].linkId).toBe(media(q, 1)[1].linkId)
+    expect(vs[2].linkId).not.toBe(vs[0].linkId)
+    // resolveFrame mostra o quadro 4 s durante todo o congelado
+    for (const t of [4 * S, 5 * S, 6 * S - 1]) {
+      const l = resolveFrame(q, t).find((x) => x.kind === 'media')
+      expect(l?.kind === 'media' && l.srcUs).toBe(4 * S)
+    }
+    expect(validateProject(q)).toEqual([])
+  })
+  it('borda: perto do início congela o 1º quadro antes do clipe; no fim congela o último depois dele', () => {
+    const { p, v } = base()
+    const s = ops.freezeFrameAt(p, v, 10_000, 2 * S)
+    expect(media(s, 0).map((i) => [i.startUs, i.durationUs, i.freeze?.atUs])).toEqual([[0, 2 * S, 0], [2 * S, 10 * S, undefined]])
+    expect(media(s, 0)[1].id).toBe(v)
+    const e = ops.freezeFrameAt(p, v, 10 * S - 10_000, S)
+    expect(media(e, 0).map((i) => [i.startUs, i.durationUs, i.freeze?.atUs])).toEqual([[0, 10 * S, undefined], [10 * S, S, 10 * S - 1]])
+    expect(validateProject(s)).toEqual([])
+    expect(validateProject(e)).toEqual([])
+  })
+  it('respeita velocidade e reverso no quadro congelado; duração mínima', () => {
+    const { p, v } = base()
+    const fast = ops.setSpeed(p, v, 2) // [0,5 s) lendo [0,10 s)
+    expect(media(ops.freezeFrameAt(fast, v, S, S), 0)[1].freeze).toEqual({ atUs: 2 * S })
+    const rev = ops.setReverse(p, [v], true)
+    expect(media(ops.freezeFrameAt(rev, v, 3 * S, S), 0)[1].freeze).toEqual({ atUs: 7 * S - 33_333 })
+    expect(media(ops.freezeFrameAt(p, v, 4 * S, 1), 0)[1].durationUs).toBe(MIN_ITEM_US)
+  })
+  it('efeitos seguem: o efeito que cruza o ponto cobre o congelado com a região parada; os seguintes andam', () => {
+    const { p, v, f } = linked()
+    const before = fxLayerX(p, 6 * S)!
+    const q = ops.freezeFrameAt(p, v, 6 * S, 2 * S)
+    expect([fx(q, f).startUs, end(fx(q, f))]).toEqual([2 * S, 12 * S])
+    // região parada no valor do instante congelado, depois continua de onde estava
+    expect(fxLayerX(q, 6 * S)).toBeCloseTo(before, 6)
+    expect(fxLayerX(q, 7.5 * S)).toBeCloseTo(before, 6)
+    expect(fxLayerX(q, 12 * S - 1)).toBeCloseTo(0.9, 3)
+    expect(fxLayerX(q, 9 * S)).toBeCloseTo(fxLayerX(p, 7 * S)!, 6)
+    // o efeito continua vinculado (ao pedaço da esquerda e ao congelado)
+    expect(fx(q, f).linkId).toBe(it_(q, v).linkId)
+    // efeito que começa depois do ponto anda com o resto
+    const e2 = ops.addEffect(base().p, 'blur', 7 * S, { durationUs: S })
+    const v2 = e2.project.tracks[0].items[0].id
+    const q2 = ops.freezeFrameAt(e2.project, v2, 4 * S, 2 * S)
+    expect([fx(q2, e2.itemId).startUs, fx(q2, e2.itemId).durationUs]).toEqual([9 * S, S])
+    expect(validateProject(q)).toEqual([])
+    expect(validateProject(q2)).toEqual([])
+  })
+  it('recusa áudio, imagem, faixa bloqueada e instante fora do item', () => {
+    const { p, v, a } = base()
+    expect(() => ops.freezeFrameAt(p, a, 4 * S, S)).toThrow(ops.EditError)
+    expect(() => ops.freezeFrameAt(p, v, 11 * S, S)).toThrow(ops.EditError)
+    const locked = ops.updateTrack(p, p.tracks[0].id, { locked: true })
+    expect(() => ops.freezeFrameAt(locked, v, 4 * S, S)).toThrow(/bloquead/)
+  })
+})
+
+describe('setReverse', () => {
+  it('liga o reverso no clipe e nos vinculados, mantém duração e fonte, espelha keyframes no tempo', () => {
+    const { p, v, a } = base()
+    const k = ops.updateItem<MediaItem>(p, v, (d) => {
+      d.visual!.transform.x = { value: 0.5, keys: [{ tUs: S, value: 0.1, ease: 'in' }, { tUs: 4 * S, value: 0.7, ease: 'linear' }] }
+    })
+    const q = ops.setReverse(k, [v], true)
+    const rv = it_(q, v) as MediaItem
+    const ra = it_(q, a) as MediaItem
+    expect([rv.reverse, ra.reverse]).toEqual([true, true])
+    expect([rv.startUs, rv.durationUs, rv.inUs, ra.durationUs]).toEqual([0, 10 * S, 0, 10 * S])
+    // espelhado: 4 s → 6 s (0,7), 1 s → 9 s (0,1); o ease do trecho é espelhado ('in' → 'out')
+    expect(rv.visual!.transform.x.keys).toEqual([{ tUs: 6 * S, value: 0.7, ease: 'out' }, { tUs: 9 * S, value: 0.1, ease: 'linear' }])
+    // a curva espelhada: valor em t = valor original em dur − t
+    const cx = (x: Project, t: number): number => (resolveFrame(x, t).find((l) => l.kind === 'media') as { rect: { cx: number } }).rect.cx
+    for (const t of [6.5 * S, 7.3 * S, 8.8 * S]) expect(cx(q, t)).toBeCloseTo(cx(k, 10 * S - t), 6)
+    // desligar volta ao original
+    const back = ops.setReverse(q, [v], false)
+    expect((it_(back, v) as MediaItem).visual!.transform.x).toEqual((it_(k, v) as MediaItem).visual!.transform.x)
+    expect(validateProject(q)).toEqual([])
+  })
+  it('efeitos vinculados espelham posição e keyframes dentro do clipe; repetir não muda nada', () => {
+    const { p, v, f } = linked()
+    const q = ops.setReverse(p, [v], true)
+    expect([fx(q, f).startUs, end(fx(q, f))]).toEqual([0, 8 * S])
+    // o conteúdo que estava em t aparece em 10 − t: a região acompanha
+    for (const t of [3 * S, 5.5 * S, 9 * S]) expect(fxLayerX(q, 10 * S - t)).toBeCloseTo(fxLayerX(p, t)!, 6)
+    expect(ops.setReverse(q, [v], true)).toBe(q)
+    // efeito curto no meio: [2,4) → [6,8)
+    const e = ops.addEffect(base().p, 'blur', 2 * S, { durationUs: 2 * S })
+    const v2 = e.project.tracks[0].items[0].id
+    const r = ops.setReverse(e.project, [v2], true)
+    expect([fx(r, e.itemId).startUs, fx(r, e.itemId).durationUs]).toEqual([6 * S, 2 * S])
+    expect(validateProject(r)).toEqual([])
+  })
+  it('a partir do efeito não reverte nada; faixa bloqueada recusa; congelado é ignorado', () => {
+    const { p, v, f } = linked()
+    expect(ops.setReverse(p, [f], true)).toBe(p)
+    const locked = ops.updateTrack(p, p.tracks[0].id, { locked: true })
+    expect(() => ops.setReverse(locked, [v], true)).toThrow(/bloquead/)
+    const b = base()
+    const fr = ops.freezeFrameAt(b.p, b.v, 4 * S, S)
+    const frozen = media(fr, 0)[1]
+    expect((it_(ops.setReverse(fr, [frozen.id], true), frozen.id) as MediaItem).reverse).toBe(false)
+  })
+})

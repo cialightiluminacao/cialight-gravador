@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ChevronFirst, ChevronLast, Maximize, Minimize, Pause, Play, StepBack, StepForward, Volume1, Volume2, VolumeX } from 'lucide-react'
+import { ChevronFirst, ChevronLast, FastForward, Maximize, Minimize, Pause, Play, Rewind, StepBack, StepForward, Volume1, Volume2, VolumeX } from 'lucide-react'
 import { projectDurationUs } from '@shared/editor/ops'
 import { formatTimecodeUs } from '@shared/editor/time'
 import { Slider, Tip } from '@/components/ui/primitives'
@@ -8,7 +8,7 @@ import type { PlaybackController } from '../engine/PlaybackController'
 import { useEditorStore } from '../state/editorStore'
 import { seekTo, stepFrames, togglePlay } from './editorActions'
 
-// Barra de transporte do visualizador: timecode, ⏮ ◀quadro ▶/❚❚ quadro▶ ⏭, volume master e tela cheia.
+// Barra de transporte do visualizador: timecode (+ taxa do shuttle J/L), ⏮ ◀quadro ▶/❚❚ quadro▶ ⏭, volume master e tela cheia.
 
 const VOLUME_KEY = 'editor.previewVolume'
 
@@ -42,6 +42,7 @@ function IconBtn({ label, shortcut, onClick, children, primary, disabled }: { la
 
 export function Transport({ playback, fullscreen, onToggleFullscreen }: { playback: PlaybackController | null; fullscreen: boolean; onToggleFullscreen: () => void }): React.JSX.Element {
   const playing = useEditorStore((s) => s.playing)
+  const playRate = useEditorStore((s) => s.playRate)
   const playheadUs = useEditorStore((s) => s.playheadUs)
   const fps = useEditorStore((s) => s.project?.canvas.fps ?? 30)
   const totalUs = useEditorStore((s) => (s.project ? projectDurationUs(s.project) : 0))
@@ -68,6 +69,13 @@ export function Transport({ playback, fullscreen, onToggleFullscreen }: { playba
         <span className="truncate text-[11px] text-muted" aria-label="Duração total">
           / {formatTimecodeUs(totalUs, fps)}
         </span>
+        {playing && playRate !== 1 ? (
+          <span className="flex shrink-0 items-center gap-0.5 self-center rounded bg-warn/90 px-1 font-mono text-[10px] font-semibold leading-[14px] text-black" aria-label={`Reproduzindo ${playRate < 0 ? 'para trás ' : ''}a ${Math.abs(playRate)}×`}>
+            {playRate < 0 ? <Rewind className="h-2.5 w-2.5 fill-current" /> : null}
+            {Math.abs(playRate)}×
+            {playRate > 0 ? <FastForward className="h-2.5 w-2.5 fill-current" /> : null}
+          </span>
+        ) : null}
       </div>
       <div className="flex items-center gap-0.5">
         <IconBtn label="Ir para o início" shortcut="Home" onClick={() => seekTo(playback, 0)} disabled={empty}>

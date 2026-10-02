@@ -3,9 +3,9 @@
 
 export type ShortcutAction =
   | 'playPause'
-  | 'shuttleBack' // J
+  | 'shuttleBack' // J: para trás 1× → 2× → 4× → 8×
   | 'pause' // K
-  | 'shuttleForward' // L
+  | 'shuttleForward' // L: para frente 1× → 2× → 4× → 8× (K segurado + J/L: quadro a quadro)
   | 'prevFrame'
   | 'nextFrame'
   | 'back1s'
@@ -89,7 +89,10 @@ export function isEditableTarget(t: EventTarget | null | undefined): boolean {
   return false
 }
 
-export function shortcutFor(e: KeyLike): ShortcutAction | null {
+/** Estado de teclas seguradas que muda o atalho (K segurado + J/L = quadro a quadro, como nos editores clássicos). */
+export interface HeldKeys { kHeld?: boolean }
+
+export function shortcutFor(e: KeyLike, held: HeldKeys = {}): ShortcutAction | null {
   const ctrl = e.ctrlKey || !!e.metaKey
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key
   // num campo de texto só Ctrl+S (salvar) vale; o resto é da digitação
@@ -115,11 +118,11 @@ export function shortcutFor(e: KeyLike): ShortcutAction | null {
     case ' ':
       return 'playPause'
     case 'j':
-      return 'shuttleBack'
+      return held.kHeld ? 'prevFrame' : 'shuttleBack'
     case 'k':
       return 'pause'
     case 'l':
-      return 'shuttleForward'
+      return held.kHeld ? 'nextFrame' : 'shuttleForward'
     case 'ArrowLeft':
       return e.shiftKey ? 'back1s' : 'prevFrame'
     case 'ArrowRight':

@@ -10,10 +10,21 @@
 // quadro), em `releaseAll` (pausa/ociosidade) e ao descartar a entrada.
 // As ImageBitmap de `image()` pertencem ao pool (o chamador NÃO as fecha); as substituídas em
 // `setSources` só são fechadas em `flushRetired()`, chamado quando nenhum render as usa.
+// Reverso (reprodução com o tempo da fonte voltando: item reverso, shuttle para trás): em vez de um seek por quadro
+// (decodificar do keyframe até ali a cada quadro), a entrada decodifica em bloco os últimos quadros antes do alvo
+// (`samples(início, fim)`, do keyframe em diante), guarda o bloco e serve os quadros dele em ordem decrescente; o
+// bloco anterior é pré-buscado assim que o atual entra em uso. Os quadros do bloco são copiados (`detach`) para fora
+// do decoder: segurar quadros dele trava o decoder de hardware (medido: para no 8º quadro segurado). A cópia é na GPU
+// (createImageBitmap → VideoFrame RGBA, ~1 ms no 1080p; a leitura para a CPU custa 15–65 ms por quadro e fica só
+// de reserva). Tamanho do bloco: o que cabe em REV_BUDGET_BYTES (entre REV_MIN_FRAMES e REV_MAX_FRAMES); no máximo
+// 2 blocos vivos por entrada (atual + anterior).
+// Passos grandes para trás (shuttle −4×/−8×, render atrasado): o bloco guarda um quadro a cada meio passo em vez de
+// todos (o mesmo trecho decodificado serve ~2·n pedidos; o quadro mostrado fica a menos de meio passo do exato).
+// Salto (passo > REV_JUMP_S, não é reprodução contínua): seek simples.
 // Se o decoder de uma entrada saudável falhar (ex.: recuperado pelo Chromium), ela é recriada uma vez.
 // Abertura que falhou (arquivo preso por outro programa, ausente…) vira placeholder e é tentada de novo
 // depois de OPEN_RETRY_MS — não a cada quadro, nem nunca mais até a URL mudar.
-import { ALL_FORMATS, Input, UrlSource, VideoSampleSink, type InputVideoTrack, type VideoSample } from 'mediabunny'
+import { ALL_FORMATS, Input, UrlSource, VideoSample, VideoSampleSink, type InputVideoTrack } from 'mediabunny'
 import type { Us } from '@shared/editor/project'
 import { decoderMatrixOverride } from '@shared/editor/sourceColor'
 
@@ -21,11 +32,34 @@ import { decoderMatrixOverride } from '@shared/editor/sourceColor'
 const MAX_SKIP_S = 1
 const EPS_S = 1e-6
 const OPEN_RETRY_MS = 5000
+// reverso: memória por bloco e limites de quadros por bloco
+const REV_BUDGET_BYTES = 96 * 1024 * 1024
+const REV_MIN_FRAMES = 4
+const REV_MAX_FRAMES = 30
+// fim (exclusivo) do bloco pedido para o alvo t: inclui o quadro que começa exatamente em t
+const REV_END_PAD_S = 1e-4
+// passo para trás acima disso é um salto, não reprodução: seek
+const REV_JUMP_S = 2
+// passos até 4 quadros: bloco denso (todos os quadros); acima, um quadro a cada meio passo
+const REV_DENSE_STEPS = 4
 
 interface Opened {
   input: Input
-  sink: VideoSampleSink
+  sink: Pick<VideoSampleSink, 'getSample' | 'samples'>
   firstS: number
+  /** Duração de um quadro (s) e bytes por quadro copiado (RGBA), para o tamanho do bloco do reverso. */
+  meta: () => Promise<{ frameS: number; frameBytes: number }>
+}
+
+/**
+ * Bloco do reverso: quadros em ordem crescente que cobrem [frames[0].timestamp, endS); atStart = vai até o 1º quadro;
+ * stride = espaçamento dos quadros guardados (a duração de um quadro no bloco denso).
+ */
+interface RevBlock {
+  frames: VideoSample[]
+  endS: number
+  atStart: boolean
+  stride: number
 }
 
 interface Entry {
@@ -39,6 +73,12 @@ interface Entry {
   held: VideoSample | null // último sample com timestamp ≤ alvo (do pool)
   ahead: VideoSample | null // próximo sample já decodificado (do pool)
   done: boolean
+  /** Reverso: bloco em uso e o anterior em pré-busca; revGen invalida pré-buscas antigas. */
+  rev: RevBlock | null
+  revPrev: Promise<RevBlock | null> | null
+  revGen: number
+  /** Último alvo pedido (s): alvo menor que ele = reprodução para trás. */
+  lastT: number | null
   lock: Promise<unknown>
   busy: number // contado desde a aquisição (inclui a espera de `opened`): não é despejada
   lastUsed: number
@@ -56,11 +96,16 @@ export class DecoderPool {
 
   private readonly now: () => number
   private readonly openFn: (url: string, trackIndex: number | null) => Promise<Opened>
+  private readonly detach: (s: VideoSample) => Promise<VideoSample>
 
-  /** deps: relógio e abertura injetáveis (testes). */
-  constructor(private readonly maxLive = 8, deps: { now?: () => number; open?: (url: string, trackIndex: number | null) => Promise<Opened> } = {}) {
+  /** deps: relógio, abertura e cópia dos quadros do bloco do reverso injetáveis (testes). */
+  constructor(
+    private readonly maxLive = 8,
+    deps: { now?: () => number; open?: (url: string, trackIndex: number | null) => Promise<Opened>; detach?: (s: VideoSample) => Promise<VideoSample> } = {}
+  ) {
     this.now = deps.now ?? (() => performance.now())
     this.openFn = deps.open ?? open
+    this.detach = deps.detach ?? detachFrame
   }
 
   /**
@@ -86,18 +131,31 @@ export class DecoderPool {
       const e = this.acquire(key, assetId)
       if (!e) return null
       try {
+        let o: Opened
         try {
-          await e.opened
+          o = await e.opened
         } catch {
           // não abre (arquivo ausente/preso/corrompido/codec): placeholder; reabre só após OPEN_RETRY_MS
           e.openFailedAt ??= this.now()
           return null
         }
         try {
-          return await this.run(e, (o) => {
-            if (sequential) return this.sequential(e, o, t)
+          const step = e.lastT !== null ? e.lastT - t : 0
+          const back = sequential && step > EPS_S
+          e.lastT = t
+          if (sequential && (back || (e.rev && covers(e.rev, t)))) {
+            // reverso: quadro do bloco em cache sem esperar a fila da entrada (a pré-busca pode estar rodando nela)
+            const hit = e.rev && covers(e.rev, t) ? pick(e.rev, t) : null
+            if (hit) {
+              this.prefetchPrev(e, o)
+              return hit.clone()
+            }
+            return await this.run(e, (oo) => this.reverse(e, oo, t, step))
+          }
+          return await this.run(e, (oo) => {
+            if (sequential) return this.sequential(e, oo, t)
             closeIter(e) // seek: o buffer de reprodução não serve mais
-            return this.seek(o, t)
+            return this.seek(oo, t)
           })
         } catch {
           this.drop(key, e) // decoder perdido: recria uma vez
@@ -147,7 +205,7 @@ export class DecoderPool {
   /** Libera o buffer de reprodução das entradas fora de `used` ([assetId, slot]); mantém os decoders abertos. */
   releaseExcept(used: [string, number][]): void {
     const keep = new Set(used.map(([a, s]) => keyOf(a, s)))
-    for (const [key, e] of this.entries) if (!keep.has(key) && (e.it || e.held || e.ahead)) void this.run(e, async () => closeIter(e)).catch(() => {})
+    for (const [key, e] of this.entries) if (!keep.has(key) && (e.it || e.held || e.ahead || e.rev || e.revPrev)) void this.run(e, async () => closeIter(e)).catch(() => {})
   }
 
   /** Pausa/ociosidade: libera todos os buffers de reprodução. */
@@ -182,7 +240,10 @@ export class DecoderPool {
     }
     if (!e) {
       const trackIndex = this.trackIdx[assetId] ?? null
-      e = { assetId, url, trackIndex, opened: this.openFn(url, trackIndex), openFailedAt: null, it: null, held: null, ahead: null, done: false, lock: Promise.resolve(), busy: 0, lastUsed: 0 }
+      e = {
+        assetId, url, trackIndex, opened: this.openFn(url, trackIndex), openFailedAt: null, it: null, held: null, ahead: null, done: false,
+        rev: null, revPrev: null, revGen: 0, lastT: null, lock: Promise.resolve(), busy: 0, lastUsed: 0
+      }
       e.opened.catch(() => {}) // falha tratada em frameAt/prefetch
       this.entries.set(key, e)
     }
@@ -204,6 +265,7 @@ export class DecoderPool {
   }
 
   private async sequential(e: Entry, o: Opened, t: number): Promise<VideoSample | null> {
+    closeRev(e) // andando para frente: o cache do reverso não serve mais
     const ref = e.held ?? e.ahead
     if (!e.it || (ref && (t < ref.timestamp - EPS_S || t > ref.timestamp + MAX_SKIP_S))) this.restart(e, o, t)
     while (!e.done) {
@@ -222,6 +284,88 @@ export class DecoderPool {
     }
     const out = e.held ?? e.ahead // antes do 1º quadro: o 1º disponível
     return out ? out.clone() : null
+  }
+
+  /** Reverso (dentro da fila da entrada): usa o bloco pré-buscado ou decodifica o bloco que termina em t. */
+  private async reverse(e: Entry, o: Opened, t: number, step: number): Promise<VideoSample | null> {
+    closeForward(e) // o iterador para frente não serve para trás
+    if (step > REV_JUMP_S) {
+      closeRev(e)
+      return this.seek(o, t)
+    }
+    if (e.revPrev) {
+      const prev = await e.revPrev
+      e.revPrev = null
+      if (prev && covers(prev, t)) {
+        closeBlock(e.rev)
+        e.rev = prev
+      } else closeBlock(prev)
+    }
+    if (!e.rev || !covers(e.rev, t)) {
+      closeBlock(e.rev)
+      e.rev = null
+      const { frameS } = await blockShape(o)
+      e.rev = await this.decodeBlock(o, t + REV_END_PAD_S, step <= REV_DENSE_STEPS * frameS ? frameS : step / 2)
+    }
+    const hit = pick(e.rev, t)
+    if (!hit) return this.seek(o, t) // bloco vazio (fora do arquivo): o quadro mais próximo
+    this.prefetchPrev(e, o)
+    return hit.clone()
+  }
+
+  /**
+   * Decodifica (do keyframe em diante) o trecho que termina em endS e copia (detach) até n quadros: todos (stride =
+   * duração do quadro) ou, esparso, o último quadro ≤ cada alvo endS − k·stride.
+   */
+  private async decodeBlock(o: Opened, endS: number, stride: number): Promise<RevBlock> {
+    const { n, frameS } = await blockShape(o)
+    const dense = stride <= frameS + EPS_S
+    const startS = Math.max(o.firstS, endS - (dense ? n * frameS : (n - 1) * stride + frameS))
+    const frames: VideoSample[] = []
+    // esparso: guarda p se há um alvo T = endS − k·stride em [p, próximo quadro) — em µs inteiros (sem deriva)
+    const endUs = Math.round(endS * 1e6)
+    const strideUs = Math.max(1, Math.round(stride * 1e6))
+    const keep = (p: VideoSample, next: VideoSample | null): boolean => {
+      if (dense || !next) return true
+      const k = Math.floor((endUs - Math.round(p.timestamp * 1e6)) / strideUs)
+      return endUs - k * strideUs < Math.round(next.timestamp * 1e6)
+    }
+    let pending: VideoSample | null = null
+    try {
+      for await (const s of o.sink.samples(startS, endS)) {
+        if (s.timestamp >= endS) {
+          s.close()
+          break
+        }
+        if (pending) {
+          if (keep(pending, s)) frames.push(await this.detach(pending))
+          else pending.close()
+        }
+        pending = s
+      }
+      if (pending) frames.push(await this.detach(pending))
+      pending = null
+    } catch (err) {
+      pending?.close()
+      for (const f of frames) f.close()
+      throw err
+    }
+    return { frames, endS, atStart: startS <= o.firstS + EPS_S, stride }
+  }
+
+  /** Pré-busca (na fila da entrada) o bloco imediatamente anterior ao atual; descartada se o reverso for abandonado. */
+  private prefetchPrev(e: Entry, o: Opened): void {
+    const cur = e.rev
+    if (!cur || e.revPrev || cur.atStart || cur.frames.length === 0) return
+    const gen = e.revGen
+    const endS = cur.frames[0].timestamp
+    e.revPrev = this.run(e, () => this.decodeBlock(o, endS, cur.stride))
+      .then((blk) => {
+        if (gen === e.revGen) return blk
+        closeBlock(blk)
+        return null
+      })
+      .catch(() => null)
   }
 
   private restart(e: Entry, o: Opened, t: number): void {
@@ -260,10 +404,63 @@ async function open(url: string, trackIndex: number | null): Promise<Opened> {
     if (!(await track.canDecode())) throw new Error(`codec não decodificável: ${track.codec}`)
     await applySourceColorRule(track)
     const firstS = await track.getFirstTimestamp()
-    return { input, sink: new VideoSampleSink(track), firstS }
+    // medido só no primeiro uso do reverso
+    let meta: Promise<{ frameS: number; frameBytes: number }> | null = null
+    const getMeta = (): Promise<{ frameS: number; frameBytes: number }> =>
+      (meta ??= (async () => {
+        const rate = (await track.computePacketStats(60).catch(() => null))?.averagePacketRate ?? 0
+        const frameBytes = (await track.getCodedWidth()) * (await track.getCodedHeight()) * 4
+        return { frameS: rate > 0 ? 1 / rate : 1 / 30, frameBytes }
+      })())
+    return { input, sink: new VideoSampleSink(track), firstS, meta: getMeta }
   } catch (err) {
     input.dispose()
     throw err
+  }
+}
+
+/**
+ * Cópia do quadro para fora do decoder (o bloco do reverso guarda dezenas de quadros; segurar os do decoder de
+ * hardware o trava): na GPU (ImageBitmap RGBA → VideoFrame); se falhar, para a CPU. Mantém timestamp e rotação.
+ * Consome `s`.
+ */
+async function detachFrame(s: VideoSample): Promise<VideoSample> {
+  const frame = s.toVideoFrame()
+  try {
+    const bmp = await createImageBitmap(frame)
+    try {
+      const copy = new VideoFrame(bmp, { timestamp: frame.timestamp, ...(frame.duration !== null ? { duration: frame.duration } : {}) })
+      const out = new VideoSample(copy, { timestamp: s.timestamp, duration: s.duration, rotation: s.rotation })
+      s.close()
+      return out
+    } finally {
+      bmp.close()
+    }
+  } catch {
+    return detachToCpu(s)
+  } finally {
+    frame.close()
+  }
+}
+
+/** Reserva do detachFrame: cópia para a CPU (VideoFrame de buffer, mesmo formato/espaço de cor). Formato desconhecido: fica o próprio quadro. */
+async function detachToCpu(s: VideoSample): Promise<VideoSample> {
+  const frame = s.toVideoFrame()
+  try {
+    if (!frame.format) return s
+    const rect = frame.visibleRect!
+    const buf = new Uint8Array(frame.allocationSize())
+    const layout = await frame.copyTo(buf)
+    const copy = new VideoFrame(buf, {
+      format: frame.format, codedWidth: rect.width, codedHeight: rect.height, layout, timestamp: frame.timestamp,
+      ...(frame.duration !== null ? { duration: frame.duration } : {}),
+      colorSpace: frame.colorSpace.toJSON(), displayWidth: frame.displayWidth, displayHeight: frame.displayHeight
+    })
+    const out = new VideoSample(copy, { timestamp: s.timestamp, duration: s.duration, rotation: s.rotation })
+    s.close()
+    return out
+  } finally {
+    frame.close()
   }
 }
 
@@ -287,7 +484,48 @@ export async function applySourceColorRule(track: Pick<InputVideoTrack, 'getColo
   return true
 }
 
-function closeIter(e: Entry): void {
+/** Quadros por bloco do reverso (o que cabe em REV_BUDGET_BYTES) e duração de um quadro. */
+async function blockShape(o: Opened): Promise<{ n: number; frameS: number }> {
+  const { frameS, frameBytes } = await o.meta()
+  return { n: Math.min(REV_MAX_FRAMES, Math.max(REV_MIN_FRAMES, Math.floor(REV_BUDGET_BYTES / Math.max(1, frameBytes)))), frameS }
+}
+
+/** O bloco cobre t? (antes do 1º quadro do arquivo, o bloco do início cobre: devolve o 1º quadro) */
+function covers(b: RevBlock, t: number): boolean {
+  return b.frames.length > 0 && t < b.endS && (t >= b.frames[0].timestamp - EPS_S || b.atStart)
+}
+
+/** Quadro do bloco com o maior timestamp ≤ t (o 1º, se t for anterior a todos). */
+function pick(b: RevBlock, t: number): VideoSample | null {
+  let lo = 0
+  let hi = b.frames.length - 1
+  if (hi < 0) return null
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (b.frames[mid].timestamp <= t + EPS_S) lo = mid
+    else hi = mid - 1
+  }
+  return b.frames[lo]
+}
+
+function closeBlock(b: RevBlock | null): void {
+  if (b) for (const f of b.frames) f.close()
+}
+
+/** Libera o reverso (bloco atual; a pré-busca em curso é descartada quando terminar). */
+function closeRev(e: Entry): void {
+  if (!e.rev && !e.revPrev) return
+  e.revGen++
+  closeBlock(e.rev)
+  e.rev = null
+  // pré-busca já resolvida (com o gen antigo): fecha os quadros dela
+  const prev = e.revPrev
+  e.revPrev = null
+  void prev?.then(closeBlock)
+}
+
+/** Libera o buffer da reprodução para frente (iterador e os 2 samples). */
+function closeForward(e: Entry): void {
   e.held?.close()
   e.ahead?.close()
   e.held = null
@@ -295,4 +533,9 @@ function closeIter(e: Entry): void {
   e.done = false
   if (e.it) void e.it.return(undefined).catch(() => {})
   e.it = null
+}
+
+function closeIter(e: Entry): void {
+  closeForward(e)
+  closeRev(e)
 }

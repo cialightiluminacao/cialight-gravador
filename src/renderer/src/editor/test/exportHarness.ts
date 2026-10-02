@@ -20,7 +20,7 @@ declare global {
   }
 }
 
-interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; speedProjectId: string; effects: { projectId: string; width: number; height: number; tUs: number; block: number; blurCrop: { x: number; y: number; w: number; h: number } } }
+interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; speedProjectId: string; reverseProjectId: string; effects: { projectId: string; width: number; height: number; tUs: number; block: number; blurCrop: { x: number; y: number; w: number; h: number } } }
 
 export async function runExportHarness(params: Params): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
@@ -86,6 +86,8 @@ export async function runExportHarness(params: Params): Promise<void> {
     report.speed = await exportOnce(base(speedProject, 'velocidade-2x.mp4'))
     // determinismo: a mesma exportação de novo (workers novos) tem de dar o mesmo áudio
     report.speedAgain = await exportOnce(base(speedProject, 'velocidade-2x-de-novo.mp4'))
+    // reverso: trecho de 3 s tocado de trás para frente (o main compara com o filtro reverse do ffmpeg)
+    report.reverse = await exportOnce(base(await window.api.project.load(params.reverseProjectId), 'reverso.mp4'))
 
     if (!report.previewUntouched) {
       try {

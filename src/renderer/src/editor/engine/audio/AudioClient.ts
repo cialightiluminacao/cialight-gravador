@@ -34,12 +34,15 @@ export class AudioClient {
     this.send({ t: 'project', project, mediaUrls, useProxy })
   }
 
-  /** Bloco mixado [fromUs, fromUs + frames/48 kHz), estéreo intercalado; null em erro. */
-  render(fromUs: Us, frames: number): Promise<AudioBlock | null> {
+  /**
+   * Bloco mixado [fromUs, fromUs + frames/48 kHz), estéreo intercalado; null em erro. rate (shuttle, até 2×): o bloco
+   * cobre frames·rate da timeline, esticado com o tom preservado.
+   */
+  render(fromUs: Us, frames: number, rate = 1): Promise<AudioBlock | null> {
     const seq = ++this.seq
     return new Promise((resolve) => {
       this.pending.set(seq, resolve)
-      this.send({ t: 'render', fromUs, frames, seq })
+      this.send({ t: 'render', fromUs, frames, seq, ...(rate !== 1 ? { rate } : {}) })
     })
   }
 

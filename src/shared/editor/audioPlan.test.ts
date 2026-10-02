@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from './factory'
 import type { Asset, MediaItem, Project } from './project'
 import * as ops from './ops'
-import { gainAt, planAudio } from './audioPlan'
+import { gainAt, planAudio, shuttleSegments, SHUTTLE_AUDIO_MAX_RATE, type AudioSegment } from './audioPlan'
 
 const S = 1_000_000
 const vid = (): Asset => ({ id: 'a1', name: 'a1', kind: 'video', source: { type: 'file', path: 'C:/a.mp4', size: 1, mtimeMs: 1 }, durationUs: 10 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
@@ -86,5 +86,38 @@ describe('planAudio', () => {
       expect(at(8, { reverse: true, keepFastAudio: true })).toBe('resample')
       expect(at(8, { reverse: true, preservePitch: false })).toBe('resample')
     })
+  })
+})
+
+describe('shuttleSegments (J/K/L: áudio do preview em taxa ≠ 1)', () => {
+  const seg = (over: Partial<AudioSegment> = {}): AudioSegment => ({
+    itemId: 'i', assetId: 'a1', startUs: 3 * S, durationUs: 4 * S, srcInUs: S, speed: 1, reverse: false, preservePitch: true, mode: 'copy',
+    gain: [{ tUs: 3 * S, gain: 0 }, { tUs: 4 * S, gain: 1 }, { tUs: 7 * S, gain: 1 }], ...over
+  })
+  it('1× devolve os mesmos segmentos', () => {
+    const s = [seg()]
+    expect(shuttleSegments(s, 1)).toBe(s)
+  })
+  it('2× para frente: tempos da timeline ÷ 2, velocidade × 2 e esticado (tom preservado) — mesma fonte em cada instante', () => {
+    const [o] = shuttleSegments([seg()], 2)
+    expect(o).toMatchObject({ startUs: 1_500_000, durationUs: 2 * S, speed: 2, mode: 'stretch', srcInUs: S })
+    expect(o.gain).toEqual([{ tUs: 1_500_000, gain: 0 }, { tUs: 2 * S, gain: 1 }, { tUs: 3_500_000, gain: 1 }])
+    // instante t da timeline ↔ t/2 no tempo do shuttle: a fonte lida é a mesma
+    const t = 5 * S
+    expect(o.srcInUs + (t / 2 - o.startUs) * o.speed).toBe(S + (t - 3 * S))
+    // trecho esticado continua esticado; reamostrado (sem preservePitch) passa a esticar também
+    expect(shuttleSegments([seg({ speed: 1.5, mode: 'stretch' })], 2)[0]).toMatchObject({ speed: 3, mode: 'stretch' })
+    expect(shuttleSegments([seg({ speed: 1.5, mode: 'resample', preservePitch: false })], 2)[0]).toMatchObject({ speed: 3, mode: 'stretch' })
+  })
+  it('mudo continua mudo; acima de 4× efetivo fica mudo (salvo trecho já esticado acima de 4×, o "manter áudio"); reverso reamostra', () => {
+    expect(shuttleSegments([seg({ mode: 'mute', speed: 8 })], 2)[0].mode).toBe('mute')
+    expect(shuttleSegments([seg({ speed: 3, mode: 'stretch' })], 2)[0].mode).toBe('mute')
+    expect(shuttleSegments([seg({ speed: 6, mode: 'stretch' })], 2)[0]).toMatchObject({ speed: 12, mode: 'stretch' })
+    expect(shuttleSegments([seg({ reverse: true, mode: 'copy' })], 2)[0]).toMatchObject({ speed: 2, mode: 'resample', reverse: true })
+  })
+  it('acima de 2× ou para trás o shuttle é mudo (lança: quem chama não pede áudio)', () => {
+    expect(SHUTTLE_AUDIO_MAX_RATE).toBe(2)
+    expect(() => shuttleSegments([seg()], 4)).toThrow()
+    expect(() => shuttleSegments([seg()], -1)).toThrow()
   })
 })

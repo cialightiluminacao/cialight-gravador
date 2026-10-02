@@ -5,7 +5,8 @@ import type { MediaUrls } from '../mediaUrls'
 export type AudioIn =
   // useProxy: mesma variante do vídeo no preview (o proxy tem o áudio a:0 em AAC)
   | { t: 'project'; project: Project; mediaUrls: MediaUrls; useProxy: boolean }
-  | { t: 'render'; fromUs: Us; frames: number; seq: number } // mixa [fromUs, fromUs + frames/48 kHz)
+  // mixa [fromUs, fromUs + frames/48 kHz); rate (shuttle J/K/L, 0 < rate ≤ 2): os frames cobrem frames·rate da timeline
+  | { t: 'render'; fromUs: Us; frames: number; seq: number; rate?: number }
   | { t: 'cancel' } // seek/pausa: descarta os pedidos na fila e o aquecimento ainda não iniciado
   | { t: 'dispose' }
   // exportação: porta (MessageChannel) pela qual o render worker pede blocos ('render') e recebe 'block'/'error'

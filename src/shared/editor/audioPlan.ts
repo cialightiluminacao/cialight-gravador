@@ -61,6 +61,31 @@ export function planAudio(p: Project): AudioSegment[] {
   return out
 }
 
+/** Shuttle (J/K/L) com som: até 2× para frente. Acima disso ou para trás o preview fica mudo. */
+export const SHUTTLE_AUDIO_MAX_RATE = 2
+
+/**
+ * Segmentos para tocar a timeline a `rate`× (0 < rate ≤ 2) no preview: o tempo do shuttle é t/rate, então início,
+ * duração e envelope são divididos por rate e a velocidade multiplicada (cada instante lê a mesma fonte). O som
+ * fica esticado com o tom da fonte (stretch); acima de 4× efetivos fica mudo, salvo trecho que já esticava acima de
+ * 4× ("Manter áudio acelerado"); reverso reamostra (como no plano normal); mudo continua mudo. rate 1: os mesmos.
+ */
+export function shuttleSegments(segs: AudioSegment[], rate: number): AudioSegment[] {
+  if (!(rate > 0 && rate <= SHUTTLE_AUDIO_MAX_RATE)) throw new Error(`shuttle sem áudio a ${rate}×`)
+  if (rate === 1) return segs
+  const t = (us: Us): Us => Math.round(us / rate)
+  return segs.map((s) => {
+    const speed = s.speed * rate
+    let mode: AudioMode
+    if (s.mode === 'mute') mode = 'mute'
+    else if (s.reverse) mode = 'resample'
+    else if (s.mode === 'stretch' && s.speed > MAX_STRETCH_SPEED) mode = 'stretch'
+    else mode = speed > MAX_STRETCH_SPEED ? 'mute' : 'stretch'
+    const startUs = t(s.startUs)
+    return { ...s, startUs, durationUs: t(s.startUs + s.durationUs) - startUs, speed, mode, gain: s.gain.map((g) => ({ tUs: t(g.tUs), gain: g.gain })) }
+  })
+}
+
 /** Ganho linear no instante tUs; 0 fora do segmento. */
 export function gainAt(seg: AudioSegment, tUs: Us): number {
   if (tUs < seg.startUs || tUs > seg.startUs + seg.durationUs) return 0

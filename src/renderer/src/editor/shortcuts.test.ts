@@ -66,4 +66,11 @@ describe('shortcutFor', () => {
     // Ctrl+S salva mesmo digitando num campo
     expect(shortcutFor(key('s', { ctrlKey: true, target: { tagName: 'INPUT', type: 'text' } as unknown as EventTarget }))).toBe('save')
   })
+  it('J/K/L clássico: com K segurado, J e L andam um quadro', () => {
+    expect(shortcutFor(key('j'), { kHeld: true })).toBe('prevFrame')
+    expect(shortcutFor(key('L'), { kHeld: true })).toBe('nextFrame')
+    expect(shortcutFor(key('j'), { kHeld: false })).toBe('shuttleBack')
+    expect(shortcutFor(key('k'), { kHeld: true })).toBe('pause')
+    expect(shortcutFor(key('s'), { kHeld: true })).toBe('split')
+  })
 })

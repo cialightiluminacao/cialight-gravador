@@ -8,6 +8,7 @@ import { useEditorStore } from '../state/editorStore'
 import { createEditorEngine } from '../ui/editorEngine'
 import { effectsCheck } from './effectsHarness'
 import { stretchCheck } from './stretchHarness'
+import { speedCheck } from './speedHarness'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -85,6 +86,8 @@ export async function runRenderHarness(projectId: string): Promise<void> {
     client.dispose()
     report.watchdog = await watchdogCheck(project)
     report.effects = await effectsCheck()
+    // por último: decodificação 1080p contínua (a CPU desta máquina estrangula depois de alguns segundos de carga)
+    report.speed = await speedCheck()
     ok = true
   } catch (e) {
     errors.push(e instanceof Error ? (e.stack ?? e.message) : String(e))

@@ -132,14 +132,25 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
 
   // ---- atalhos ----
   useEffect(() => {
+    // K segurado: J/L andam quadro a quadro (e repetem segurados, como as setas)
+    let kHeld = false
+    const isK = (e: KeyboardEvent): boolean => e.code === 'KeyK' || e.key.toLowerCase() === 'k'
+    const frameStep = (e: KeyboardEvent): boolean => kHeld && (e.code === 'KeyJ' || e.code === 'KeyL' || e.key.toLowerCase() === 'j' || e.key.toLowerCase() === 'l')
+    const onKeyUp = (e: KeyboardEvent): void => {
+      if (isK(e)) kHeld = false
+    }
+    const onBlur = (): void => {
+      kHeld = false
+    }
     const onKey = (e: KeyboardEvent): void => {
-      if (e.defaultPrevented || (e.repeat && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
+      if (isK(e) && !e.ctrlKey && !e.altKey && !e.metaKey) kHeld = true
+      if (e.defaultPrevented || (e.repeat && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && !frameStep(e))) return
       if (useEditorStore.getState().project?.id !== projectId) return // outro projeto ainda no store (troca em curso)
       if (gestureActive() || viewerGestureActive()) return // arraste na linha do tempo/no visualizador: o teclado é do gesto
       if (document.querySelector('[role="dialog"]')) return // diálogo aberto (ex.: exportação): o teclado é dele
       const t = e.target as Element | null
       if (!e.ctrlKey && t?.closest?.(OWN_KEYS)) return
-      const action = shortcutFor(e)
+      const action = shortcutFor(e, { kHeld })
       if (action && runShortcut(action, engineRef.current?.playback ?? null)) e.preventDefault()
     }
     // arquivos soltos fora da biblioteca não podem navegar a janela para o arquivo
@@ -149,10 +160,14 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       if (e.type === 'dragover') e.dataTransfer.dropEffect = 'none'
     }
     window.addEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
     window.addEventListener('dragover', blockDrop)
     window.addEventListener('drop', blockDrop)
     return () => {
       window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
       window.removeEventListener('dragover', blockDrop)
       window.removeEventListener('drop', blockDrop)
     }

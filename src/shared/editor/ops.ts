@@ -1,12 +1,12 @@
 import { produce } from 'immer'
 import { evalAnim, removeKey, setKey, setValue, sliceKeys } from './anim'
 import { createEffectItem, createMediaItem } from './factory'
-import { visualTrackBelow } from './resolve'
+import { sourceTimeUs, visualTrackBelow } from './resolve'
 import type { EffectPresetId, EffectRegionInit } from './factory'
 import { newId } from './ids'
 import { frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
-import type { Anim, Asset, EffectItem, Item, MediaItem, Project, Track, TrackKind, Us, VisualProps } from './project'
+import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, Track, TrackKind, Us, VisualProps } from './project'
 
 // Operações de edição puras: (project, ...) => Project. Lançam EditError quando a operação é inválida.
 
@@ -1050,6 +1050,144 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
       rippleShift(d, pivot, shift, idSet, new Set())
     }
     relocateFollowers(d, changes.filter((c) => c.fx).map((c) => c.id))
+    finalize(d)
+  })
+}
+
+/** Duração padrão do "Congelar quadro" do inspetor. */
+export const FREEZE_DEFAULT_US = 2_000_000
+
+/** Curva de um trecho percorrida de trás para frente: E'(q) = 1 − E(1 − q). 'hold' não tem par (tratado em mirrorKeys). */
+function mirrorEase(e: Ease): Ease {
+  if (typeof e === 'object') {
+    const [x1, y1, x2, y2] = e.bezier
+    return { bezier: [1 - x2, 1 - y2, 1 - x1, 1 - y1] }
+  }
+  return e === 'in' ? 'out' : e === 'out' ? 'in' : e
+}
+
+/**
+ * Keyframes espelhados no tempo dentro de [0, dur]: o key em t vai para dur − t e cada trecho leva a curva espelhada.
+ * O ease do último key (sem trecho depois) guarda o do último original, então espelhar duas vezes devolve o original.
+ * Trecho 'hold' (valor parado e salto no fim) vira salto no início: um key extra 1 µs depois com o valor parado.
+ */
+function mirrorKeys(a: Anim<number>, dur: Us): Anim<number> {
+  const k = a.keys
+  if (!k || k.length === 0) return a
+  const out: Keyframe<number>[] = []
+  for (let j = k.length - 1; j >= 0; j--) {
+    const t = dur - k[j].tUs
+    if (j === 0) {
+      out.push({ tUs: t, value: k[0].value, ease: k[k.length - 1].ease })
+      continue
+    }
+    const seg = k[j - 1].ease
+    if (seg !== 'hold') {
+      out.push({ tUs: t, value: k[j].value, ease: mirrorEase(seg) })
+      continue
+    }
+    out.push({ tUs: t, value: k[j].value, ease: 'hold' })
+    if (k[j].tUs - k[j - 1].tUs > 2) out.push({ tUs: t + 1, value: k[j - 1].value, ease: 'hold' })
+  }
+  return { ...a, keys: out }
+}
+
+/**
+ * Insere um trecho parado de D µs no instante local `local` das animações do item (o valor de `local` fica até
+ * local + D; os keys depois andam D). Constantes não mudam.
+ */
+function holdAnimAt(a: Anim<number>, local: Us, D: Us): Anim<number> {
+  const k = a.keys
+  if (!k || k.length === 0) return a
+  const v = evalAnim(a, local)
+  const before = k.filter((x) => x.tUs < local)
+  const after = k.filter((x) => x.tUs > local).map((x) => ({ ...x, tUs: x.tUs + D }))
+  const at = k.find((x) => x.tUs === local)
+  return { ...a, keys: [...before, { tUs: local, value: v, ease: at?.ease ?? 'linear' }, { tUs: local + D, value: v, ease: at?.ease ?? 'linear' }, ...after] }
+}
+
+/**
+ * Congelar quadro: divide o clipe de vídeo em atUs e insere um pedaço `freeze` de durationUs (≥ MIN_ITEM_US) com o
+ * quadro da fonte mostrado naquele instante (com velocidade/reverso), abrindo espaço com ripple em todas as faixas
+ * desbloqueadas (o áudio vinculado é dividido e empurrado: o congelado é mudo). A menos de MIN_ITEM_US de uma borda,
+ * o ponto vai para a borda (antes do 1º quadro / depois do último). O pedaço fica no grupo do lado esquerdo
+ * (linkId original). Efeitos que cruzam o ponto não são divididos: cobrem o congelado com a região parada no valor do
+ * instante congelado (a proteção continua sobre o quadro parado); os que começam depois andam com o resto.
+ */
+export function freezeFrameAt(p: Project, itemId: string, atUs: Us, durationUs: Us): Project {
+  const f = mustFind(p, itemId)
+  const item = f.item
+  if (item.type !== 'media' || f.track.kind !== 'video' || !item.visual) throw new EditError('invalid', 'Congelar quadro só se aplica a clipes de vídeo')
+  const asset = p.assets.find((a) => a.id === item.assetId)
+  if (!asset || asset.kind !== 'video') throw new EditError('invalid', 'Congelar quadro só se aplica a clipes de vídeo')
+  assertUnlocked(f.track)
+  let at = Math.round(atUs)
+  if (at < item.startUs || at > end(item)) throw new EditError('bounds', 'O playhead não está sobre o clipe')
+  if (at - item.startUs < MIN_ITEM_US) at = item.startUs
+  else if (end(item) - at < MIN_ITEM_US) at = end(item)
+  const D = Math.max(MIN_ITEM_US, Math.round(durationUs))
+  const srcUs = sourceTimeUs(item, asset, Math.min(at, end(item) - 1))
+  const piece: MediaItem = {
+    ...clearEdges(omit(item, 'freeze'), true, true),
+    id: newId('i_'), startUs: at, durationUs: D, inUs: srcUs, speed: 1, reverse: false, freeze: { atUs: srcUs },
+    audio: { ...item.audio, enabled: false, volume: { value: evalAnim(item.audio.volume, at - item.startUs) } },
+    visual: mapVisual(item.visual, (a) => ({ value: evalAnim(a, at - item.startUs) }))
+  }
+  return edit(p, (d) => {
+    // efeitos que cruzam o ponto saem antes do makeRoom (que os dividiria) e voltam esticados sobre o congelado
+    const held: { track: Track; item: Item }[] = []
+    for (const t of d.tracks) {
+      if (t.locked) continue
+      const crossing = t.items.filter((i) => i.type === 'effect' && i.startUs < at && end(i) > at)
+      if (!crossing.length) continue
+      t.items = t.items.filter((i) => !crossing.includes(i))
+      for (const i of crossing) held.push({ track: t, item: { ...mapAnims(i, (a) => holdAnimAt(a, at - i.startUs, D)), durationUs: i.durationUs + D } })
+    }
+    makeRoom(d, at, D, f.track.id)
+    mustTrack(d, f.track.id).items.push(piece)
+    for (const h of held) h.track.items.push(h.item)
+    finalize(d)
+  })
+}
+
+/**
+ * Liga/desliga o reverso dos clipes (e da mídia vinculada), mantendo duração e trecho da fonte. O conteúdo que
+ * estava em t (a partir do início do clipe) passa a aparecer em dur − t, então os keyframes do clipe são espelhados
+ * no tempo e os efeitos vinculados (seguidores) também: posição dentro do clipe e keyframes. Pedaços congelados não
+ * mudam; a partir de um efeito não há o que reverter (devolve o projeto).
+ */
+export function setReverse(p: Project, itemIds: string[], reverse: boolean): Project {
+  const ids = expand(p, itemIds, true)
+  const targets = ids
+    .map((id) => mustFind(p, id))
+    .filter((x): x is typeof x & { item: MediaItem } => x.item.type === 'media' && !x.item.freeze && x.item.reverse !== reverse)
+  if (targets.length === 0) return p
+  for (const x of targets) assertUnlocked(x.track)
+  // seguidores dos grupos alterados, cada um espelhado em torno do clipe de vídeo do grupo que o cruza
+  const followers: { id: string; clip: MediaItem }[] = []
+  for (const t of p.tracks) {
+    for (const it of t.items) {
+      if (!isFollower(p, it)) continue
+      const clips = targets.filter((x) => x.item.linkId === it.linkId && x.track.kind === 'video' && x.item.visual).map((x) => x.item)
+      const clip = clips.find((c) => c.startUs < end(it) && end(c) > it.startUs) ?? clips[0]
+      if (!clip) continue
+      assertUnlocked(t)
+      followers.push({ id: it.id, clip })
+    }
+  }
+  return edit(p, (d) => {
+    for (const x of targets) {
+      const f = mustFind(d, x.item.id)
+      const m = f.item as MediaItem
+      f.track.items[f.itemIndex] = { ...mapAnims(m, (a) => mirrorKeys(a, m.durationUs)), reverse }
+    }
+    for (const { id, clip } of followers) {
+      const f = mustFind(d, id)
+      const it = f.item
+      const ns = Math.max(0, clip.startUs + end(clip) - end(it))
+      f.track.items[f.itemIndex] = { ...mapAnims(it, (a) => mirrorKeys(a, it.durationUs)), startUs: ns }
+    }
+    relocateFollowers(d, followers.map((x) => x.id))
     finalize(d)
   })
 }

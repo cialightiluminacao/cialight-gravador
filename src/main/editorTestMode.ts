@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from 'path'
 import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
+import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -21,6 +22,8 @@ const PROJECT_ID = 'p-editor-render-test'
 const EFFECTS_PROJECT_ID = 'p-editor-effects-test'
 // time-stretch (F3): senoide de 440 Hz; o harness monta as velocidades em memória (stretchHarness.ts)
 const STRETCH_PROJECT_ID = 'p-editor-stretch-test'
+// reverso e shuttle J/K/L (F3): vídeo com o número do quadro em bits + senoide de 1 kHz (speedHarness.ts)
+const SPEED_PROJECT_ID = 'p-editor-speed-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -38,6 +41,7 @@ interface HarnessReport {
   burst?: string[]
   effects?: EffectsReport
   stretch?: StretchReport
+  speed?: SpeedReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -69,6 +73,15 @@ interface EffectsReport {
   featherTail?: { rectRing: number; ellipseRing: number; outsideMaxDiff: number; changed: number[] }
   realloc?: { maxDiff: number }
   bench?: { renderer?: string; noFx: Stats; fx3: Stats; fx3Frame: Stats; error?: string }
+}
+interface SpeedRun {
+  error?: string; frames: number; samples: number; wrong: number; maxError: number; wrongDirection: number; firstMarker: number | null; lastMarker: number | null
+  meanLagUs: number; maxLagUs: number; ratio: number; peak: number; mismatches: { tUs: number; marker: number; expected: number }[]
+}
+interface SpeedReport {
+  error?: string; reverseItem?: SpeedRun; shuttleBack?: SpeedRun; shuttle2x?: SpeedRun; shuttle4x?: SpeedRun; shuttleBack8x?: SpeedRun
+  pcm2x?: { hz: number; rms: number; error?: string }
+  parity?: { maxDiff: number; meanDiff: number; markers: number[]; error?: string }
 }
 interface StretchReport {
   error?: string
@@ -203,9 +216,23 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(STRETCH_PROJECT_ID), { recursive: true, force: true })
   projects.create(stretchProject)
 
-  const win = new BrowserWindow({ width: 800, height: 600, show: false, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
+  // reverso/shuttle: 1080p30 de 8 s, GOP de 2 s, número do quadro em 8 bits no topo (caixas 240×80 sobre faixa
+  // preta; branca = 1) + senoide de 1 kHz
+  const marker = join(dir, 'marcador-de-quadro.mp4')
+  const bits = Array.from({ length: 8 }, (_, k) => `drawbox=x=${k * 240}:y=0:w=240:h=80:color=white:t=fill:enable='eq(mod(floor(n/${2 ** k}),2),1)'`).join(',')
+  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=1000:sample_rate=48000,volume=4', '-t', '8', '-map', '0:v', '-map', '1:a', '-vf', `drawbox=x=0:y=0:w=1920:h=80:color=black:t=fill,${bits}`, '-c:v', 'libx264', '-preset', 'veryfast', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-ac', '2', marker], 'editor: marcador de quadro')
+  const aMarker: Asset = { ...assetFromInfo('a_marker', marker, statSync(marker), await probe(marker)), status: 'ready' }
+  let speedProject: Project = { ...createEmptyProject('Teste de reverso e shuttle', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: SPEED_PROJECT_ID }
+  speedProject = addMediaFromAsset(addAsset(speedProject, aMarker), aMarker.id, 0).project
+  rmSync(projects.dirOf(SPEED_PROJECT_ID), { recursive: true, force: true })
+  projects.create(speedProject)
+
+  // janela visível sem foco (fora da barra de tarefas): oculta, o Chromium derruba o requestAnimationFrame para ~2/s
+  // depois de umas dezenas de segundos, e a reprodução do editor anda por rAF
+  const win = new BrowserWindow({ width: 800, height: 600, show: false, focusable: false, skipTaskbar: true, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
+  win.showInactive()
   const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 120 s'] } }), 120_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 180 s'] } }), 180_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
       clearTimeout(timer)
       resolve(r)
@@ -313,6 +340,34 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   }
   const sp = sx?.perf
   check(!!sp && sp.warmX >= 10, `time-stretch: 4 faixas esticadas (0,5×/1,5×/2×/4×) no worker ≥ 10× tempo real (${sp?.warmX}× com cache quente; ${sp?.coldX}× decodificando; referência da CPU ${sp?.cpuBefore} → ${sp?.cpuAfter} it/ms)`, failures)
+
+  const sp2 = r.speed
+  console.log(`reverso/shuttle: ${JSON.stringify(sp2)}`)
+  check(!!sp2 && !sp2.error, `reverso/shuttle: harness sem erro (${sp2?.error ?? ''})`, failures)
+  const runOk = (x: SpeedRun | undefined, tag: string, dir: 1 | -1): void => {
+    check(!!x && !x.error && x.samples >= 10 && x.frames >= 10, `${tag}: tocou e mostrou quadros (${x?.frames} quadros, ${x?.samples} leituras do marcador) ${x?.error ?? ''}`, failures)
+    check(!!x && x.wrong === 0, `${tag}: quadro na tela = quadro esperado para o instante (${x?.wrong} errados de ${x?.samples}; ${JSON.stringify(x?.mismatches)})`, failures)
+    check(!!x && x.wrongDirection === 0 && x.firstMarker !== null && x.lastMarker !== null && Math.sign(x.lastMarker - x.firstMarker) === dir, `${tag}: marcador ${dir < 0 ? 'decrescente' : 'crescente'} (${x?.firstMarker} → ${x?.lastMarker}, ${x?.wrongDirection} fora de ordem)`, failures)
+  }
+  const rv = sp2?.reverseItem
+  runOk(rv, 'item reverso a 1×', -1)
+  check(!!rv && rv.meanLagUs >= 0 && rv.meanLagUs <= frameUs, `item reverso a 1×: atraso médio ≤ 1 quadro (${rv?.meanLagUs} µs; máx. ${rv?.maxLagUs} µs) a 30 fps (${rv?.frames} quadros em 2 s)`, failures)
+  check(!!rv && Math.abs(rv.ratio - 1) < 0.03, `item reverso a 1×: relógio a 1× (${rv?.ratio})`, failures)
+  const sb = sp2?.shuttleBack
+  runOk(sb, 'shuttle J (−1×)', -1)
+  check(!!sb && Math.abs(sb.ratio + 1) < 0.03 && sb.meanLagUs <= frameUs, `shuttle J: relógio a −1× (${sb?.ratio}), atraso médio ${sb?.meanLagUs} µs ≤ 1 quadro`, failures)
+  const s2 = sp2?.shuttle2x
+  runOk(s2, 'shuttle L L (2×)', 1)
+  check(!!s2 && Math.abs(s2.ratio - 2) < 0.06 && s2.peak > 0.1, `shuttle 2×: relógio a 2× (${s2?.ratio}) com som (pico ${s2?.peak})`, failures)
+  const s4 = sp2?.shuttle4x
+  runOk(s4, 'shuttle L L L (4×)', 1)
+  check(!!s4 && Math.abs(s4.ratio - 4) < 0.12 && s4.peak === 0, `shuttle 4×: avança 4 s por segundo (${s4?.ratio}×) e mudo (pico ${s4?.peak})`, failures)
+  const s8 = sp2?.shuttleBack8x
+  check(!!s8 && !s8.error && s8.samples >= 5 && s8.maxError <= 12 && s8.wrongDirection === 0 && s8.frames >= 8 && Math.abs(s8.ratio + 8) < 0.25, `shuttle −8×: quadros decrescentes a ≤ meio passo do exato (${s8?.firstMarker} → ${s8?.lastMarker}, erro máx. ${s8?.maxError} quadros, ${s8?.frames} quadros em 0,6 s, atraso médio ${s8?.meanLagUs} µs de timeline), relógio ${s8?.ratio}× ${s8?.error ?? ''}`, failures)
+  const pq = sp2?.parity
+  check(!!pq && !pq.error && pq.markers.length === 2 && pq.markers[0] === pq.markers[1] && pq.maxDiff <= 2, `reverso: quadro do bloco (cópia na GPU) = mesmo quadro por seek (marcadores ${JSON.stringify(pq?.markers)}, dif. máx. ${pq?.maxDiff}, média ${pq?.meanDiff}) ${pq?.error ?? ''}`, failures)
+  const pc = sp2?.pcm2x
+  check(!!pc && !pc.error && Math.abs(pc.hz - 1000) / 1000 <= 0.02 && pc.rms > 0.2, `shuttle 2×: áudio esticado com o tom da fonte — ${pc?.hz} Hz (1 kHz ±2 %; reamostrado daria 2 kHz), RMS ${pc?.rms} ${pc?.error ?? ''}`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

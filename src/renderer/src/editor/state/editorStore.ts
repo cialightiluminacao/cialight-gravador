@@ -20,6 +20,8 @@ export interface EditorState {
   selection: string[]
   playheadUs: Us
   playing: boolean
+  /** Taxa da reprodução (shuttle J/K/L: ±1, ±2, ±4, ±8); 1 quando parado. */
+  playRate: number
   zoomPxPerSec: number
   scrollUs: Us
   snapping: boolean
@@ -45,7 +47,7 @@ export interface EditorState {
   markSaved(): void
   select(ids: string[], mode?: 'set' | 'add' | 'toggle'): void
   setPlayhead(us: Us): void
-  setPlaying(b: boolean): void
+  setPlaying(b: boolean, rate?: number): void
   setZoom(pxPerSec: number, anchorUs?: Us): void
   setScroll(us: Us): void
   setInOut(inUs: Us | null, outUs: Us | null): void
@@ -72,6 +74,7 @@ const INITIAL = {
   selection: [] as string[],
   playheadUs: 0,
   playing: false,
+  playRate: 1,
   zoomPxPerSec: ZOOM_DEFAULT,
   scrollUs: 0,
   snapping: true,
@@ -186,7 +189,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     }),
 
   setPlayhead: (us) => set({ playheadUs: Math.max(0, Math.round(us)) }),
-  setPlaying: (b) => set({ playing: b }),
+  setPlaying: (b, rate = 1) => set({ playing: b, playRate: b ? rate : 1 }),
 
   setZoom: (pxPerSec, anchorUs) =>
     set((s) => {

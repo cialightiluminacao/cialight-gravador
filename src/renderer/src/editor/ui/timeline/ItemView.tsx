@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { AlertTriangle, EyeOff, Link2, PenLine, Rewind, Shapes, Sparkles, Type } from 'lucide-react'
+import { AlertTriangle, EyeOff, Link2, PenLine, Rewind, Shapes, Snowflake, Sparkles, Type } from 'lucide-react'
 import type { Asset, Item, MediaItem, TrackKind } from '@shared/editor/project'
 import { cn } from '@/lib/cn'
 import { mediaUrl, projectFileUrl } from '../mediaImport'
@@ -144,8 +144,9 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
           {Icon ? <Icon className="h-3 w-3 shrink-0 opacity-80" /> : null}
           {item.linkId ? <Link2 className="h-3 w-3 shrink-0 opacity-80" aria-label="Vinculado" /> : null}
           <span className="truncate">{itemName(item, asset)}</span>
-          {media && media.speed !== 1 ? <span className="shrink-0 rounded bg-warn/90 px-1 font-mono text-[9px] leading-[12px] text-black">{speedLabel(media.speed)}</span> : null}
-          {media?.reverse ? <Rewind className="h-3 w-3 shrink-0 text-warn" aria-label="Reverso" /> : null}
+          {media && media.speed !== 1 && !media.freeze ? <span className="shrink-0 rounded bg-warn/90 px-1 font-mono text-[9px] leading-[12px] text-black">{speedLabel(media.speed)}</span> : null}
+          {media?.reverse && !media.freeze ? <Rewind className="h-3 w-3 shrink-0 text-warn" aria-label="Reverso" /> : null}
+          {media?.freeze ? <Snowflake className="h-3 w-3 shrink-0 text-info" aria-label="Quadro congelado" /> : null}
         </span>
       ) : null}
       {/* alças de trim: só nas bordas reais (não nas de recorte) e fora de faixa bloqueada */}

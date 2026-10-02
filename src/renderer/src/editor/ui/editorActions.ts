@@ -16,9 +16,6 @@ const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getS
 /** Área de transferência interna (ids dos itens copiados). */
 let clipboard: string[] = []
 
-/** J/L: o motor só toca a 1× (sem taxas 2×/4× nem reverso), então J/L saltam 5 s sem parar a reprodução. */
-export const SHUTTLE_JUMP_US = 5_000_000
-
 /** "Ajustar tudo" (Shift+Z) depende da largura da linha do tempo: ela registra o handler aqui. */
 let zoomFitHandler: (() => void) | null = null
 export function registerZoomFit(fn: (() => void) | null): void {
@@ -193,12 +190,9 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
   switch (action) {
     case 'playPause': togglePlay(playback); return true
     case 'pause': playback?.pause(); return true
-    // J/L: salto de 5 s (seek mantém a reprodução); L parado começa a tocar
-    case 'shuttleBack': seekTo(playback, s.playheadUs - SHUTTLE_JUMP_US); return true
-    case 'shuttleForward':
-      if (!s.playing) void playback?.play()
-      else seekTo(playback, s.playheadUs + SHUTTLE_JUMP_US)
-      return true
+    // J/L: shuttle — parado ou no outro sentido toca a 1×; de novo no mesmo sentido dobra até 8× (K pausa)
+    case 'shuttleBack': void playback?.shuttle(-1); return true
+    case 'shuttleForward': void playback?.shuttle(1); return true
     case 'prevFrame': stepFrames(playback, -1); return true
     case 'nextFrame': stepFrames(playback, 1); return true
     case 'back1s': stepFrames(playback, -Math.round(fps)); return true

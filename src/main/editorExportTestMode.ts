@@ -55,6 +55,8 @@ const FX_BLUR_CROP = { x: Math.round((FX_BLUR.x - FX_BLUR.w / 2) * W) + 24, y: M
 // velocidade (F3): testsrc2 + voz sintética de 6 s a 2× com tom preservado
 const SPEED_ID = 'p-editor-export-velocidade'
 const VOICE_HZ = 220
+// reverso (F3): testsrc2 [2 s, 5 s) de trás para frente × ffmpeg -vf reverse
+const REVERSE_ID = 'p-editor-export-reverso'
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
 
@@ -73,6 +75,7 @@ interface HarnessReport {
   effects?: { export?: ExportOut; previewBlockVar?: number[]; previewBlurRgb?: number[]; error?: string }
   speed?: ExportOut
   speedAgain?: ExportOut
+  reverse?: ExportOut
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
 }
 
@@ -238,6 +241,15 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(SPEED_ID), { recursive: true, force: true })
   projects.create(speedProject)
 
+  // reverso: a fonte do cenário, trecho [2 s, 5 s) com reverse (só vídeo)
+  const revItem: MediaItem = { ...createMediaItem(aVideo, 0, 'video'), inUs: 2_000_000, durationUs: 3_000_000, reverse: true }
+  const reverseProject: Project = {
+    ...addAsset({ ...createEmptyProject('Reverso', { width: W, height: H, fps: FPS, background: '#000000' }), id: REVERSE_ID }, aVideo),
+    tracks: [{ id: 't_rev', kind: 'video', name: 'Vídeo', muted: false, hidden: false, locked: false, volume: 1, items: [revItem] }]
+  }
+  rmSync(projects.dirOf(REVERSE_ID), { recursive: true, force: true })
+  projects.create(reverseProject)
+
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
   const session = await makeSyntheticSession(sessions, SESSION_ID)
@@ -252,7 +264,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -420,6 +432,24 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     let diff = 0
     for (let i = 0; i < Math.min(a.length, b.length); i++) diff = Math.max(diff, Math.abs(a[i] - b[i]))
     check(a.length > 0 && a.length === b.length && diff === 0, `velocidade: exportação determinística — PCM estéreo decodificado idêntico nas duas exportações (${a.length} × ${b.length} amostras, diferença máx. ${diff})`, failures)
+  }
+
+  // ---- reverso × ffmpeg -vf reverse ----
+  const rvOut = r.reverse?.path
+  check(!!rvOut && existsSync(rvOut), `reverso: trecho de 3 s exportado de trás para frente (${rvOut ?? r.reverse?.error}) em ${r.reverse?.ms} ms`, failures)
+  if (rvOut && existsSync(rvOut)) {
+    const ref = join(dir, 'reverso-ref.mp4')
+    // -t de entrada: o filtro reverse guarda tudo o que entra (com -t de saída inverteria até o fim do arquivo)
+    await gen(['-ss', '2', '-t', '3', '-i', src, '-an', '-vf', 'reverse', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '10', '-pix_fmt', 'yuv420p', ...BT709, ref], 'teste: reverso de referência')
+    const pr = await probeFile(rvOut)
+    check(Math.abs(pr.durationMs - 3000) <= FRAME_MS && (await countFrames(rvOut)) === 90, `reverso: 3,0 s e 90 quadros (${pr.durationMs} ms)`, failures)
+    for (const t of [0.5, 1.5, 2.5]) {
+      const a = await frameRgb(rvOut, t, join(dir, `reverso-saida-${t}.rgb`))
+      const b = await frameRgb(ref, t, join(dir, `reverso-ref-${t}.rgb`))
+      const nb = await frameRgb(ref, t + 1 / FPS, join(dir, `reverso-ref-vizinho-${t}.rgb`))
+      const p = psnr(a, b)
+      check(p > 30, `reverso: quadro ${t.toFixed(1)} s = ffmpeg reverse (PSNR ${p.toFixed(1)} dB > 30; contra o quadro vizinho: ${psnr(a, nb).toFixed(1)} dB)`, failures)
+    }
   }
 
   // ---- preview intocado durante a exportação ----

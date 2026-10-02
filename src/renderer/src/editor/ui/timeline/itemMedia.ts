@@ -6,8 +6,9 @@ import type { FilmstripInfo, MediaItem, Us } from '@shared/editor/project'
 export const PEAKS_PER_SEC = 100
 const PEAK_US = 1e6 / PEAKS_PER_SEC
 
-/** Instante da fonte mostrado em `localUs` (tempo dentro do item), com inUs, velocidade e reverso. */
-export function sourceUsAt(item: Pick<MediaItem, 'inUs' | 'speed' | 'reverse' | 'durationUs'>, localUs: Us): Us {
+/** Instante da fonte mostrado em `localUs` (tempo dentro do item), com inUs, velocidade, reverso e congelado. */
+export function sourceUsAt(item: Pick<MediaItem, 'inUs' | 'speed' | 'reverse' | 'durationUs' | 'freeze'>, localUs: Us): Us {
+  if (item.freeze) return item.freeze.atUs
   const off = item.reverse ? item.durationUs - localUs : localUs
   return Math.round(item.inUs + off * item.speed)
 }
