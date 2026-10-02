@@ -318,6 +318,22 @@ describe('mixBlock + StretchBank (fake determinístico)', () => {
     expect(created).toHaveLength(2)
   })
 
+  it('pin: segmentos do bloco atual não são despejados pelo aquecimento à frente (o banco passa do limite)', async () => {
+    const { created, bank, srcs } = setup(2)
+    await bank.ensure('i1', 2)
+    await bank.ensure('b', 2)
+    bank.pin(new Set(['i1', 'b'])) // os dois tocam no bloco atual
+    await bank.ensure('c', 2) // aquecimento de um segmento que começa adiante
+    expect(bank.has('i1') && bank.has('b') && bank.has('c')).toBe(true)
+    expect(created).toHaveLength(3)
+    // e o mixBlock do bloco atual ainda estica (não cai na reamostragem)
+    const out = mixBlock([stretchSeg()], 0, 4800, srcs)
+    expect(Math.round(out[0] * 1e6)).toBe(BASE + LEAD)
+    bank.pin(new Set())
+    await bank.ensure('d', 2) // sem pin: volta ao limite despejando os mais antigos (i1 foi lido por último)
+    expect([bank.has('b'), bank.has('c'), bank.has('i1'), bank.has('d')]).toEqual([false, false, true, true])
+  })
+
   it('falha ao criar o stretcher: ensure rejeita sempre, sem tentar de novo', async () => {
     let tries = 0
     const bank = new StretchBank(async () => {

@@ -17,13 +17,14 @@ export interface AudioSegment {
 export const MAX_STRETCH_SPEED = 4
 
 /**
- * 1× copia; sem preservePitch reamostra; com preservePitch estica até 4× (e em câmera lenta), acima de 4×
- * silencia salvo keepFastAudio. Reverso fora de 1× reamostra (o stretch só anda para a frente).
+ * 1× copia; com preservePitch acima de 4× silencia salvo keepFastAudio (também em reverso); sem preservePitch
+ * reamostra; com preservePitch estica até 4× (e em câmera lenta). Reverso fora de 1× reamostra (o stretch só
+ * anda para a frente).
  */
 export function audioMode(speed: number, reverse: boolean, preservePitch: boolean, keepFastAudio: boolean): AudioMode {
   if (speed === 1) return 'copy'
+  if (preservePitch && speed > MAX_STRETCH_SPEED && !keepFastAudio) return 'mute'
   if (!preservePitch || reverse) return 'resample'
-  if (speed > MAX_STRETCH_SPEED && !keepFastAudio) return 'mute'
   return 'stretch'
 }
 

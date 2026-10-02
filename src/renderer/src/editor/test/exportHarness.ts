@@ -84,6 +84,8 @@ export async function runExportHarness(params: Params): Promise<void> {
     // velocidade 2× com tom preservado: voz sintética de 220 Hz (o main confere o tom e a duração)
     const speedProject = await window.api.project.load(params.speedProjectId)
     report.speed = await exportOnce(base(speedProject, 'velocidade-2x.mp4'))
+    // determinismo: a mesma exportação de novo (workers novos) tem de dar o mesmo áudio
+    report.speedAgain = await exportOnce(base(speedProject, 'velocidade-2x-de-novo.mp4'))
 
     if (!report.previewUntouched) {
       try {

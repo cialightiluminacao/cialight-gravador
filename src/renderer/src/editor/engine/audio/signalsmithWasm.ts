@@ -1,6 +1,6 @@
 // GERADO por scripts/vendor-signalsmith.mjs — não editar à mão.
 // signalsmith-stretch 1.3.2 (https://github.com/Signalsmith-Audio/signalsmith-stretch), Licença: MIT,
-// Copyright (c) Geraint Luff / Signalsmith Audio. Só o binário WASM e o mapa dos nomes minificados do glue
+// Copyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd. Só o binário WASM e o mapa dos nomes minificados do glue
 // emscripten publicado; o carregador é nosso (stretch.ts).
 export const SIGNALSMITH_VERSION = '1.3.2'
 export const SIGNALSMITH_WASM_SHA256 = '83869197b3c5ebf9fc8c517a1586aef1ecf77404842218d62b9c0e82882d8ca3'

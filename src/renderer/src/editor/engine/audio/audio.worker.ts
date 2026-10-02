@@ -105,6 +105,9 @@ async function pump(): Promise<void> {
       const stale = (): boolean => epoch !== e0
       try {
         const segs = segments
+        // stretchers do bloco presos até o próximo: o aquecimento à frente não os despeja antes do mixBlock
+        const blockEnd = m.fromUs + Math.round((m.frames * 1e6) / SR)
+        stretch.pin(new Set(segs.filter((s) => s.mode === 'stretch' && s.startUs < blockEnd && s.startUs + s.durationUs > m.fromUs).map((s) => s.itemId)))
         await prepare(segs, m.fromUs, m.frames, stale)
         if (stale()) continue // cancelado durante a decodificação: o cliente já descartou
         const pcm = mixBlock(segs, m.fromUs, m.frames, sources as Map<string, PcmSource>)

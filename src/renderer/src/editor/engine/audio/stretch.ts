@@ -87,14 +87,20 @@ async function instantiate(): Promise<Raw> {
   return raw
 }
 
-/** Stretcher estéreo a 48 kHz (preset padrão: janela de 120 ms, latências de 60 ms + 60 ms). `rate` dimensiona os buffers. */
+/**
+ * Stretcher estéreo a 48 kHz (preset padrão: janela de 120 ms, latências de 60 ms + 60 ms). A velocidade de cada
+ * chamada é a razão entrada/saída do process (e o `rate` do seek); `rate` aqui é só a velocidade inicial
+ * pretendida — o mesmo stretcher serve qualquer velocidade (o StretchBank os reaproveita).
+ */
 export async function createStretcher(rate: number, channels: 2): Promise<Stretcher> {
+  void rate
   const m = await instantiate()
   m.presetDefault(channels, SAMPLE_RATE)
   const inputLatency = m.inputLatency()
   const outputLatency = m.outputLatency()
   const latencyFrames = inputLatency + outputLatency
-  const len = Math.max(IO_FRAMES, latencyFrames, Math.ceil(latencyFrames * Math.max(1, rate)))
+  // buffers de I/O: process divide em sub-blocos que cabem neles, em qualquer velocidade
+  const len = Math.max(IO_FRAMES, latencyFrames)
   const ptr = m.setBuffers(channels, len)
   const bytes = len * 4
   const inPtr = [ptr, ptr + bytes]

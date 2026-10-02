@@ -53,7 +53,7 @@ if (wasmImports.size !== 4) fail(`o WASM importa ${[...wasmImports].join(', ')}`
 const sha = createHash('sha256').update(wasm).digest('hex')
 const out = `// GERADO por scripts/vendor-signalsmith.mjs — não editar à mão.
 // signalsmith-stretch ${pkg.version} (https://github.com/Signalsmith-Audio/signalsmith-stretch), Licença: MIT,
-// Copyright (c) Geraint Luff / Signalsmith Audio. Só o binário WASM e o mapa dos nomes minificados do glue
+// Copyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd. Só o binário WASM e o mapa dos nomes minificados do glue
 // emscripten publicado; o carregador é nosso (stretch.ts).
 export const SIGNALSMITH_VERSION = '${pkg.version}'
 export const SIGNALSMITH_WASM_SHA256 = '${sha}'

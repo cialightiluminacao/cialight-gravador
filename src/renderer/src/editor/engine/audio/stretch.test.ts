@@ -81,16 +81,16 @@ describe('createStretcher (WASM real)', () => {
   }
 
   for (const speed of [0.5, 2]) {
-    it(`${speed}×: alinhamento — pausa da fonte em 2,0–2,5 s cai em 2,0/${speed} s na saída (±1 bloco)`, async () => {
+    it(`${speed}×: alinhamento — pausa da fonte em 2,0–2,5 s cai em 2,0/${speed} s na saída (±10 ms)`, async () => {
       const { pcm, bank } = source(440, 6, [2, 2.5])
       const out = channel(await render(pcm, seg(speed, 4), bank), 0)
-      // centro da pausa: frames de 5 ms com RMS < 5 % da senoide
-      const win = 240
+      // centro da pausa: janelas de 1 ms com RMS < 5 % da senoide
+      const win = 48 // 1 ms
       const quiet: number[] = []
       for (let f = 0; f + win <= out.length; f += win) if (rmsOf(out, f, f + win) < 0.05 * 0.35) quiet.push(f + win / 2)
       expect(quiet.length).toBeGreaterThan(0)
       const center = (quiet[0] + quiet[quiet.length - 1]) / 2
-      expect(Math.abs(center - (2.25 / speed) * SR)).toBeLessThanOrEqual(BLOCK)
+      expect(Math.abs(center - (2.25 / speed) * SR)).toBeLessThanOrEqual(SR / 100)
     })
   }
 
@@ -123,7 +123,6 @@ describe('createStretcher (WASM real)', () => {
     const t0 = performance.now()
     for (let f = 0; f < SR * 2.5; f += BLOCK) mixBlock(segs, Math.round((f * 1e6) / SR), BLOCK, srcs)
     const x = 2.5 / ((performance.now() - t0) / 1000)
-    console.log(`stretch: 4 segmentos a ${x.toFixed(1)}× tempo real`)
     expect(x).toBeGreaterThan(1)
   })
 })

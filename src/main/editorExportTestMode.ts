@@ -72,6 +72,7 @@ interface HarnessReport {
   v1Composed?: { path?: string; error?: string }
   effects?: { export?: ExportOut; previewBlockVar?: number[]; previewBlurRgb?: number[]; error?: string }
   speed?: ExportOut
+  speedAgain?: ExportOut
   previewUntouched?: { before: number[]; after: number[] } | { error: string }
 }
 
@@ -141,9 +142,9 @@ async function rmsDb(file: string, from: number, to: number): Promise<number> {
   return m ? (m[1] === '-inf' ? -Infinity : Number(m[1])) : NaN
 }
 
-/** Áudio do arquivo como PCM mono float 48 kHz (ffmpeg → f32le). */
-async function monoPcm(file: string, out: string): Promise<Float32Array> {
-  await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-vn', '-ac', '1', '-ar', '48000', '-f', 'f32le', out], { label: 'teste: pcm' })
+/** Áudio do arquivo como PCM float 48 kHz intercalado (ffmpeg → f32le); mono por padrão. */
+async function pcmOf(file: string, out: string, channels = 1): Promise<Float32Array> {
+  await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-vn', '-ac', String(channels), '-ar', '48000', '-f', 'f32le', out], { label: 'teste: pcm' })
   const b = readFileSync(out)
   return new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength))
 }
@@ -401,14 +402,24 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   if (spOut && existsSync(spOut)) {
     const pr = await probeFile(spOut)
     check(Math.abs(pr.durationMs - 3000) <= FRAME_MS, `velocidade: duração 3,0 s ± 1 quadro (${pr.durationMs} ms)`, failures)
-    const outPcm = await monoPcm(spOut, join(dir, 'velocidade-saida.f32'))
-    const srcPcm = await monoPcm(voice, join(dir, 'velocidade-fonte.f32'))
+    const outPcm = await pcmOf(spOut, join(dir, 'velocidade-saida.f32'))
+    const srcPcm = await pcmOf(voice, join(dir, 'velocidade-fonte.f32'))
     const hzOut = dominantHz(outPcm, 48000, 48000, 100, 1000)
     const hzSrc = dominantHz(srcPcm, 2 * 48000, 48000, 100, 1000)
     let sq = 0
     for (let i = 48000; i < 2 * 48000 && i < outPcm.length; i++) sq += outPcm[i] * outPcm[i]
     const rms = Math.sqrt(sq / 48000)
     check(Math.abs(hzOut - VOICE_HZ) / VOICE_HZ <= 0.02 && Math.abs(hzSrc - VOICE_HZ) / VOICE_HZ <= 0.02 && rms > 0.05, `velocidade: tom mantido a 2× — fundamental ${hzOut} Hz na saída × ${hzSrc} Hz na fonte (${VOICE_HZ} ±2 %; reamostrado daria ${2 * VOICE_HZ}), RMS ${rms.toFixed(3)}`, failures)
+  }
+
+  const spAgain = r.speedAgain?.path
+  check(!!spOut && !!spAgain && existsSync(spOut) && existsSync(spAgain), `velocidade: 2ª exportação igual (${spAgain ?? r.speedAgain?.error})`, failures)
+  if (spOut && spAgain && existsSync(spOut) && existsSync(spAgain)) {
+    const a = await pcmOf(spOut, join(dir, 'velocidade-a.f32'), 2)
+    const b = await pcmOf(spAgain, join(dir, 'velocidade-b.f32'), 2)
+    let diff = 0
+    for (let i = 0; i < Math.min(a.length, b.length); i++) diff = Math.max(diff, Math.abs(a[i] - b[i]))
+    check(a.length > 0 && a.length === b.length && diff === 0, `velocidade: exportação determinística — PCM estéreo decodificado idêntico nas duas exportações (${a.length} × ${b.length} amostras, diferença máx. ${diff})`, failures)
   }
 
   // ---- preview intocado durante a exportação ----

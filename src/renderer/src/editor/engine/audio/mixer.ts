@@ -223,15 +223,17 @@ const STRETCH_TOL_FRAMES = 2
  * Alinhamento (signalsmith): depois do pré-roll, a saída j corresponde à fonte base + j·speed quando a
  * entrada já foi entregue até base + lead + j·speed, lead = outputLatency·speed + inputLatency. A posição
  * é sempre recalculada de base/out (inteiros), sem acumular frações.
- * No máximo `maxLive` segmentos com estado (LRU); os instanciados a mais são reaproveitados.
+ * No máximo `maxLive` segmentos com estado (LRU, exceto os presos por pin); os liberados são reaproveitados.
  */
 export class StretchBank {
   private readonly states = new Map<string, StretchState>() // ordem = LRU (mais recente no fim)
   private readonly creating = new Map<string, Promise<void>>()
   private readonly spare: Stretcher[] = []
+  private pinned = new Set<string>()
   private latency: { input: number; output: number; total: number } | null = null
   private failure: unknown = null
 
+  /** create(rate): rate é só a velocidade do 1º uso; o stretcher serve qualquer velocidade depois (reuso). */
   constructor(private readonly create: (rate: number) => Promise<Stretcher>, private readonly maxLive = 16) {}
 
   /** Garante um stretcher para o segmento. Rejeita se o WASM não carregar (e não tenta de novo). */
@@ -245,9 +247,11 @@ export class StretchBank {
     let p = this.creating.get(key)
     if (!p) {
       p = (async () => {
-        // cheio: o segmento usado há mais tempo cede o stretcher
-        while (this.states.size >= this.maxLive) {
-          const [oldKey, old] = this.states.entries().next().value as [string, StretchState]
+        // cheio: o segmento usado há mais tempo e fora do bloco atual (pin) cede o stretcher; se todos estão
+        // presos, o banco passa do limite (nunca despeja quem o mixBlock vai ler)
+        for (const [oldKey, old] of this.states) {
+          if (this.states.size < this.maxLive) break
+          if (this.pinned.has(oldKey)) continue
           this.states.delete(oldKey)
           this.spare.push(old.st)
         }
@@ -269,12 +273,21 @@ export class StretchBank {
     await p
   }
 
+  /**
+   * Segmentos do bloco em preparo/mixagem: não são despejados até o próximo pin (o aquecimento à frente, que
+   * roda em paralelo, não tira o stretcher de quem o mixBlock vai ler).
+   */
+  pin(keys: Set<string>): void {
+    this.pinned = keys
+  }
+
   has(key: string): boolean {
     return this.states.has(key)
   }
 
   /** Solta os segmentos que saíram do plano (os stretchers ficam para reuso). */
   retain(keys: Set<string>): void {
+    this.pinned = new Set([...this.pinned].filter((k) => keys.has(k)))
     for (const [k, s] of this.states) {
       if (keys.has(k)) continue
       this.states.delete(k)

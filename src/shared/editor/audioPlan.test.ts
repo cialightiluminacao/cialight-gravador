@@ -79,9 +79,12 @@ describe('planAudio', () => {
     it('sem preservePitch → resample (o tom muda), em qualquer velocidade', () => {
       for (const v of [0.5, 2, 8]) expect(at(v, { preservePitch: false })).toBe('resample')
     })
-    it('reverso: 1× copia, outras velocidades reamostram', () => {
+    it('reverso: 1× copia, até 4× reamostra; acima de 4× com preservePitch fica mudo (salvo keepFastAudio)', () => {
       expect(at(1, { reverse: true })).toBe('copy')
       expect(at(2, { reverse: true })).toBe('resample')
+      expect(at(8, { reverse: true })).toBe('mute')
+      expect(at(8, { reverse: true, keepFastAudio: true })).toBe('resample')
+      expect(at(8, { reverse: true, preservePitch: false })).toBe('resample')
     })
   })
 })
