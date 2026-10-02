@@ -267,7 +267,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     if (info.kind !== a.kind) throw new Error('O arquivo escolhido não é do mesmo tipo da mídia original')
     const fresh = assetFromInfo(a.id, newPath, statSync(newPath), info)
     // derivados do arquivo antigo deixam de valer (undefined explícito: o renderer aplica com updateAsset)
-    const next: Asset = { ...fresh, name: a.name, proxy: undefined, intermediate: undefined, filmstrip: undefined, filmstripInfo: undefined, peaks: undefined, error: undefined }
+    const next: Asset = { ...fresh, name: a.name, proxy: undefined, intermediate: undefined, filmstrip: undefined, filmstripInfo: undefined, peaks: undefined, speech: undefined, loudness: undefined, error: undefined }
     projects.cacheAssets(projectId, [next])
     return next
   })

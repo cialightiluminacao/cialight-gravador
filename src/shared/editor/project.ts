@@ -25,6 +25,9 @@ export interface Asset {
   proxy?: string; intermediate?: string; filmstrip?: string; peaks?: string
   /** Geometria do sprite do filmstrip: `frames` quadros de tileW×tileH, um a cada `everyUs`. */
   filmstripInfo?: FilmstripInfo
+  /** Intervalos de fala (cache/<id>.speech.json, ver speech.ts) e loudness da faixa de áudio analisada na ingestão. */
+  speech?: string
+  loudness?: { integrated: number; truePeak: number; lra: number }
   status: 'ready' | 'processing' | 'missing' | 'error'; error?: string
 }
 export type AnimPreset = 'fade' | 'slideL' | 'slideR' | 'slideU' | 'slideD' | 'zoom' | 'pop'

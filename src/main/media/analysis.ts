@@ -4,6 +4,7 @@ import { ffmpegPath } from '../export/ffmpegPath'
 import { jpegScaleColorOpts, type SourceColor } from '@shared/editor/sourceColor'
 import { FfmpegError, probeFile, runFfmpeg } from '../export/ffmpegRunner'
 import { log } from '../log'
+import { parseEbur128, parseSilencedetect, speechIntervals, SPEECH_DEFAULTS, type Loudness, type SpeechFile } from '@shared/editor/speech'
 
 // Análises para a timeline: filmstrip (sprite horizontal de miniaturas), peaks de áudio
 // (min/max por 10 ms) e a miniatura do projeto. Saídas são escritas em <arquivo>.part e
@@ -208,4 +209,90 @@ export function buildPeaks(input: string, outBin: string, opts: AnalysisOpts & {
       resolve({ file: outBin, samplesPerSec: 100 })
     })
   })
+}
+
+/**
+ * Roda o ffmpeg só para ler o stderr de um filtro de análise (saída `-f null`). Guarda apenas as linhas que
+ * casam com `keep` (silencedetect pode gerar milhares) e o progresso vem de `-progress pipe:1`.
+ */
+function runAnalysisFilter(input: string, map: string, filter: string, keep: RegExp, durationUs: number, opts: AnalysisOpts, label: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const args = ['-hide_banner', '-nostdin', '-i', input, '-map', map, '-vn', '-af', filter, '-f', 'null', '-progress', 'pipe:1', '-nostats', '-']
+    log.info(`ffmpeg [${label}]: ${args.join(' ')}`)
+    const child = spawn(ffmpegPath(), args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const kept: string[] = []
+    const tail: string[] = []
+    let pending = ''
+    let lastPct = -1
+    let cancelled = false
+    const onLine = (line: string): void => {
+      if (!line.trim()) return
+      if (keep.test(line)) kept.push(line)
+      tail.push(line)
+      if (tail.length > 20) tail.shift()
+    }
+    const onAbort = (): void => {
+      cancelled = true
+      execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => child.kill())
+    }
+    if (opts.signal) {
+      if (opts.signal.aborted) onAbort()
+      else opts.signal.addEventListener('abort', onAbort, { once: true })
+    }
+    child.stdout.on('data', (d: Buffer) => {
+      const m = [...d.toString('utf8').matchAll(/out_time_us=(\d+)/g)].pop()
+      if (!m || !(durationUs > 0) || !opts.onProgress) return
+      const pct = Math.min(99, Math.floor((Number(m[1]) / durationUs) * 100))
+      if (pct !== lastPct) opts.onProgress((lastPct = pct))
+    })
+    child.stderr.on('data', (d: Buffer) => {
+      const lines = (pending + d.toString('utf8')).split(/\r?\n/)
+      pending = lines.pop() ?? ''
+      lines.forEach(onLine)
+    })
+    child.on('error', (e) => {
+      opts.signal?.removeEventListener('abort', onAbort)
+      reject(new FfmpegError(`não foi possível iniciar o ffmpeg: ${e.message}`, '', -1))
+    })
+    child.on('close', (code) => {
+      opts.signal?.removeEventListener('abort', onAbort)
+      onLine(pending)
+      if (cancelled) return reject(new CancelledError())
+      if (code !== 0) return reject(new FfmpegError(`ffmpeg (${label}) saiu com código ${code}`, tail.join('\n'), code ?? -1))
+      resolve(kept.join('\n'))
+    })
+  })
+}
+
+export interface SpeechOpts extends AnalysisOpts {
+  thresholdDb?: number
+  minSilenceUs?: number
+}
+
+/** Intervalos de fala (silencedetect + padding/mescla de speech.ts) gravados em JSON (.part → rename). */
+export async function buildSpeech(input: string, outJson: string, durationUs: number, opts: SpeechOpts = {}): Promise<SpeechFile> {
+  const thresholdDb = opts.thresholdDb ?? SPEECH_DEFAULTS.thresholdDb
+  const minSilenceUs = opts.minSilenceUs ?? SPEECH_DEFAULTS.minSilenceUs
+  const filter = `silencedetect=n=${thresholdDb}dB:d=${minSilenceUs / 1_000_000}`
+  const text = await runAnalysisFilter(input, opts.map ?? '0:a:0', filter, /silence_(start|end)/, durationUs, opts, 'speech')
+  const intervals = speechIntervals(parseSilencedetect(text), durationUs, SPEECH_DEFAULTS.padUs, SPEECH_DEFAULTS.minSpeechUs, SPEECH_DEFAULTS.mergeGapUs)
+  const result: SpeechFile = { version: 1, thresholdDb, minSilenceUs, intervals, durationUs }
+  const tmp = partPath(outJson)
+  try {
+    writeFileSync(tmp, JSON.stringify(result))
+    renameSync(tmp, outJson)
+  } catch (e) {
+    rmSync(tmp, { force: true })
+    throw e
+  }
+  return result
+}
+
+/** Loudness integrado (LUFS), true peak (dBFS) e LRA (LU) pelo ebur128 do ffmpeg. */
+export async function buildLoudness(input: string, durationUs: number, opts: AnalysisOpts = {}): Promise<Loudness> {
+  // framelog=quiet: sem a linha por 100 ms; o resumo final continua saindo
+  const text = await runAnalysisFilter(input, opts.map ?? '0:a:0', 'ebur128=peak=true:framelog=quiet', /./, durationUs, opts, 'loudness')
+  const r = parseEbur128(text)
+  if (!r) throw new FfmpegError('ffmpeg (loudness) não devolveu o resumo do ebur128', text.split('\n').slice(-5).join('\n'), 0)
+  return r
 }

@@ -13,6 +13,8 @@ import { ProjectStore } from './project/projectStore'
 import { probe, type MediaInfo } from './media/probe'
 import { needsProxy } from './media/proxyPolicy'
 import { IngestQueue, assetFromInfo, type IngestJob } from './media/ingest'
+import { buildLoudness, buildSpeech } from './media/analysis'
+import type { SpeechFile } from '@shared/editor/speech'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { getSettings } from './settings/settingsStore'
 import { startExportJob } from './export/exportJob'
@@ -437,6 +439,40 @@ async function testIngest(store: SessionStore): Promise<number> {
     ok(after.results.alacInt?.audio === true && after.results.mkvInt?.video === true && after.results.mkvInt?.audio === true, `intermediários decodificam no WebCodecs (${JSON.stringify(after.results)})`, failures)
   }
 
+  // fala e loudness: ruído rosa em rajadas com pausas conhecidas (1–2,5 s, 4–5 s, 6,2–8 s de 10 s) e seno de 1 kHz a −20 dBFS
+  const speechWav = join(dir, 'fala-sintetica.wav')
+  const sineWav = join(dir, 'seno-20dbfs.wav')
+  const twoTracks = join(dir, 'duas-faixas.mp4')
+  await gen(['-f', 'lavfi', '-i', "anoisesrc=color=pink:r=48000:a=0.3:d=10,volume='between(t,1,2.5)+between(t,4,5)+between(t,6.2,8)':eval=frame", '-c:a', 'pcm_s16le', speechWav], 'ingest: fala sintética')
+  await gen(['-f', 'lavfi', '-i', 'aevalsrc=0.1*sin(2*PI*1000*t):s=48000:d=6', '-c:a', 'pcm_s16le', sineWav], 'ingest: seno -20 dBFS')
+  await gen(['-i', speechWav, '-i', sineWav, '-map', '0:a', '-map', '1:a', '-c:a', 'aac', '-b:a', '192k', twoTracks], 'ingest: duas faixas de áudio')
+  const wSpeech = waitDone(queue, project.id, 'a_speech')
+  const wSine = waitDone(queue, project.id, 'a_sine')
+  queue.enqueue(project.id, mk('a_speech', speechWav, await probe(speechWav)))
+  queue.enqueue(project.id, mk('a_sine', sineWav, await probe(sineWav)))
+  const [pSpeech, pSine] = await Promise.all([wSpeech, wSine])
+  ok(pSpeech.status === 'ready' && pSpeech.speech === 'cache/a_speech.speech.json' && exists(pSpeech.speech) && !!pSpeech.loudness, `fala sintética: speech.json + loudness (${JSON.stringify(pSpeech)})`, failures)
+  if (exists(pSpeech.speech)) {
+    const sf = JSON.parse(readFileSync(abs(pSpeech.speech), 'utf8')) as SpeechFile
+    ok(sf.version === 1 && sf.thresholdDb === -35 && sf.minSilenceUs === 350_000 && sf.durationUs === 10_000_000, `speech.json: formato (${JSON.stringify({ ...sf, intervals: undefined })})`, failures)
+    // verdade + padding de 120 ms, ±50 ms
+    const want = [[1_000_000, 2_500_000], [4_000_000, 5_000_000], [6_200_000, 8_000_000]].map(([a, b]) => [a - 120_000, b + 120_000])
+    ok(sf.intervals.length === want.length && sf.intervals.every((iv, i) => Math.abs(iv.fromUs - want[i][0]) <= 50_000 && Math.abs(iv.toUs - want[i][1]) <= 50_000), `fala: intervalos ±50 ms (${JSON.stringify(sf.intervals)} vs ${JSON.stringify(want)})`, failures)
+  }
+  const sineL = pSine.loudness
+  ok(!!sineL && Math.abs(sineL.integrated + 23) <= 1 && Math.abs(sineL.truePeak + 20) <= 1 && sineL.lra < 1, `seno −20 dBFS: ≈ −23 LUFS (${JSON.stringify(sineL)})`, failures)
+  // faixa escolhida por -map (mic/sistema da sessão): a:0 é a fala em rajadas, a:1 o seno contínuo
+  const sp0 = await buildSpeech(twoTracks, join(dir, 'duas-0.speech.json'), 10_000_000, { map: '0:a:0' })
+  const sp1 = await buildSpeech(twoTracks, join(dir, 'duas-1.speech.json'), 6_000_000, { map: '0:a:1' })
+  const ld1 = await buildLoudness(twoTracks, 6_000_000, { map: '0:a:1' })
+  ok(sp0.intervals.length === 3 && sp1.intervals.length === 1 && sp1.intervals[0].fromUs === 0 && sp1.intervals[0].toUs === 6_000_000, `-map: fala a:0 ${sp0.intervals.length} intervalos, seno a:1 ${JSON.stringify(sp1.intervals)}`, failures)
+  ok(Math.abs(ld1.integrated + 23) <= 1.5, `-map: loudness da faixa a:1 ≈ −23 LUFS (${ld1.integrated})`, failures)
+  // cancelamento durante a análise: rejeita com CancelledError e não deixa .part
+  const ctl = new AbortController()
+  const cancelled = buildSpeech(twoTracks, join(dir, 'cancelada.speech.json'), 10_000_000, { map: '0:a:0', signal: ctl.signal }).then(() => false, (e) => e instanceof Error && e.name === 'CancelledError')
+  ctl.abort()
+  ok(await cancelled && !readdirSync(dir).some((n) => n.includes('cancelada')), 'análise de fala cancelada: sem resultado nem .part', failures)
+
   // proxy com cada encoder do cache de probe (somente leitura; nada é gravado nas configurações)
   for (const enc of cached?.available ?? []) {
     if (enc === encoder) continue
@@ -466,7 +502,7 @@ async function testIngest(store: SessionStore): Promise<number> {
   ok(leftovers.length === 0, `cancelamento: sem arquivos .part (${leftovers.join(', ')})`, failures)
 
   ok(settingsHash() === hashBefore, 'settings.json do usuário intocado', failures)
-  writeFileSync(join(outDir, 'ingest-report.json'), JSON.stringify({ encoder: cached?.preferred ?? 'libx264', available: cached?.available ?? [], probes: { src: iSrc, rotated: iRot, mp3: iMp3, png: iPng }, patches: { pLong, pRot, pMp3, pPng, pUndec, pFlac, pAlac, pMkv }, decodable: dec.results, failures }, null, 2))
+  writeFileSync(join(outDir, 'ingest-report.json'), JSON.stringify({ encoder: cached?.preferred ?? 'libx264', available: cached?.available ?? [], probes: { src: iSrc, rotated: iRot, mp3: iMp3, png: iPng }, patches: { pLong, pRot, pMp3, pPng, pUndec, pFlac, pAlac, pMkv, pSpeech, pSine }, decodable: dec.results, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE INGESTÃO PASSOU')
   return failures.length ? 1 : 0
 }

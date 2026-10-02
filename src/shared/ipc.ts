@@ -29,7 +29,7 @@ export interface ProjectSummary {
   originSessionId?: string
 }
 
-export type IngestStep = 'probe' | 'proxy' | 'intermediate' | 'filmstrip' | 'peaks'
+export type IngestStep = 'probe' | 'proxy' | 'intermediate' | 'filmstrip' | 'peaks' | 'speech' | 'loudness'
 /** Progresso de uma etapa da ingestão de um asset (0–100). */
 export interface IngestJob { projectId: string; assetId: string; step: IngestStep; percent: number }
 /** Resultado da ingestão de um asset: patch para ops.updateAsset (caminhos relativos à pasta do projeto). */

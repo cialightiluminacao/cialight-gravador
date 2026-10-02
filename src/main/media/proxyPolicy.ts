@@ -141,15 +141,15 @@ export function audioIntermediateArgs(input: string, output: string, info: Media
 }
 
 /**
- * Derivados de um asset já prontos? Vídeo: filmstrip, peaks (se tem áudio) e proxy/intermediário
- * quando a política pede (VFR não fica no Asset, então não entra aqui). Áudio: peaks (e o intermediário
+ * Derivados de um asset já prontos? Vídeo: filmstrip, peaks/fala/loudness (se tem áudio) e proxy/intermediário
+ * quando a política pede (VFR não fica no Asset, então não entra aqui). Áudio: peaks/fala/loudness (e o intermediário
  * quando o WebCodecs não decodifica). Imagem: sempre.
  */
 export function derivedComplete(a: Asset): boolean {
   if (a.kind === 'image') return true
   const audioDecodable = a.audio?.decodable !== false
-  if (a.kind === 'audio') return !!a.peaks && (audioDecodable || !!a.intermediate)
-  if (!a.filmstrip || (a.audio && !a.peaks)) return false
+  if (a.kind === 'audio') return !!a.peaks && !!a.speech && !!a.loudness && (audioDecodable || !!a.intermediate)
+  if (!a.filmstrip || (a.audio && !(a.peaks && a.speech && a.loudness))) return false
   if (!a.video) return true
   const { video } = a
   const d = needsProxy({ durationUs: a.durationUs, kind: 'video', video, audio: a.audio, vfr: false, formatName: '' }, video.decodable, audioDecodable)

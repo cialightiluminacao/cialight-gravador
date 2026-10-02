@@ -15,7 +15,7 @@ describe('schema', () => {
   it('round-trip com item', () => { const p = withItems([createMediaItem(asset, 0, 'video')]); expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p) })
   it('round-trip com filmstrip/peaks e filmstripInfo', () => {
     const p = createEmptyProject('x')
-    p.assets = [{ ...asset, filmstrip: 'cache/a1.strip.jpg', filmstripInfo: { frames: 6, everyUs: 1_000_000, tileW: 114, tileH: 64 }, peaks: 'cache/a1.peaks.bin' }]
+    p.assets = [{ ...asset, filmstrip: 'cache/a1.strip.jpg', filmstripInfo: { frames: 6, everyUs: 1_000_000, tileW: 114, tileH: 64 }, peaks: 'cache/a1.peaks.bin', speech: 'cache/a1.speech.json', loudness: { integrated: -23.1, truePeak: -1.2, lra: 4.5 } }]
     expect(parseProject(JSON.parse(JSON.stringify(p)))).toEqual(p)
   })
   it('audioTrackIndex: round-trip; negativo ou fracionário lança', () => {

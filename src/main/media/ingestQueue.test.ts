@@ -68,6 +68,8 @@ vi.mock('./analysis', async (orig) => ({
   runToFile: (_args: unknown, _out: string, opts: { signal?: AbortSignal }) => gate('heavy', 'proxy', opts.signal),
   buildFilmstrip: (_i: string, file: string, _d: number, opts: { signal?: AbortSignal }) => gate('light', 'filmstrip', opts.signal, { file, frames: 6, everyUs: 1_000_000, tileW: 114, tileH: 64 }),
   buildPeaks: (_i: string, file: string, opts: { signal?: AbortSignal }) => gate('light', 'peaks', opts.signal, { file, samplesPerSec: 100 }),
+  buildSpeech: (_i: string, _f: string, _d: number, opts: { signal?: AbortSignal }) => gate('light', 'speech', opts.signal, { version: 1, intervals: [] }),
+  buildLoudness: (_i: string, _d: number, opts: { signal?: AbortSignal }) => gate('light', 'loudness', opts.signal, { integrated: -23, truePeak: -1, lra: 4 }),
   buildThumb: async (_i: string, file: string) => file
 }))
 
@@ -126,7 +128,7 @@ describe('IngestQueue', () => {
     await drain()
     expect(h.max).toEqual({ heavy: 1, light: 2 })
     expect(done.map((d) => d.assetId).sort()).toEqual(['a', 'b', 'c'])
-    for (const d of done) expect(d.patch).toMatchObject({ status: 'ready', proxy: `proxies/${d.assetId}.mp4`, filmstrip: `cache/${d.assetId}.strip.jpg`, peaks: `cache/${d.assetId}.peaks.bin` })
+    for (const d of done) expect(d.patch).toMatchObject({ status: 'ready', proxy: `proxies/${d.assetId}.mp4`, filmstrip: `cache/${d.assetId}.strip.jpg`, peaks: `cache/${d.assetId}.peaks.bin`, speech: `cache/${d.assetId}.speech.json`, loudness: { integrated: -23, truePeak: -1, lra: 4 } })
     expect(queue.busy('p')).toBe(false)
   })
 

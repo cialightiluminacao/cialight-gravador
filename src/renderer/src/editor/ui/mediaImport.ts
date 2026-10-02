@@ -58,10 +58,12 @@ export async function enqueueAsset(projectId: string, a: Asset): Promise<void> {
   }
 }
 
-/** Ao abrir: retoma o que ficou em processamento e gera filmstrip/peaks das gravações que ainda não têm. */
+/** Ao abrir: retoma o que ficou em processamento e gera filmstrip/peaks/fala/loudness das gravações que ainda não têm. */
 export function enqueuePending(projectId: string, assets: Asset[]): void {
   for (const a of assets) {
-    const sessionNeedsAnalysis = a.source.type === 'session' && a.status === 'ready' && (a.kind === 'video' ? !a.filmstrip : !a.peaks)
+    const fromSession = a.source.type === 'session' && a.status === 'ready'
+    // gravações antigas ganham também fala/loudness (análise de áudio da F3)
+    const sessionNeedsAnalysis = fromSession && ((a.kind === 'video' ? !a.filmstrip : !a.peaks) || ((a.kind === 'audio' || !!a.audio) && !(a.speech && a.loudness)))
     if (a.status === 'processing' || sessionNeedsAnalysis) void enqueueAsset(projectId, a)
   }
 }

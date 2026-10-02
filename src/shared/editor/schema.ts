@@ -133,6 +133,8 @@ const asset = z.object({
     .object({ frames: z.number().int().positive(), everyUs: us.positive(), tileW: z.number().int().positive(), tileH: z.number().int().positive() })
     .optional(),
   peaks: z.string().optional(),
+  speech: z.string().optional(),
+  loudness: z.object({ integrated: z.number(), truePeak: z.number(), lra: z.number() }).optional(),
   status: z.enum(['ready', 'processing', 'missing', 'error']),
   error: z.string().optional()
 })

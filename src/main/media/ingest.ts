@@ -7,10 +7,10 @@ import { probe, type MediaInfo } from './probe'
 import { audioIntermediateArgs, intermediateArgs, needsProxy, proxyArgs } from './proxyPolicy'
 import { FfmpegError } from '../export/ffmpegRunner'
 import { runWithEncoderFallback } from '../export/encoderFallback'
-import { buildFilmstrip, buildPeaks, buildThumb, CancelledError, runToFile } from './analysis'
+import { buildFilmstrip, buildLoudness, buildPeaks, buildSpeech, buildThumb, CancelledError, runToFile } from './analysis'
 
-// Fila de ingestão: por asset, probe → (proxy | intermediário) em paralelo com filmstrip e peaks.
-// Concorrência: 1 job pesado (transcodificação) + 2 leves (probe/filmstrip/peaks).
+// Fila de ingestão: por asset, probe → (proxy | intermediário) em paralelo com filmstrip, peaks, fala e loudness.
+// Concorrência: 1 job pesado (transcodificação) + 2 leves (probe/filmstrip/peaks/fala/loudness).
 // Ao terminar um asset emite 'done' com o patch (caminhos relativos à pasta do projeto);
 // quem persiste o patch é decidido pelo chamador (ver registro do domínio `media` em ipc.ts).
 
@@ -99,6 +99,7 @@ export const intermediateRel = (assetId: string): string => `proxies/${assetId}.
 export const audioIntermediateRel = (assetId: string): string => `proxies/${assetId}.intermediate.m4a`
 export const filmstripRel = (assetId: string): string => `cache/${assetId}.strip.jpg`
 export const peaksRel = (assetId: string): string => `cache/${assetId}.peaks.bin`
+export const speechRel = (assetId: string): string => `cache/${assetId}.speech.json`
 export const THUMB_REL = 'cache/thumb.jpg'
 
 export class IngestQueue {
@@ -292,6 +293,25 @@ export class IngestQueue {
             const rel = peaksRel(asset.id)
             await buildPeaks(input.path, this.out(projectId, rel), { signal, onProgress, map: input.audioMap, durationUs })
             patch.peaks = rel
+          })
+        )
+      )
+      // fala e loudness da mesma faixa de áudio (mic/sistema da sessão: -map 0:a:N), como jobs leves à parte
+      tasks.push(
+        guard(
+          'fala',
+          this.step(this.light, signal, { ...id, step: 'speech' }, async (onProgress) => {
+            const rel = speechRel(asset.id)
+            await buildSpeech(input.path, this.out(projectId, rel), durationUs, { signal, onProgress, map: input.audioMap })
+            patch.speech = rel
+          })
+        )
+      )
+      tasks.push(
+        guard(
+          'loudness',
+          this.step(this.light, signal, { ...id, step: 'loudness' }, async (onProgress) => {
+            patch.loudness = await buildLoudness(input.path, durationUs, { signal, onProgress, map: input.audioMap })
           })
         )
       )

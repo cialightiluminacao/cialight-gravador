@@ -135,36 +135,42 @@ describe('audioIntermediateArgs', () => {
 })
 
 describe('derivedComplete', () => {
+  const an = { speech: 's', loudness: { integrated: -23, truePeak: -1, lra: 4 } }
   const base: Asset = {
     id: 'a', name: 'a', kind: 'video', source: { type: 'file', path: 'x', size: 1, mtimeMs: 1 }, durationUs: 6_000_000, status: 'ready',
     video: { width: 1920, height: 1080, fps: 30, codec: 'h264', rotation: 0, decodable: true, gopUs: 1_000_000 },
     audio: { channels: 2, sampleRate: 48000, codec: 'aac' }
   }
   it('vídeo sem proxy necessário: filmstrip + peaks bastam', () => {
-    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p' })).toBe(true)
+    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p', ...an })).toBe(true)
     expect(derivedComplete({ ...base, filmstrip: 'f' })).toBe(false)
-    expect(derivedComplete({ ...base, peaks: 'p' })).toBe(false)
+    expect(derivedComplete({ ...base, peaks: 'p', ...an })).toBe(false)
+    // sem a análise de fala/loudness a ingestão ainda não terminou
+    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p' })).toBe(false)
+    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p', speech: 's' })).toBe(false)
+    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p', loudness: an.loudness })).toBe(false)
     expect(derivedComplete({ ...base, audio: undefined, filmstrip: 'f' })).toBe(true)
   })
   it('GOP longo exige proxy; não decodificável exige intermediário', () => {
-    const long = { ...base, filmstrip: 'f', peaks: 'p', video: { ...base.video!, gopUs: 10_000_000 } }
+    const long = { ...base, filmstrip: 'f', peaks: 'p', ...an, video: { ...base.video!, gopUs: 10_000_000 } }
     expect(derivedComplete(long)).toBe(false)
     expect(derivedComplete({ ...long, proxy: 'x' })).toBe(true)
-    const undec = { ...base, filmstrip: 'f', peaks: 'p', video: { ...base.video!, decodable: false } }
+    const undec = { ...base, filmstrip: 'f', peaks: 'p', ...an, video: { ...base.video!, decodable: false } }
     expect(derivedComplete(undec)).toBe(false)
     expect(derivedComplete({ ...undec, intermediate: 'i' })).toBe(true)
   })
   it('áudio não decodificável exige o intermediário (só áudio ou vídeo)', () => {
-    const flac: Asset = { ...base, kind: 'audio', video: undefined, peaks: 'p', audio: { channels: 2, sampleRate: 44100, codec: 'flac', decodable: false } }
+    const flac: Asset = { ...base, kind: 'audio', video: undefined, peaks: 'p', ...an, audio: { channels: 2, sampleRate: 44100, codec: 'flac', decodable: false } }
     expect(derivedComplete(flac)).toBe(false)
     expect(derivedComplete({ ...flac, intermediate: 'i' })).toBe(true)
-    const ac3: Asset = { ...base, filmstrip: 'f', peaks: 'p', audio: { channels: 6, sampleRate: 48000, codec: 'ac3', decodable: false } }
+    const ac3: Asset = { ...base, filmstrip: 'f', peaks: 'p', ...an, audio: { channels: 6, sampleRate: 48000, codec: 'ac3', decodable: false } }
     expect(derivedComplete(ac3)).toBe(false)
     expect(derivedComplete({ ...ac3, intermediate: 'i' })).toBe(true)
   })
-  it('áudio precisa de peaks; imagem sempre completa', () => {
+  it('áudio precisa de peaks, fala e loudness; imagem sempre completa', () => {
     expect(derivedComplete({ ...base, kind: 'audio', video: undefined })).toBe(false)
-    expect(derivedComplete({ ...base, kind: 'audio', video: undefined, peaks: 'p' })).toBe(true)
+    expect(derivedComplete({ ...base, kind: 'audio', video: undefined, peaks: 'p', ...an })).toBe(true)
+    expect(derivedComplete({ ...base, kind: 'audio', video: undefined, peaks: 'p' })).toBe(false)
     expect(derivedComplete({ ...base, kind: 'image', durationUs: null })).toBe(true)
   })
 })
