@@ -344,6 +344,8 @@ const AUDIO_BLOCK_US = 100_000
 const AUDIO_AHEAD = 4
 const AUDIO_LEAD_US = 200_000
 const AUDIO_CHANNELS = 2
+// taxas de AAC tentadas abaixo da pedida antes de cair para Opus
+const AAC_FALLBACK_BPS = [256_000, 192_000, 160_000, 128_000]
 
 let exporting: { jobId: string; abort: AbortController; outbox: ChunkOutbox } | null = null
 
@@ -514,11 +516,20 @@ async function runExport(
   if (total <= 0) throw new Error('Intervalo de exportação vazio')
 
   let audioCodec: 'aac' | 'opus' | null = null
+  let audioBitrate = job.audio?.bitrate ?? 0
   if (job.audio && audioPort) {
-    const opts = { numberOfChannels: AUDIO_CHANNELS, sampleRate: SR, quality: new Quality({ bitrate: job.audio.bitrate }) }
-    if (await canEncodeAudio('aac', opts)) audioCodec = 'aac'
-    else if (await canEncodeAudio('opus', opts)) audioCodec = 'opus'
-    else throw new Error('Nenhum codificador de áudio disponível (AAC ou Opus)')
+    const opts = (bitrate: number): Parameters<typeof canEncodeAudio>[1] => ({ numberOfChannels: AUDIO_CHANNELS, sampleRate: SR, quality: new Quality({ bitrate }) })
+    // AAC primeiro, na taxa pedida ou na maior aceita abaixo dela (o AAC do Windows não aceita 320 kbps); Opus só sem AAC
+    const aacRate = [job.audio.bitrate, ...AAC_FALLBACK_BPS.filter((b) => b < job.audio!.bitrate)]
+    for (const b of aacRate) {
+      if (await canEncodeAudio('aac', opts(b))) {
+        audioCodec = 'aac'
+        audioBitrate = b
+        break
+      }
+    }
+    if (!audioCodec && (await canEncodeAudio('opus', opts(job.audio.bitrate)))) audioCodec = 'opus'
+    if (!audioCodec) throw new Error('Nenhum codificador de áudio disponível (AAC ou Opus)')
   }
 
   const hevc = job.video.codec === 'hevc'
@@ -539,7 +550,7 @@ async function runExport(
     }
   })
   output.addVideoTrack(video, { frameRate: job.fps })
-  const audio = audioCodec ? new AudioSampleSource({ codec: audioCodec, quality: new Quality({ bitrate: job.audio!.bitrate }) }) : null
+  const audio = audioCodec ? new AudioSampleSource({ codec: audioCodec, quality: new Quality({ bitrate: audioBitrate }) }) : null
   if (audio) output.addAudioTrack(audio)
   const feed = audio && audioPort ? new AudioFeed(audioPort, job.fromUs, durationUs, signal) : null
 
