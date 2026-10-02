@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAlert, Upload, X } from 'lucide-react'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
 import { contentEndUs, findItem } from '@shared/editor/ops'
@@ -49,6 +49,13 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   // fim do conteúdo (sem efeitos e itens desativados): um efeito depois da mídia não estica "Tudo" com preto
   const totalUs = project ? contentEndUs(project) : 0
   const inOutUsable = hasInOut(totalUs, inUs, outUs)
+  const range = exportRange(totalUs, inUs, outUs, rangeMode)
+  // avisos de privacidade: só quando o projeto ou o intervalo mudam — não a cada renderização (o progresso da
+  // exportação re-renderiza várias vezes por segundo; em 1 h a conta passa de 100 ms)
+  const privacy = useMemo(
+    () => (open && project && range.toUs > range.fromUs ? privacyWarnings(project, range.fromUs, range.toUs) : []),
+    [open, project, range.fromUs, range.toUs]
+  )
 
   // ao abrir (fora de uma exportação): formulário com os padrões do projeto
   useEffect(() => {
@@ -62,7 +69,6 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   useEffect(() => () => abortRef.current?.abort(), [])
 
   if (!project) return null
-  const range = exportRange(totalUs, inUs, outUs, rangeMode)
   const durationUs = range.toUs - range.fromUs
   const size = outputSize(preset, project.canvas)
   const fps = project.canvas.fps
@@ -74,7 +80,6 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const estimate = estimateBytes(videoBps, audioBps, durationUs)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
   const issues = durationUs > 0 ? exportMediaIssues(project, range.fromUs, range.toUs) : []
-  const privacy = durationUs > 0 ? privacyWarnings(project, range.fromUs, range.toUs) : []
   // "Revisar": seleciona o efeito, leva o playhead ao instante do aviso (o mais fraco, o início da mídia por
   // cima…, sempre dentro do intervalo) e fecha o diálogo
   const review = (w: PrivacyWarning): void => {

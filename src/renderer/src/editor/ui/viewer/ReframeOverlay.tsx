@@ -2,7 +2,7 @@ import { toast } from 'sonner'
 import { focusFromScreen, focusToScreen, mainClipAt, reframeWindow } from '@shared/editor/reframe'
 import type { Project, Us } from '@shared/editor/project'
 import { useEditorStore } from '../../state/editorStore'
-import { reframePreview, useReframe } from '../../state/reframe'
+import { useReframe, useReframePreview } from '../../state/reframe'
 import type { Pt } from '../viewerGeometry'
 
 // Visualizador com o painel "Reenquadrar" aberto: o quadro novo desenhado sobre o atual (o resto escurecido) no
@@ -38,8 +38,9 @@ export function ReframeOverlay({ project, playheadUs, width, height }: { project
   const mode = useReframe((s) => s.mode)
   const points = useReframe((s) => s.points)
   const m = mainClipAt(project, playheadUs)
-  const after = reframePreview(project, { aspect, mode, points }).project
-  const win = m ? reframeWindow(project, after, m.id, playheadUs) : null
+  // a última prévia pronta (a conta é agendada: o clique que marca o ponto não espera por ela)
+  const after = useReframePreview(project, { aspect, mode, points }).result?.project ?? null
+  const win = m && after ? reframeWindow(project, after, m.id, playheadUs) : null
   const list = m && mode === 'cover' ? (points[m.id] ?? []) : []
   const poly = win?.map((c) => `${c.x * width},${c.y * height}`).join(' ')
   return (

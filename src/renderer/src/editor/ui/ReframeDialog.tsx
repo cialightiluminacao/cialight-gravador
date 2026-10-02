@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
-import { Crop, Crosshair, ShieldCheck, TriangleAlert, X, ZoomIn } from 'lucide-react'
+import { Crop, Crosshair, LoaderCircle, ShieldCheck, TriangleAlert, X, ZoomIn } from 'lucide-react'
 import { toast } from 'sonner'
 import { newProjectId } from '@shared/editor/ids'
 import type { MediaItem, Project } from '@shared/editor/project'
 import { findItem } from '@shared/editor/ops'
-import { hasZoomKeys, mainClipAt, REFRAME_ASPECTS, reframeName, type ReframeAspect, type ReframeWarning } from '@shared/editor/reframe'
+import { hasZoomKeys, mainClipAt, REFRAME_ASPECTS, reframeCanvas, reframeName, type ReframeAspect, type ReframeWarning } from '@shared/editor/reframe'
 import { formatTimecodeUs } from '@shared/editor/time'
 import { Button } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/primitives'
@@ -13,7 +13,7 @@ import { useAppStore } from '@/app/store'
 import { ipcErrorMessage } from '@/lib/ipcError'
 import type { PlaybackController } from '../engine/PlaybackController'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
-import { reframePreview, useReframe } from '../state/reframe'
+import { reframePreview, useReframe, useReframePreview } from '../state/reframe'
 import { seekTo } from './editorActions'
 import { itemLabel } from './itemLabel'
 import { aspectIdOf } from './aspects'
@@ -103,8 +103,10 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
     return () => window.removeEventListener('resize', onResize)
   }, [open])
 
-  const result = useMemo(() => (open && project ? reframePreview(project, { aspect, mode, points }) : null), [open, project, aspect, mode, points])
-  if (!project || !result) return null
+  // prévia agendada (useReframePreview): o clique de foco e as opções respondem na hora; avisos esperam a conta
+  const { result, pending } = useReframePreview(open ? project : null, { aspect, mode, points })
+  if (!open || !project) return null
+  const size = reframeCanvas(project.canvas, aspect)
   const rf = useReframe.getState()
   const target = mainClipAt(project, playheadUs)
   // pontos por clipe (o do playhead primeiro); clipes apagados somem da lista
@@ -116,7 +118,7 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
   const hasTarget = groups.some((g) => g.m.id === target?.id)
   const current = aspectIdOf(project)
   const effects = project.tracks.reduce((n, t) => n + t.items.filter((i) => i.type === 'effect').length, 0)
-  const lines = warningLines(result.warnings)
+  const lines = result && !pending ? warningLines(result.warnings) : []
   const fps = project.canvas.fps
   const apply = async (): Promise<void> => {
     setBusy(true)
@@ -162,7 +164,7 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
                 options={REFRAME_ASPECTS.map((a) => ({ value: a.id, label: a.id, title: a.id === current ? 'O projeto já está nesta proporção' : a.label, disabled: a.id === current }))}
               />
               <p className="text-[11px] text-muted">
-                {REFRAME_ASPECTS.find((a) => a.id === aspect)!.label} · {result.project.canvas.width}×{result.project.canvas.height}
+                {REFRAME_ASPECTS.find((a) => a.id === aspect)!.label} · {size.width}×{size.height}
               </p>
             </div>
 
@@ -247,7 +249,12 @@ export function ReframeDialog({ playback }: { playback: PlaybackController | nul
               </div>
             ) : null}
 
-            {effects > 0 && !lines.length ? (
+            {pending ? (
+              <p data-reframe-pending="" role="status" className="flex items-center gap-2 text-[11px] text-muted">
+                <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> Calculando o novo enquadramento…
+              </p>
+            ) : null}
+            {result && !pending && effects > 0 && !lines.length ? (
               <div className="flex gap-2 rounded-xl border border-border bg-bg-2 px-3 py-2 text-[11px] leading-snug text-fg-2" data-reframe-privacy="">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ok" />
                 <span>

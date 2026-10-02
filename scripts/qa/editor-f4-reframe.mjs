@@ -173,7 +173,9 @@ async function main() {
   }
   await ev(HELPERS + '; return 1')
   const v = await ev(`return T.items().find((i) => i.assetId === 'a_qa_video' && i.visual).id`)
-  const panel = () => ev(`const R = window.__qaEditor.reframe; const d = document.querySelector('[data-reframe-dialog]'); const w = document.querySelector('[data-reframe-window]')
+  // a prévia é agendada (fora do clique): espera o "Calculando…" sumir e o visualizador pegar a prévia nova
+  const panel = () => ev(`for (let i = 0; i < 100 && document.querySelector('[data-reframe-pending]'); i++) await T.wait(50)
+    await T.wait(80); const R = window.__qaEditor.reframe; const d = document.querySelector('[data-reframe-dialog]'); const w = document.querySelector('[data-reframe-window]')
     const pts = (w?.getAttribute('points') || '').split(' ').filter(Boolean).map((s) => s.split(',').map(Number))
     const ov = T.el('[data-viewer-overlay]').getBoundingClientRect()
     const xs = pts.map((p) => p[0] / ov.width), ys = pts.map((p) => p[1] / ov.height)
