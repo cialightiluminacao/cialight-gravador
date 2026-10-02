@@ -129,12 +129,18 @@ export function focusToScreen(p: Project, m: MediaItem, f: FocusPoint): { tUs: U
   return cf ? { tUs, ...screenAt(cf, f) } : null
 }
 
+/**
+ * Escala "de repouso" do clipe principal: a menor dele, mas nunca abaixo de 1 (ou da inicial, se menor) — afastar
+ * (escala abaixo do repouso) não é zoom e não pode transformar o trecho normal em "zoom".
+ */
+const restScale = (sc: number[], first: number): number => Math.max(Math.min(...sc), Math.min(1, first))
+
 /** O clipe tem zoom (keys de escala com aproximação ≥ ZOOM_FOCUS_MIN): no reenquadrar, o alvo dele manda nesses trechos. */
 export function hasZoomKeys(m: MediaItem): boolean {
   const s = m.visual?.transform.scale
   if (!s?.keys?.length) return false
   const vs = s.keys.map((k) => k.value)
-  const base = Math.min(...vs)
+  const base = restScale(vs, evalAnim(s, 0))
   return base > 0 && Math.max(...vs) >= base * ZOOM_FOCUS_MIN
 }
 
@@ -182,11 +188,11 @@ function simplifyXY(s: { t: Us; x: number; y: number; r: { x0: number; x1: numbe
 }
 
 /**
- * Peso do alvo do zoom em cada amostra (escalas em ordem de tempo): trechos contíguos com a escala acima da base (a
- * menor do clipe) e pico ≥ ZOOM_FOCUS_MIN × base; peso = (s/base − 1)/(pico/base − 1) — 1 na espera do zoom, 0 fora.
+ * Peso do alvo do zoom em cada amostra (escalas em ordem de tempo): trechos contíguos com a escala acima da de repouso
+ * (restScale) e pico ≥ ZOOM_FOCUS_MIN × repouso; peso = (s/base − 1)/(pico/base − 1) — 1 na espera do zoom, 0 fora.
  */
 function zoomWeights(sc: number[]): number[] {
-  const base = Math.min(...sc)
+  const base = restScale(sc, sc[0])
   const w = sc.map(() => 0)
   if (!(base > 0)) return w
   for (let i = 0; i < sc.length; ) {

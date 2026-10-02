@@ -148,6 +148,19 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
     for (let k = 0; k < 300; k++) expect(coversFrame(m1.visual!, src, { w: 1080, h: 1920 }, frameToUs(k, 30))).toBe(true)
   })
 
+  it('afastar (escala abaixo da do clipe) não conta como zoom: o ponto do usuário continua no centro no trecho normal', () => {
+    const p = single((m) => {
+      m.visual!.transform.scale = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'linear' }, { tUs: 6 * S, value: 1, ease: 'inOut' }, { tUs: 8 * S, value: 0.6, ease: 'linear' }] }
+    })
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.7, y: 0.5 }] } })
+    const m1 = mOf(r.project, 'm')
+    for (const t of [0, 2 * S, 5.9 * S]) {
+      const s = toScreen(clipFrameAt(r.project, m1, t)!, 0.7 * 1920, 0.5 * 1080)
+      expect(Math.abs(s.x - 540)).toBeLessThanOrEqual(0.005 * 1920 + 1e-6)
+    }
+    expect(hasZoomKeys(m1)).toBe(false)
+  })
+
   it('hasZoomKeys: zoom sim, Ken Burns leve e clipe parado não (nota do painel)', () => {
     expect(hasZoomKeys(mOf(applyZoom(single(), 'm', { x: 0.25, y: 0.25, w: 0.4, h: 0.4 }, 2.5 * S, 0.5 * S, 1.5 * S, 'inOut', { clamp: true }).project, 'm'))).toBe(true)
     expect(hasZoomKeys(mOf(applyKenBurns(single(), 'm', 'br').project, 'm'))).toBe(false)
