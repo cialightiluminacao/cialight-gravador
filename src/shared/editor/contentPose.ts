@@ -2,7 +2,7 @@
 // resolve (efeito ancorado: região guardada no espaço do conteúdo, levada à tela em cada instante), pela privacidade
 // (transformedUnderEffect, unlinkedOverMoving) e pelas operações de ancorar/desancorar (followTransform).
 import type { LayerBase } from './layerGeometry'
-import type { Anim, EffectItem, MediaItem, Us } from './project'
+import type { Anim, AnimPreset, EffectItem, MediaItem, Us } from './project'
 import { itemEndUs } from './time'
 
 /**
@@ -52,15 +52,18 @@ const animated = (...as: Anim<number>[]): boolean => as.some((a) => (a.keys?.len
 /** A região do efeito tem keys (x, y, w, h ou rotação)? */
 export const regionAnimated = (fx: EffectItem): boolean => animated(fx.region.x, fx.region.y, fx.region.w, fx.region.h, fx.region.rotation)
 
+/** O preset de entrada/saída mexe na geometria do clipe (deslizar, zoom, pop, girar, bater)? Fade e desfoque não. */
+export const presetMoves = (preset: AnimPreset): boolean => preset !== 'fade' && preset !== 'blur'
+
 /**
- * O clipe move o conteúdo no quadro: x/y/escala/rotação ou corte com keys, ou animação de entrada/saída que não é só
- * fade. zoom/pop ainda não têm geometria no resolve (F4 Task 5 a põe em visualStateAt) e por ora não movem nada.
+ * O clipe move o conteúdo no quadro: x/y/escala/rotação ou corte com keys, ou animação de entrada/saída com geometria
+ * (deslizar, zoom, pop, girar, bater — visualStateAt); fade e desfoque não movem.
  */
 export function clipMoves(m: MediaItem): boolean {
   const v = m.visual
   if (!v) return false
   const t = v.transform
-  return animated(t.x, t.y, t.scale, t.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b) || (!!v.animIn && v.animIn.preset !== 'fade') || (!!v.animOut && v.animOut.preset !== 'fade')
+  return animated(t.x, t.y, t.scale, t.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b) || (!!v.animIn && presetMoves(v.animIn.preset)) || (!!v.animOut && presetMoves(v.animOut.preset))
 }
 
 /** Região do quadro → pose no espaço do conteúdo (como matrix.layerMatrix: R(−θ)·(região − centro) / tamanho). */

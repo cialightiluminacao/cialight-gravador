@@ -78,12 +78,16 @@ const cases: [string, () => Project][] = [
   ['elipse girada, espelho, rotação e escala com overshoot', () => attached(scene((m, fx) => { m.visual!.mirror = true; m.visual!.transform.rotation = anim(0, 40, 'out'); m.visual!.transform.scale = anim(1, 2.2, { bezier: [0.5, -0.5, 0.4, 1.6] }); fx.region.shape = 'ellipse'; fx.region.rotation = { value: 30 } }))],
   ['segurar (salto)', () => attached(scene((m) => { m.visual!.transform.x = { value: 0.5, keys: [{ tUs: 0, value: 0.5, ease: 'hold' }, { tUs: 4 * S, value: 0.8, ease: 'linear' }] } }))],
   ['Ken Burns pelo corte (PiP)', () => attached(applyKenBurns(scene((m, fx) => { m.visual!.transform.scale = { value: 0.4 }; m.visual!.transform.x = { value: 0.75 }; m.visual!.transform.y = { value: 0.7 }; fx.region = { ...fx.region, x: { value: 0.7 }, y: { value: 0.65 }, w: { value: 0.08 }, h: { value: 0.06 } } }), 'm', 'br').project)],
-  ['efeito mais longo que o clipe (deslizar na entrada)', () => attached(scene((m, fx) => { m.startUs = 2 * S; m.durationUs = 6 * S; m.visual!.animIn = { preset: 'slideL', durationUs: S }; fx.durationUs = 12 * S }))]
+  ['efeito mais longo que o clipe (deslizar na entrada)', () => attached(scene((m, fx) => { m.startUs = 2 * S; m.durationUs = 6 * S; m.visual!.animIn = { preset: 'slideL', durationUs: S }; fx.durationUs = 12 * S }))],
+  ['zoom na entrada e pop na saída', () => attached(scene((m) => { m.visual!.animIn = { preset: 'zoom', durationUs: S }; m.visual!.animOut = { preset: 'pop', durationUs: S / 2, ease: 'linear' } }))],
+  ['girar na entrada e bater na saída', () => attached(scene((m) => { m.visual!.animIn = { preset: 'rotate', durationUs: S }; m.visual!.animOut = { preset: 'bounce', durationUs: S } }))]
 ]
+/** Casos que a v1.3 recusa: keys de corte (Ken Burns em PiP) e presets novos da F4 (girar, bater, desfoque). */
+const v13Refuses = (n: string): boolean => n === 'Ken Burns pelo corte (PiP)' || n === 'girar na entrada e bater na saída'
 
 describe('disco: a v1.3 instalada não vaza o conteúdo de um efeito ancorado', () => {
-  it('a v1.3 abre os projetos ancorados sem recursos novos (e recusa o Ken Burns por corte, que usa keys de corte)', () => {
-    expect(cases.map(([n, make]) => [n, parseProjectV13(JSON.parse(JSON.stringify(toDiskProject(make())))).success])).toEqual(cases.map(([n]) => [n, n !== 'Ken Burns pelo corte (PiP)']))
+  it('a v1.3 abre os projetos ancorados sem recursos novos (e recusa o Ken Burns por corte e girar/bater)', () => {
+    expect(cases.map(([n, make]) => [n, parseProjectV13(JSON.parse(JSON.stringify(toDiskProject(make())))).success])).toEqual(cases.map(([n]) => [n, !v13Refuses(n)]))
   })
   it.each(cases)('%s: a região gravada para a v1.3 contém a do build novo em todo instante (1/240 s)', (_n, make) => {
     const q = make()
@@ -207,8 +211,8 @@ describe('efeito invertido: o caminho conservador nunca abre um buraco maior que
     // ida e volta pela v1.3 (abre e grava sem attach): o build novo desenha o mesmo buraco nulo; pelo parse novo, sem perda
     const disk = JSON.parse(JSON.stringify(toDiskProject(q)))
     const v13 = parseProjectV13(disk)
-    // a v1.3 abre todos menos o Ken Burns por corte (keys de corte, que ela já recusava — nada a vazar)
-    expect(v13.success).toBe(n !== 'Ken Burns pelo corte (PiP)')
+    // a v1.3 abre todos menos o Ken Burns por corte e os presets novos (que ela recusa — nada a vazar)
+    expect(v13.success).toBe(!v13Refuses(n))
     if (v13.success) {
       const back = parseProject(JSON.parse(JSON.stringify(v13.data)))
       const fb = back.tracks.flatMap((t) => t.items).find((i) => i.id === 'fx') as EffectItem
@@ -347,5 +351,46 @@ describe('efeito invertido dentro do clipe: o buraco desenhado cabe no buraco ex
     expect((n.w - r.w) * W).toBeCloseTo(2, 6)
     expect((n.h - r.h) * H).toBeCloseTo(2, 6)
     holeContained(q, (t) => screen(q, t), 0.9)
+  })
+})
+
+describe('animações de entrada/saída: a região ancorada acompanha o conteúdo (conferência densa, 1/240 s)', () => {
+  /** Cantos (px do quadro) da região do conteúdo do efeito levados à tela pela pose exata do clipe no instante t. */
+  function exactCorners(p: Project, t: Us): [number, number][] {
+    const fx = fxOf(p), m = findItem(p, 'm')!.item as MediaItem
+    const cf = clipFrameAt(p, m, t, true)!, g = cf.g, l = t - fx.startUs, r = fx.region
+    const cx = evalAnim(r.x, l) * g.dw, cy = evalAnim(r.y, l) * g.dh, hw = (evalAnim(r.w, l) * g.dw) / 2, hh = (evalAnim(r.h, l) * g.dh) / 2
+    const ph = (evalAnim(r.rotation, l) * Math.PI) / 180, c = Math.cos(ph), sn = Math.sin(ph)
+    return ([[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]] as [number, number][]).map(([x, y]) => { const s = toScreen(cf, cx + c * x - sn * y, cy + sn * x + c * y); return [s.x, s.y] })
+  }
+  /** O ponto (px) está dentro da região do quadro `r` (retângulo girado), com folga eps? */
+  const within = (r: RegionValues, [x, y]: [number, number], eps = 1e-6): boolean => {
+    const th = (r.rotation * Math.PI) / 180, c = Math.cos(th), sn = Math.sin(th)
+    const dx = x - r.x * W, dy = y - r.y * H
+    return Math.abs(c * dx + sn * dy) <= (r.w * W) / 2 + eps && Math.abs(-sn * dx + c * dy) <= (r.h * H) / 2 + eps
+  }
+  it.each([
+    ['zoom de entrada (0,8 → 1)', { animIn: { preset: 'zoom' as const, durationUs: S } }],
+    ['pop de entrada (0,6 → 1,05 → 1, overshoot)', { animIn: { preset: 'pop' as const, durationUs: S } }],
+    ['girar na entrada (−15° → 0)', { animIn: { preset: 'rotate' as const, durationUs: S } }],
+    ['bater na saída (recuo)', { animOut: { preset: 'bounce' as const, durationUs: S } }]
+  ])('%s: a região desenhada contém o conteúdo exato em todo instante e a caixa de reserva a contém', (_n, anims) => {
+    const q = attached(scene((m) => { Object.assign(m.visual!, anims) }))
+    const f = fxOf(q).attach!.fallback!
+    const win: [Us, Us] = 'animIn' in anims ? [0, S] : [9 * S, 10 * S]
+    let moved = 0
+    const ref = screen(q, 5 * S)
+    for (let t = win[0]; t < win[1]; t += Math.round(S / 240)) {
+      const r = screen(q, t)
+      const bad = exactCorners(q, t).find((pt) => !within(r, pt))
+      if (bad) throw new Error(`conteúdo fora da região em ${t}: ${bad} ⊄ ${JSON.stringify(r)}`)
+      if (!inside(f, r, 'rect')) throw new Error(`região fora da caixa de reserva em ${t}: ${JSON.stringify(r)} ⊄ ${JSON.stringify(f)}`)
+      moved = Math.max(moved, Math.hypot((r.x - ref.x) * W, (r.y - ref.y) * H), Math.abs(r.w - ref.w) * W, Math.abs(r.rotation - ref.rotation))
+    }
+    // a animação mexe de fato na região (a âncora segue a geometria do preset)
+    expect(moved).toBeGreaterThan(10)
+    // sem âncora (região parada no quadro, vinculada) o mesmo clipe dá o aviso transformedUnderEffect
+    expect(warn(scene((m) => { Object.assign(m.visual!, anims) }), 'transformedUnderEffect')).toHaveLength(1)
+    expect(warn(q, 'transformedUnderEffect')).toEqual([])
   })
 })

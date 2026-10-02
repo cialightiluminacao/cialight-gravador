@@ -3,8 +3,10 @@
 
 export interface RedBlob { cx: number; cy: number; n: number; w: number; h: number }
 
-/** Centro de massa (px, centro do pixel, y para baixo) e caixa dos pixels vermelhos; stride 4 = RGBA, 3 = RGB24. */
-export function redBlob(d: Uint8Array, w: number, h: number, stride = 4): RedBlob | null {
+const lumaAt = (d: Uint8Array, i: number): number => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+
+/** Centro de massa (px, centro do pixel, y para baixo) e caixa dos pixels em que `match(r, g, b)`; stride 4 = RGBA, 3 = RGB24. */
+export function colorBlob(d: Uint8Array, w: number, h: number, match: (r: number, g: number, b: number) => boolean, stride = 4): RedBlob | null {
   let sx = 0
   let sy = 0
   let n = 0
@@ -12,7 +14,7 @@ export function redBlob(d: Uint8Array, w: number, h: number, stride = 4): RedBlo
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * stride
-      if (d[i] < 150 || d[i + 1] > 90 || d[i + 2] > 90) continue
+      if (!match(d[i], d[i + 1], d[i + 2])) continue
       sx += x + 0.5
       sy += y + 0.5
       n++
@@ -22,10 +24,36 @@ export function redBlob(d: Uint8Array, w: number, h: number, stride = 4): RedBlo
   return n ? { cx: sx / n, cy: sy / n, n, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null
 }
 
+/** Pixels vermelhos (R ≥ 150, G e B ≤ 90). */
+export function redBlob(d: Uint8Array, w: number, h: number, stride = 4): RedBlob | null {
+  return colorBlob(d, w, h, (r, g, b) => r >= 150 && g <= 90 && b <= 90, stride)
+}
+
+/** Pixels verdes (a caixa 0x40a060 do alvo do zoom, também com opacidade ≥ ~0,6 sobre o fundo escuro): G > 90, G − R > 40, G − B > 30. */
+export function greenBlob(d: Uint8Array, w: number, h: number, stride = 4): RedBlob | null {
+  return colorBlob(d, w, h, (r, g, b) => g > 90 && g - r > 40 && g - b > 30, stride)
+}
+
+/**
+ * Energia de detalhe (métrica do blur do F2): média de ΔL² entre vizinhos (horizontal + vertical) em [x0,x1)×[y0,y1)
+ * de uma imagem de largura `w`. O blur espalha as bordas e derruba essa energia (~1/raio).
+ */
+export function detailEnergy(d: Uint8Array, w: number, x0: number, y0: number, x1: number, y1: number, stride = 4): number {
+  let s = 0
+  let n = 0
+  for (let y = y0; y < y1 - 1; y++) {
+    for (let x = x0; x < x1 - 1; x++) {
+      const i = (y * w + x) * stride
+      const l = lumaAt(d, i)
+      s += (l - lumaAt(d, i + stride)) ** 2 + (l - lumaAt(d, i + w * stride)) ** 2
+      n++
+    }
+  }
+  return n ? s / n : 0
+}
+
 /** Caixa de pixels (px, inclusiva, y para baixo). */
 export interface PxBox { x0: number; y0: number; x1: number; y1: number }
-
-const lumaAt = (d: Uint8Array, i: number): number => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
 
 /** Caixa dos pixels claros (texto branco, luma > 128) entre as linhas y0 e y1. */
 export function brightBox(d: Uint8Array, w: number, y0: number, y1: number, stride = 4): PxBox | null {

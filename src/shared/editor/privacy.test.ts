@@ -184,8 +184,20 @@ describe('privacyWarnings: clipe se move sob efeito vinculado (transformedUnderE
     expect(privacyWarnings(off, 0, 10 * S).map((w) => w.kind)).toEqual(['disabled'])
     // opacidade animada não move o conteúdo
     expect(tue(scene((m) => { m.visual!.transform.opacity = lin(1, 0.2) }))).toEqual([])
-    // zoom/pop ainda sem geometria (Task 5): não disparam
-    expect(tue(scene((m) => { m.visual!.animIn = { preset: 'zoom', durationUs: S }; m.visual!.animOut = { preset: 'pop', durationUs: S } }))).toEqual([])
+    // desfoque de entrada/saída não move o conteúdo
+    expect(tue(scene((m) => { m.visual!.animIn = { preset: 'blur', durationUs: S }; m.visual!.animOut = { preset: 'blur', durationUs: S } }))).toEqual([])
+  })
+  it('dispara: animações de entrada/saída com geometria (zoom, pop, girar, bater) com região parada vinculada e não ancorada', () => {
+    const zoom = tue(scene((m) => { m.visual!.animIn = { preset: 'zoom', durationUs: S } }))
+    expect(zoom).toEqual([expect.objectContaining({ itemId: 'fx', kind: 'transformedUnderEffect', mediaItemId: 'm' })])
+    expect(zoom[0].tUs).toBeLessThan(S)
+    for (const preset of ['pop', 'rotate', 'bounce'] as const) {
+      expect(tue(scene((m) => { m.visual!.animIn = { preset, durationUs: S } }))).toHaveLength(1)
+      // na saída: a partir do começo dela
+      const out = tue(scene((m) => { m.visual!.animOut = { preset, durationUs: S } }))
+      expect(out).toHaveLength(1)
+      expect(out[0].tUs).toBeGreaterThanOrEqual(9 * S)
+    }
   })
   it('corte animado conta como movimento: região parada dispara', () => {
     expect(tue(scene((m) => { m.visual!.crop.l = lin(0, 0.5) }))).toHaveLength(1)

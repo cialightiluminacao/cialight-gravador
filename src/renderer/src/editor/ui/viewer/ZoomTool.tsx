@@ -85,12 +85,13 @@ export function runZoomEdit(itemId: string, edit: (p: Project) => ZoomEdit): boo
 }
 
 /**
- * Zoom/pan/Ken Burns aplicado num clipe com efeitos de privacidade por cima: a região de um efeito sem âncora fica
+ * Zoom/pan/Ken Burns (ou animação de entrada/saída com movimento — `motion` nomeia o movimento no texto) aplicado num
+ * clipe com efeitos de privacidade por cima: a região de um efeito sem âncora fica
  * parada no quadro enquanto o conteúdo se move. Efeitos do grupo de vínculo cuja região encosta no clipe →
  * "Ancorar efeitos ao clipe" (só esses; a região passa a acompanhar o conteúdo, inclusive edições futuras); efeitos
  * soltos sobre o clipe → "Vincular e ancorar" (todos eles); "Ver efeito(s)" seleciona. Os já ancorados acompanham sozinhos.
  */
-export function warnLinkedEffects(itemId: string): void {
+export function warnLinkedEffects(itemId: string, motion = 'o zoom'): void {
   const p = useEditorStore.getState().project
   if (!p) return
   let over: { linked: string[]; unlinked: string[] }
@@ -126,8 +127,8 @@ export function warnLinkedEffects(itemId: string): void {
   const one = ids.length === 1
   const title = one ? 'Há um efeito de privacidade sobre este clipe' : `Há ${ids.length} efeitos de privacidade sobre este clipe`
   const text = over.unlinked.length
-    ? 'A região não acompanha o zoom: o conteúdo protegido pode sair de baixo dela. Vincule e ancore o efeito ao clipe para ele seguir o movimento.'
-    : 'A região não acompanha o zoom: o conteúdo protegido pode sair de baixo dela. Ancore o efeito ao clipe para ele seguir o movimento.'
+    ? `A região não acompanha ${motion}: o conteúdo protegido pode sair de baixo dela. Vincule e ancore o efeito ao clipe para ele seguir o movimento.`
+    : `A região não acompanha ${motion}: o conteúdo protegido pode sair de baixo dela. Ancore o efeito ao clipe para ele seguir o movimento.`
   const btn = 'h-7 rounded-md px-2.5 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-surface-3'
   toastId = toast.warning(title, {
     duration: 15_000,

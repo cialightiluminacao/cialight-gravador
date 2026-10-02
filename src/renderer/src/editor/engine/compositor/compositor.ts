@@ -1,7 +1,9 @@
 // Compositor WebGL2 (roda no render worker): desenha as camadas de resolveFrame, do fundo ao topo,
 // no canvas inteiro (= quadro do projeto na resolução do canvas). Mesmo código no preview e na exportação.
 // F1: mídia (vídeo/imagem) e anotações. F2: efeitos de privacidade (effects.ts) — com efeito no quadro, as
-// camadas vão para um FBO de acumulação que o efeito lê. Texto/forma/transições chegam depois (ignorados).
+// camadas vão para um FBO de acumulação que o efeito lê. F4: desfoque por camada (preset de animação 'blur') — a
+// camada é desenhada isolada no FBO auxiliar, desfocada pelo blur dos efeitos e composta. Texto/forma/transições
+// chegam depois (ignorados).
 import * as twgl from 'twgl.js'
 import { effectBound, type AnnotationsLayer, type EffectLayer, type Layer, type MediaLayer } from '@shared/editor/resolve'
 import { parseColor } from './color'
@@ -22,6 +24,11 @@ export interface DrawExtra {
 
 // Larguras de borda e raios do modelo estão em pixels de um quadro de 1920 de largura (como os traços v1).
 const REFERENCE_WIDTH = 1920
+// Desfoque da camada (MediaLayer.blur) em pixels de um quadro de 1080 de altura: escala com a altura de saída, como
+// os tamanhos dos efeitos (effectsMath) — mesma aparência no preview e em qualquer resolução de exportação.
+const BLUR_REFERENCE_HEIGHT = 1080
+// raio abaixo disso (px de saída): sem desfoque visível, a camada vai direto (sem o FBO auxiliar)
+const MIN_LAYER_BLUR_PX = 0.5
 // 'rounded' sem raio definido: 6 % do menor lado (paridade com a PiP v1).
 const DEFAULT_ROUNDED = 0.06
 const SELECTION_COLOR: [number, number, number, number] = [0.32, 0.6, 1, 1]
@@ -77,7 +84,8 @@ export class Compositor {
     const H = this.canvas.height
     // Com efeito no quadro, as camadas vão para o FBO de acumulação (o efeito precisa ler o que está abaixo)
     // e o resultado é copiado ao canvas no fim; sem efeito, direto no canvas (caminho da F1, sem custo extra).
-    const hasFx = layers.some((l) => l.kind === 'effect')
+    const blurOf = (l: Layer): number => (l.kind === 'media' && l.blur ? (l.blur * H) / BLUR_REFERENCE_HEIGHT : 0)
+    const hasFx = layers.some((l) => l.kind === 'effect' || blurOf(l) >= MIN_LAYER_BLUR_PX)
     // FBOs de efeito liberados depois de IDLE_RELEASE_FRAMES quadros seguidos sem efeito (realocados no próximo)
     this.framesWithoutFx = hasFx ? 0 : this.framesWithoutFx + 1
     if (this.framesWithoutFx === IDLE_RELEASE_FRAMES) this.effects.release()
@@ -97,16 +105,24 @@ export class Compositor {
         if (fx && layer.scope === 'below') this.applyEffect(fx.accum, layer, W, H)
         continue
       }
-      // efeitos de escopo `track` desta faixa (resolveFrame os põe logo depois dela, pelo targetTrackId): a camada é
-      // desenhada isolada no FBO auxiliar, recebe todos eles e só então é composta sobre o acumulado
+      // efeitos de escopo `track` desta faixa (resolveFrame os põe logo depois dela, pelo targetTrackId) e o desfoque
+      // da própria camada: ela é desenhada isolada no FBO auxiliar, desfocada, recebe os efeitos e só então é composta
+      // sobre o acumulado (o efeito de privacidade age sobre a camada já desfocada)
       let last = i
       while (fx && layers[last + 1]?.kind === 'effect' && (layers[last + 1] as EffectLayer).scope === 'track' && effectBound(layers, last + 1)) last++
-      if (fx && last > i) {
+      const blur = blurOf(layer)
+      if (fx && (last > i || blur >= MIN_LAYER_BLUR_PX)) {
         const aux = this.effects.aux(W, H)
         this.bindTarget(aux)
         gl.clearColor(0, 0, 0, 0)
         gl.clear(gl.COLOR_BUFFER_BIT)
         this.drawLayer(layer, ctx)
+        if (blur >= MIN_LAYER_BLUR_PX) {
+          this.effects.blurLayer(aux, blur, W, H)
+          this.bindTarget(aux)
+          gl.enable(gl.BLEND)
+          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+        }
         for (let j = i + 1; j <= last; j++) this.applyEffect(aux, layers[j] as EffectLayer, W, H)
         this.bindTarget(fx.accum)
         this.effects.composite(aux)

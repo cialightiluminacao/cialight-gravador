@@ -6,6 +6,7 @@ import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
 import { laplacianVar, localContrast, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
+import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShots'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -49,6 +50,7 @@ interface HarnessReport {
   speed?: SpeedReport
   zoom?: ZoomReport
   follow?: FollowReport
+  anim?: AnimReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -98,6 +100,8 @@ type Legib = { c: number; lap: number }
 interface FollowInstant { frame: number; tUs: number; box: PxBox; ref: Legib; preview: Legib; unadjusted?: Legib; exported?: Legib }
 interface FollowRun { instants: FollowInstant[]; exportPath?: string; exportError?: string }
 interface FollowReport { error?: string; attached?: FollowRun; later?: FollowRun }
+type AnimKey = keyof typeof ANIM_TIMES
+interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>> }
 
 interface StretchReport {
   error?: string
@@ -303,6 +307,22 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       run.exportError = e instanceof Error ? e.message : String(e)
     }
   }
+  // animações de entrada/saída: os mesmos instantes medidos no preview, nos quadros da exportação
+  const animRun = result.report.anim
+  if (animRun?.exportPath) {
+    try {
+      animRun.exported = {}
+      for (const [k, tUs] of Object.entries(ANIM_TIMES) as [AnimKey, number][]) {
+        const fr = Math.round((tUs * 30) / 1e6)
+        const raw = join(dir, `anim-${k}.rgb`)
+        // meio quadro antes (o 1º quadro com pts ≥ -ss é o próprio `fr`); o quadro 0 direto
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', ...(fr > 0 ? ['-ss', ((fr - 0.5) / 30).toFixed(4)] : []), '-i', animRun.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro da animação' })
+        animRun.exported[k] = measureShot(new Uint8Array(readFileSync(raw)), 1920, 1080, 3)
+      }
+    } catch (e) {
+      animRun.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
   win.destroy()
 
   const r = result.report
@@ -463,6 +483,34 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   }
   const ctl = fl?.attached?.instants ?? []
   check(ctl.some((i) => (i.unadjusted?.c ?? 0) >= 0.15), `efeito ancorado (controle): sem âncora o texto fica legível em algum instante do zoom (contraste ${ctl.map((i) => i.unadjusted?.c.toFixed(3)).join(' ')})`, failures)
+
+  const an = r.anim
+  console.log(`animações: ${JSON.stringify(an)}`)
+  check(!!an && !an.error && !!an.preview, `animações: harness sem erro (${an?.error ?? ''})`, failures)
+  // escala pela caixa verde (200×120 em repouso) e pelo centro do vermelho ((1300, 350): 340 px à direita do centro)
+  const redScale = (b: RedBlob | null | undefined): number => (b ? (b.cx - 960) / 340 : NaN)
+  const f3 = (n: number | undefined): string => (n === undefined || Number.isNaN(n) ? '—' : n.toFixed(3))
+  const pa = an?.preview
+  const scaleOk = (sh: AnimShot | undefined, s: number): boolean => !!sh?.green && Math.abs(sh.green.w - 200 * s) <= 3 && Math.abs(sh.green.h - 120 * s) <= 3 && Math.abs(redScale(sh.red) - s) <= 0.01
+  check((pa?.start.maxChannel ?? 255) <= 2, `pop: no 1º instante a camada é invisível (maior canal do quadro ${pa?.start.maxChannel}, fundo preto)`, failures)
+  for (const [k, s] of [['popMid', 0.6 + (0.45 * 4) / 7], ['popPeak', 1.05], ['rest', 1]] as const) {
+    const sh = pa?.[k]
+    check(scaleOk(sh, s), `pop em ${ANIM_TIMES[k] / 1e6} s: escala ${f3(s)} — caixa verde ${sh?.green?.w}×${sh?.green?.h} px (esperado ${(200 * s).toFixed(1)}×${(120 * s).toFixed(1)} ±3), centro do vermelho ${f3(redScale(sh?.red))}× (±0,01)`, failures)
+  }
+  const rest = pa?.rest.detail ?? NaN
+  const r4 = (pa?.blur4.detail ?? NaN) / rest, r10 = (pa?.blur10.detail ?? NaN) / rest
+  check(r4 < 0.3 && r10 < 0.15 && r10 < 0.6 * r4, `desfoque de saída: energia de detalhe ÷ a do repouso — 4 px ${f3(r4)} (< 0,3), 10 px ${f3(r10)} (< 0,15 e < 0,6 × a de 4 px)`, failures)
+  const hf = an?.half
+  const h10 = hf ? hf.blur10 / hf.rest : NaN, d10 = hf ? hf.blur10Down / hf.restDown : NaN
+  check(Math.abs(h10 - d10) <= Math.max(0.03, 0.25 * d10), `desfoque em 960×540 (raio pela altura de saída) = o quadro de 1920×1080 reduzido 2×: energia ÷ repouso ${f3(h10)} × ${f3(d10)}`, failures)
+  const ea = an?.exported
+  check(!!ea?.start && ea.start.maxChannel <= 8, `exportação: 1º quadro invisível (maior canal ${ea?.start?.maxChannel}) ${an?.exportError ?? ''}`, failures)
+  for (const k of ['popMid', 'popPeak', 'rest'] as const) {
+    const e = ea?.[k], v = pa?.[k]
+    check(!!e?.green && !!v?.green && Math.abs(e.green.w - v.green.w) <= 2 && Math.abs(e.green.h - v.green.h) <= 2 && Math.abs(redScale(e.red) - redScale(v.red)) <= 0.01, `exportação = preview (pop em ${ANIM_TIMES[k] / 1e6} s): caixa verde ${e?.green?.w}×${e?.green?.h} (preview ${v?.green?.w}×${v?.green?.h}) ±2 px, vermelho ${f3(redScale(e?.red))}× (preview ${f3(redScale(v?.red))}×)`, failures)
+  }
+  const e10 = (ea?.blur10?.detail ?? NaN) / (ea?.rest?.detail ?? NaN), e4 = (ea?.blur4?.detail ?? NaN) / (ea?.rest?.detail ?? NaN)
+  check(Math.abs(e10 - r10) <= Math.max(0.03, 0.25 * r10) && Math.abs(e4 - r4) <= Math.max(0.03, 0.25 * r4), `exportação = preview (desfoque): energia ÷ repouso 4 px ${f3(e4)} (preview ${f3(r4)}), 10 px ${f3(e10)} (preview ${f3(r10)})`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

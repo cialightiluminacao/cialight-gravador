@@ -180,3 +180,27 @@ describe('toDiskProject: a v1.3 instalada continua lendo o que o build novo grav
   })
 })
 
+
+describe('animações de entrada/saída (F4): presets novos e curva', () => {
+  const withAnims = (animIn: unknown, animOut?: unknown): unknown => {
+    const p = withItems([createMediaItem(asset, 0, 'video')])
+    const json = JSON.parse(JSON.stringify(toDiskProject(p)))
+    json.tracks[0].items[0].visual.animIn = animIn
+    if (animOut) json.tracks[0].items[0].visual.animOut = animOut
+    return json
+  }
+  it('girar, bater e desfoque com curva: round-trip; preset desconhecido lança', () => {
+    for (const preset of ['zoom', 'pop', 'rotate', 'bounce', 'blur']) {
+      const json = withAnims({ preset, durationUs: 500_000, ease: { bezier: [0.34, 1.56, 0.64, 1] } }, { preset, durationUs: 300_000, ease: 'inOut' })
+      const p = parseProject(json)
+      expect((p.tracks[0].items[0] as MediaItem).visual!.animIn).toEqual({ preset, durationUs: 500_000, ease: { bezier: [0.34, 1.56, 0.64, 1] } })
+      expect(parseProject(JSON.parse(JSON.stringify(toDiskProject(p))))).toEqual(p)
+    }
+    expect(() => parseProject(withAnims({ preset: 'spin', durationUs: 1 }))).toThrow()
+    expect(() => parseProject(withAnims({ preset: 'zoom', durationUs: 1, ease: { bezier: [2, 0, 0.5, 1] } }))).toThrow()
+  })
+  it('a v1.3 abre zoom/pop (descarta a curva) e recusa os presets novos', () => {
+    expect(parseProjectV13(withAnims({ preset: 'pop', durationUs: 1, ease: 'linear' })).success).toBe(true)
+    for (const preset of ['rotate', 'bounce', 'blur']) expect(parseProjectV13(withAnims({ preset, durationUs: 1 })).success).toBe(false)
+  })
+})

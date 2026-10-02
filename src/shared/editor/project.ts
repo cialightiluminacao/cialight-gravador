@@ -36,7 +36,13 @@ export interface Asset {
   processedAudio?: Record<string, string>
   status: 'ready' | 'processing' | 'missing' | 'error'; error?: string
 }
-export type AnimPreset = 'fade' | 'slideL' | 'slideR' | 'slideU' | 'slideD' | 'zoom' | 'pop'
+export const ANIM_PRESETS = ['fade', 'slideL', 'slideR', 'slideU', 'slideD', 'zoom', 'pop', 'rotate', 'bounce', 'blur'] as const
+export type AnimPreset = (typeof ANIM_PRESETS)[number]
+/**
+ * Animação de entrada/saída: preset, duração e curva do progresso (ausente = a padrão do preset, PRESET_EASE em
+ * resolve.ts: fade linear e deslizar suavizando a saída como até a v1.3; bater linear; os outros suavizando a saída).
+ */
+export interface PresetAnim { preset: AnimPreset; durationUs: Us; ease?: Ease }
 export interface Transform { x: Anim<number>; y: Anim<number>; scale: Anim<number>; rotation: Anim<number>; opacity: Anim<number> }
 export interface VisualProps {
   transform: Transform
@@ -44,7 +50,7 @@ export interface VisualProps {
   crop: { l: Anim<number>; t: Anim<number>; r: Anim<number>; b: Anim<number> }
   fit: 'contain' | 'cover' | 'fill'
   fadeInUs: Us; fadeOutUs: Us
-  animIn?: { preset: AnimPreset; durationUs: Us }; animOut?: { preset: AnimPreset; durationUs: Us }
+  animIn?: PresetAnim; animOut?: PresetAnim
   adjust?: { brightness: Anim<number>; contrast: Anim<number>; saturation: Anim<number> }
   shape?: 'rect' | 'rounded' | 'circle'; radius?: Anim<number>
   border?: { width: number; color: string }

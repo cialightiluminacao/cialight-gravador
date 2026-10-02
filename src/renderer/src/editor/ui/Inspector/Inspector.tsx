@@ -14,6 +14,7 @@ import { SpeedPanel } from './SpeedPanel'
 import { EffectPanel } from './EffectPanel'
 import { AudioMixPanel } from './AudioMixPanel'
 import { InspectorPlayback } from './KeyframeButton'
+import { AnimPanel } from './AnimPanel'
 import { ITEM_TYPE_LABEL, itemLabel } from '../itemLabel'
 
 // Inspetor (coluna direita): propriedades do item selecionado; sem seleção, as do projeto.
@@ -69,10 +70,14 @@ function ItemPanels({ project, item, trackKind, locked }: { project: Project; it
   }
   if (item.type !== 'media') {
     return (
-      <PanelSection title={ITEM_TYPE_LABEL[item.type]}>
-        <Timing item={item} fps={project.canvas.fps} />
-        <p className="pt-1 text-[11px] leading-relaxed text-muted">As propriedades deste tipo de item chegam numa próxima versão do editor.</p>
-      </PanelSection>
+      <>
+        <PanelSection title={ITEM_TYPE_LABEL[item.type]}>
+          <Timing item={item} fps={project.canvas.fps} />
+          <p className="pt-1 text-[11px] leading-relaxed text-muted">As demais propriedades deste tipo de item chegam numa próxima versão do editor.</p>
+        </PanelSection>
+        {/* texto e forma (F5) já animam a entrada/saída pelo mesmo painel */}
+        {item.type === 'text' || item.type === 'shape' ? <AnimPanel item={item} disabled={locked} /> : null}
+      </>
     )
   }
   // o som de um vídeo fica no item de áudio vinculado (addMediaFromAsset); é ele que a aba Áudio edita

@@ -5,6 +5,7 @@ import { applyKenBurns, type ZoomCorner } from '@shared/editor/zoom'
 import { Segmented, Tip, Toggle } from '@/components/ui/primitives'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
 import { runZoomEdit } from '../viewer/ZoomTool'
+import { AnimPanel } from './AnimPanel'
 import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
@@ -12,7 +13,7 @@ import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient
 // Inspetor de vídeo do item de mídia: transformação (animável: ◇ liga o keyframe no playhead; com keys,
 // editar grava no key do playhead; corte e raio também são animáveis — editados no playhead), Ken Burns (preset de
 // zoom lento 1 → 1,15 com pan diagonal ao longo do clipe — posição/escala, ou o corte num clipe menor que o quadro), corte, ajuste,
-// forma/borda (PiP), espelhar e fades.
+// forma/borda (PiP), espelhar, fades e animações de entrada/saída (AnimPanel).
 
 type TKey = keyof VisualProps['transform']
 type V = MediaItem & { visual: VisualProps }
@@ -117,6 +118,8 @@ export function VideoPanel({ item }: { item: V }): React.JSX.Element {
           <NumberField compact label="Saída" value={usToSec2(v.fadeOutUs)} min={0} max={halfSec} precision={2} step={0.01} unit="s" onChange={(n) => editItemTransient<V>(id, (d) => { d.visual.fadeOutUs = sec2ToUs(n) })} />
         </div>
       </PanelSection>
+
+      <AnimPanel item={item} />
     </>
   )
 }

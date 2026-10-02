@@ -88,38 +88,14 @@ export class EffectPass {
 
     let fxTex: WebGLTexture = s.snapshot
     let fxScale: [number, number] = [1 / W, 1 / H]
-    let copyRect: PxRect
     if (fx.effect === 'blur') {
-      const ds = downsampleFactor(radius)
-      const w = gaussianWeights(radius / ds, BLUR_MAX_TAPS)
-      this.weights.fill(0)
-      this.weights.set(w)
-      const n = w.length - 1
-      const [a, b] = this.blurPair(s, ds)
-      const dw = a.width
-      const dh = a.height
-      // área em texels da escala reduzida; cada passe anterior cobre a área do seguinte + o alcance do kernel
-      const e = n + 2
-      const vRect = grow(toGrid(area, ds), 1, dw, dh)
-      const hRect = grow(vRect, e, dw, dh)
-      const dRect = grow(vRect, 2 * e, dw, dh)
-      copyRect = clampRect({ x: dRect.x * ds, y: dRect.y * ds, w: dRect.w * ds, h: dRect.h * ds }, W, H)
-      this.snap(target, s.snapshot, copyRect)
-      twgl.bindFramebufferInfo(gl, a)
-      this.scissor(dRect)
-      this.pass(this.down, { u_src: s.snapshot, u_srcSize: [W, H], u_ds: ds })
-      twgl.bindFramebufferInfo(gl, b)
-      this.scissor(hRect)
-      this.pass(this.blurProg, { u_tex: a.attachments[0], u_dir: [1, 0], u_n: n, u_w: this.weights })
-      twgl.bindFramebufferInfo(gl, a)
-      this.scissor(vRect)
-      this.pass(this.blurProg, { u_tex: b.attachments[0], u_dir: [0, 1], u_n: n, u_w: this.weights })
-      fxTex = a.attachments[0] as WebGLTexture
-      fxScale = [1 / (ds * dw), 1 / (ds * dh)]
+      const b = this.blurArea(s, target, area, radius, W, H)
+      fxTex = b.tex
+      fxScale = b.scale
     } else {
       // pixelização: blocos que cruzam a borda da área usam pixels até um bloco além dela
       const margin = fx.effect === 'pixelate' ? Math.ceil(cell) + 2 : 0
-      copyRect = clampRect({ x: area.x - margin, y: area.y - margin, w: area.w + 2 * margin, h: area.h + 2 * margin }, W, H)
+      const copyRect = clampRect({ x: area.x - margin, y: area.y - margin, w: area.w + 2 * margin, h: area.h + 2 * margin }, W, H)
       this.snap(target, s.snapshot, copyRect)
       if (fx.effect === 'pixelate') {
         // blocos (bx, by — by de cima) que tocam a área; centros de pixel pela mesma conta do FS_APPLY
@@ -160,6 +136,29 @@ export class EffectPass {
     gl.disable(gl.SCISSOR_TEST)
   }
 
+  /**
+   * Desfoque gaussiano de raio `radius` px no alvo inteiro (W×H, camada isolada e transparente; preset de animação
+   * 'blur'): o mesmo caminho do blur dos efeitos (redução, H e V, ampliação bilinear), com máscara 1 no quadro todo.
+   * Deixa o blend e o scissor desligados.
+   */
+  blurLayer(target: twgl.FramebufferInfo, radius: number, W: number, H: number): void {
+    if (radius < MIN_BLUR_PX) return
+    const gl = this.gl
+    const s = this.ensure(W, H)
+    const area: PxRect = { x: 0, y: 0, w: W, h: H }
+    gl.disable(gl.BLEND)
+    gl.enable(gl.SCISSOR_TEST)
+    const b = this.blurArea(s, target, area, radius, W, H)
+    twgl.bindFramebufferInfo(gl, target)
+    this.scissor(area)
+    // região = o quadro inteiro + 1 px, sem borda suave: máscara 1 em todo pixel
+    this.pass(this.apply, {
+      u_src: s.snapshot, u_fx: b.tex, u_fxScale: b.scale, u_frame: [W, H], u_mode: MODE.blur, u_q: 512, u_color: [0, 0, 0],
+      u_center: [W / 2, H / 2], u_half: [W / 2 + 1, H / 2 + 1], u_rot: [1, 0], u_shape: 0, u_feather: 0, u_invert: 0
+    })
+    gl.disable(gl.SCISSOR_TEST)
+  }
+
   /** Libera programas, FBOs e texturas. */
   dispose(): void {
     const gl = this.gl
@@ -183,6 +182,39 @@ export class EffectPass {
       pix: null
     }
     return this.sized
+  }
+
+  /**
+   * Blur da área `area` do alvo (scissor ligado, blend desligado): copia a área + alcance do kernel para o snapshot,
+   * reduz ds× e aplica o gaussiano H e V. Devolve a textura reduzida e a escala para lê-la em px do alvo.
+   */
+  private blurArea(s: Sized, target: twgl.FramebufferInfo, area: PxRect, radius: number, W: number, H: number): { tex: WebGLTexture; scale: [number, number] } {
+    const gl = this.gl
+    const ds = downsampleFactor(radius)
+    const w = gaussianWeights(radius / ds, BLUR_MAX_TAPS)
+    this.weights.fill(0)
+    this.weights.set(w)
+    const n = w.length - 1
+    const [a, b] = this.blurPair(s, ds)
+    const dw = a.width
+    const dh = a.height
+    // área em texels da escala reduzida; cada passe anterior cobre a área do seguinte + o alcance do kernel
+    const e = n + 2
+    const vRect = grow(toGrid(area, ds), 1, dw, dh)
+    const hRect = grow(vRect, e, dw, dh)
+    const dRect = grow(vRect, 2 * e, dw, dh)
+    const copyRect = clampRect({ x: dRect.x * ds, y: dRect.y * ds, w: dRect.w * ds, h: dRect.h * ds }, W, H)
+    this.snap(target, s.snapshot, copyRect)
+    twgl.bindFramebufferInfo(gl, a)
+    this.scissor(dRect)
+    this.pass(this.down, { u_src: s.snapshot, u_srcSize: [W, H], u_ds: ds })
+    twgl.bindFramebufferInfo(gl, b)
+    this.scissor(hRect)
+    this.pass(this.blurProg, { u_tex: a.attachments[0], u_dir: [1, 0], u_n: n, u_w: this.weights })
+    twgl.bindFramebufferInfo(gl, a)
+    this.scissor(vRect)
+    this.pass(this.blurProg, { u_tex: b.attachments[0], u_dir: [0, 1], u_n: n, u_w: this.weights })
+    return { tex: a.attachments[0] as WebGLTexture, scale: [1 / (ds * dw), 1 / (ds * dh)] }
   }
 
   /** FBOs da pixelização: bloco ≥ 2 px → no máximo ⌈W/2⌉+1 blocos por linha e ⌈H/2⌉+1 por coluna. */

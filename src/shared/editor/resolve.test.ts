@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyProject, defaultVisual } from './factory'
 import type { Asset, EffectItem, MediaItem, Project } from './project'
 import * as ops from './ops'
-import { activeItemsAt, resolveFrame, sourceTimeUs } from './resolve'
+import { activeItemsAt, resolveFrame, sourceTimeUs, visualStateAt } from './resolve'
 import type { MediaLayer } from './resolve'
 
 const S = 1_000_000
@@ -160,5 +160,95 @@ describe('resolveFrame: propriedades animáveis da F4', () => {
     p.tracks[0].items = [{ id: 'tx', type: 'text', startUs: 0, durationUs: 10 * S, text: 'a', style: { font: 'Inter', size: k(10, 30), weight: 400, color: '#fff', align: 'left', lineHeight: 1 }, visual: defaultVisual() }]
     const l = resolveFrame(p, 5 * S)[0]
     expect(l.kind === 'text' && l.style.size).toBeCloseTo(20)
+  })
+})
+
+describe('visualStateAt: animações de entrada/saída (F4)', () => {
+  type Ease = import('./project').Ease
+  type Preset = import('./project').AnimPreset
+  const D = 10 * S
+  /** Estado em p ∈ [0,1] da entrada de 1 s (local = p s). */
+  const inAt = (preset: Preset, p: number, ease?: Ease, over: Partial<import('./project').VisualProps> = {}) =>
+    visualStateAt({ ...defaultVisual(), ...over, animIn: { preset, durationUs: S, ...(ease ? { ease } : {}) } }, D, Math.round(p * S))
+  /** Estado em p ∈ [0,1] da saída de 1 s (p = 0 no começo da saída, 1 no fim do item). */
+  const outAt = (preset: Preset, p: number, ease?: Ease) =>
+    visualStateAt({ ...defaultVisual(), animOut: { preset, durationUs: S, ...(ease ? { ease } : {}) } }, D, D - S + Math.round(p * S))
+  const rest = { rect: { cx: 0.5, cy: 0.5, scale: 1, rotation: 0 }, opacity: 1, blur: 0 }
+
+  it('fade: opacidade 0 → ½ → 1 (linear, como na F1)', () => {
+    expect([0, 0.5, 1].map((p) => inAt('fade', p).opacity)).toEqual([0, 0.5, 1])
+    expect([0, 0.5, 1].map((p) => outAt('fade', p).opacity)).toEqual([1, 0.5, 0])
+  })
+  it('deslizar L/R/U/D: de fora do quadro até a posição (suavizar saída por padrão, como na F1)', () => {
+    // ½ com 'out': 1 − ½³ = 0,875 do caminho → falta 0,125
+    expect([0, 0.5, 1].map((p) => inAt('slideL', p).rect.cx)).toEqual([-0.5, 0.375, 0.5])
+    expect([0, 0.5, 1].map((p) => inAt('slideR', p).rect.cx)).toEqual([1.5, 0.625, 0.5])
+    expect([0, 0.5, 1].map((p) => inAt('slideU', p).rect.cy)).toEqual([-0.5, 0.375, 0.5])
+    expect([0, 0.5, 1].map((p) => inAt('slideD', p).rect.cy)).toEqual([1.5, 0.625, 0.5])
+    expect(inAt('slideL', 0).opacity).toBe(1)
+    // saída: sai pelo mesmo lado
+    expect([0, 0.5, 1].map((p) => outAt('slideL', p).rect.cx)).toEqual([0.5, -0.375, -0.5])
+  })
+  it('zoom: escala 0,8 → 1 e aparece na 1ª metade', () => {
+    const s = [0, 0.5, 1].map((p) => inAt('zoom', p, 'linear'))
+    expect(s.map((x) => x.rect.scale)).toEqual([0.8, 0.9, 1].map((v) => expect.closeTo(v, 12)))
+    expect(s.map((x) => x.opacity)).toEqual([0, 1, 1])
+    expect(inAt('zoom', 0.25, 'linear').opacity).toBeCloseTo(0.5, 12)
+  })
+  it('pop: escala 0,6 → 1,05 (aos 70 %) → 1', () => {
+    const at = (p: number) => inAt('pop', p, 'linear').rect.scale
+    expect(at(0)).toBeCloseTo(0.6, 12)
+    expect(at(0.5)).toBeCloseTo(0.6 + 0.45 * (0.5 / 0.7), 12)
+    expect(at(0.7)).toBeCloseTo(1.05, 12)
+    expect(at(1)).toBe(1)
+    expect([0, 0.5, 1].map((p) => inAt('pop', p, 'linear').opacity)).toEqual([0, 1, 1])
+  })
+  it('girar: rotação −15° → 0 (aparece na 1ª metade)', () => {
+    expect([0, 0.5, 1].map((p) => inAt('rotate', p, 'linear').rect.rotation)).toEqual([-15, -7.5, 0])
+    expect([0, 0.5, 1].map((p) => inAt('rotate', p, 'linear').opacity)).toEqual([0, 1, 1])
+  })
+  it('bater: desliza de baixo, passa do ponto (overshoot) e volta', () => {
+    const cy = (p: number) => inAt('bounce', p).rect.cy
+    expect(cy(0)).toBeCloseTo(1.5, 12)
+    // recuo (easeOutBack, c = 1,70158): no meio já passou 8,8 % do quadro acima da posição final
+    expect(cy(0.5)).toBeCloseTo(0.5 - 0.0876975, 6)
+    expect(cy(1)).toBe(0.5)
+    const min = Math.min(...Array.from({ length: 101 }, (_, i) => cy(i / 100)))
+    expect(min).toBeLessThan(0.4)
+    expect(inAt('bounce', 0).opacity).toBe(1)
+  })
+  it('desfoque: 20 → 0 px (aparece na 1ª metade)', () => {
+    expect([0, 0.5, 1].map((p) => inAt('blur', p, 'linear').blur)).toEqual([20, 10, 0])
+    expect([0, 0.5, 1].map((p) => inAt('blur', p, 'linear').opacity)).toEqual([0, 1, 1])
+    expect(inAt('blur', 0.5, 'linear').rect).toEqual(rest.rect)
+  })
+  it('ease configurável (padrão: suavizar saída) e saída espelhada', () => {
+    expect(inAt('zoom', 0.5).rect.scale).toBeCloseTo(0.8 + 0.2 * 0.875, 12) // padrão 'out'
+    expect(inAt('zoom', 0.5, 'in').rect.scale).toBeCloseTo(0.8 + 0.2 * 0.125, 12)
+    expect(inAt('zoom', 0.5, { bezier: [0.25, 0.25, 0.75, 0.75] }).rect.scale).toBeCloseTo(0.9, 6)
+    // saída: o caminho inverso (em repouso no começo, 0,8 e invisível no fim)
+    expect(outAt('zoom', 0, 'linear')).toEqual(rest)
+    expect(outAt('zoom', 1, 'linear').rect.scale).toBeCloseTo(0.8, 12)
+    expect(outAt('zoom', 1, 'linear').opacity).toBe(0)
+    expect(outAt('pop', 0.3, 'linear').rect.scale).toBeCloseTo(1.05, 12)
+    expect(outAt('blur', 1, 'linear').blur).toBe(20)
+    expect(outAt('rotate', 1, 'linear').rect.rotation).toBe(-15)
+  })
+  it('compõe com o transform do item (escala multiplica, rotação soma) e com fade/entrada+saída sobrepostas', () => {
+    const t = { ...defaultVisual().transform, scale: { value: 0.5 }, rotation: { value: 10 } }
+    const s = inAt('zoom', 0, 'linear', { transform: t })
+    expect(s.rect.scale).toBeCloseTo(0.4, 12)
+    expect(inAt('rotate', 0, 'linear', { transform: t }).rect.rotation).toBe(-5)
+    // item curto (1 s) com pop na entrada e desfoque na saída, as duas de 1 s: valem juntas
+    const both = visualStateAt({ ...defaultVisual(), animIn: { preset: 'pop', durationUs: S, ease: 'linear' }, animOut: { preset: 'blur', durationUs: S, ease: 'linear' } }, S, S / 2)
+    expect(both.rect.scale).toBeCloseTo(0.6 + 0.45 * (0.5 / 0.7), 12)
+    expect(both.blur).toBe(10)
+  })
+  it('invisível no 1º instante de quem aparece (opacidade exatamente 0); camada leva o desfoque só quando > 0', () => {
+    for (const preset of ['fade', 'zoom', 'pop', 'rotate', 'blur'] as const) expect(inAt(preset, 0).opacity).toBe(0)
+    const { p, v } = base()
+    const q = ops.updateItem<MediaItem>(p, v, (d) => { d.visual = { ...defaultVisual(), animIn: { preset: 'blur', durationUs: S, ease: 'linear' } } })
+    expect((resolveFrame(q, S / 2)[0] as MediaLayer).blur).toBe(10)
+    expect(resolveFrame(q, 2 * S)[0]).not.toHaveProperty('blur')
   })
 })

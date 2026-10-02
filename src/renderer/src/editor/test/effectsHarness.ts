@@ -2,7 +2,7 @@ import { createEffectItem, createMediaItem, type EffectPresetId, type EffectRegi
 import type { EffectItem, MediaItem, Project, Track } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
-import { brightBox as brightBoxPx, laplacianVar, localContrast as localContrastPx, type PxBox } from '@shared/testing/pixels'
+import { brightBox as brightBoxPx, detailEnergy as detailEnergyPx, laplacianVar, localContrast as localContrastPx, type PxBox } from '@shared/testing/pixels'
 import { effectPixelBlockPx, featherPx, pixelCellQ, regionDistPx, regionScissor } from '../engine/compositor/effectsMath'
 
 // Cenários de pixel do passe de efeitos (F2) para o teste de render (CIALIGHT_TEST=editor-render).
@@ -38,20 +38,10 @@ function boxTopDown(r: Region & { shape?: 'rect' | 'ellipse' }, feather: number,
 /**
  * Energia de detalhe: média de ΔL² entre vizinhos (horizontal + vertical) em [x0,x1)×[y0,y1). Mede o que o
  * blur remove mesmo no testsrc2 (barras chapadas com bordas duras): a borda espalhada pelo blur tem ΔL² ~1/raio
- * do original, enquanto a variância de luma da região quase não muda.
+ * do original, enquanto a variância de luma da região quase não muda. (A conta está em @shared/testing/pixels.)
  */
 export function detailEnergy(d: Img, x0: number, y0: number, x1: number, y1: number, width = W): number {
-  let s = 0
-  let n = 0
-  for (let y = y0; y < y1 - 1; y++) {
-    for (let x = x0; x < x1 - 1; x++) {
-      const i = (y * width + x) * 4
-      const l = luma(d, i)
-      s += (l - luma(d, i + 4)) ** 2 + (l - luma(d, i + width * 4)) ** 2
-      n++
-    }
-  }
-  return n ? s / n : 0
+  return detailEnergyPx(d, width, x0, y0, x1, y1)
 }
 
 /** Maior diferença por canal entre a e b em [x0,x1)×[y0,y1), pulando pixels para os quais `skip` é verdadeiro. */

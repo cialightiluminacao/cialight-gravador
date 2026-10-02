@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
-import { MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
+import { ANIM_PRESETS, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
 import type { Anim, EffectItem, EffectRegion, Item, Project, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
@@ -24,8 +24,9 @@ const anim = z.object({
  */
 const animOrNumber = z.union([z.number().transform((value) => ({ value })), anim])
 
-const animPreset = z.enum(['fade', 'slideL', 'slideR', 'slideU', 'slideD', 'zoom', 'pop'])
-const presetAnim = z.object({ preset: animPreset, durationUs: us })
+// F4: girar, bater e desfoque (a v1.3 recusa o projeto que os usa) e a curva `ease` (a v1.3 a descarta)
+const animPreset = z.enum(ANIM_PRESETS)
+const presetAnim = z.object({ preset: animPreset, durationUs: us, ease: ease.optional() })
 const transform = z.object({ x: anim, y: anim, scale: anim, rotation: anim, opacity: anim })
 const visual = z.object({
   transform,
