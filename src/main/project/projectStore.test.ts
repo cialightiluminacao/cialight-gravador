@@ -359,6 +359,25 @@ describe('ProjectStore: arquivos gerados (narração) e recuperação', () => {
     expect(() => store.writeGenerated(c.handle, new Uint8Array([1]), 0)).toThrow()
   })
 
+  it('revisão final (M4): clearPendingGenerated só apaga gravação pendente (com marcador ou aberta), nunca outro arquivo de generated/', () => {
+    const gen = join(root, 'p-a', 'generated')
+    mkdirSync(gen, { recursive: true })
+    // cache de áudio processado e um arquivo vazio sem marcador (ffmpeg começando a escrever)
+    writeFileSync(join(gen, 'a1.audio-dn-sh.f-1.m4a'), 'pcm')
+    writeFileSync(join(gen, 'vazio.m4a'), '')
+    store.clearPendingGenerated('p-a', 'generated/a1.audio-dn-sh.f-1.m4a', { discardFile: true })
+    store.clearPendingGenerated('p-a', 'generated/vazio.m4a', { discardFile: true })
+    expect(existsSync(join(gen, 'a1.audio-dn-sh.f-1.m4a'))).toBe(true)
+    expect(existsSync(join(gen, 'vazio.m4a'))).toBe(true)
+    // narração já salva no projeto (marcador limpo): discardFile não a apaga mais
+    const a = store.openGeneratedWrite('p-a', 'narracao', 'm4a', meta(1))
+    store.writeGenerated(a.handle, new Uint8Array([1, 2]), 0)
+    store.closeGeneratedWrite(a.handle)
+    store.clearPendingGenerated('p-a', a.rel)
+    store.clearPendingGenerated('p-a', a.rel, { discardFile: true })
+    expect(existsSync(join(root, 'p-a', a.rel))).toBe(true)
+  })
+
   it('nome/extensão inválidos e meta malformado no disco', () => {
     expect(() => store.openGeneratedWrite('p-a', '../x', 'm4a', meta(1))).toThrow()
     expect(() => store.openGeneratedWrite('p-a', 'narracao', 'webm' as 'm4a', meta(1))).toThrow()

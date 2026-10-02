@@ -437,6 +437,8 @@ export class ProjectStore {
   /**
    * Tira o marcador (o asset foi salvo, ou a gravação não tem conserto). Arquivo vazio sai junto; `discardFile` apaga
    * o arquivo mesmo com bytes (gravação que não chegou a valer: falha ao começar, nada gravado), fechando-o se aberto.
+   * Só apaga gravação pendente (marcador presente ou escrita aberta): cache de áudio processado, narração já salva
+   * e qualquer outro arquivo de generated/ ficam.
    */
   clearPendingGenerated(id: string, rel: string, opts?: { discardFile?: boolean }, owner?: number): void {
     if (!rel.startsWith('generated/')) throw new Error(`arquivo gerado inválido: ${rel}`)
@@ -445,7 +447,9 @@ export class ProjectStore {
     const open = [...this.generatedWrites].filter(([, w]) => w.projectId.toLowerCase() === id.toLowerCase() && w.rel === rel)
     for (const [h] of open) this.ownedWrite(h, owner)
     for (const [h] of open) this.closeGeneratedWrite(h)
+    const pending = open.length > 0 || existsSync(`${file}${PENDING_SUFFIX}`)
     rmSync(`${file}${PENDING_SUFFIX}`, { force: true })
+    if (!pending) return
     let empty = false
     try {
       empty = statSync(file).size === 0
