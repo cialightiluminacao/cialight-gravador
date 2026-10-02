@@ -57,7 +57,17 @@ Editor multi-faixa dentro do app: **Histórico → Editar** (ou **Projetos → N
 - **Reenquadrar:** **Reenquadrar** na barra de cima converte o projeto para **9:16**, **1:1** ou **4:5**, em "Preencher" (com **pontos de foco**: clique no visualizador marca o ponto que fica no centro naquele instante; a câmera vai suave de um ponto ao outro e o ponto continua no centro durante um zoom do clipe) ou "Caber inteiro". O padrão é **Criar cópia** ("<nome> (Vertical)", numa pasta própria com os proxies, sem reprocessar a mídia) — o original fica intacto; "Este projeto" aplica em um passo de desfazer. PiP e textos mantêm o tamanho relativo; os efeitos de privacidade continuam sobre o mesmo conteúdo (ancorados ou ajustados ao novo quadro) e o painel lista o que precisa de conferência (efeito fora do novo quadro, buraco do "Borrar tudo menos…" fechado, anotações).
 - **Compatibilidade:** projetos salvos pela v1.4 continuam abrindo na v1.3, **exceto** os que usam recursos novos sem equivalente nela (keyframes em corte, ajustes, raio ou tamanho do texto; Ken Burns num PiP): esses só abrem na v1.4 — atualize todas as máquinas. Efeitos ancorados e as animações Girar/Quicar/Desfoque abrem na v1.3 de forma segura (região fixa que cobre todo o movimento — no "Borrar tudo menos…" ancorado, o quadro inteiro borrado; animação trocada por Fade/Deslizar).
 
-- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4)
+**Exportação completa (v1.7.0):**
+
+- **Presets:** `Ctrl+E` (ou **Exportar**) abre o diálogo com **WhatsApp (até 64 MB)**, **YouTube 1080p**, **YouTube 4K**, **Instagram Reels/Stories (9:16)**, **Feed 1:1**, **Feed 4:5**, **Original (máxima)** e **Edição (intermediário)**, com a estimativa de tamanho ao vivo. Presets de outra proporção aparecem desativados com o motivo (o vídeo nunca é cortado nem ganha tarjas sem você pedir). **Personalizar** ajusta resolução, fps, qualidade por taxa ou por **tamanho alvo** (ex.: "caber em 25 MB") e o codec.
+- **HEVC:** disponível quando o computador tem codificador de hardware para ele (senão aparece desativado com o motivo); se falhar, o vídeo sai em H.264 com aviso.
+- **GIF, quadro PNG e só áudio:** no mesmo diálogo — **GIF** curto (até 30 s; 320/480/640 px, 10/12/15 fps), **Quadro (PNG)** do cursor no tamanho do projeto (também com `Ctrl+Shift+E` ou o botão **Quadro**, direto na pasta) e **Só áudio** (MP3, M4A ou WAV, a mesma mixagem do vídeo). Todos respeitam o trecho **I–O** e os efeitos de privacidade.
+- **Capítulos do YouTube:** os marcadores (com rótulo) viram a lista de capítulos ("00:00 Abertura…"), relativa ao trecho exportado; copie ou salve como .txt no diálogo, ou use **Capítulos** na barra de cima. Avisos quando o YouTube não aceitaria a lista (menos de 3 capítulos, capítulo com menos de 10 s).
+- **Fila de exportações:** **Adicionar à fila** guarda o projeto como está e as configurações; as exportações rodam uma de cada vez enquanto você continua editando, no painel **Exportações** (progresso, reordenar, cancelar, abrir pasta). A fila não é salva: sair do editor ou fechar o app com exportações ativas pede confirmação.
+- **Codificador de reserva:** se o codificador de vídeo do Windows falhar (hardware e software), a exportação continua com o libx264 do ffmpeg (mesma imagem e mesmos efeitos de privacidade).
+- **Memória e mídia movida:** texturas e miniaturas da linha do tempo têm teto de memória (512 MB / 200 MB) em projetos grandes. Se uma pasta de mídia foi movida ou renomeada, ao abrir o projeto o editor procura os arquivos (mesmo nome e tamanho) e propõe reapontar — você confere o caminho antigo → novo e confirma.
+
+- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4; §24: da F7)
 - Checklist manual: [docs/qa-checklist.md](docs/qa-checklist.md) (seção Editor)
 
 QA automatizado via CDP (eventos sintéticos na página, sem mexer no mouse/teclado do Windows; tudo em `test-out/`), depois de `npm run build`:
@@ -88,9 +98,15 @@ node scripts/qa/editor-f4-reframe.mjs # Reenquadrar: painel, pontos de foco, est
 node scripts/qa/editor-f4-e2e.mjs     # F4 ponta a ponta: blur vinculado → zoom 2× → Ancorar → Pop/Desfoque → curva
                                       # personalizada → Alta 1080p → Reenquadrar 9:16 (cópia, foco) → Vertical 9:16;
                                       # ffmpeg confere tamanhos, durações, o foco no centro e o texto ilegível no zoom
+node scripts/qa/editor-f7-export.mjs  # exportação completa: presets, HEVC, tamanho alvo, GIF/PNG/só áudio, capítulos, fila
+node scripts/qa/editor-f7-relink.mjs  # relink: pasta de mídia movida → "Mídia encontrada em outro local" → reapontar
+node scripts/qa/editor-f7-e2e.mjs     # F7 ponta a ponta: tarja + blur + marcadores → fila (YouTube 1080p, GIF 480, MP3)
+                                      # → PNG (Ctrl+Shift+E) → capítulos → ffprobe e privacidade nos pixels → relink → memória
 ```
 
-Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/` e `docs/qa/editor-f4/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
+Testes reais dos formatos (GIF, PNG, só áudio, fila e codificador de reserva): `npm run test:editor-formats`.
+
+Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/`, `docs/qa/editor-f4/` e `docs/qa/editor-f7/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
 
 ## Estrutura
 
