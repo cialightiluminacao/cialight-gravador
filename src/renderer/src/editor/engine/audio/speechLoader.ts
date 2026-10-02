@@ -1,10 +1,8 @@
 // Carregamento da fala (sem dependência do worker, testável): lê os speech.json pela URL (cache por URL; falha não
 // fica em cache e é avisada uma vez por URL). No audio worker (ducking) monta o plano com a fala sem nunca rejeitar —
-// erro ao montar mantém o plano anterior (sem fala) e é avisado; no diálogo "Remover silêncios" (thread principal)
-// carrega a fala sem margem nem mescla (SILENCE_SPEECH_OPTS).
+// erro ao montar mantém o plano anterior (sem fala) e é avisado; o painel "Remover silêncios" (thread principal) lê os
+// arquivos (loadFiles: limiar da análise + silêncios) e tira a fala sem margem nem mescla (SILENCE_SPEECH_OPTS).
 import { speechFromFile, type SpeechFile, type SpeechInterval } from '@shared/editor/speech'
-
-type SpeechOpts = Parameters<typeof speechFromFile>[1]
 
 export type FetchJson = (url: string) => Promise<unknown>
 
@@ -16,27 +14,28 @@ function isSpeechFile(x: unknown): x is SpeechFile {
 }
 
 export class SpeechLoader {
-  private readonly cache = new Map<string, Promise<SpeechInterval[] | null>>()
+  private readonly cache = new Map<string, Promise<SpeechFile | null>>()
   private readonly reported = new Set<string>()
+  private readonly intervals = new WeakMap<SpeechFile, SpeechInterval[]>()
 
-  /** onFailed(assetId): speech.json que não carregou (uma vez por URL). opts: margem/mescla (padrão: SPEECH_DEFAULTS). */
-  constructor(private readonly fetchJson: FetchJson, private readonly onFailed: (assetId: string) => void, private readonly opts: SpeechOpts = {}) {}
+  /** onFailed(assetId): speech.json que não carregou (uma vez por URL). */
+  constructor(private readonly fetchJson: FetchJson, private readonly onFailed: (assetId: string) => void) {}
 
-  /** Intervalos de fala por assetId (urls: assetId → URL do speech.json); o que não carregar fica de fora. */
-  async load(urls: Record<string, string>): Promise<Record<string, SpeechInterval[]>> {
-    const out: Record<string, SpeechInterval[]> = {}
+  /** speech.json por assetId (urls: assetId → URL); o que não carregar fica de fora (e é avisado uma vez por URL). */
+  async loadFiles(urls: Record<string, string>): Promise<Record<string, SpeechFile>> {
+    const out: Record<string, SpeechFile> = {}
     await Promise.all(
       Object.entries(urls).map(async ([id, url]) => {
         let p = this.cache.get(url)
         if (!p) {
           p = this.fetchJson(url)
-            .then((json) => (isSpeechFile(json) ? speechFromFile(json, this.opts) : null))
+            .then((json) => (isSpeechFile(json) ? json : null))
             .catch(() => null)
           this.cache.set(url, p)
         }
-        const iv = await p
-        if (iv) {
-          out[id] = iv
+        const file = await p
+        if (file) {
+          out[id] = file
           return
         }
         if (this.cache.get(url) === p) this.cache.delete(url) // tenta de novo no próximo projeto
@@ -46,6 +45,18 @@ export class SpeechLoader {
         }
       })
     )
+    return out
+  }
+
+  /** Intervalos de fala por assetId com a margem/mescla padrão (SPEECH_DEFAULTS: ducking). */
+  async load(urls: Record<string, string>): Promise<Record<string, SpeechInterval[]>> {
+    const files = await this.loadFiles(urls)
+    const out: Record<string, SpeechInterval[]> = {}
+    for (const [id, f] of Object.entries(files)) {
+      let iv = this.intervals.get(f)
+      if (!iv) this.intervals.set(f, (iv = speechFromFile(f)))
+      out[id] = iv
+    }
     return out
   }
 

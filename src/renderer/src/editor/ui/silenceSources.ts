@@ -13,10 +13,19 @@ export function silenceSourceTracks(p: Project): Track[] {
   return p.tracks.filter((t) => audioItems(p, t).length > 0).map((t, i) => ({ t, i })).sort((a, b) => rank(a.t) - rank(b.t) || a.i - b.i).map((x) => x.t)
 }
 
-/** Faixa sugerida: a preferida (ex.: a do item do menu), se tiver som; senão a primeira de silenceSourceTracks. */
-export function defaultSilenceSource(p: Project, preferred?: string | null): string | null {
+/**
+ * Faixas de referência sugeridas: todas as de papel Voz (mais a preferida — a do item do menu — se tiver som); sem
+ * nenhuma, a primeira de silenceSourceTracks.
+ */
+export function defaultSilenceSources(p: Project, preferred?: string | null): string[] {
   const all = silenceSourceTracks(p)
-  return all.find((t) => t.id === preferred)?.id ?? all[0]?.id ?? null
+  const out = all.filter((t) => t.role === 'voice' || t.id === preferred).map((t) => t.id)
+  return out.length ? out : all.slice(0, 1).map((t) => t.id)
+}
+
+/** Limiar em dB com o sinal de menos tipográfico ("−35 dB"). */
+export function formatDb(db: number): string {
+  return `${db < 0 ? '−' : ''}${Math.abs(db).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} dB`
 }
 
 /** "12,3 s" / "1 min 05 s" (economia mostrada no diálogo). */

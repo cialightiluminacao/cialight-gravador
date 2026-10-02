@@ -4,7 +4,7 @@ import { ipcErrorMessage } from '@/lib/ipcError'
 import type { Asset } from '@shared/editor/project'
 import { useAppStore } from '@/app/store'
 import { flushAutosave, startAutosave, useEditorStore } from '../state/editorStore'
-import { shortcutFor } from '../shortcuts'
+import { shortcutFor, TRANSPORT_ACTIONS } from '../shortcuts'
 import { createEditorEngine, type EditorEngine } from './editorEngine'
 import { runShortcut, seekTo } from './editorActions'
 import { enqueuePending, importPaths } from './mediaImport'
@@ -163,10 +163,16 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       if (e.defaultPrevented || (e.repeat && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && !frameStep(e))) return
       if (useEditorStore.getState().project?.id !== projectId) return // outro projeto ainda no store (troca em curso)
       if (gestureActive() || viewerGestureActive()) return // arraste na linha do tempo/no visualizador: o teclado é do gesto
-      if (document.querySelector('[role="dialog"]')) return // diálogo aberto (ex.: exportação): o teclado é dele
+      // diálogo aberto (ex.: exportação): o teclado é dele. O painel "Remover silêncios" (não modal) só deixa passar o
+      // transporte, e os controles dele (sliders, interruptores, botões) ficam com as próprias teclas
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+      const panel = dialogs.find((d) => d.hasAttribute('data-silence-dialog'))
+      if (dialogs.some((d) => d !== panel)) return
       const t = e.target as Element | null
+      if (panel && t instanceof Node && panel.contains(t)) return
       if (!e.ctrlKey && t?.closest?.(OWN_KEYS)) return
       const action = shortcutFor(e, { kHeld })
+      if (panel && action && !TRANSPORT_ACTIONS.has(action)) return
       if (action && runShortcut(action, engineRef.current?.playback ?? null)) e.preventDefault()
     }
     // arquivos soltos fora da biblioteca não podem navegar a janela para o arquivo

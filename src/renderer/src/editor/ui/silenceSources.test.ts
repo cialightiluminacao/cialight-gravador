@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import type { Asset, Project, Track } from '@shared/editor/project'
-import { defaultSilenceSource, formatSaved, silenceSourceTracks } from './silenceSources'
+import { defaultSilenceSources, formatDb, formatSaved, silenceSourceTracks } from './silenceSources'
 
 const S = 1_000_000
 const asset = (id: string, kind: Asset['kind'], audio: boolean): Asset => ({
@@ -21,14 +21,18 @@ describe('fontes do Remover silêncios', () => {
   it('só faixas com som; Voz primeiro, música por último', () => {
     expect(silenceSourceTracks(proj()).map((t) => t.id)).toEqual(['t_mic', 't_sys', 't_vid', 't_mus'])
   })
-  it('sugestão: a preferida se tiver som, senão a primeira', () => {
-    expect(defaultSilenceSource(proj())).toBe('t_mic')
-    expect(defaultSilenceSource(proj(), 't_vid')).toBe('t_vid')
-    expect(defaultSilenceSource(proj(), 't_scr')).toBe('t_mic')
-    expect(defaultSilenceSource(createEmptyProject('x'))).toBeNull()
+  it('sugestão: todas as de Voz (+ a preferida, se tiver som); sem Voz, a primeira com som', () => {
+    expect(defaultSilenceSources(proj())).toEqual(['t_mic'])
+    expect(defaultSilenceSources(proj(), 't_vid')).toEqual(['t_mic', 't_vid'])
+    expect(defaultSilenceSources(proj(), 't_scr')).toEqual(['t_mic'])
+    const noVoice = { ...proj(), tracks: proj().tracks.filter((t) => t.role !== 'voice') }
+    expect(defaultSilenceSources(noVoice)).toEqual(['t_sys'])
+    expect(defaultSilenceSources(createEmptyProject('x'))).toEqual([])
   })
   it('formatSaved', () => {
     expect(formatSaved(5_400_000)).toBe('5,4 s')
     expect(formatSaved(65_000_000)).toBe('1 min 05 s')
+    expect(formatDb(-35)).toBe('−35 dB')
+    expect(formatDb(-37.5)).toBe('−37,5 dB')
   })
 })

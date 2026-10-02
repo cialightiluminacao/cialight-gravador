@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isEditableTarget, shortcutFor, type KeyLike } from './shortcuts'
+import { isEditableTarget, shortcutFor, TRANSPORT_ACTIONS, type KeyLike } from './shortcuts'
 
 const key = (k: string, mods: Partial<KeyLike> = {}): KeyLike => ({ key: k, ctrlKey: false, shiftKey: false, altKey: false, ...mods })
 
@@ -72,5 +72,12 @@ describe('shortcutFor', () => {
     expect(shortcutFor(key('j'), { kHeld: false })).toBe('shuttleBack')
     expect(shortcutFor(key('k'), { kHeld: true })).toBe('pause')
     expect(shortcutFor(key('s'), { kHeld: true })).toBe('split')
+  })
+})
+
+describe('TRANSPORT_ACTIONS (painel não modal aberto)', () => {
+  it('Espaço, J/K/L, setas e Home/End passam; edição não', () => {
+    for (const k of [key(' '), key('j'), key('k'), key('l'), key('ArrowLeft'), key('ArrowRight', { shiftKey: true }), key('Home'), key('End')]) expect(TRANSPORT_ACTIONS.has(shortcutFor(k)!)).toBe(true)
+    for (const k of [key('s'), key('Delete'), key('z', { ctrlKey: true }), key('b')]) expect(TRANSPORT_ACTIONS.has(shortcutFor(k)!)).toBe(false)
   })
 })

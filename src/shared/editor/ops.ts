@@ -913,6 +913,150 @@ export function deleteRange(p: Project, fromUs: Us, toUs: Us, opts?: { trackIds?
   })
 }
 
+/**
+ * Vários deleteRange de uma vez (remover silêncios: centenas de cortes num projeto longo), com o MESMO resultado de
+ * aplicar deleteRange do último intervalo para o primeiro — mas numa única edição: cada faixa é varrida uma vez contra
+ * os intervalos ordenados (do fim para o início), os pedaços ficam em tempo original e só no fim andam o total cortado
+ * antes deles. Os vínculos repetem passo a passo o que cada deleteRange faria (relinkAcross por intervalo sobre os
+ * pedaços, efeitos órfãos, linkId sem par), mas só nos grupos que o intervalo tocou. Intervalos sobrepostos: EditError.
+ */
+export function deleteRanges(p: Project, ranges: readonly { fromUs: Us; toUs: Us }[], opts?: { trackIds?: string[] }): Project {
+  const rs = ranges.map((r) => ({ from: Math.max(0, Math.round(r.fromUs)), to: Math.round(r.toUs) })).sort((a, b) => a.from - b.from)
+  if (!rs.length) return p
+  rs.forEach((r, i) => {
+    if (r.to <= r.from) throw new EditError('invalid', 'Intervalo vazio')
+    if (i > 0 && r.from < rs[i - 1].to) throw new EditError('invalid', 'Intervalos sobrepostos')
+  })
+  const trackIds = opts?.trackIds
+    ? opts.trackIds.map((id) => { const t = mustTrack(p, id); assertUnlocked(t); return id })
+    : p.tracks.filter((t) => !t.locked).map((t) => t.id)
+  const base = produce(p, stampLegacyTargets)
+  const cutTracks = new Set(trackIds)
+
+  // nós = itens em evolução (tempo original); `link` é o vínculo corrente (o linkId do item é reescrito no fim)
+  interface Node { it: Item; link: string | undefined }
+  const members = new Map<string, Set<Node>>()
+  const mediaCount = new Map<string, number>()
+  const isMedia = (n: Node): boolean => n.it.type !== 'effect'
+  const join = (n: Node, link: string | undefined): void => {
+    n.link = link
+    if (!link) return
+    let s = members.get(link)
+    if (!s) members.set(link, (s = new Set()))
+    s.add(n)
+    if (isMedia(n)) mediaCount.set(link, (mediaCount.get(link) ?? 0) + 1)
+  }
+  const leave = (n: Node): void => {
+    if (!n.link) return
+    members.get(n.link)?.delete(n)
+    if (isMedia(n)) mediaCount.set(n.link, (mediaCount.get(n.link) ?? 1) - 1)
+    n.link = undefined
+  }
+  const pending: Node[][] = [] // por faixa cortada: itens ainda não alcançados pelos cortes, ordenados por início
+  const done: Node[][] = [] // por faixa: itens prontos
+  base.tracks.forEach((t, ti) => {
+    const nodes = t.items.map((it) => { const n: Node = { it, link: undefined }; join(n, it.linkId); return n })
+    pending[ti] = cutTracks.has(t.id) ? [...nodes].sort((a, b) => a.it.startUs - b.it.startUs) : []
+    done[ti] = cutTracks.has(t.id) ? [] : nodes
+  })
+
+  for (let j = rs.length - 1; j >= 0; j--) {
+    const { from, to } = rs[j]
+    const cutLinks = new Set<string>()
+    const removedMedia = new Set<string>()
+    const touched = new Set<string>()
+    base.tracks.forEach((_, ti) => {
+      const pend = pending[ti]
+      // começam depois do corte: nenhum corte anterior os alcança
+      while (pend.length && pend[pend.length - 1].it.startUs >= to) done[ti].push(pend.pop()!)
+      // cruzam o corte (sem sobreposição na faixa: são os últimos com fim > from)
+      const crossing: Node[] = []
+      while (pend.length && end(pend[pend.length - 1].it) > from) crossing.push(pend.pop()!)
+      const back: Node[] = []
+      for (const n of crossing.reverse()) {
+        const it = n.it, s = it.startUs, e = end(it)
+        const left = s < from && from - s >= MIN_ITEM_US
+        const right = e > to && e - to >= MIN_ITEM_US
+        if (n.link) touched.add(n.link)
+        if (left && right && n.link) cutLinks.add(n.link)
+        if (right) {
+          const r = sliceItem(it, to, e, true)
+          if (left) {
+            const rn: Node = { it: { ...r, id: newId('i_') }, link: undefined }
+            join(rn, n.link)
+            done[ti].push(rn)
+          } else {
+            n.it = r
+            done[ti].push(n)
+          }
+        }
+        if (left) {
+          n.it = sliceItem(it, s, from, true)
+          back.push(n)
+        }
+        if (!left && !right) {
+          if (n.link && isMedia(n)) removedMedia.add(n.link)
+          leave(n)
+        }
+      }
+      pend.push(...back)
+    })
+    // dropOrphanLinks: grupo sem mídia → os efeitos perdem o vínculo
+    for (const link of removedMedia) {
+      if ((mediaCount.get(link) ?? 0) > 0) continue
+      for (const n of [...(members.get(link) ?? [])]) leave(n)
+    }
+    // relinkAcross: os membros depois do corte ganham um vínculo novo comum
+    for (const link of cutLinks) {
+      const mem = [...(members.get(link) ?? [])]
+      const media = mem.filter(isMedia)
+      const deciders = media.length ? media : mem
+      if (!deciders.some((n) => n.it.startUs < from) || !deciders.some((n) => n.it.startUs >= to)) continue
+      const nl = newId('l_')
+      touched.add(nl)
+      for (const n of mem) if (n.it.startUs >= to) { leave(n); join(n, nl) }
+    }
+    // finalize: linkId sem par sai (no 1º corte aplicado, em todos os grupos, como o finalize do deleteRange)
+    for (const link of j === rs.length - 1 ? [...members.keys()] : touched) {
+      const mem = members.get(link)
+      if (mem && mem.size < 2) for (const n of [...mem]) leave(n)
+    }
+  }
+
+  // deslocamento: total cortado antes do início (em tempo original: nenhum item fica dentro de um corte)
+  const ends = rs.map((r) => r.to)
+  const removedBefore: Us[] = [0]
+  for (const r of rs) removedBefore.push(removedBefore[removedBefore.length - 1] + r.to - r.from)
+  const shiftOf = (t: Us): Us => {
+    let lo = 0, hi = ends.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (ends[mid] <= t) lo = mid + 1
+      else hi = mid
+    }
+    return removedBefore[lo]
+  }
+  return produce(base, (d) => {
+    base.tracks.forEach((t, ti) => {
+      const cut = cutTracks.has(t.id)
+      const nodes = [...done[ti], ...pending[ti]]
+      d.tracks[ti].items = nodes.map((n) => {
+        let it = n.link === n.it.linkId ? n.it : withLink(n.it, n.link)
+        if (cut) {
+          const sh = shiftOf(it.startUs)
+          if (sh) it = { ...it, startUs: it.startUs - sh }
+        }
+        return it
+      })
+    })
+    if (d.tracks.every((t) => t.locked || cutTracks.has(t.id))) {
+      d.markers = d.markers.filter((m) => !rs.some((r) => m.tUs >= r.from && m.tUs < r.to))
+      for (const m of d.markers) m.tUs -= shiftOf(m.tUs)
+    }
+    finalize(d)
+  })
+}
+
 // ---------------------------------------------------------------- vínculo / áudio
 
 export function linkItems(p: Project, itemIds: string[]): Project {

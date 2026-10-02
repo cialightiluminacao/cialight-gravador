@@ -42,10 +42,11 @@ describe('SpeechLoader (fala do ducking no audio worker)', () => {
     expect(Object.keys(got as object)).toEqual(['v'])
   })
 
-  it('margem/mescla do chamador (remover silêncios: sem margem) em vez do padrão', async () => {
-    const l = new SpeechLoader(async () => file, () => {}, { padUs: 0, mergeGapUs: 0 })
-    expect((await l.load({ v: 'u' })).v).toEqual([{ fromUs: 2 * S, toUs: 4 * S }])
-    const d = new SpeechLoader(async () => file, () => {})
-    expect((await d.load({ v: 'u' })).v).toEqual([{ fromUs: 2 * S - 120_000, toUs: 4 * S + 120_000 }])
+  it('loadFiles devolve o arquivo (limiar da análise + silêncios brutos) com o mesmo cache por URL', async () => {
+    const fetchJson = vi.fn(async () => file)
+    const l = new SpeechLoader(fetchJson, () => {})
+    expect(await l.loadFiles({ v: 'u' })).toEqual({ v: file })
+    expect((await l.load({ v: 'u' })).v).toEqual([{ fromUs: 2 * S - 120_000, toUs: 4 * S + 120_000 }])
+    expect(fetchJson).toHaveBeenCalledTimes(1)
   })
 })

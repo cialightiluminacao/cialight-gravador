@@ -96,7 +96,7 @@ export function TopBar({ onBack, onExport }: { onBack: () => void; onExport: () 
     useEditorStore.getState().apply((p) => ({ ...p, canvas: { ...p.canvas, ...canvasForAspect(p, id as AspectId) } }))
   }
   return (
-    <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-surface/70 px-2">
+    <header data-editor-topbar="" className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-surface/70 px-2">
       <Tip content="Salvar e voltar aos projetos" side="bottom">
         <Button variant="ghost" size="sm" className="h-8 gap-1 px-2" onClick={onBack} aria-label="Voltar aos projetos">
           <ChevronLeft className="h-4 w-4" /> Projetos

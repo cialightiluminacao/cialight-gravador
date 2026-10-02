@@ -28,6 +28,7 @@ const DUR_S = 16
 const SPEECH = [[0.5, 3], [5, 8], [8.25, 10], [13, 16]]
 // padrões do painel: silêncio ≥ 0,7 s, margem 0,15 s → cortes 3,15–4,85 e 10,15–12,85 (0–0,5 s é curto demais)
 const EXPECTED_SAVED_S = 1.7 + 2.7
+const SYSTEM = [11, 11.5]
 
 mkdirSync(SHOTS, { recursive: true })
 const settingsBefore = existsSync(SETTINGS) ? readFileSync(SETTINGS) : null
@@ -49,7 +50,9 @@ function makeSession() {
     '-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30',
     '-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=30',
     '-f', 'lavfi', '-i', `aevalsrc='${voice}':s=48000`,
-    '-t', String(DUR_S), '-map', '0:v', '-map', '1:v', '-map', '2:a',
+    // áudio do sistema: um som em 11–11,5 s, dentro da pausa de 3 s da voz
+    '-f', 'lavfi', '-i', `aevalsrc='0.3*sin(2*PI*660*t)*between(t,${SYSTEM[0]},${SYSTEM[1]})':s=48000`,
+    '-t', String(DUR_S), '-map', '0:v', '-map', '1:v', '-map', '2:a', '-map', '3:a',
     '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-ac', '2',
     '-movflags', '+frag_keyframe+empty_moov+default_base_moof', join(dir, 'rec.mp4')
   ])
@@ -60,8 +63,8 @@ function makeSession() {
     video: { width: 1280, height: 720, fps: 30, codec: 'avc1.640028', bitrate: 8e6 },
     webcam: { deviceId: 'x', label: 'Cam', width: 640, height: 360, mirrored: false },
     mic: { deviceId: 'y', label: 'Mic', echoCancellation: false, noiseSuppression: true, autoGainControl: true },
-    systemAudio: false,
-    tracks: { screen: 0, webcam: 1, mic: 0 },
+    systemAudio: true,
+    tracks: { screen: 0, webcam: 1, mic: 0, system: 1 },
     durationMs: DUR_S * 1000,
     pauses: [], pip: [pip],
     strokes: [
@@ -203,13 +206,14 @@ async function main() {
   await ev(`window.__navigate('editor:${pid}'); return 1`)
   let ready = false
   for (let i = 0; i < 150 && !ready; i++) {
-    ready = await ev(`const s = window.__qaEditor?.store.getState(); return !!s?.project && s.project.assets.every((a) => a.status === 'ready') && !!s.project.assets.find((a) => a.id.endsWith('-mic'))?.speech`)
+    ready = await ev(`const s = window.__qaEditor?.store.getState(); return !!s?.project && s.project.assets.every((a) => a.status === 'ready') && ['-mic', '-system'].every((k) => !!s.project.assets.find((a) => a.id.endsWith(k))?.speech)`)
     if (!ready) await sleep(1000)
   }
-  check('gravação aberta, ingestão e análise de fala do microfone prontas', ready, null)
+  check('gravação aberta, ingestão e análise de fala do microfone e do áudio do sistema prontas', ready, null)
   await ev(HELPERS + '; return 1')
   const shape = await ev(`return T.project().tracks.map((t) => t.name + ':' + (t.role ?? '') + ':' + t.items.map((i) => i.type).join(','))`)
-  check('faixas: Tela, Webcam, Anotações, Microfone (Voz)', shape.join('|') === 'Tela::media|Webcam::media|Anotações::annotations|Microfone:voice:media', shape)
+  check('faixas: Tela, Webcam, Anotações, Microfone (Voz), Áudio do sistema', shape.join('|') === 'Tela::media|Webcam::media|Anotações::annotations|Microfone:voice:media|Áudio do sistema:sfx:media', shape)
+  const ids = await ev(`const t = (n) => T.project().tracks.find((x) => x.name === n).id; return { mic: t('Microfone'), sys: t('Áudio do sistema') }`)
 
   // blur vinculado à tela (como o addEffect sobre o clipe faz): 1–15 s, canto superior esquerdo, numa faixa Efeitos
   await ev(`
@@ -238,12 +242,14 @@ async function main() {
     await ev(`await T.clickEl(T.button('Remover silêncios')); return 1`)
     let r = null
     for (let i = 0; i < 40; i++) {
-      r = await ev(`const d = document.querySelector('[data-silence-dialog]'); return d ? { summary: d.querySelector('[data-silence-summary]').textContent, bands: document.querySelectorAll('[data-silence-cut]').length, cuts: window.__qaEditor.silence.getState().cuts, track: d.querySelector('button[role="combobox"]')?.textContent ?? '' } : null`)
+      r = await ev(`const d = document.querySelector('[data-silence-dialog]'); const on = (id) => d.querySelector('[data-silence-source="' + id + '"] [role="switch"]')?.getAttribute('aria-checked'); return d ? { summary: d.querySelector('[data-silence-summary]').textContent, bands: document.querySelectorAll('[data-silence-cut]').length, cuts: window.__qaEditor.silence.getState().cuts, mic: on('${ids.mic}'), sys: on('${ids.sys}'), threshold: d.querySelector('[data-silence-threshold]')?.textContent ?? '', other: d.querySelector('[data-silence-other="${ids.sys}"]')?.textContent ?? '', top: d.getBoundingClientRect().top, bar: document.querySelector('[data-editor-topbar]').getBoundingClientRect().bottom } : null`)
       if (r?.cuts.length) break
       await sleep(250)
     }
     const saved = r ? r.cuts.reduce((n, c) => n + c.toUs - c.fromUs, 0) / S : NaN
-    check('painel aberto com a faixa Microfone como voz de referência', !!r && r.track.includes('Microfone'), r)
+    check('painel aberto abaixo da barra superior; referência = a faixa de Voz (Microfone), o áudio do sistema desligado', !!r && r.top >= r.bar && r.mic === 'true' && r.sys === 'false', r)
+    check('limiar lido da análise, com o menos tipográfico (−35 dB)', !!r && r.threshold.includes('−35 dB por 0,35 s'), r?.threshold)
+    check('aviso: há fala em "Áudio do sistema" dentro de 1 corte', !!r && r.other.includes('Áudio do sistema') && r.other.includes('1 corte'), r?.other)
     check(`2 cortes (pausas de 2 s e 3 s; a de 0,5 s no início e a de 0,25 s ficam): ${r?.cuts.map((c) => `${(c.fromUs / S).toFixed(2)}–${(c.toUs / S).toFixed(2)}`).join(', ')}`, r?.cuts.length === 2, r?.cuts)
     check(`economia ${saved.toFixed(2)} s ≈ ${EXPECTED_SAVED_S} s (±0,2) e mostrada no resumo`, Math.abs(saved - EXPECTED_SAVED_S) <= 0.2 && /−4,[2-6] s/.test(r?.summary ?? ''), r?.summary)
     check('pré-visualização: 2 faixas vermelhas na régua', r?.bands === 2, r?.bands)
@@ -263,6 +269,33 @@ async function main() {
       await press('PageDown', 4)
       return { n, at, back: window.__qaEditor.silence.getState().cuts.length, atBack: shown() }`)
     check('duração mínima 2,70 s: só a pausa de 3 s; de volta a 0,70 s: as duas', r2.n === 1 && r2.at === '2,70 s' && r2.back === 2 && r2.atBack === '0,70 s', r2)
+
+    // incluir o áudio do sistema como referência: o som em 11–11,5 s divide a pausa de 3 s (sem aviso); desligar volta
+    const inc = await ev(`
+      const d = document.querySelector('[data-silence-dialog]')
+      await T.clickEl([...d.querySelectorAll('button')].find((b) => b.textContent.includes('Incluir como referência')))
+      await new Promise((r) => setTimeout(r, 300))
+      const cuts = window.__qaEditor.silence.getState().cuts.map((c) => [c.fromUs, c.toUs])
+      const warn = !!d.querySelector('[data-silence-other]')
+      const sys = d.querySelector('[data-silence-source="${ids.sys}"] [role="switch"]')
+      return { cuts, warn, on: sys.getAttribute('aria-checked') }`)
+    await sleep(300)
+    await shot('f3-silencio-06-incluir-sistema.png')
+    const split = inc.cuts.filter(([a, b]) => a >= 10 * S && b <= 13 * S)
+    check('"Incluir como referência": sistema ligado, pausa de 3 s dividida em volta do som (sem cortar 11–11,5 s), aviso some', inc.on === 'true' && !inc.warn && split.length === 2 && split[0][1] <= SYSTEM[0] * S && split[1][0] >= SYSTEM[1] * S, inc)
+    const off = await ev(`await T.clickEl(document.querySelector('[data-silence-dialog] [data-silence-source="${ids.sys}"] [role="switch"]')); await new Promise((r) => setTimeout(r, 300)); return window.__qaEditor.silence.getState().cuts.length`)
+    check('desligar o sistema: de volta aos 2 cortes', off === 2, off)
+
+    // atalhos de transporte com o painel aberto (foco fora dele): Espaço toca, K pausa; S (dividir) não passa
+    const keys = await ev(`
+      document.activeElement?.blur()
+      const k = (key, code) => document.body.dispatchEvent(new KeyboardEvent('keydown', { key, code, bubbles: true }))
+      const past = T.st().history.past.length
+      k(' ', 'Space'); await new Promise((r) => setTimeout(r, 400)); const playing = T.st().playing
+      k('k', 'KeyK'); document.body.dispatchEvent(new KeyboardEvent('keyup', { key: 'k', code: 'KeyK', bubbles: true })); await new Promise((r) => setTimeout(r, 200)); const paused = !T.st().playing
+      k('s', 'KeyS'); await T.settle()
+      return { playing, paused, split: T.st().history.past.length !== past, open: !!document.querySelector('[data-silence-dialog]') }`)
+    check('painel aberto: Espaço toca e K pausa; S (dividir) é ignorado; o painel continua aberto', keys.playing && keys.paused && !keys.split && keys.open, keys)
   }
 
   const cuts = await ev(`return window.__qaEditor.silence.getState().cuts`)
@@ -297,10 +330,25 @@ async function main() {
   await ev(`window.__qaEditor.store.getState().setZoom(60); window.__qaEditor.store.getState().setScroll(0); await T.settle(); return 1`)
   await shot('f3-silencio-04-timeline-cortada.png')
 
-  console.log('desfazer em 1 passo')
+  console.log('desfazer em 1 passo (pelo "Desfazer" do aviso)')
+  const toastUndo = `[...document.querySelectorAll('[data-sonner-toast] button')].filter((b) => b.textContent.trim() === 'Desfazer').at(-1)`
   {
-    const r = await ev(`await T.clickEl(T.button('Desfazer')); await T.settle(); return { same: JSON.stringify(T.project().tracks) === JSON.stringify(${JSON.stringify(before.p.tracks)}), markers: JSON.stringify(T.project().markers) === JSON.stringify(${JSON.stringify(before.p.markers)}), past: T.st().history.past.length }`)
+    const r = await ev(`await T.clickEl(${toastUndo}); await T.settle(); return { same: JSON.stringify(T.project().tracks) === JSON.stringify(${JSON.stringify(before.p.tracks)}), markers: JSON.stringify(T.project().markers) === JSON.stringify(${JSON.stringify(before.p.markers)}), past: T.st().history.past.length }`)
     check('um "Desfazer" devolve todas as faixas e marcadores como antes', r.same && r.markers && r.past === before.past, r)
+  }
+
+  console.log('"Desfazer" do aviso depois de outra edição: não desfaz a outra')
+  {
+    await ev(`await T.clickEl(T.button('Remover silêncios')); for (let i = 0; i < 40 && !window.__qaEditor.silence.getState().cuts.length; i++) await new Promise((r) => setTimeout(r, 250)); await T.clickEl(T.button('Aplicar')); await new Promise((r) => setTimeout(r, 400)); return 1`)
+    const r = await ev(`
+      const cut = T.st().history.past.length
+      T.st().apply((p) => ({ ...p, markers: [...p.markers, { id: 'm_qa_extra', tUs: 1000000, label: 'Outra edição', color: '#22c55e' }] }))
+      await T.settle()
+      await T.clickEl(${toastUndo}); await new Promise((r) => setTimeout(r, 300))
+      const out = { cut, past: T.st().history.past.length, extra: T.project().markers.some((m) => m.id === 'm_qa_extra') }
+      T.st().undo(); T.st().undo(); await T.settle()
+      return { ...out, restored: JSON.stringify(T.project().tracks) === JSON.stringify(${JSON.stringify(before.p.tracks)}) }`)
+    check('o "Desfazer" antigo não desfaz a edição feita depois (histórico intacto)', r.extra && r.past === r.cut + 1 && r.restored, r)
   }
 
   console.log('faixa bloqueada')
@@ -313,7 +361,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 600))
       const d = document.querySelector('[data-silence-dialog]')
       return { text: d?.textContent ?? '', disabled: T.button('Aplicar')?.disabled }`)
-    check('webcam bloqueada com blur no projeto: o painel explica e não deixa aplicar', r.text.includes('faixas bloqueadas') && r.disabled === true, r)
+    check('webcam bloqueada com blur no projeto: o painel explica e não deixa aplicar', r.text.includes('faixas de vídeo bloqueadas') && r.disabled === true, r)
     await shot('f3-silencio-05-faixa-bloqueada.png')
     await ev(`await T.clickEl(T.button('Cancelar')); return 1`)
   }

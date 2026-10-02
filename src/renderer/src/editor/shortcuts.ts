@@ -39,6 +39,9 @@ export type ShortcutAction =
   | 'toggleEnabled' // Shift+E (com os vinculados)
   | 'toggleEnabledUnlinked' // Alt+Shift+E (Alt ignora o vínculo, como mover/aparar)
 
+/** Transporte (tocar/pausar, J/K/L, quadro a quadro, ±1 s, início/fim): o que passa com o painel não modal aberto. */
+export const TRANSPORT_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(['playPause', 'pause', 'shuttleBack', 'shuttleForward', 'prevFrame', 'nextFrame', 'back1s', 'fwd1s', 'home', 'end'])
+
 export interface KeyLike {
   key: string
   code?: string
