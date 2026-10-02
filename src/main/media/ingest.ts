@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync, mkdirSync, statSync } from 'fs'
 import { basename, dirname } from 'path'
 import type { Asset } from '@shared/editor/project'
-import { audioProcessKey, processedAudioRel, type AudioProcessOpts } from '@shared/editor/audioProcess'
+import { audioProcessKey, processedAudioRel, sourceFingerprint, type AudioProcessOpts } from '@shared/editor/audioProcess'
 import type { HwEncoder } from '@shared/types'
 import type { IngestJob, IngestStep } from '@shared/ipc'
 import { probe, type MediaInfo } from './probe'
@@ -44,6 +44,9 @@ export interface IngestDeps {
   rnnoiseDir?: () => string
   log?: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void }
 }
+
+/** Versão de áudio processada pronta: chave, impressão da fonte usada e o arquivo (relativo à pasta do projeto). */
+export interface ProcessedAudio { key: string; fingerprint: string; rel: string }
 
 type ProgressFn = (j: IngestJob) => void
 type DoneFn = (projectId: string, assetId: string, patch: Partial<Asset>) => void
@@ -113,8 +116,8 @@ export class IngestQueue {
   private light = new Slots(2)
   /** Execução vigente de cada asset: projectId → assetId → seu AbortController. */
   private active = new Map<string, Map<string, AbortController>>()
-  /** processAudio em curso: projectId|assetId|chave → promessa (pedidos repetidos compartilham a execução). */
-  private audioRuns = new Map<string, Promise<{ key: string; rel: string }>>()
+  /** processAudio em curso: projectId|assetId|chave|impressão → execução (pedidos repetidos compartilham a mesma). */
+  private audioRuns = new Map<string, { promise: Promise<ProcessedAudio>; ctl: AbortController; projectId: string; assetId: string }>()
   private progressFns: ProgressFn[] = []
   private doneFns: DoneFn[] = []
 
@@ -156,34 +159,39 @@ export class IngestQueue {
   }
 
   /**
-   * Versão pré-processada da faixa de áudio do asset (generated/<id>.audio-<chave>.m4a, ver audioProcess.ts). Cache por
-   * (asset, parâmetros): arquivo já existente volta na hora. Job pesado; cancelado por `cancel(projectId)`
+   * Versão pré-processada da faixa de áudio do asset (generated/<id>.audio-<chave>.<impressão>.m4a, ver audioProcess.ts).
+   * Cache por (asset, parâmetros, impressão digital da fonte lida agora): arquivo já existente volta na hora. Job pesado; cancelado por `cancel(projectId)`
    * (rejeita com CancelledError). Quem grava `processedAudio` no projeto é o chamador (renderer, escritor único).
    */
-  processAudio(projectId: string, asset: Asset, opts: AudioProcessOpts): Promise<{ key: string; rel: string }> {
+  processAudio(projectId: string, asset: Asset, opts: AudioProcessOpts): Promise<ProcessedAudio> {
     const key = audioProcessKey(opts)
     if (!key) return Promise.reject(new Error('nada a processar no áudio'))
     if (!(asset.kind === 'audio' || asset.audio)) return Promise.reject(new Error('mídia sem áudio'))
-    const rel = processedAudioRel(asset.id, key)
-    const out = this.out(projectId, rel)
-    if (existsSync(out)) return Promise.resolve({ key, rel })
-    const id = `${projectId}|${asset.id}|${key}`
-    const pending = this.audioRuns.get(id)
-    if (pending) return pending
-
     let input: IngestInput
+    let fingerprint: string
     try {
       input = this.deps.resolveInput(projectId, asset)
+      const st = statSync(input.path)
+      fingerprint = sourceFingerprint(st.size, st.mtimeMs)
     } catch (e) {
       return Promise.reject(e)
     }
+    // a impressão da fonte entra no nome: fonte trocada (relink, arquivo regravado) nunca acha o cache antigo
+    const rel = processedAudioRel(asset.id, key, fingerprint)
+    const out = this.out(projectId, rel)
+    const result = { key, fingerprint, rel }
+    if (existsSync(out)) return Promise.resolve(result)
+    const id = `${projectId}|${asset.id}|${key}|${fingerprint}`
+    const pending = this.audioRuns.get(id)
+    if (pending) return pending.promise
+
     let runs = this.active.get(projectId)
     if (!runs) this.active.set(projectId, (runs = new Map()))
-    const runKey = `${asset.id}~audio~${key}`
+    const runKey = `${asset.id}~audio~${key}~${fingerprint}`
     const ctl = new AbortController()
     runs.set(runKey, ctl)
     const job = { projectId, assetId: asset.id, step: 'audioProcess' as const, key }
-    const p = this.step(this.heavy, ctl.signal, job, (onProgress) =>
+    const promise = this.step(this.heavy, ctl.signal, job, (onProgress) =>
       processAudioFile(input.path, input.audioMap ?? '0:a:0', out, opts, {
         modelDir: this.deps.rnnoiseDir?.() ?? '',
         durationUs: asset.durationUs ?? 0,
@@ -192,19 +200,32 @@ export class IngestQueue {
         onProgress
       })
     )
-      .then(() => ({ key, rel }))
+      .then(() => result)
       .finally(() => {
-        this.audioRuns.delete(id)
+        if (this.audioRuns.get(id)?.ctl === ctl) this.audioRuns.delete(id)
         const m = this.active.get(projectId)
         if (m?.get(runKey) === ctl) m.delete(runKey)
         if (m && m.size === 0 && this.active.get(projectId) === m) this.active.delete(projectId)
       })
-    this.audioRuns.set(id, p)
-    return p
+    this.audioRuns.set(id, { promise, ctl, projectId, assetId: asset.id })
+    return promise
+  }
+
+  /**
+   * Cancela os processamentos de áudio de um asset (relink: a fonte vai mudar), sem tocar na ingestão dele nem nos
+   * de outros assets; os pedidos rejeitam com CancelledError e um pedido novo roda do zero.
+   */
+  cancelAudio(projectId: string, assetId: string): void {
+    for (const [id, r] of this.audioRuns) {
+      if (r.projectId !== projectId || r.assetId !== assetId) continue
+      this.audioRuns.delete(id)
+      r.ctl.abort()
+    }
   }
 
   /** Cancela tudo do projeto (fila e ffmpeg em execução); nenhum 'done' é emitido para eles. */
   cancel(projectId: string): void {
+    for (const [id, r] of this.audioRuns) if (r.projectId === projectId) this.audioRuns.delete(id)
     const runs = this.active.get(projectId)
     if (!runs) return
     this.active.delete(projectId)

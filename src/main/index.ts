@@ -100,7 +100,9 @@ if (!gotLock) {
         } catch {
           return false
         }
-      }
+      },
+      // impressão digital da fonte do áudio processado dos assets de gravação
+      sessionMediaFile: (id) => store.filePath(id, 'rec.mp4')
     })
     installFileProtocol(store, projects)
     installDisplayMediaHandler()

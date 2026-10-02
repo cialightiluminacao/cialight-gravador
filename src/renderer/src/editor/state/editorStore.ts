@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { toast } from 'sonner'
 import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
-import { mergeProcessedAudio } from '@shared/editor/audioProcess'
+import { withProcessedAudio } from '@shared/editor/audioProcess'
 import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
 import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from './zoom'
 import { ipcErrorMessage } from '@/lib/ipcError'
@@ -46,8 +46,8 @@ export interface EditorState {
   /** Aplica patch em asset SEM entrada de histórico (resultado de ingest); corrige past/present/future. */
   applyAssetPatch(assetId: string, patch: Partial<Asset>): void
   setIngest(assetId: string, progress: IngestProgress | null): void
-  /** Versão de áudio processada pronta: acrescenta a chave a `asset.processedAudio` (sem histórico, como a ingestão). */
-  markAudioProcessed(assetId: string, key: string): void
+  /** Versão de áudio processada pronta: `asset.processedAudio[key] = fingerprint` (sem histórico, como a ingestão). */
+  markAudioProcessed(assetId: string, key: string, fingerprint: string): void
   setAudioJob(id: string, state: AudioJobState | null): void
   setAudioBypass(on: boolean): void
   begin(): void
@@ -144,10 +144,10 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     set({ ...derive(h), txBase: txBase ? fix(txBase) : null, dirty: true })
   },
 
-  markAudioProcessed: (assetId, key) => {
+  markAudioProcessed: (assetId, key, fingerprint) => {
     const a = get().project?.assets.find((x) => x.id === assetId)
     if (!a) return
-    const processedAudio = mergeProcessedAudio(a.processedAudio, [key])
+    const processedAudio = withProcessedAudio(a.processedAudio, key, fingerprint)
     if (processedAudio !== a.processedAudio) get().applyAssetPatch(assetId, { processedAudio })
   },
 

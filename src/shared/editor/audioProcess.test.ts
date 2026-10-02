@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Asset } from './project'
-import { audioProcessKey, audioSourceKey, isAudioProcessKey, mergeProcessedAudio, parseAudioProcessKey, processedAudioRel, splitAudioSourceKey } from './audioProcess'
+import { audioProcessKey, audioSourceKey, isAudioProcessKey, isSourceFingerprint, parseAudioProcessKey, processedAudioRel, sourceFingerprint, splitAudioSourceKey, withProcessedAudio } from './audioProcess'
 
 describe('chave de cache do pré-processamento de áudio', () => {
   it('nenhum processamento → null', () => {
@@ -19,9 +18,19 @@ describe('chave de cache do pré-processamento de áudio', () => {
     expect(isAudioProcessKey('dn-sh')).toBe(true)
     expect(isAudioProcessKey('')).toBe(false)
   })
-  it('arquivo em generated/ por (asset, chave)', () => {
-    expect(processedAudioRel('a_1', 'dn-sh')).toBe('generated/a_1.audio-dn-sh.m4a')
-    expect(processedAudioRel('a_1', 'dn-sh_ln-i16-tp1.5')).toBe('generated/a_1.audio-dn-sh_ln-i16-tp1.5.m4a')
+  it('impressão digital da fonte (tamanho + mtime): muda com o arquivo; só [0-9a-z-]', () => {
+    const fp = sourceFingerprint(123_456, 1_700_000_000_123.4)
+    expect(fp).toBe(`${(123_456).toString(36)}-${(1_700_000_000_123).toString(36)}`)
+    expect(sourceFingerprint(123_456, 1_700_000_000_999)).not.toBe(fp)
+    expect(sourceFingerprint(123_457, 1_700_000_000_123)).not.toBe(fp)
+    expect(isSourceFingerprint(fp)).toBe(true)
+    expect(isSourceFingerprint('../x')).toBe(false)
+    expect(isSourceFingerprint('')).toBe(false)
+  })
+  it('arquivo em generated/ por (asset, chave, fonte): fonte trocada nunca acha o cache antigo', () => {
+    expect(processedAudioRel('a_1', 'dn-sh', '2n9c-abc')).toBe('generated/a_1.audio-dn-sh.2n9c-abc.m4a')
+    expect(processedAudioRel('a_1', 'dn-sh_ln-i16-tp1.5', 'x-y')).toBe('generated/a_1.audio-dn-sh_ln-i16-tp1.5.x-y.m4a')
+    expect(processedAudioRel('a_1', 'dn-sh', 'x-y')).not.toBe(processedAudioRel('a_1', 'dn-sh', 'x-z'))
   })
   it('chave da fonte do mixer: original = assetId; processado = assetId~chave (ida e volta)', () => {
     expect(audioSourceKey('a1', null)).toBe('a1')
@@ -29,10 +38,11 @@ describe('chave de cache do pré-processamento de áudio', () => {
     expect(splitAudioSourceKey('a1~dn-sh')).toEqual({ assetId: 'a1', processKey: 'dn-sh' })
     expect(splitAudioSourceKey('a1')).toEqual({ assetId: 'a1', processKey: null })
   })
-  it('mergeProcessedAudio une as chaves (nunca perde uma já pronta) e é estável', () => {
-    const a = { processedAudio: ['dn-sh'] } as Pick<Asset, 'processedAudio'>
-    expect(mergeProcessedAudio(a.processedAudio, ['ln-i16-tp1.5'])).toEqual(['dn-sh', 'ln-i16-tp1.5'])
-    expect(mergeProcessedAudio(a.processedAudio, ['dn-sh'])).toBe(a.processedAudio)
-    expect(mergeProcessedAudio(undefined, ['dn-sh'])).toEqual(['dn-sh'])
+  it('withProcessedAudio registra chave → impressão digital (nunca perde outra chave) e é estável', () => {
+    const cur = { 'dn-sh': 'a-b' }
+    expect(withProcessedAudio(cur, 'ln-i16-tp1.5', 'a-b')).toEqual({ 'dn-sh': 'a-b', 'ln-i16-tp1.5': 'a-b' })
+    expect(withProcessedAudio(cur, 'dn-sh', 'a-b')).toBe(cur)
+    expect(withProcessedAudio(cur, 'dn-sh', 'c-d')).toEqual({ 'dn-sh': 'c-d' }) // fonte nova substitui
+    expect(withProcessedAudio(undefined, 'dn-sh', 'a-b')).toEqual({ 'dn-sh': 'a-b' })
   })
 })

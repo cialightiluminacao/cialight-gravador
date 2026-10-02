@@ -1,6 +1,8 @@
 // Pré-processamento de voz (redução de ruído e normalização de loudness) — parte pura: chave de cache, caminho do
-// arquivo gerado e a chave da fonte que o mixer lê. O original nunca é alterado: cada combinação de parâmetros vira
-// um arquivo de áudio próprio em generated/<assetId>.audio-<chave>.m4a; Asset.processedAudio lista as chaves prontas.
+// arquivo gerado e a chave da fonte que o mixer lê. O original nunca é alterado: cada combinação de parâmetros e de
+// fonte vira um arquivo próprio em generated/<assetId>.audio-<chave>.<impressão>.m4a, onde a impressão digital é o
+// tamanho + mtime do arquivo de origem (o importado ou o rec.mp4 da gravação) no momento do processamento: fonte
+// trocada (relink, arquivo regravado) nunca acha o cache antigo. Asset.processedAudio: chave → impressão prontas.
 
 export interface AudioProcessOpts { denoise: boolean; normalize: boolean }
 
@@ -33,8 +35,12 @@ export function parseAudioProcessKey(key: string): AudioProcessOpts | null {
 
 export const isAudioProcessKey = (key: string): boolean => parseAudioProcessKey(key) !== null
 
-/** Arquivo gerado (relativo à pasta do projeto). */
-export const processedAudioRel = (assetId: string, key: string): string => `generated/${assetId}.audio-${key}.m4a`
+/** Impressão digital do arquivo de origem: tamanho e mtime (ms inteiros) em base 36. */
+export const sourceFingerprint = (size: number, mtimeMs: number): string => `${Math.round(size).toString(36)}-${Math.round(mtimeMs).toString(36)}`
+export const isSourceFingerprint = (fp: string): boolean => /^[0-9a-z]+-[0-9a-z]+$/.test(fp)
+
+/** Arquivo gerado (relativo à pasta do projeto) por (asset, chave, impressão da fonte). */
+export const processedAudioRel = (assetId: string, key: string, fingerprint: string): string => `generated/${assetId}.audio-${key}.${fingerprint}.m4a`
 
 /** Separador da chave de fonte do mixer (ids de asset não usam '~'). */
 const SEP = '~'
@@ -47,8 +53,8 @@ export function splitAudioSourceKey(sourceKey: string): { assetId: string; proce
   return i < 0 ? { assetId: sourceKey, processKey: null } : { assetId: sourceKey.slice(0, i), processKey: sourceKey.slice(i + 1) }
 }
 
-/** União das chaves prontas (o resultado de um processamento nunca apaga outra chave já pronta); mesma referência se nada muda. */
-export function mergeProcessedAudio(current: string[] | undefined, add: string[]): string[] {
-  const missing = add.filter((k) => !(current ?? []).includes(k))
-  return missing.length || !current ? [...(current ?? []), ...missing] : current
+/** Registra a versão pronta (chave → impressão da fonte); uma fonte nova substitui a antiga; mesma referência se nada muda. */
+export function withProcessedAudio(current: Record<string, string> | undefined, key: string, fingerprint: string): Record<string, string> {
+  if (current && current[key] === fingerprint) return current
+  return { ...(current ?? {}), [key]: fingerprint }
 }

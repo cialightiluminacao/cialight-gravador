@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { audioProcessArgs, denoiseArgs, denoiseFilter, DENOISE_DELAY_SAMPLES, loudnormApplyFilter, loudnormMeasureArgs, parseLoudnormJson } from './audioProcess'
+import { audioProcessArgs, denoiseArgs, denoiseFilter, DENOISE_DELAY_SAMPLES, loudnormApplyFilter, loudnormMeasureArgs, MissingModelError, missingModelMessage, parseLoudnormJson, processAudioFile } from './audioProcess'
 
 const JSON_OUT = `[Parsed_loudnorm_1 @ 000001]
 {
@@ -60,5 +60,18 @@ describe('loudnorm em duas passadas', () => {
     expect(both[both.indexOf('-af') + 1]).toBe(`aresample=48000:first_pts=0,${denoiseFilter()},${loudnormApplyFilter(m, { dualMono: false })}`)
     const silent = audioProcessArgs('in', '0:a:0', 'out.m4a', { denoise: false, normalize: true }, null, { dualMono: false })
     expect(silent[silent.indexOf('-af') + 1]).toBe('aresample=48000:first_pts=0')
+  })
+})
+
+describe('modelo ausente', () => {
+  it('processAudioFile lança MissingModelError (antes de rodar o ffmpeg) só quando o denoise é pedido', async () => {
+    const run = { modelDir: 'Z:\\nao-existe', durationUs: 1, dualMono: false }
+    await expect(processAudioFile('in.wav', '0:a:0', 'out.m4a', { denoise: true, normalize: false }, run)).rejects.toBeInstanceOf(MissingModelError)
+  })
+  it('mensagem: no app instalado, para o usuário (reinstalar); em dev, o comando para baixar', () => {
+    const e = new MissingModelError('C:\\app\\resources\\models\\rnnoise\\sh.rnnn')
+    expect(missingModelMessage(e, true)).toBe('O modelo de redução de ruído não foi encontrado na instalação. Reinstale o CiaLight Gravador para usar “Reduzir ruído (voz)”.')
+    expect(missingModelMessage(e, false)).toContain('npm run fetch:models')
+    expect(missingModelMessage(e, true)).not.toContain('npm')
   })
 })

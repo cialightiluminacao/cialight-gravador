@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyProject } from './factory'
 import type { Asset, MediaItem, Project } from './project'
 import * as ops from './ops'
-import { audioProcessPending, gainAt, pendingAudioProcessing, planAudio, shuttleSegments, SHUTTLE_AUDIO_MAX_RATE, type AudioSegment } from './audioPlan'
+import { abPlan, audioProcessPending, gainAt, pendingAudioProcessing, planAudio, shuttleSegments, SHUTTLE_AUDIO_MAX_RATE, type AudioSegment } from './audioPlan'
 
 const S = 1_000_000
 const vid = (): Asset => ({ id: 'a1', name: 'a1', kind: 'video', source: { type: 'file', path: 'C:/a.mp4', size: 1, mtimeMs: 1 }, durationUs: 10 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
@@ -129,7 +129,7 @@ describe('shuttleSegments (J/K/L: áudio do preview em taxa ≠ 1)', () => {
 
 describe('planAudio: redução de ruído / normalização (pré-processamento em cache)', () => {
   const flags = (p: Project, a: string, denoise: boolean, normalize: boolean): Project => ops.updateItem<MediaItem>(p, a, (d) => { d.audio.denoise = denoise; d.audio.normalize = normalize })
-  const ready = (p: Project, keys: string[]): Project => ops.updateAsset(p, 'a1', { processedAudio: keys })
+  const ready = (p: Project, keys: string[]): Project => ops.updateAsset(p, 'a1', { processedAudio: Object.fromEntries(keys.map((k) => [k, 'f-1'])) })
   it('sem flags: fonte = original, nada pendente', () => {
     const { p } = base()
     expect(planAudio(p)[0]).toMatchObject({ sourceKey: 'a1', processKey: null })
@@ -160,6 +160,19 @@ describe('planAudio: redução de ruído / normalização (pré-processamento em
     const q = ready(flags(p, a, true, false), ['dn-sh'])
     expect(planAudio(q, { bypassProcessing: true })[0]).toMatchObject({ sourceKey: 'a1', processKey: 'dn-sh' })
   })
+  it('abPlan (A/B): o plano tocado e o alternativo só com os segmentos cuja fonte muda — as duas fontes ficam vivas', () => {
+    const { p, a } = base()
+    const q = ready(flags(p, a, true, false), ['dn-sh'])
+    const on = abPlan(q, false)
+    expect(on.segments[0].sourceKey).toBe('a1~dn-sh')
+    expect(on.alternate.map((s) => s.sourceKey)).toEqual(['a1'])
+    const held = abPlan(q, true)
+    expect(held.segments[0].sourceKey).toBe('a1')
+    expect(held.alternate.map((s) => s.sourceKey)).toEqual(['a1~dn-sh'])
+    // nada processado: nenhum alternativo
+    expect(abPlan(flags(p, a, true, false), false).alternate).toEqual([])
+    expect(abPlan(p, true).alternate).toEqual([])
+  })
   it('shuttle preserva a fonte do segmento', () => {
     const { p, a } = base()
     const q = ready(flags(p, a, true, false), ['dn-sh'])
@@ -178,7 +191,7 @@ describe('pendingAudioProcessing (o que o editor pede ao main)', () => {
     const r = ops.addMediaFromAsset(q, 'a1', 20 * S)
     const both = flags(r.project, r.itemIds[1], true, true)
     expect(pendingAudioProcessing(both)).toHaveLength(1)
-    expect(pendingAudioProcessing(ops.updateAsset(q, 'a1', { processedAudio: ['dn-sh_ln-i16-tp1.5'] }))).toEqual([])
+    expect(pendingAudioProcessing(ops.updateAsset(q, 'a1', { processedAudio: { 'dn-sh_ln-i16-tp1.5': 'f-1' } }))).toEqual([])
     expect(pendingAudioProcessing(ops.updateAsset(q, 'a1', { status: 'processing' }))).toEqual([])
   })
 })

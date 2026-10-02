@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { basename, extname, join } from 'path'
-import { readdirSync, rmSync, statSync } from 'fs'
+import { statSync } from 'fs'
 import { IPC, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
 import { getSettings, outputDir, rawDir, setSettings } from './settings/settingsStore'
@@ -24,6 +24,7 @@ import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { encoderFallbackChain } from '@shared/encoderCache'
 import type { AudioProcessOpts } from '@shared/editor/audioProcess'
 import { rnnoiseDir } from './export/ffmpegPath'
+import { MissingModelError, missingModelMessage } from './media/audioProcess'
 import { buildReviewAssets } from './export/reviewAssets'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
@@ -265,7 +266,9 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ipcMain.handle(IPC.media.processAudio, (_e, projectId: string, assetId: string, opts: AudioProcessOpts) => {
     const a = projects.cached(projectId).assets.find((x) => x.id === assetId)
     if (!a) throw new Error(`Asset não encontrado: ${assetId}`)
-    return ingest.processAudio(projectId, a, { denoise: !!opts?.denoise, normalize: !!opts?.normalize })
+    return ingest.processAudio(projectId, a, { denoise: !!opts?.denoise, normalize: !!opts?.normalize }).catch((e: unknown) => {
+      throw e instanceof MissingModelError ? new Error(missingModelMessage(e, app.isPackaged)) : e
+    })
   })
   ipcMain.handle(IPC.media.relink, async (_e, projectId: string, assetId: string, newPath: string) => {
     const a = projects.cached(projectId).assets.find((x) => x.id === assetId)
@@ -276,13 +279,10 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     const fresh = assetFromInfo(a.id, newPath, statSync(newPath), info)
     // derivados do arquivo antigo deixam de valer (undefined explícito: o renderer aplica com updateAsset)
     const next: Asset = { ...fresh, name: a.name, proxy: undefined, intermediate: undefined, filmstrip: undefined, filmstripInfo: undefined, peaks: undefined, speech: undefined, loudness: undefined, processedAudio: undefined, error: undefined }
-    // áudio pré-processado do arquivo antigo: o nome é por (asset, chave), então apagar evita reusar o cache errado
-    try {
-      const gen = join(projects.dirOf(projectId), 'generated')
-      for (const f of readdirSync(gen)) if (f.startsWith(`${assetId}.audio-`)) rmSync(join(gen, f), { force: true })
-    } catch (e) {
-      log.warn(`relink ${assetId}: não foi possível apagar o áudio processado antigo`, e)
-    }
+    // áudio pré-processado do arquivo antigo: para o que estiver rodando e apaga o cache (a impressão da fonte no nome já
+    // impede reusar a versão errada; aqui é limpeza)
+    ingest.cancelAudio(projectId, assetId)
+    projects.removeProcessedAudio(projectId, assetId)
     projects.cacheAssets(projectId, [next])
     return next
   })

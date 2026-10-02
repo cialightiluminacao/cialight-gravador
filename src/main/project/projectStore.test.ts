@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ProjectStore } from './projectStore'
 import { SessionStore } from '../session/sessionStore'
 import { createEmptyProject } from '@shared/editor/factory'
 import type { Asset, Project } from '@shared/editor/project'
+import { sourceFingerprint } from '@shared/editor/audioProcess'
 
 function mk(id: string, updatedAt: string): Project {
   return { ...createEmptyProject(`Projeto ${id}`), id, updatedAt }
@@ -114,24 +115,48 @@ describe('ProjectStore', () => {
     expect(() => store.assetPath(p, 's', 'proxy', sessions)).toThrow()
   })
 
-  it('processedAudioPath: arquivo em generated/ por (asset, chave); chave inválida ou asset desconhecido lança', () => {
+  it('processedAudioPath: arquivo em generated/ por (asset, chave, impressão); chave/impressão inválida ou asset desconhecido lança', () => {
     const base = { name: 'x', kind: 'audio' as const, durationUs: 1, status: 'ready' as const }
     const p = { ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets: [{ ...base, id: 'm', source: { type: 'session' as const, sessionId: 's', stream: 'mic' as const } }] }
-    expect(store.processedAudioPath(p, 'm', 'dn-sh')).toBe(join(root, 'p-a', 'generated', 'm.audio-dn-sh.m4a'))
-    expect(() => store.processedAudioPath(p, 'm', '../x')).toThrow()
-    expect(() => store.processedAudioPath(p, 'zz', 'dn-sh')).toThrow()
+    expect(store.processedAudioPath(p, 'm', 'dn-sh', '2n-ab')).toBe(join(root, 'p-a', 'generated', 'm.audio-dn-sh.2n-ab.m4a'))
+    expect(() => store.processedAudioPath(p, 'm', '../x', '2n-ab')).toThrow()
+    expect(() => store.processedAudioPath(p, 'm', 'dn-sh', '../x')).toThrow()
+    expect(() => store.processedAudioPath(p, 'zz', 'dn-sh', '2n-ab')).toThrow()
   })
 
-  it('withMediaStatus tira de processedAudio as chaves sem arquivo (outro PC) ou de parâmetros antigos', () => {
+  it('withMediaStatus tira de processedAudio as chaves sem arquivo (outro PC), de parâmetros antigos ou de outra fonte', () => {
+    const rec = join(root, 'rec.mp4')
+    writeFileSync(rec, Buffer.alloc(10))
+    const s2 = new ProjectStore({ projectsRoot: () => root, trash: async () => {}, sessionMediaExists: () => true, sessionMediaFile: () => rec })
+    const p0 = mk('p-a', '2026-10-01T10:00:00.000Z')
+    s2.create(p0)
+    const st = statSync(rec)
+    const fp = sourceFingerprint(st.size, st.mtimeMs)
+    for (const f of [`m.audio-dn-sh.${fp}.m4a`, `m.audio-dn-old.${fp}.m4a`, 'm.audio-ln-i16-tp1.5.0-0.m4a']) writeFileSync(join(root, 'p-a', 'generated', f), 'x')
+    const base = { name: 'x', kind: 'audio' as const, durationUs: 1, status: 'ready' as const, source: { type: 'session' as const, sessionId: 's', stream: 'mic' as const } }
+    const p: Project = {
+      ...p0,
+      assets: [
+        // ok | parâmetros antigos | arquivo de outra fonte (impressão diferente da do rec.mp4 atual) | sem arquivo
+        { ...base, id: 'm', processedAudio: { 'dn-sh': fp, 'dn-old': fp, 'ln-i16-tp1.5': '0-0', 'dn-sh_ln-i16-tp1.5': fp } },
+        { ...base, id: 'n', processedAudio: { 'dn-sh': fp } }
+      ]
+    }
+    const r = s2.withMediaStatus(p)
+    expect(r.assets.map((a) => a.processedAudio)).toEqual([{ 'dn-sh': fp }, undefined])
+    expect(s2.withMediaStatus(r)).toBe(r)
+  })
+
+  it('removeProcessedAudio apaga só os arquivos do asset, um a um (falha num não impede os outros)', () => {
     const p0 = mk('p-a', '2026-10-01T10:00:00.000Z')
     store.create(p0)
-    writeFileSync(join(root, 'p-a', 'generated', 'm.audio-dn-sh.m4a'), 'x')
-    writeFileSync(join(root, 'p-a', 'generated', 'm.audio-dn-old.m4a'), 'x')
-    const base = { name: 'x', kind: 'audio' as const, durationUs: 1, status: 'ready' as const, source: { type: 'session' as const, sessionId: 's', stream: 'mic' as const } }
-    const p = { ...p0, assets: [{ ...base, id: 'm', processedAudio: ['dn-sh', 'ln-i16-tp1.5', 'dn-old'] }, { ...base, id: 'n', processedAudio: ['dn-sh'] }] }
-    const r = store.withMediaStatus(p)
-    expect(r.assets.map((a) => a.processedAudio)).toEqual([['dn-sh'], undefined])
-    expect(store.withMediaStatus(r)).toBe(r)
+    const gen = join(root, 'p-a', 'generated')
+    for (const f of ['m.audio-dn-sh.1-1.m4a', 'm.audio-ln-i16-tp1.5.1-1.m4a', 'mm.audio-dn-sh.1-1.m4a', 'n.audio-dn-sh.1-1.m4a', 'm.wav']) writeFileSync(join(gen, f), 'x')
+    mkdirSync(join(gen, 'm.audio-dn-sh.2-2.m4a')) // não removível como arquivo (diretório não vazio)
+    writeFileSync(join(gen, 'm.audio-dn-sh.2-2.m4a', 'dentro'), 'x')
+    const removed = store.removeProcessedAudio('p-a', 'm')
+    expect(removed).toBe(2)
+    expect(readdirSync(gen).sort()).toEqual(['m.audio-dn-sh.2-2.m4a', 'm.wav', 'mm.audio-dn-sh.1-1.m4a', 'n.audio-dn-sh.1-1.m4a'])
   })
 
   it('create recusa sobrescrever um projeto existente', () => {

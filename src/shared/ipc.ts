@@ -228,11 +228,12 @@ export interface IpcApi {
      */
     enqueue(projectId: string, assetId: string, opts: { decodable: boolean; audioDecodable?: boolean; analyzeAudio?: boolean }): Promise<void>
     /**
-     * Redução de ruído e/ou normalização (−16 LUFS) da faixa de áudio do asset, em cache por (asset, parâmetros) em
-     * generated/. Resolve com a chave pronta quando o arquivo existe (na hora, se já estava em cache); o renderer
-     * acrescenta a chave a `asset.processedAudio`. Progresso por `onProgress` (step 'audioProcess', com `key`).
+     * Redução de ruído e/ou normalização (−16 LUFS) da faixa de áudio do asset, em cache por (asset, parâmetros,
+     * impressão digital da fonte) em generated/. Resolve com a chave e a impressão quando o arquivo existe (na hora, se
+     * já estava em cache); o renderer registra `asset.processedAudio[key] = fingerprint`. Progresso por `onProgress`
+     * (step 'audioProcess', com `key`). Relink cancela os pedidos do asset (rejeitam com "cancelado").
      */
-    processAudio(projectId: string, assetId: string, opts: { denoise: boolean; normalize: boolean }): Promise<{ key: string; rel: string }>
+    processAudio(projectId: string, assetId: string, opts: { denoise: boolean; normalize: boolean }): Promise<{ key: string; fingerprint: string; rel: string }>
     /** Novo caminho para um asset de arquivo (ausente/movido): devolve o asset atualizado com status 'processing'; o renderer aplica e chama `enqueue`. */
     relink(projectId: string, assetId: string, newPath: string): Promise<Asset>
     /**

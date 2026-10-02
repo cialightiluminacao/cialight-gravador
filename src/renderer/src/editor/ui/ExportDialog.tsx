@@ -3,7 +3,8 @@ import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAl
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
 import { contentEndUs, findItem } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
-import { audioProcessPending, planAudio } from '@shared/editor/audioPlan'
+import { planAudio } from '@shared/editor/audioPlan'
+import { audioProcessIssues } from './audioProcessing'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, Progress, Segmented } from '@/components/ui/primitives'
 import { PathField } from '@/components/ui/PathField'
@@ -35,6 +36,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const project = useEditorStore((s) => s.project)
   const inUs = useEditorStore((s) => s.inUs)
   const outUs = useEditorStore((s) => s.outUs)
+  const audioJobs = useEditorStore((s) => s.audioJobs)
   const settings = useAppStore((s) => s.settings)
   const appInfo = useAppStore((s) => s.appInfo)
   const [phase, setPhase] = useState<Phase>({ kind: 'form' })
@@ -65,10 +67,9 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const size = outputSize(preset, project.canvas)
   const fps = project.canvas.fps
   const videoBps = presetVideoBitrate(preset, fps, durationUs)
-  const audioSegs = planAudio(project)
-  const hasAudio = audioSegs.some((s) => s.mode !== 'mute')
-  // redução de ruído/normalização ainda processando: a exportação sairia com o original nesses trechos
-  const audioPending = audioSegs.some((s) => s.mode !== 'mute' && s.startUs < range.toUs && s.startUs + s.durationUs > range.fromUs && audioProcessPending(s))
+  const hasAudio = planAudio(project).some((s) => s.mode !== 'mute')
+  // redução de ruído/normalização ainda processando ou que falhou: a exportação sairia com o original nesses trechos
+  const voiceIssues = audioProcessIssues(project, audioJobs, range.fromUs, range.toUs)
   const audioBps = hasAudio ? AUDIO_KBPS * 1000 : 0
   const estimate = estimateBytes(videoBps, audioBps, durationUs)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
@@ -227,10 +228,20 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               </div>
             ) : null}
 
-            {audioPending ? (
+            {voiceIssues.failed.length ? (
+              <div className="flex items-start gap-1.5 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2.5 text-[12px] text-warn" role="alert" data-audio-failed="">
+                <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  O tratamento de voz (redução de ruído/normalização) falhou em {voiceIssues.failed.map((n) => `“${n}”`).join(', ')}: esses trechos saem com o áudio original. Use “Tentar de novo” no inspetor de áudio.
+                </span>
+              </div>
+            ) : null}
+            {voiceIssues.pending.length ? (
               <div className="flex items-start gap-1.5 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2.5 text-[12px] text-warn" role="status" data-audio-pending="">
                 <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                O tratamento de voz (redução de ruído/normalização) ainda está sendo processado. Exportando agora, esses trechos saem com o áudio original.
+                <span>
+                  O tratamento de voz de {voiceIssues.pending.map((n) => `“${n}”`).join(', ')} ainda está sendo processado. Exportando agora, esses trechos saem com o áudio original.
+                </span>
               </div>
             ) : null}
 

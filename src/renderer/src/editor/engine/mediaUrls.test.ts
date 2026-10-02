@@ -47,9 +47,9 @@ describe('mediaUrlsFor', () => {
   })
 
   it('áudio pré-processado pronto: URL por chave (preview e exportação); chaves inválidas ficam de fora', () => {
-    const q = project([asset('a_dn', { processedAudio: ['dn-sh', 'dn-old'] })])
+    const q = project([asset('a_dn', { processedAudio: { 'dn-sh': '2n-ab', 'dn-old': '2n-ab', 'ln-i16-tp1.5': '../x' } })])
     for (const mode of ['preview', 'export'] as const) {
-      expect(mediaUrlsFor(q, mode).a_dn).toEqual({ original: `${base('a_dn')}?v=original`, audio: { 'dn-sh': `${base('a_dn')}?v=audio&k=dn-sh` } })
+      expect(mediaUrlsFor(q, mode).a_dn).toEqual({ original: `${base('a_dn')}?v=original`, audio: { 'dn-sh': `${base('a_dn')}?v=audio&k=dn-sh&f=2n-ab` } })
     }
   })
 })

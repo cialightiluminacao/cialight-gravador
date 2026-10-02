@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { parseProject } from '@shared/editor/schema'
 import { projectDurationUs, updateAsset } from '@shared/editor/ops'
@@ -7,7 +7,7 @@ import type { Asset, Project } from '@shared/editor/project'
 import type { ProjectSummary } from '@shared/ipc'
 import type { SessionStore } from '../session/sessionStore'
 import { derivedComplete } from '../media/proxyPolicy'
-import { isAudioProcessKey, processedAudioRel } from '@shared/editor/audioProcess'
+import { isAudioProcessKey, isSourceFingerprint, processedAudioRel, sourceFingerprint } from '@shared/editor/audioProcess'
 
 // Projetos do editor: uma pasta por projeto em <projectsRoot>/<projectId>/ com project.json
 // (escrita atômica), versions/NNN.json (histórico de segurança), proxies/, cache/, generated/.
@@ -23,6 +23,8 @@ export interface ProjectStoreDeps {
   now?: () => number
   /** O rec.mp4 da gravação existe? (assets de sessão: sem ele → 'missing'). Ausente = não confere. */
   sessionMediaExists?: (sessionId: string) => boolean
+  /** Caminho do rec.mp4 da gravação (impressão digital da fonte dos assets de sessão). Ausente = não confere. */
+  sessionMediaFile?: (sessionId: string) => string
 }
 
 export type AssetVariant = 'original' | 'proxy' | 'intermediate'
@@ -160,11 +162,13 @@ export class ProjectStore {
     // lista, e o editor reprocessa se o item ainda pede
     const withProcessed = (a: Asset): Asset => {
       if (!a.processedAudio) return a
-      const keep = a.processedAudio.filter((k) => isAudioProcessKey(k) && existsSync(this.filePath(p.id, processedAudioRel(a.id, k))))
-      if (keep.length === a.processedAudio.length) return a
+      const current = this.sourceFingerprintOf(p, a)
+      const entries = Object.entries(a.processedAudio)
+      const keep = entries.filter(([k, fp]) => isAudioProcessKey(k) && isSourceFingerprint(fp) && (current === null || fp === current) && existsSync(this.filePath(p.id, processedAudioRel(a.id, k, fp))))
+      if (keep.length === entries.length) return a
       changed = true
       const { processedAudio: _, ...rest } = a
-      return keep.length ? { ...rest, processedAudio: keep } : rest
+      return keep.length ? { ...rest, processedAudio: Object.fromEntries(keep) } : rest
     }
     const assets = p.assets.map((a) => withProcessed(withStatus(a)))
     return changed ? { ...p, assets } : p
@@ -273,13 +277,50 @@ export class ProjectStore {
   }
 
   /**
-   * Versão de áudio pré-processada (generated/<asset>.audio-<chave>.m4a). Resolve pela chave (validada) sem exigir
-   * que `processedAudio` do projeto em memória já a liste: o renderer pode ainda não ter salvo o resultado.
+   * Versão de áudio pré-processada (generated/<asset>.audio-<chave>.<impressão>.m4a). Resolve pela chave e impressão
+   * (validadas) sem exigir que `processedAudio` do projeto em memória já as liste: o renderer pode ainda não ter salvo.
    */
-  processedAudioPath(p: Project, assetId: string, key: string): string {
+  processedAudioPath(p: Project, assetId: string, key: string, fingerprint: string): string {
     if (!p.assets.some((x) => x.id === assetId)) throw new Error(`asset não encontrado: ${assetId}`)
     if (!isAudioProcessKey(key)) throw new Error(`chave de áudio processado inválida: ${key}`)
-    return this.filePath(p.id, processedAudioRel(assetId, key))
+    if (!isSourceFingerprint(fingerprint)) throw new Error(`impressão da fonte inválida: ${fingerprint}`)
+    return this.filePath(p.id, processedAudioRel(assetId, key, fingerprint))
+  }
+
+  /**
+   * Impressão digital (tamanho + mtime) do arquivo de origem do asset — o importado, o rec.mp4 da gravação ou o
+   * gerado —, a mesma que a fila usa ao processar; null se não dá para ler (ausente) ou conferir.
+   */
+  sourceFingerprintOf(p: Project, a: Asset): string | null {
+    const src = a.source
+    if (src.type === 'session' && !this.deps.sessionMediaFile) return null
+    try {
+      const path = src.type === 'file' ? src.path : src.type === 'generated' ? this.filePath(p.id, src.file) : this.deps.sessionMediaFile!(src.sessionId)
+      const st = statSync(path)
+      return sourceFingerprint(st.size, st.mtimeMs)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Apaga as versões de áudio processadas do asset em generated/ (relink: o arquivo de origem mudou). Cada arquivo
+   * na sua tentativa: um que falhe (em uso, sem permissão) só vira aviso e não impede os outros. Devolve quantos saíram.
+   */
+  removeProcessedAudio(id: string, assetId: string): number {
+    const gen = join(this.dirOf(id), 'generated')
+    if (!existsSync(gen)) return 0
+    let removed = 0
+    for (const f of readdirSync(gen)) {
+      if (!f.startsWith(`${assetId}.audio-`)) continue
+      try {
+        rmSync(join(gen, f), { force: true })
+        removed++
+      } catch (e) {
+        this.deps.log?.warn(`não foi possível apagar o áudio processado ${f} de ${id}`, e)
+      }
+    }
+    return removed
   }
 
   assetPath(p: Project, assetId: string, variant: AssetVariant, sessionsStore: SessionStore): string {

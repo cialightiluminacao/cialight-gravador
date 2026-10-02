@@ -70,7 +70,7 @@ export function planAudio(p: Project, opts: PlanAudioOpts = {}): AudioSegment[] 
         return { tUs: item.startUs + local, gain: Math.max(0, g) }
       })
       const processKey = audioProcessKey({ denoise: a.denoise, normalize: a.normalize })
-      const ready = processKey !== null && !opts.bypassProcessing && (asset.processedAudio ?? []).includes(processKey)
+      const ready = processKey !== null && !opts.bypassProcessing && !!asset.processedAudio?.[processKey]
       out.push({
         itemId: item.id, assetId: item.assetId, sourceKey: audioSourceKey(item.assetId, ready ? processKey : null), processKey, startUs: item.startUs, durationUs: dur, srcInUs: item.inUs,
         speed: item.speed, reverse: item.reverse, preservePitch: a.preservePitch, keepFastAudio: a.keepFastAudio ?? false,
@@ -79,6 +79,17 @@ export function planAudio(p: Project, opts: PlanAudioOpts = {}): AudioSegment[] 
     }
   }
   return out
+}
+
+/**
+ * Comparar A/B: o plano a tocar (`bypass` = original) e o `alternate` — os segmentos do outro lado cuja fonte é
+ * diferente. O worker mantém vivas (e aquecidas) as fontes dos dois, então segurar/soltar o botão não decodifica
+ * do zero.
+ */
+export function abPlan(p: Project, bypass: boolean): { segments: AudioSegment[]; alternate: AudioSegment[] } {
+  const segments = planAudio(p, { bypassProcessing: bypass })
+  const other = planAudio(p, { bypassProcessing: !bypass })
+  return { segments, alternate: other.filter((s, i) => s.sourceKey !== segments[i]?.sourceKey) }
 }
 
 /**

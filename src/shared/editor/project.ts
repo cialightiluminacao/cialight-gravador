@@ -29,10 +29,11 @@ export interface Asset {
   speech?: string
   loudness?: { integrated: number; truePeak: number; lra: number }
   /**
-   * Chaves (audioProcess.ts) das versões de áudio pré-processadas (ruído/normalização) já prontas em
-   * generated/<id>.audio-<chave>.m4a. Cache: arquivo ausente ao abrir (outro PC) tira a chave e o editor reprocessa.
+   * Versões de áudio pré-processadas (ruído/normalização) prontas: chave (audioProcess.ts) → impressão digital da fonte,
+   * em generated/<id>.audio-<chave>.<impressão>.m4a. Cache: arquivo ausente ao abrir (outro PC) ou fonte diferente da
+   * impressão tira a chave e o editor reprocessa.
    */
-  processedAudio?: string[]
+  processedAudio?: Record<string, string>
   status: 'ready' | 'processing' | 'missing' | 'error'; error?: string
 }
 export type AnimPreset = 'fade' | 'slideL' | 'slideR' | 'slideU' | 'slideD' | 'zoom' | 'pop'

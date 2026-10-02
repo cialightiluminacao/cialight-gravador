@@ -65,8 +65,42 @@ Modelo RNNoise "somnolent-hogwash-2018-09-01" (sh.rnnn em resources/models/rnnoi
   rnnoise-nu (https://github.com/GregorR/rnnoise-nu). Usado pelo filtro arnndn do FFmpeg na redução de ruído do editor.
   O README do repositório declara: "With the exception of the tools/ directory and this file, none of this work is
   creative and thus none of it is subject to copyright." (sem restrição de redistribuição).
-  O RNNoise (https://github.com/xiph/rnnoise), cujo formato o modelo segue e que o filtro arnndn do FFmpeg
-  implementa, é Copyright (c) Xiph.Org Foundation, Jean-Marc Valin e outros — Licença BSD de 3 cláusulas.
+  O código do RNNoise (https://github.com/xiph/rnnoise) não é distribuído à parte: ele está dentro do FFmpeg (filtro
+  arnndn, nas DLLs em resources/ffmpeg, sob a GPLv3 do build acima). Reproduzimos abaixo, por atribuição, o aviso e a
+  licença BSD de 3 cláusulas do RNNoise (COPYING do repositório, commit 70f1d256acd4b34a572f999a05c87bf00b67730d):
+
+  Copyright (c) 2007-2017, 2024 Jean-Marc Valin
+  Copyright (c) 2023 Amazon
+  Copyright (c) 2017, Mozilla
+  Copyright (c) 2005-2017, Xiph.Org Foundation
+  Copyright (c) 2003-2004, Mark Borgerding
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions
+  are met:
+
+  - Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+
+  - Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+
+  - Neither the name of the Xiph.Org Foundation nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+  A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION
+  OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
 opencut-classic (https://github.com/OpenCut-app/OpenCut, MIT) foi consultado como referência de

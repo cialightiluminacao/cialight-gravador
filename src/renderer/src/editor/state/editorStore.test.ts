@@ -114,17 +114,17 @@ describe('editorStore', () => {
     expect(st().project).toBe(st().history.present)
   })
 
-  it('markAudioProcessed acrescenta a chave pronta (união) em todo o histórico, sem entrada de undo', () => {
-    st().apply((p) => ({ ...p, assets: [{ ...asset('x'), processedAudio: ['dn-sh'] }] }))
+  it('markAudioProcessed registra chave → impressão em todo o histórico, sem entrada de undo', () => {
+    st().apply((p) => ({ ...p, assets: [{ ...asset('x'), processedAudio: { 'dn-sh': 'a-1' } }] }))
     st().apply((p) => addMarker(p, 1))
     const pastLen = st().history.past.length
-    st().markAudioProcessed('x', 'ln-i16-tp1.5')
-    st().markAudioProcessed('x', 'dn-sh')
+    st().markAudioProcessed('x', 'ln-i16-tp1.5', 'a-1')
+    st().markAudioProcessed('x', 'dn-sh', 'a-1')
     expect(st().history.past).toHaveLength(pastLen)
-    expect(st().project!.assets[0].processedAudio).toEqual(['dn-sh', 'ln-i16-tp1.5'])
+    expect(st().project!.assets[0].processedAudio).toEqual({ 'dn-sh': 'a-1', 'ln-i16-tp1.5': 'a-1' })
     st().undo()
-    expect(st().project!.assets[0].processedAudio).toEqual(['dn-sh', 'ln-i16-tp1.5'])
-    st().markAudioProcessed('zz', 'dn-sh') // asset removido nesse meio tempo: ignora
+    expect(st().project!.assets[0].processedAudio).toEqual({ 'dn-sh': 'a-1', 'ln-i16-tp1.5': 'a-1' })
+    st().markAudioProcessed('zz', 'dn-sh', 'a-1') // asset removido nesse meio tempo: ignora
   })
 
   it('estado do processamento de áudio e do A/B fica fora do projeto', () => {

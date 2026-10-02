@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { basename, dirname, join } from 'path'
 import type { Asset } from '@shared/editor/project'
 import type { IngestJob } from '@shared/ipc'
+import { sourceFingerprint } from '@shared/editor/audioProcess'
 import type { MediaInfo } from './probe'
 
 // Fila com ffmpeg falso: cada etapa vira uma promessa controlada pelo teste, para medir a
@@ -227,30 +228,55 @@ describe('IngestQueue', () => {
 
   describe('processAudio (redução de ruído/normalização em cache)', () => {
     const jobs: IngestJob[] = []
+    let srcFile: string
+    const fp = (): string => {
+      const st = statSync(srcFile)
+      return sourceFingerprint(st.size, st.mtimeMs)
+    }
     beforeEach(() => {
       jobs.length = 0
       queue.on('progress', (j) => jobs.push(j))
+      srcFile = join(dir, 'fonte.wav')
+      writeFileSync(srcFile, Buffer.alloc(100))
     })
-    const ready = (): Asset => ({ ...asset('a'), status: 'ready' })
+    const ready = (id = 'a'): Asset => ({ ...asset(id), status: 'ready', source: { type: 'file', path: srcFile, size: 100, mtimeMs: 1 } })
 
-    it('gera no slot pesado o arquivo da chave em generated/, com progresso por chave e sem emitir done', async () => {
+    it('gera no slot pesado o arquivo de (chave, impressão da fonte) em generated/, com progresso por chave e sem emitir done', async () => {
       const p = queue.processAudio('p', ready(), { denoise: true, normalize: true })
       await flush()
-      expect(h.calls.map((c) => [c.kind, c.what])).toEqual([['heavy', 'audio:a.audio-dn-sh_ln-i16-tp1.5.m4a']])
+      expect(h.calls.map((c) => [c.kind, c.what])).toEqual([['heavy', `audio:a.audio-dn-sh_ln-i16-tp1.5.${fp()}.m4a`]])
       expect(queue.busy('p')).toBe(true)
       h.calls[0].resolve()
-      await expect(p).resolves.toEqual({ key: 'dn-sh_ln-i16-tp1.5', rel: 'generated/a.audio-dn-sh_ln-i16-tp1.5.m4a' })
+      await expect(p).resolves.toEqual({ key: 'dn-sh_ln-i16-tp1.5', fingerprint: fp(), rel: `generated/a.audio-dn-sh_ln-i16-tp1.5.${fp()}.m4a` })
       expect(jobs.some((j) => j.step === 'audioProcess' && j.key === 'dn-sh_ln-i16-tp1.5' && j.percent === 40)).toBe(true)
       expect(done).toHaveLength(0)
       expect(queue.busy('p')).toBe(false)
     })
 
     it('arquivo já existe (cache): devolve na hora sem ffmpeg', async () => {
-      const file = join(dir, 'p', 'generated', 'a.audio-dn-sh.m4a')
+      const file = join(dir, 'p', 'generated', `a.audio-dn-sh.${fp()}.m4a`)
       mkdirSync(dirname(file), { recursive: true })
       writeFileSync(file, 'x')
-      await expect(queue.processAudio('p', ready(), { denoise: true, normalize: false })).resolves.toEqual({ key: 'dn-sh', rel: 'generated/a.audio-dn-sh.m4a' })
+      await expect(queue.processAudio('p', ready(), { denoise: true, normalize: false })).resolves.toEqual({ key: 'dn-sh', fingerprint: fp(), rel: `generated/a.audio-dn-sh.${fp()}.m4a` })
       expect(h.calls).toHaveLength(0)
+    })
+
+    it('fonte trocada (relink/arquivo regravado): impressão nova, nunca acha o cache antigo', async () => {
+      const old = join(dir, 'p', 'generated', `a.audio-dn-sh.${fp()}.m4a`)
+      mkdirSync(dirname(old), { recursive: true })
+      writeFileSync(old, 'x')
+      writeFileSync(srcFile, Buffer.alloc(200))
+      const p = queue.processAudio('p', ready(), { denoise: true, normalize: false })
+      await flush()
+      expect(h.calls.map((c) => c.what)).toEqual([`audio:a.audio-dn-sh.${fp()}.m4a`])
+      h.calls[0].resolve()
+      await expect(p).resolves.toMatchObject({ fingerprint: fp() })
+      expect(basename(old)).not.toBe(`a.audio-dn-sh.${fp()}.m4a`)
+    })
+
+    it('fonte ilegível: rejeita sem deixar a fila ocupada', async () => {
+      await expect(queue.processAudio('p', { ...ready(), source: { type: 'file', path: join(dir, 'nao-existe.wav'), size: 1, mtimeMs: 1 } }, { denoise: true, normalize: false })).rejects.toThrow()
+      expect(queue.busy('p')).toBe(false)
     })
 
     it('pedidos repetidos da mesma chave compartilham a execução; chaves diferentes e a ingestão do asset não se cancelam', async () => {
@@ -262,9 +288,28 @@ describe('IngestQueue', () => {
       await expect(a).resolves.toMatchObject({ key: 'dn-sh' })
       await expect(b).resolves.toMatchObject({ key: 'dn-sh' })
       await expect(c).resolves.toMatchObject({ key: 'ln-i16-tp1.5' })
-      expect(h.calls.filter((x) => x.what.startsWith('audio:')).map((x) => x.what).sort()).toEqual(['audio:a.audio-dn-sh.m4a', 'audio:a.audio-ln-i16-tp1.5.m4a'])
+      expect(h.calls.filter((x) => x.what.startsWith('audio:')).map((x) => x.what).sort()).toEqual([`audio:a.audio-dn-sh.${fp()}.m4a`, `audio:a.audio-ln-i16-tp1.5.${fp()}.m4a`])
       expect(h.calls.every((x) => !x.signal?.aborted)).toBe(true)
       expect(done).toHaveLength(1) // a análise de áudio
+    })
+
+    it('cancelAudio: cancela só o processamento de áudio daquele asset (a ingestão dele e o de outro asset seguem)', async () => {
+      const mine = queue.processAudio('p', ready('a'), { denoise: true, normalize: false })
+      const mine2 = queue.processAudio('p', ready('a'), { denoise: false, normalize: true })
+      const other = queue.processAudio('p', ready('b'), { denoise: true, normalize: false })
+      queue.enqueue('p', ready('a'), { analyzeAudio: true })
+      await flush()
+      queue.cancelAudio('p', 'a')
+      const [r1, r2] = await Promise.allSettled([mine, mine2])
+      expect([r1, r2].map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'ok'))).toEqual(['cancelado', 'cancelado'])
+      await drain()
+      await expect(other).resolves.toMatchObject({ key: 'dn-sh' })
+      expect(done.map((d) => d.assetId)).toEqual(['a'])
+      expect(queue.busy('p')).toBe(false)
+      // depois de cancelado, um novo pedido da mesma chave roda de novo
+      const again = queue.processAudio('p', ready('a'), { denoise: true, normalize: false })
+      await drain()
+      await expect(again).resolves.toMatchObject({ key: 'dn-sh' })
     })
 
     it('cancelar o projeto rejeita com CancelledError e libera a fila', async () => {

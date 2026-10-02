@@ -66,6 +66,21 @@ export function parseLoudnormJson(stderr: string): LoudnormMeasure | null {
   return Object.values(r).every(Number.isFinite) ? r : null
 }
 
+/** O arquivo do modelo RNNoise não está onde deveria (instalação incompleta ou, em dev, sem `npm run fetch:models`). */
+export class MissingModelError extends Error {
+  constructor(readonly path: string) {
+    super(`modelo de redução de ruído ausente (${path})`)
+    this.name = 'MissingModelError'
+  }
+}
+
+/** Texto para o usuário: no app instalado, reinstalar; em dev, o comando que baixa o modelo. */
+export function missingModelMessage(e: MissingModelError, packaged: boolean): string {
+  return packaged
+    ? 'O modelo de redução de ruído não foi encontrado na instalação. Reinstale o CiaLight Gravador para usar “Reduzir ruído (voz)”.'
+    : `Modelo de redução de ruído ausente (${e.path}): rode "npm run fetch:models".`
+}
+
 export interface AudioProcessRun {
   /** Pasta com o modelo RNNoise (resources/models/rnnoise). */
   modelDir: string
@@ -80,9 +95,7 @@ export interface AudioProcessRun {
  * Cancelamento → CancelledError e nenhum arquivo (nem .part) fica.
  */
 export async function processAudioFile(input: string, map: string, out: string, opts: AudioProcessOpts, run: AudioProcessRun): Promise<void> {
-  if (opts.denoise && !existsSync(join(run.modelDir, DENOISE_MODEL.file))) {
-    throw new Error(`modelo de redução de ruído ausente (${join(run.modelDir, DENOISE_MODEL.file)}); rode "npm run fetch:models"`)
-  }
+  if (opts.denoise && !existsSync(join(run.modelDir, DENOISE_MODEL.file))) throw new MissingModelError(join(run.modelDir, DENOISE_MODEL.file))
   const lo = { dualMono: run.dualMono }
   const span = (from: number, to: number) => (p: { outTimeUs: number }): void => {
     if (run.durationUs > 0) run.onProgress?.(Math.min(99, Math.round(from + ((to - from) * p.outTimeUs) / run.durationUs)))

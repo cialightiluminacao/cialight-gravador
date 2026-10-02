@@ -20,6 +20,8 @@ const ATTACH = process.argv.includes('--attach')
 const SHOTS = join(ROOT, 'docs', 'qa', 'editor-f3')
 const SETTINGS = join(process.env.APPDATA ?? '', 'cialight-gravador', 'settings.json')
 const GENERATED = join(ROOT, 'test-out', 'Projetos', 'p-qa-editor-fixture', 'generated')
+/** Arquivos gerados de uma chave (o nome leva a impressão digital da fonte: <asset>.audio-<chave>.<impressão>.m4a). */
+const generatedFor = (key) => (existsSync(GENERATED) ? readdirSync(GENERATED).filter((f) => f.startsWith(`a_qa_video.audio-${key}.`) && f.endsWith('.m4a')) : [])
 
 mkdirSync(SHOTS, { recursive: true })
 const settingsBefore = existsSync(SETTINGS) ? readFileSync(SETTINGS) : null
@@ -167,9 +169,9 @@ async function main() {
     check('um passo de histórico; status "processando" (tocando o original)', r.denoise === true && r.past === r.p0 + 1 && r.status === 'processing' && r.text.includes('tocando o original'), { ...r, text: undefined })
     await shot('f3-voz-01-processando.png')
     const ms = await ev(`return await T.waitReady(60000)`)
-    const keys = await ev(`return T.st().project.assets.find((x) => x.id === 'a_qa_video').processedAudio`)
-    check('fica pronto e a chave entra em processedAudio', ms >= 0 && JSON.stringify(keys) === '["dn-sh"]', { ms, keys })
-    check('arquivo em generated/', existsSync(join(GENERATED, 'a_qa_video.audio-dn-sh.m4a')), readdirSync(GENERATED))
+    const pa = await ev(`return T.st().project.assets.find((x) => x.id === 'a_qa_video').processedAudio`)
+    check('fica pronto e a chave → impressão da fonte entra em processedAudio', ms >= 0 && JSON.stringify(Object.keys(pa ?? {})) === '["dn-sh"]', { ms, pa })
+    check('arquivo em generated/ com a impressão no nome', generatedFor('dn-sh').length === 1 && generatedFor('dn-sh')[0] === `a_qa_video.audio-dn-sh.${pa?.['dn-sh']}.m4a`, readdirSync(GENERATED))
     await shot('f3-voz-02-pronto.png')
   }
 
@@ -188,11 +190,18 @@ async function main() {
     check('desligado: sem status; religado: pronto na hora (cache), nenhum job', r.off.status === null && r.on.status === 'ready' && r.on.jobs === 0, r)
   }
 
+  console.log('faixa muda / áudio do item desligado: sem "aguardando"')
+  {
+    const r = await ev(`const tr = T.st().project.tracks.find((t) => t.items.some((i) => i.id === '${a}')); T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => (t.id === tr.id ? { ...t, muted: true } : t)) })); await T.settle(); await T.clickEl(T.toggle('Normalizar volume (−16 LUFS)')); await T.settle(); const muted = { status: T.status(), text: T.panel().textContent, jobs: Object.keys(T.st().audioJobs) }; T.st().undo(); await T.settle(); T.st().undo(); await T.settle(); return { muted, back: T.status() }`)
+    check('faixa muda com a opção ligada: status "inativo", sem "Aguardando" nem pedido', r.muted.status === 'inactive' && !r.muted.text.includes('Aguardando') && r.muted.jobs.length === 0, { ...r, muted: { ...r.muted, text: undefined } })
+    await sleep(200)
+  }
+
   console.log('normalizar também: nova chave (ruído antes da normalização)')
   {
     await ev(`await T.clickEl(T.toggle('Normalizar volume (−16 LUFS)')); return 1`)
     const ms = await ev(`return await T.waitReady(60000)`)
-    const keys = await ev(`return T.st().project.assets.find((x) => x.id === 'a_qa_video').processedAudio`)
+    const keys = await ev(`return Object.keys(T.st().project.assets.find((x) => x.id === 'a_qa_video').processedAudio ?? {})`)
     check('dn-sh_ln-i16-tp1.5 pronto, dn-sh mantido no cache', ms >= 0 && JSON.stringify(keys) === '["dn-sh","dn-sh_ln-i16-tp1.5"]', { ms, keys })
     await shot('f3-voz-04-ruido-e-normalizar.png')
   }
@@ -207,11 +216,11 @@ async function main() {
     check('ao abrir, as chaves sem arquivo saem e o pedido sai sozinho', r0.keys === null && r0.jobs.includes('a_qa_video~dn-sh_ln-i16-tp1.5'), r0)
     let keys = null
     for (let i = 0; i < 60; i++) {
-      keys = await ev(`return T.st().project.assets.find((x) => x.id === 'a_qa_video').processedAudio ?? null`)
+      keys = await ev(`const pa = T.st().project.assets.find((x) => x.id === 'a_qa_video').processedAudio; return pa ? Object.keys(pa) : null`)
       if (keys) break
       await sleep(1000)
     }
-    check('reprocessado (só a chave pedida pelo item)', JSON.stringify(keys) === '["dn-sh_ln-i16-tp1.5"]' && existsSync(join(GENERATED, 'a_qa_video.audio-dn-sh_ln-i16-tp1.5.m4a')), keys)
+    check('reprocessado (só a chave pedida pelo item)', JSON.stringify(keys) === '["dn-sh_ln-i16-tp1.5"]' && generatedFor('dn-sh_ln-i16-tp1.5').length === 1, keys)
   }
 }
 

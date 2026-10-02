@@ -8,9 +8,10 @@
 // Shuttle (J/K/L até 2×, só preview): o pedido traz `rate`; o bloco é mixado no tempo do shuttle (t/rate) com os
 // segmentos de shuttleSegments (velocidade × rate, esticados), e devolvido com o fromUs da timeline.
 // Redução de ruído/normalização: cada segmento lê a fonte do seu sourceKey — o original do asset ou a versão
-// pré-processada em generated/ (arquivo só de áudio, faixa única); `bypassProcessing` (A/B) força o original.
+// pré-processada em generated/ (arquivo só de áudio, faixa única); `bypassProcessing` (A/B) força o original. No
+// preview as fontes dos dois lados do A/B ficam vivas e aquecidas (segurar/soltar o botão não decodifica do zero).
 import { splitAudioSourceKey } from '@shared/editor/audioProcess'
-import { planAudio, shuttleSegments, type AudioSegment } from '@shared/editor/audioPlan'
+import { abPlan, shuttleSegments, type AudioSegment } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 import { AssetPcm } from './assetPcm'
@@ -25,6 +26,8 @@ const LOOKAHEAD_US = 1_000_000
 const post = (m: AudioOut, transfer: Transferable[] = []): void => (self as unknown as Worker).postMessage(m, transfer)
 
 let segments: AudioSegment[] = []
+// A/B (só preview): segmentos do outro lado (original × processado) cuja fonte difere — mantidos vivos e aquecidos
+let alternate: AudioSegment[] = []
 // segmentos do shuttle por taxa (refeitos quando o projeto muda)
 let shuttle = new Map<number, AudioSegment[]>()
 const sources = new Map<string, AssetPcm>()
@@ -59,6 +62,7 @@ self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
       case 'dispose':
         queue.length = 0
         segments = []
+        alternate = []
         stretch.retain(new Set())
         for (const s of sources.values()) s.dispose()
         sources.clear()
@@ -75,10 +79,13 @@ function enqueue(m: Extract<AudioIn, { t: 'render' }>, reply: RenderMsg['reply']
 }
 
 function setProject(project: Project, mediaUrls: MediaUrls, useProxy: boolean, bypassProcessing: boolean): void {
-  segments = planAudio(project, { bypassProcessing })
+  const ab = abPlan(project, bypassProcessing)
+  segments = ab.segments
+  // exportação (sem proxy) não compara: só o plano tocado
+  alternate = useProxy ? ab.alternate.filter((s) => s.mode !== 'mute') : []
   shuttle = new Map()
   stretch.retain(new Set(segments.filter((s) => s.mode === 'stretch').map((s) => s.itemId)))
-  const used = new Set(segments.filter((s) => s.mode !== 'mute').map((s) => s.sourceKey))
+  const used = new Set([...segments.filter((s) => s.mode !== 'mute'), ...alternate].map((s) => s.sourceKey))
   for (const [key, src] of sources) {
     const want = used.has(key) ? sourceFor(project, key, mediaUrls, useProxy) : null
     if (!want || want.url !== src.url || want.trackIndex !== src.trackIndex) {
@@ -133,6 +140,8 @@ async function pump(): Promise<void> {
         const pcm = mixBlock(segs, fromUs, m.frames, sources as Map<string, PcmSource>)
         m.reply({ t: 'block', seq: m.seq, fromUs: m.fromUs, pcm }, [pcm.buffer])
         void prepare(segs, blockEnd, Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
+        // A/B: o outro lado também fica decodificado (bloco + aquecimento), para segurar/soltar não começar do zero
+        if (rate === 1 && alternate.length) void warm(alternate, fromUs, m.frames + Math.round((LOOKAHEAD_US * SR) / 1e6), stale)
       } catch (err) {
         m.reply({ t: 'error', message: errMsg(err), seq: m.seq })
       }
@@ -164,6 +173,25 @@ function prepare(segs: AudioSegment[], fromUs: Us, frames: number, stale: () => 
     const frames = Math.ceil(((b - a) * SR) / 1e6) + 1
     if (seg.mode === 'stretch') jobs.push(src.ensureStretched(seg.itemId, srcFrom, frames, seg.speed, stale))
     else jobs.push(src.ensure(srcFrom, frames, seg.speed, seg.reverse, stale))
+  }
+  return Promise.all(jobs)
+}
+
+/**
+ * Só decodifica (sem stretcher: o StretchBank é por item e pertence ao plano tocado) os chunks que os segmentos
+ * alternativos leriam em [fromUs, fromUs + frames/SR).
+ */
+function warm(segs: AudioSegment[], fromUs: Us, frames: number, stale: () => boolean): Promise<unknown> {
+  const blockEnd = fromUs + Math.round((frames * 1e6) / SR)
+  const jobs: Promise<void>[] = []
+  for (const seg of segs) {
+    const src = sources.get(seg.sourceKey)
+    const a = Math.max(fromUs, seg.startUs)
+    const b = Math.min(blockEnd, seg.startUs + seg.durationUs)
+    if (!src || b <= a) continue
+    const local = a - seg.startUs
+    const srcFrom = seg.reverse ? seg.srcInUs + Math.round((seg.durationUs - local) * seg.speed) : seg.srcInUs + Math.round(local * seg.speed)
+    jobs.push(src.ensure(srcFrom, Math.ceil(((b - a) * SR) / 1e6) + 1, seg.speed, seg.reverse, stale))
   }
   return Promise.all(jobs)
 }

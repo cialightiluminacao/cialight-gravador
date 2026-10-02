@@ -2,10 +2,11 @@ import { useEffect, useRef } from 'react'
 import { AlertTriangle, Check, Headphones, Loader2 } from 'lucide-react'
 import type { MediaItem } from '@shared/editor/project'
 import { audioProcessKey, audioSourceKey } from '@shared/editor/audioProcess'
+import { planAudio } from '@shared/editor/audioPlan'
 import { Progress, Slider, Toggle } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
 import { useEditorStore } from '../../state/editorStore'
-import { retryAudioProcessing } from '../audioProcessing'
+import { retryAudioProcessing, voiceProcessStatus } from '../audioProcessing'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
 import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
@@ -95,7 +96,10 @@ function VoicePanel({ item }: { item: MediaItem }): React.JSX.Element {
   const job = useEditorStore((s) => (jobId ? s.audioJobs[jobId] : undefined))
   const bypass = useEditorStore((s) => s.audioBypass)
   const setBypass = useEditorStore((s) => s.setAudioBypass)
-  const ready = !!key && !!asset?.processedAudio?.includes(key)
+  const ready = !!key && !!asset?.processedAudio?.[key]
+  // o item soa no plano (áudio ligado, item ativo, faixa não muda)? Senão nada é pedido: não está "aguardando"
+  const active = useEditorStore((s) => !!s.project && planAudio(s.project).some((x) => x.itemId === id))
+  const status = voiceProcessStatus({ ready, job, active, assetReady: asset?.status === 'ready' })
   // soltar o botão fora dele/trocar de item: o A/B nunca fica preso no original
   useEffect(() => () => useEditorStore.getState().setAudioBypass(false), [id])
 
@@ -111,12 +115,12 @@ function VoicePanel({ item }: { item: MediaItem }): React.JSX.Element {
         <Toggle size="sm" checked={a.normalize} disabled={!a.enabled} onCheckedChange={(on) => editItem<MediaItem>(id, (d) => { d.audio.normalize = on })} aria-label="Normalizar volume (−16 LUFS)" />
       </OptionRow>
       {key ? (
-        <div className="space-y-1.5 pt-0.5" data-audio-process-status={ready ? 'ready' : job && 'error' in job ? 'error' : 'processing'}>
-          {ready ? (
+        <div className="space-y-1.5 pt-0.5" data-audio-process-status={status}>
+          {status === 'ready' ? (
             <p className="flex items-center gap-1.5 text-[11px] text-ok">
               <Check className="h-3.5 w-3.5" /> Áudio tratado pronto
             </p>
-          ) : job && 'error' in job ? (
+          ) : status === 'error' ? (
             <div className="flex items-start gap-1.5 text-[11px] text-warn" role="alert">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span className="min-w-0 flex-1">
@@ -126,13 +130,15 @@ function VoicePanel({ item }: { item: MediaItem }): React.JSX.Element {
                 </button>
               </span>
             </div>
+          ) : status === 'inactive' ? (
+            <p className="text-[11px] text-muted-2">O tratamento é feito quando o áudio do item estiver ligado e a faixa com som.</p>
           ) : (
             <>
               <p className="flex items-center gap-1.5 text-[11px] text-muted">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {job ? `Processando… ${Math.round(job.percent)}%` : 'Aguardando a mídia…'} <span className="text-muted-2">(tocando o original)</span>
+                {status === 'waiting' ? 'Aguardando a mídia…' : `Processando… ${job && 'percent' in job ? Math.round(job.percent) : 0}%`} <span className="text-muted-2">(tocando o original)</span>
               </p>
-              {job ? <Progress value={job.percent} tone="info" className="h-1" /> : null}
+              {job && 'percent' in job ? <Progress value={job.percent} tone="info" className="h-1" /> : null}
             </>
           )}
           <button

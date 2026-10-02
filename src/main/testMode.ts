@@ -2,7 +2,6 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import { createHash } from 'crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, join } from 'path'
-import { execFileSync } from 'child_process'
 import type { ExportOptions, ExportPresetId, Session } from '@shared/types'
 import { PRESET_ORDER } from '@shared/presets/presets'
 import type { SessionStore } from './session/sessionStore'
@@ -24,11 +23,13 @@ import { preloadPath, loadPage } from './windows/recorderWindow'
 import { log } from './log'
 import { testEditorRender } from './editorTestMode'
 import { testEditorExport } from './editorExportTestMode'
-import { isFastStart, makeSyntheticSession } from './testFixtures'
+import { crossCorrelationLag, isFastStart, makeSyntheticSession, makeVoiceFixture } from './testFixtures'
 import { rnnoiseDir } from './export/ffmpegPath'
-import { DENOISE_DELAY_SAMPLES } from './media/audioProcess'
+import { DENOISE_DELAY_SAMPLES, processAudioFile } from './media/audioProcess'
+import { DENOISE_MODEL } from '@shared/editor/audioProcess'
+import { tmpdir } from 'os'
 
-// Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render|editor-export). Roda no Electron
+// Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render|editor-export|models). Roda no Electron
 // real com o ffmpeg embutido; escreve um relatório JSON em test-out/ e sai com
 // código 0 (sucesso) ou 1 (falha). Chamado por `npm run test:ffmpeg|test:capture|test:ingest|test:editor`.
 
@@ -266,32 +267,6 @@ async function decodeInRenderer(store: SessionStore, files: { name: string; path
 
 // ---- redução de ruído e normalização (parte do CIALIGHT_TEST=ingest) ----
 
-const VOICE_TEXT = 'Olá, este é um teste de redução de ruído. A voz deve continuar clara depois do processamento.'
-
-/**
- * Voz sintética: a do Windows (System.Speech, pt-BR se houver) em WAV mono 48 kHz; sem ela, uma "vogal" harmônica
- * modulada em sílabas (o RNNoise trata tom puro como ruído, então aí só vale a queda do ruído nas pausas).
- */
-function synthVoice(out: string): 'tts' | 'harmonic' {
-  const script = [
-    'Add-Type -AssemblyName System.Speech',
-    '$s = New-Object System.Speech.Synthesis.SpeechSynthesizer',
-    "$v = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -eq 'pt-BR' } | Select-Object -First 1",
-    'if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }',
-    '$f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(48000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)',
-    `$s.SetOutputToWaveFile('${out.replace(/'/g, "''")}', $f)`,
-    `$s.Speak('${VOICE_TEXT}')`,
-    '$s.Dispose()'
-  ].join('; ')
-  try {
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 60_000 })
-    if (existsSync(out) && statSync(out).size > 48_000 * 2) return 'tts'
-  } catch (e) {
-    log.warn('voz sintética do Windows indisponível; usando a harmônica', e)
-  }
-  return 'harmonic'
-}
-
 /** Média RMS (dBFS, volumedetect) de [from, to) s do 1º stream de áudio. */
 async function meanDb(file: string, fromS: number, toS: number): Promise<number> {
   const r = await runFfmpeg(['-hide_banner', '-nostdin', '-i', file, '-map', '0:a:0', '-af', `atrim=${fromS}:${toS},volumedetect`, '-f', 'null', '-progress', 'pipe:1', '-nostats', '-'], { label: 'volumedetect' })
@@ -306,58 +281,32 @@ async function pcmMono(file: string, raw: string): Promise<Int16Array> {
   return new Int16Array(b.buffer.slice(b.byteOffset, b.byteOffset + (b.length & ~1)))
 }
 
-/** Atraso (amostras) de `b` em relação a `a` pela correlação cruzada em ±maxLag. */
-function lagOf(a: Int16Array, b: Int16Array, maxLag = 2000): number {
-  let best = -Infinity
-  let lag = 0
-  const n = Math.min(a.length, b.length) - maxLag
-  for (let l = -maxLag; l <= maxLag; l++) {
-    let s = 0
-    for (let i = maxLag; i < n; i += 2) s += a[i] * b[i + l]
-    if (s > best) {
-      best = s
-      lag = l
-    }
-  }
-  return lag
-}
-
 type MkAsset = (id: string, path: string, info: MediaInfo, decodable?: boolean) => Asset
 
 /**
  * Voz sintética + ruído branco a −30 dBFS: o denoise derruba o ruído nas pausas em ≥ 10 dB (mantendo a voz, com a
- * do Windows) sem deslocar o áudio; a normalização leva −30 LUFS a −16 ±1 (estéreo e mono tocado nos dois canais);
- * a 2ª chamada da mesma chave vem do cache; nenhum .part sobra.
+ * do Windows); a normalização leva −30 LUFS a −16 ±1 (estéreo e mono tocado nos dois canais); nenhuma saída se
+ * desloca no tempo (correlação cruzada com a voz limpa, |atraso| ≤ 2 amostras); a 2ª chamada da mesma chave vem do
+ * cache, fonte regravada gera outro arquivo; nenhum .part sobra.
  */
 async function testVoiceProcessing(queue: IngestQueue, mk: MkAsset, gen: (args: string[], label: string) => Promise<unknown>, dir: string, pdir: string, projectId: string, failures: string[]): Promise<void> {
-  const tts = join(dir, 'voz-tts.wav')
-  const voice = join(dir, 'voz.wav')
+  const vf = await makeVoiceFixture(dir, 'voz')
+  const { file: voice, kind, speech, pauses, durS: dur } = vf
   const noisy = join(dir, 'voz-ruido.wav')
-  const kind = synthVoice(tts)
-  // pausas conhecidas: 1 s antes e 2 s depois da fala (harmônica: fala em 1–3 s e 5–7 s de 9 s)
-  let speech: [number, number]
-  let pauses: [number, number][]
-  if (kind === 'tts') {
-    await gen(['-i', tts, '-af', 'adelay=1000,apad=pad_dur=2', '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', voice], 'voz: pausas')
-    const d = ((await probe(voice)).durationUs ?? 0) / 1e6
-    speech = [1.3, d - 2.5]
-    pauses = [[0.1, 0.9], [d - 1.8, d - 0.1]]
-  } else {
-    const v = '0.3*(0.6+0.4*sin(2*PI*4*t))*(sin(2*PI*220*t)+0.5*sin(4*PI*220*t)+0.25*sin(6*PI*220*t))*(between(t,1,3)+between(t,5,7))'
-    await gen(['-f', 'lavfi', '-i', `aevalsrc='${v}':s=48000:d=9`, '-c:a', 'pcm_s16le', voice], 'voz harmônica')
-    speech = [1.2, 2.8]
-    pauses = [[0.1, 0.9], [3.4, 4.6]]
-  }
-  const dur = ((await probe(voice)).durationUs ?? 0) / 1e6
   // ruído branco uniforme de amplitude a: RMS = a/√3 → −30 dBFS com a = √3·10^(−30/20)
   await gen(['-i', voice, '-f', 'lavfi', '-i', `anoisesrc=color=white:r=48000:a=${(Math.sqrt(3) * 10 ** (-30 / 20)).toFixed(5)}:d=${dur}:seed=7`, '-filter_complex', '[0][1]amix=inputs=2:normalize=0:duration=first', '-ac', '1', '-c:a', 'pcm_s16le', noisy], 'voz + ruído −30 dB')
   const aNoisy: Asset = { ...mk('a_noisy', noisy, await probe(noisy)), status: 'ready' }
+  const clean = await pcmMono(voice, join(dir, 'voz.s16'))
+  const lagOk = async (file: string, label: string, raw: string): Promise<void> => {
+    const lag = crossCorrelationLag(clean, await pcmMono(file, join(dir, raw)))
+    ok(Math.abs(lag) <= 2, `${label}: sem deslocamento no tempo (${lag} amostras)`, failures)
+  }
 
   const t0 = Date.now()
   const dn = await queue.processAudio(projectId, aNoisy, { denoise: true, normalize: false })
   const dnFile = join(pdir, ...dn.rel.split('/'))
   console.log(`denoise em ${((Date.now() - t0) / 1000).toFixed(1)} s (voz ${kind})`)
-  ok(dn.key === 'dn-sh' && existsSync(dnFile), `denoise: arquivo gerado (${dn.rel})`, failures)
+  ok(dn.key === 'dn-sh' && existsSync(dnFile) && dn.rel.endsWith(`.${dn.fingerprint}.m4a`), `denoise: arquivo gerado com a impressão da fonte (${dn.rel})`, failures)
   for (const [a, b] of pauses) {
     const before = await meanDb(noisy, a, b)
     const after = await meanDb(dnFile, a, b)
@@ -366,10 +315,11 @@ async function testVoiceProcessing(queue: IngestQueue, mk: MkAsset, gen: (args: 
   const speechBefore = await meanDb(voice, speech[0], speech[1])
   const speechAfter = await meanDb(dnFile, speech[0], speech[1])
   console.log(`voz (${kind}): ${speechBefore} dB limpa → ${speechAfter} dB após o denoise`)
-  if (kind === 'tts') ok(Math.abs(speechAfter - speechBefore) <= 3, `denoise: voz preservada ±3 dB (${speechBefore} → ${speechAfter} dB)`, failures)
-  // mesma linha do tempo do original: o atraso do arnndn (480 amostras) é compensado
-  const lag = lagOf(await pcmMono(voice, join(dir, 'voz.s16')), await pcmMono(dnFile, join(dir, 'voz-dn.s16')))
-  ok(Math.abs(lag) <= 2, `denoise: sem deslocamento no tempo (${lag} amostras; atraso bruto do arnndn ${DENOISE_DELAY_SAMPLES})`, failures)
+  // só a voz do Windows sobrevive ao RNNoise (a harmônica vira "ruído"): voz preservada e correlação só com ela
+  if (kind === 'tts') {
+    ok(Math.abs(speechAfter - speechBefore) <= 3, `denoise: voz preservada ±3 dB (${speechBefore} → ${speechAfter} dB)`, failures)
+    await lagOk(dnFile, `denoise (atraso bruto do arnndn: ${DENOISE_DELAY_SAMPLES})`, 'voz-dn.s16')
+  }
   const mtime = statSync(dnFile).mtimeMs
   const t1 = Date.now()
   const again = await queue.processAudio(projectId, aNoisy, { denoise: true, normalize: false })
@@ -396,14 +346,27 @@ async function testVoiceProcessing(queue: IngestQueue, mk: MkAsset, gen: (args: 
     const a: Asset = { ...mk(id, file, await probe(file)), status: 'ready' }
     const r = await queue.processAudio(projectId, a, { denoise: false, normalize: true })
     const out = join(pdir, ...r.rel.split('/'))
+    const label = id === 'a_ln_st' ? 'estéreo' : 'mono'
     const l = id === 'a_ln_st' ? await buildLoudness(out, durUs) : await upmixed(out)
-    ok(r.key === 'ln-i16-tp1.5' && Math.abs(l.integrated + 16) <= 1 && l.truePeak <= -1, `normalização ${id === 'a_ln_st' ? 'estéreo' : 'mono'}: −30 → ${l.integrated} LUFS (alvo −16 ±1), TP ${l.truePeak}`, failures)
+    ok(r.key === 'ln-i16-tp1.5' && Math.abs(l.integrated + 16) <= 1 && l.truePeak <= -1, `normalização ${label}: −30 → ${l.integrated} LUFS (alvo −16 ±1), TP ${l.truePeak}`, failures)
+    await lagOk(out, `normalização ${label}`, `voz-ln-${id}.s16`)
   }
   // as duas: o ruído sai antes da normalização
   const both = await queue.processAudio(projectId, aNoisy, { denoise: true, normalize: true })
   const bothFile = join(pdir, ...both.rel.split('/'))
   const lb = existsSync(bothFile) ? await upmixed(bothFile) : null
   ok(both.key === 'dn-sh_ln-i16-tp1.5' && !!lb && Math.abs(lb.integrated + 16) <= 1, `denoise + normalização: ${lb?.integrated} LUFS`, failures)
+  if (kind === 'tts' && existsSync(bothFile)) await lagOk(bothFile, 'denoise + normalização', 'voz-dn-ln.s16')
+
+  // fonte regravada (mesmo caminho, outro conteúdo): impressão nova → processa de novo em outro arquivo, nunca o antigo
+  const rewritten = join(dir, 'voz-regravada.wav')
+  copyFileSync(noisy, rewritten)
+  const aRe: Asset = { ...mk('a_regravada', rewritten, await probe(rewritten)), status: 'ready' }
+  const first = await queue.processAudio(projectId, aRe, { denoise: true, normalize: false })
+  await gen(['-i', noisy, '-af', 'volume=0.5', '-t', '5', '-c:a', 'pcm_s16le', rewritten], 'voz regravada')
+  const second = await queue.processAudio(projectId, aRe, { denoise: true, normalize: false })
+  ok(first.fingerprint !== second.fingerprint && first.rel !== second.rel && existsSync(join(pdir, ...second.rel.split('/'))), `fonte regravada: processa de novo com outra impressão (${first.rel} → ${second.rel})`, failures)
+
   const parts = readdirSync(join(pdir, 'generated')).filter((n) => n.includes('.part'))
   ok(parts.length === 0, `processar áudio: sem .part em generated/ (${parts.join(', ')})`, failures)
 }
@@ -663,6 +626,35 @@ async function testIngest(store: SessionStore): Promise<number> {
   return failures.length ? 1 : 0
 }
 
+// ---- modelos empacotados (CIALIGHT_TEST=models; também no app empacotado: release/win-unpacked) ----
+// Confere que rnnoiseDir() acha o modelo (sha256 pinado em resources/models/models.json) e que o ffmpeg empacotado
+// roda o denoise com ele. Escreve só em %TEMP%\cialight-models-test (o app empacotado não tem test-out/) e o
+// relatório em models-report.json lá.
+const MODELS_SHA256: Record<string, string> = { 'rnnoise/sh.rnnn': '70bb6685eb0c2a1d18e2918dca3fbfbd39317010b1802eb1b6ea73a92f3fdec0' }
+
+async function testModels(): Promise<number> {
+  const failures: string[] = []
+  const dir = join(tmpdir(), 'cialight-models-test')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const model = join(rnnoiseDir(), DENOISE_MODEL.file)
+  ok(existsSync(model), `modelo em ${model} (empacotado: ${app.isPackaged}, resourcesPath ${process.resourcesPath})`, failures)
+  const sha = existsSync(model) ? createHash('sha256').update(readFileSync(model)).digest('hex') : null
+  ok(sha === MODELS_SHA256['rnnoise/sh.rnnn'], `sha256 do modelo (${sha})`, failures)
+  const src = join(dir, 'ruido.wav')
+  await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-f', 'lavfi', '-i', 'anoisesrc=color=white:r=48000:a=0.05:d=2', '-c:a', 'pcm_s16le', src, '-progress', 'pipe:1', '-nostats'], { label: 'models: ruído' })
+  const out = join(dir, 'ruido-dn.m4a')
+  try {
+    await processAudioFile(src, '0:a:0', out, { denoise: true, normalize: false }, { modelDir: rnnoiseDir(), durationUs: 2_000_000, dualMono: false })
+    ok(existsSync(out) && statSync(out).size > 1000, `denoise com o modelo empacotado (${out})`, failures)
+  } catch (e) {
+    ok(false, `denoise com o modelo empacotado falhou: ${e instanceof Error ? e.message : String(e)}`, failures)
+  }
+  writeFileSync(join(dir, 'models-report.json'), JSON.stringify({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, rnnoiseDir: rnnoiseDir(), model, sha, failures }, null, 2))
+  console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE MODELOS PASSOU')
+  return failures.length ? 1 : 0
+}
+
 export async function runIntegrationTest(mode: string, store: SessionStore, projects: ProjectStore): Promise<void> {
   let code = 1
   try {
@@ -671,6 +663,7 @@ export async function runIntegrationTest(mode: string, store: SessionStore, proj
     else if (mode === 'ingest') code = await testIngest(store)
     else if (mode === 'editor-render') code = await testEditorRender(projects, store, outDir)
     else if (mode === 'editor-export') code = await testEditorExport(projects, store, outDir)
+    else if (mode === 'models') code = await testModels()
     else console.error(`modo de teste desconhecido: ${mode}`)
   } catch (e) {
     console.error('teste falhou com exceção:', e)

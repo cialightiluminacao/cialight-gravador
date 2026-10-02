@@ -19,9 +19,9 @@ import { cachedEncoderProbe } from './export/encoderProbe'
 import { probe } from './media/probe'
 import { assetFromInfo } from './media/ingest'
 import { processAudioFile } from './media/audioProcess'
-import { processedAudioRel } from '@shared/editor/audioProcess'
+import { processedAudioRel, sourceFingerprint } from '@shared/editor/audioProcess'
 import { rnnoiseDir } from './export/ffmpegPath'
-import { isFastStart, makeSyntheticSession } from './testFixtures'
+import { crossCorrelationLag, isFastStart, makeSyntheticSession, makeVoiceFixture } from './testFixtures'
 import { loadPage, preloadPath } from './windows/recorderWindow'
 
 // Teste de integração da exportação do editor (CIALIGHT_TEST=editor-export, `npm run test:editor-export`).
@@ -60,7 +60,7 @@ const SPEED_ID = 'p-editor-export-velocidade'
 const VOICE_HZ = 220
 // reverso (F3): testsrc2 [2 s, 5 s) de trás para frente × ffmpeg -vf reverse
 const REVERSE_ID = 'p-editor-export-reverso'
-// redução de ruído (F3): voz em rajada (1–3 s de 5 s) + ruído branco −30 dBFS, item com denoise e o processado pronto
+// redução de ruído (F3): voz sintética com pausas + ruído branco −30 dBFS, item com denoise e o processado pronto
 const DENOISE_ID = 'p-editor-export-ruido'
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
@@ -257,14 +257,18 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(REVERSE_ID), { recursive: true, force: true })
   projects.create(reverseProject)
 
-  // redução de ruído: o arquivo processado é gerado pelo mesmo caminho do main (media.processAudio) em generated/
+  // redução de ruído: voz sintética (a do Windows, se houver) + ruído branco −30 dBFS em estéreo; o arquivo processado
+  // é gerado pelo mesmo caminho do main (media.processAudio) em generated/, com a impressão digital da fonte no nome
+  const voiceFx = await makeVoiceFixture(dir, 'voz-ruido-limpa')
   const noisyVoice = join(dir, 'voz-ruido.m4a')
-  await gen(['-f', 'lavfi', '-i', `aevalsrc='${voiceExpr}*between(t,1,3)':s=48000:d=5`, '-f', 'lavfi', '-i', 'anoisesrc=color=white:r=48000:a=0.05477:d=5:seed=3', '-filter_complex', '[0][1]amix=inputs=2:normalize=0,pan=stereo|c0=c0|c1=c0', '-c:a', 'aac', '-b:a', '192k', noisyVoice], 'editor-export: voz com ruído')
-  const aNoisy: Asset = { ...assetFromInfo('a_ruido', noisyVoice, statSync(noisyVoice), await probe(noisyVoice)), status: 'ready', processedAudio: ['dn-sh'] }
+  await gen(['-i', voiceFx.file, '-f', 'lavfi', '-i', `anoisesrc=color=white:r=48000:a=0.05477:d=${voiceFx.durS}:seed=3`, '-filter_complex', '[0][1]amix=inputs=2:normalize=0:duration=first,pan=stereo|c0=c0|c1=c0', '-c:a', 'aac', '-b:a', '192k', noisyVoice], 'editor-export: voz com ruído')
+  const nst = statSync(noisyVoice)
+  const noisyFp = sourceFingerprint(nst.size, nst.mtimeMs)
+  const aNoisy: Asset = { ...assetFromInfo('a_ruido', noisyVoice, nst, await probe(noisyVoice)), status: 'ready', processedAudio: { 'dn-sh': noisyFp } }
   const dnAdded = addMediaFromAsset(addAsset({ ...createEmptyProject('Ruído', { width: W, height: H, fps: FPS, background: '#000000' }), id: DENOISE_ID }, aNoisy), aNoisy.id, 0)
   rmSync(projects.dirOf(DENOISE_ID), { recursive: true, force: true })
   projects.create(updateItem<MediaItem>(dnAdded.project, dnAdded.itemIds[0], (d) => { d.audio.denoise = true }))
-  await processAudioFile(noisyVoice, '0:a:0', projects.filePath(DENOISE_ID, processedAudioRel(aNoisy.id, 'dn-sh')), { denoise: true, normalize: false }, { modelDir: rnnoiseDir(), durationUs: 5_000_000, dualMono: false })
+  await processAudioFile(noisyVoice, '0:a:0', projects.filePath(DENOISE_ID, processedAudioRel(aNoisy.id, 'dn-sh', noisyFp)), { denoise: true, normalize: false }, { modelDir: rnnoiseDir(), durationUs: Math.round(voiceFx.durS * 1e6), dualMono: false })
 
   // sessão v1 sintética (webcam circular espelhada, PiP padrão até 5 s)
   rmSync(sessions.dirOf(SESSION_ID), { recursive: true, force: true })
@@ -455,12 +459,17 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   const dnOff = r.denoiseOff?.path
   check(!!dnOn && !!dnOff && existsSync(dnOn) && existsSync(dnOff), `ruído: exportado com e sem a redução (${dnOn ?? r.denoise?.error} | ${dnOff ?? r.denoiseOff?.error})`, failures)
   if (dnOn && dnOff && existsSync(dnOn) && existsSync(dnOff)) {
-    for (const [a, b] of [[0.1, 0.9], [3.4, 4.8]]) {
+    for (const [a, b] of voiceFx.pauses) {
       const src = await rmsDb(join(dir, 'voz-ruido.m4a'), a, b)
       const on = await rmsDb(dnOn, a, b)
       const off = await rmsDb(dnOff, a, b)
-      check(Math.abs(off - src) <= 1.5 && off - on >= 10, `ruído: pausa ${a}–${b} s — fonte ${src.toFixed(1)} dB, desligado ${off.toFixed(1)} dB (= fonte ±1,5), tratado ${on.toFixed(1)} dB (≥ 10 dB abaixo)`, failures)
+      check(Math.abs(off - src) <= 1.5 && off - on >= 10, `ruído: pausa ${a.toFixed(1)}–${b.toFixed(1)} s — fonte ${src.toFixed(1)} dB, desligado ${off.toFixed(1)} dB (= fonte ±1,5), tratado ${on.toFixed(1)} dB (≥ 10 dB abaixo)`, failures)
     }
+    // tratado × original na exportação: mesma linha do tempo (|atraso| ≤ 2 ms); só com a voz do Windows, que o RNNoise mantém
+    if (voiceFx.kind === 'tts') {
+      const lag = crossCorrelationLag(await pcmOf(dnOff, join(dir, 'ruido-original.f32')), await pcmOf(dnOn, join(dir, 'ruido-tratado.f32')), 2400, 4)
+      check(Math.abs(lag) <= 96, `ruído: exportação tratada alinhada à original (${lag} amostras = ${((lag / 48) || 0).toFixed(2)} ms; ≤ 2 ms)`, failures)
+    } else console.log('ruído: sem voz do Windows; correlação tratado × original não se aplica à voz harmônica')
   }
 
   // ---- reverso × ffmpeg -vf reverse ----

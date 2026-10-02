@@ -1,9 +1,10 @@
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync, statSync } from 'fs'
+import { execFileSync } from 'child_process'
 import { join } from 'path'
 import type { RecordingConfig, Session } from '@shared/types'
 import { DEFAULT_PIP } from '@shared/defaults'
 import type { SessionStore } from './session/sessionStore'
-import { runFfmpeg } from './export/ffmpegRunner'
+import { probeFile, runFfmpeg } from './export/ffmpegRunner'
 
 // Utilitários dos testes de integração (CIALIGHT_TEST=…): fixtures geradas pelo ffmpeg embutido.
 
@@ -51,4 +52,70 @@ export async function makeSyntheticSession(store: SessionStore, id: string): Pro
   session.pip = [DEFAULT_PIP, { ...DEFAULT_PIP, tMs: 5000, x: 0.05, y: 0.05 }]
   store.save(session)
   return session
+}
+
+// ---- voz sintética (redução de ruído / normalização) ----
+
+const VOICE_TEXT = 'Olá, este é um teste de redução de ruído. A voz deve continuar clara depois do processamento.'
+
+/** Voz do Windows (System.Speech, pt-BR se houver) em WAV mono 48 kHz; false se indisponível. */
+function windowsTts(out: string): boolean {
+  const script = [
+    'Add-Type -AssemblyName System.Speech',
+    '$s = New-Object System.Speech.Synthesis.SpeechSynthesizer',
+    "$v = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -eq 'pt-BR' } | Select-Object -First 1",
+    'if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }',
+    '$f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(48000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)',
+    `$s.SetOutputToWaveFile('${out.replace(/'/g, "''")}', $f)`,
+    `$s.Speak('${VOICE_TEXT}')`,
+    '$s.Dispose()'
+  ].join('; ')
+  try {
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 60_000 })
+    return existsSync(out) && statSync(out).size > 48_000 * 2
+  } catch {
+    return false
+  }
+}
+
+export interface VoiceFixture {
+  /** WAV mono 48 kHz. */
+  file: string
+  /** 'tts' = voz do Windows; 'harmonic' = "vogal" harmônica em sílabas (o RNNoise trata tom puro como ruído). */
+  kind: 'tts' | 'harmonic'
+  durS: number
+  /** Trecho só com fala e pausas só com silêncio (s). */
+  speech: [number, number]
+  pauses: [number, number][]
+}
+
+/** Voz sintética com pausas conhecidas: 1 s antes e 2 s depois da fala (harmônica: fala em 1–3 s e 5–7 s de 9 s). */
+export async function makeVoiceFixture(dir: string, name: string): Promise<VoiceFixture> {
+  const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
+  const tts = join(dir, `${name}-tts.wav`)
+  const file = join(dir, `${name}.wav`)
+  if (windowsTts(tts)) {
+    await gen(['-i', tts, '-af', 'adelay=1000,apad=pad_dur=2', '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', file], 'voz: pausas')
+    const durS = (await probeFile(file)).durationMs / 1000
+    return { file, kind: 'tts', durS, speech: [1.3, durS - 2.5], pauses: [[0.1, 0.9], [durS - 1.8, durS - 0.1]] }
+  }
+  const v = '0.3*(0.6+0.4*sin(2*PI*4*t))*(sin(2*PI*220*t)+0.5*sin(4*PI*220*t)+0.25*sin(6*PI*220*t))*(between(t,1,3)+between(t,5,7))'
+  await gen(['-f', 'lavfi', '-i', `aevalsrc='${v}':s=48000:d=9`, '-c:a', 'pcm_s16le', file], 'voz harmônica')
+  return { file, kind: 'harmonic', durS: 9, speech: [1.2, 2.8], pauses: [[0.1, 0.9], [3.4, 4.6]] }
+}
+
+/** Atraso (amostras) de `b` em relação a `a` pela correlação cruzada em ±maxLag (amostras de `a` a cada `stride`). */
+export function crossCorrelationLag(a: ArrayLike<number>, b: ArrayLike<number>, maxLag = 2000, stride = 2): number {
+  let best = -Infinity
+  let lag = 0
+  const n = Math.min(a.length, b.length) - maxLag
+  for (let l = -maxLag; l <= maxLag; l++) {
+    let s = 0
+    for (let i = maxLag; i < n; i += stride) s += a[i] * b[i + l]
+    if (s > best) {
+      best = s
+      lag = l
+    }
+  }
+  return lag
 }
