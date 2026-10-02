@@ -359,11 +359,12 @@ async function main() {
       const input = h.querySelector('input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'Tela principal'); input.dispatchEvent(new Event('input', { bubbles: true })); input.blur(); await T.settle()
       return T.tracks().find((t) => t.id === v1.id).name`)
     check('duplo clique renomeia a faixa', rn === 'Tela principal', rn)
-    const mv = await ev(`const a2 = T.tracks().find((t) => t.name === 'Áudio 2'); const trig = T.el('[data-track-header="' + a2.id + '"] [aria-label="Opções da faixa"]')
+    // F3: a trilha importada fica na faixa "Música" (papel música), abaixo do som do vídeo ("Áudio 1")
+    const mv = await ev(`const a2 = T.tracks().find((t) => t.name === 'Música'); const trig = T.el('[data-track-header="' + a2.id + '"] [aria-label="Opções da faixa"]')
       trig.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' })); await T.settle(); await new Promise((r) => setTimeout(r, 200))
       const item = [...document.querySelectorAll('[role="menuitem"]')].find((x) => x.textContent.includes('Mover para cima')); item.click(); await T.settle(); await new Promise((r) => setTimeout(r, 200))
       return T.tracks().filter((t) => t.kind === 'audio').map((t) => t.name)`)
-    check('menu da faixa: mover para cima', JSON.stringify(mv) === JSON.stringify(['Áudio 2', 'Áudio 1']), mv)
+    check('menu da faixa: mover para cima', JSON.stringify(mv) === JSON.stringify(['Música', 'Áudio 1']), mv)
     const dr = await ev(`const v2 = T.tracks().find((t) => t.name === 'Vídeo 2'); const row = T.rowOf(v2.id).getBoundingClientRect(); const dt = new DataTransfer(); dt.setData('application/x-cialight-asset', 'a_qa_logo')
       const n0 = T.byAsset('a_qa_logo').length; const lanes = T.el('[data-timeline-lanes]')
       lanes.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: T.xOf(8e6), clientY: row.top + 20, dataTransfer: dt })); await T.settle()
@@ -375,12 +376,17 @@ async function main() {
       drop(row.top + 20); await T.settle(); drop(top + 6); await T.settle()
       return { v0, v1: nv(), music: T.byAsset('a_qa_music').filter((i) => i.s === 9e6).map((i) => i.kind) }`)
     check('áudio solto em faixa/área de vídeo vai para o áudio, sem criar faixa de vídeo vazia', wk.v1 === wk.v0 && wk.music.length === 2 && wk.music.every((k) => k === 'audio'), wk)
-    const jkl = await ev(`const c = window.__qaEditor.controller; c.seek(8e6); await T.settle(); await T.key('j'); const afterJ = T.st().playheadUs
-      await T.key('l'); await new Promise((r) => setTimeout(r, 700)); const playing = T.st().playing; const t0 = T.st().playheadUs
-      await T.key('l'); await new Promise((r) => setTimeout(r, 100)); const t1 = T.st().playheadUs; const stillPlaying = T.st().playing
-      await T.key('k'); await T.settle(); return { afterJ, playing, t0, t1, stillPlaying, paused: !T.st().playing }`)
-    check('J volta 5 s', jkl.afterJ === 3 * S, jkl)
-    check('L toca; L de novo salta +5 s sem parar; K pausa', jkl.playing && jkl.stillPlaying && jkl.t1 - jkl.t0 >= 4.5 * S && jkl.paused, jkl)
+    // J/K/L clássico da F3 (o shuttle detalhado está em editor-f3-speed.mjs): L toca e acelera, J toca para trás, K pausa
+    const jkl = await ev(`const c = window.__qaEditor.controller; c.seek(8e6); await T.settle()
+      const tap = async (k) => { for (const type of ['keydown', 'keyup']) window.dispatchEvent(new KeyboardEvent(type, { key: k, code: 'Key' + k.toUpperCase(), bubbles: true, cancelable: true })); await T.settle() }
+      await tap('l'); await new Promise((r) => setTimeout(r, 500)); const l1 = { playing: T.st().playing, rate: T.st().playRate }; const t0 = T.st().playheadUs
+      await tap('l'); await new Promise((r) => setTimeout(r, 300)); const l2 = { playing: T.st().playing, rate: T.st().playRate, moved: T.st().playheadUs > t0 }
+      await tap('k'); await new Promise((r) => setTimeout(r, 200)); const k1 = { playing: T.st().playing, rate: T.st().playRate }
+      await tap('j'); await new Promise((r) => setTimeout(r, 300)); const t1 = T.st().playheadUs; await new Promise((r) => setTimeout(r, 300)); const j1 = { playing: T.st().playing, rate: T.st().playRate, back: T.st().playheadUs < t1 }
+      await tap('k'); await new Promise((r) => setTimeout(r, 200))
+      return { l1, l2, k1, j1, paused: !T.st().playing }`)
+    check('L toca a 1×; L de novo acelera a 2× sem parar; K pausa e volta a 1×', jkl.l1.playing && jkl.l1.rate === 1 && jkl.l2.playing && jkl.l2.rate === 2 && jkl.l2.moved && !jkl.k1.playing && jkl.k1.rate === 1, jkl)
+    check('J toca para trás (−1×); K pausa', jkl.j1.playing && jkl.j1.rate === -1 && jkl.j1.back && jkl.paused, jkl)
   }
 
   console.log('desfazer tudo')
