@@ -30,6 +30,9 @@ const SPEED_PROJECT_ID = 'p-editor-speed-test'
 const SPEED_SD_PROJECT_ID = 'p-editor-speed-sd-test'
 // zoom/pan (F4): PNG escuro com um quadrado vermelho de 12 px em (1300, 350); o harness aplica o zoom (zoomHarness.ts)
 const ZOOM_PROJECT_ID = 'p-editor-zoom-test'
+// zoom automático nos cliques (F6): vídeo de 6 s do mesmo alvo do zoom; o harness monta a trilha do cursor em memória
+// (autoZoomHarness.ts)
+const AUTO_ZOOM_PROJECT_ID = 'p-editor-autozoom-test'
 // reenquadrar (F4): PNG com quadrado vermelho de 24 px em (1500, 540) e o texto "Senha 4821" perto; o harness grava a
 // cópia 9:16 pelo IPC project.duplicate (reframeHarness.ts)
 const REFRAME_PROJECT_ID = 'p-editor-reframe-test'
@@ -53,6 +56,7 @@ interface HarnessReport {
   stretch?: StretchReport
   speed?: SpeedReport
   zoom?: ZoomReport
+  autoZoom?: AutoZoomReport
   follow?: FollowReport
   anim?: AnimReport
   reframe?: ReframeReport
@@ -101,6 +105,9 @@ interface SpeedReport {
 interface Parity { maxDiff: number; meanDiff: number; neighborMeanDiff: number; markers: number[]; error?: string }
 interface ZoomScenario { before: RedBlob | null; after: RedBlob | null; mid: RedBlob | null; error?: string }
 interface ZoomReport { error?: string; full?: ZoomScenario; cropped?: ZoomScenario; exportPath?: string; exportError?: string }
+interface AutoZoomShot { tUs: number; scale: number; x: number; y: number; red: RedBlob | null; expected: { x: number; y: number } | null; borderBg: number; borderMin: number; gapRight: number; gapBottom: number }
+interface AutoZoomScenario { error?: string; segments?: number; inUs?: number; fullUs?: number; outStartUs?: number; outUs?: number; before?: AutoZoomShot; full?: AutoZoomShot; after?: AutoZoomShot; during?: AutoZoomShot[] }
+interface AutoZoomReport { error?: string; centered?: AutoZoomScenario; follow?: AutoZoomScenario; control?: AutoZoomShot }
 type Legib = { c: number; lap: number }
 interface FollowInstant { frame: number; tUs: number; box: PxBox; ref: Legib; preview: Legib; unadjusted?: Legib; exported?: Legib }
 interface FollowRun { instants: FollowInstant[]; exportPath?: string; exportError?: string }
@@ -272,6 +279,13 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const zoomProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Zoom', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: ZOOM_PROJECT_ID }, aZoom), aZoom.id, 0).project
   rmSync(projects.dirOf(ZOOM_PROJECT_ID), { recursive: true, force: true })
   projects.create(zoomProject)
+  // zoom automático: o mesmo alvo como vídeo de 6 s (o zoom automático só vale para clipes de vídeo)
+  const autoZoomMp4 = join(dir, 'zoom-alvo.mp4')
+  await gen(['-loop', '1', '-i', zoomPng, '-t', '6', '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', autoZoomMp4], 'editor: alvo do zoom automático')
+  const aAutoZoom: Asset = { ...assetFromInfo('a_autozoom', autoZoomMp4, statSync(autoZoomMp4), await probe(autoZoomMp4)), status: 'ready' }
+  const autoZoomProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Zoom automático', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: AUTO_ZOOM_PROJECT_ID }, aAutoZoom), aAutoZoom.id, 0).project
+  rmSync(projects.dirOf(AUTO_ZOOM_PROJECT_ID), { recursive: true, force: true })
+  projects.create(autoZoomProject)
   // reenquadrar: fundo escuro, quadrado vermelho 24×24 centrado em (1500, 540) e o texto "Senha 4821" (Consolas 72)
   const reframePng = join(dir, 'reenquadrar.png')
   await gen(['-f', 'lavfi', '-i', 'color=c=0x1e293b:s=1920x1080', '-vf', `drawbox=x=1488:y=528:w=24:h=24:color=red:t=fill,${line('Senha 4821', 1320, 760)}`, '-frames:v', '1', '-update', '1', reframePng], 'editor: reenquadrar')
@@ -506,6 +520,26 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const pv = zr?.full?.after
   const ex = zoomExported
   check(!!ex && !!pv && Math.abs(ex.cx - 960) <= 2 && Math.abs(ex.cy - 540) <= 2 && Math.abs(ex.cx - pv.cx) <= 2 && Math.abs(ex.cy - pv.cy) <= 2 && Math.abs(Math.sqrt(ex.n / pv.n) - 1) <= 0.15, `zoom: exportação = preview — quadro final exportado: centro do alvo ${at(ex)}, ${ex?.w}×${ex?.h} px (preview ${at(pv)}, ${pv?.w}×${pv?.h}) ±2 px ${zr?.exportError ?? ''}`, failures)
+
+  const az = r.autoZoom
+  console.log(`zoom automático: ${JSON.stringify(az)}`)
+  check(!!az && !az.error, `zoom automático: harness sem erro (${az?.error ?? ''})`, failures)
+  for (const [tag, sc] of [['centrado, 2×', az?.centered], ['seguindo o cursor até o canto, 3×', az?.follow]] as const) {
+    check(!!sc && !sc.error && sc.segments === 1, `zoom automático (${tag}): um trecho de zoom (${sc?.segments}; ida ${sc?.inUs}–${sc?.fullUs} µs, volta ${sc?.outStartUs}–${sc?.outUs} µs) ${sc?.error ?? ''}`, failures)
+    const shots = [sc?.before, sc?.full, ...(sc?.during ?? []), sc?.after].filter((x): x is AutoZoomShot => !!x)
+    check(shots.length === 14 && shots.every((x) => x.borderBg === 0), `zoom automático (${tag}): nenhum pixel da borda do quadro é o fundo preto em ${shots.length} instantes (pixels de fundo ${shots.map((x) => x.borderBg).join(' ')}; menor canal máx. ${Math.min(...shots.map((x) => x.borderMin))})`, failures)
+    const f = sc?.full
+    const d = f?.red && f.expected ? Math.hypot(f.red.cx - f.expected.x, f.red.cy - f.expected.y) : Infinity
+    check(d <= 8 && (f?.scale ?? 0) > 1.9, `zoom automático (${tag}): no zoom cheio (escala ${f?.scale}) o ponto clicado está onde a pose (com o clamp) diz — vermelho ${at(f?.red)} × esperado (${f?.expected?.x.toFixed(2)}, ${f?.expected?.y.toFixed(2)}): ${d.toFixed(2)} px ≤ 8`, failures)
+    for (const [when, x] of [['antes', sc?.before], ['depois', sc?.after]] as const) {
+      check(!!x && x.scale === 1 && !!x.red && Math.abs(x.red.cx - 1300) <= 1.5 && Math.abs(x.red.cy - 350) <= 1.5 && x.red.w <= 14, `zoom automático (${tag}) ${when} do trecho: escala ${x?.scale} = 1 e vermelho no lugar ${at(x?.red)} (${x?.red?.w} px)`, failures)
+    }
+  }
+  const cz = az?.centered?.full
+  check(!!cz?.red && Math.abs(cz.red.cx - 960) <= 3 && Math.abs(cz.red.cy - 540) <= 3, `zoom automático (centrado): o vermelho clicado vai ao centro do quadro ${at(cz?.red)} ±3 px`, failures)
+  check((az?.control?.borderBg ?? 0) > 1000, `zoom automático (controle): o mesmo canto sem o clamp deixa ${az?.control?.borderBg} pixels de borda no fundo preto (> 1000 — a medida da borda não é vazia)`, failures)
+  const end = az?.follow?.during?.[az.follow.during.length - 1]
+  check(!!end && end.gapRight >= -0.5 && end.gapRight <= 2 && end.gapBottom >= -0.5 && end.gapBottom <= 2, `zoom automático (seguindo): o pan chega ao canto preso pelo clamp — folga da camada à direita ${end?.gapRight.toFixed(2)} px e embaixo ${end?.gapBottom.toFixed(2)} px (0–2)`, failures)
 
   const fl = r.follow
   console.log(`efeito ancorado: ${JSON.stringify(fl)}`)

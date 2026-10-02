@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CURSOR_VIDEO_LAG_MS } from '../cursor'
 import { createEmptyProject, createMediaItem } from './factory'
 import type { Asset, MediaItem, Project } from './project'
-import { cursorTimeMs } from './cursorTime'
+import { cursorTimeMap, cursorTimeMs, timelineUsAtCursorMs } from './cursorTime'
 import { resolveFrame, type MediaLayer } from './resolve'
 
 const screen: Asset = {
@@ -50,5 +50,60 @@ describe('cursorTimeMs (tempo da timeline → tempo da trilha do cursor)', () =>
     expect(cursorTimeMs(p, { ...item, assetId: 'nada' }, 2_000_000)).toBeNull()
     const img = { ...p, assets: [{ ...screen, kind: 'image' as const }] }
     expect(cursorTimeMs(img, item, 2_000_000)).toBeNull()
+  })
+})
+
+describe('timelineUsAtCursorMs (inverso: tempo do cursor → timeline) e cursorTimeMap', () => {
+  const cases: [string, Partial<MediaItem>][] = [
+    ['corte (inUs)', { inUs: 3_000_000 }],
+    ['velocidade 2×', { inUs: 500_000, speed: 2 }],
+    ['velocidade 0,5×', { inUs: 1_000_000, speed: 0.5 }],
+    ['reverso', { inUs: 2_000_000, reverse: true }],
+    ['reverso a 0,5×', { inUs: 2_000_000, reverse: true, speed: 0.5 }]
+  ]
+  it.each(cases)('%s: ida e volta (timeline → cursor → timeline) a ±1 µs, denso', (_l, over) => {
+    const { p, item } = project(over)
+    for (let t = item.startUs; t < item.startUs + item.durationUs; t += 7_919) {
+      const ms = cursorTimeMs(p, item, t)!
+      const back = timelineUsAtCursorMs(p, item, ms)
+      expect(back).not.toBeNull()
+      expect(Math.abs(back! - t)).toBeLessThanOrEqual(1)
+    }
+  })
+  it('monótono: crescente no clipe normal, decrescente no reverso', () => {
+    const fwd = project({ inUs: 1_000_000, speed: 2 })
+    const rev = project({ inUs: 1_000_000, reverse: true })
+    let a = -Infinity, b = Infinity
+    for (let ms = 1_000; ms < 9_000; ms += 37) {
+      const f = timelineUsAtCursorMs(fwd.p, fwd.item, ms)
+      if (f !== null) { expect(f).toBeGreaterThanOrEqual(a); a = f }
+      const r = timelineUsAtCursorMs(rev.p, rev.item, ms)
+      if (r !== null) { expect(r).toBeLessThanOrEqual(b); b = r }
+    }
+  })
+  it('valores à mão; o atraso R11 entra (clique em 3420 ms aparece no quadro de 3500 ms da fonte)', () => {
+    const { p, item } = project({ inUs: 3_000_000 })
+    expect(timelineUsAtCursorMs(p, item, 3500 - 80)).toBe(1_500_000)
+    const two = project({ inUs: 500_000, speed: 2 })
+    expect(timelineUsAtCursorMs(two.p, two.item, 500 + 2000 - 80)).toBe(2_000_000)
+  })
+  it('fora do clipe, congelado, sem asset de vídeo: null', () => {
+    const { p, item } = project({ inUs: 3_000_000 })
+    expect(timelineUsAtCursorMs(p, item, 3000 - 80 - 1)).toBeNull()
+    expect(timelineUsAtCursorMs(p, item, 7000 - 80)).toBeNull()
+    const fr = project({ inUs: 6_000_000, freeze: { atUs: 6_000_000 } })
+    expect(timelineUsAtCursorMs(fr.p, fr.item, 6000 - 80)).toBeNull()
+    expect(timelineUsAtCursorMs(p, { ...item, assetId: 'nada' }, 4000)).toBeNull()
+    expect(cursorTimeMap(fr.p, fr.item)).toBeNull()
+  })
+  it('cursorTimeMap: o mesmo par em tempo local do item', () => {
+    const { p, item } = project({ inUs: 500_000, speed: 2 })
+    const m = cursorTimeMap(p, item)!
+    expect(m.durationUs).toBe(item.durationUs)
+    expect(m.reversed).toBe(false)
+    expect(m.toCursorMs(1_000_000)).toBe(cursorTimeMs(p, item, item.startUs + 1_000_000))
+    expect(m.toLocalUs(m.toCursorMs(1_000_000)!)).toBe(1_000_000)
+    expect(m.toCursorMs(item.durationUs)).toBeNull()
+    expect(cursorTimeMap(project({ reverse: true }).p, project({ reverse: true }).item)!.reversed).toBe(true)
   })
 })

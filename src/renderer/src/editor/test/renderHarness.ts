@@ -10,6 +10,7 @@ import { effectsCheck } from './effectsHarness'
 import { stretchCheck } from './stretchHarness'
 import { speedCheck } from './speedHarness'
 import { zoomCheck } from './zoomHarness'
+import { autoZoomCheck } from './autoZoomHarness'
 import { followCheck } from './followHarness'
 import { animCheck } from './animHarness'
 import { reframeCheck } from './reframeHarness'
@@ -91,6 +92,7 @@ export async function runRenderHarness(projectId: string, outDir: string | null 
     report.watchdog = await watchdogCheck(project)
     report.effects = await effectsCheck()
     report.zoom = await zoomCheck(outDir)
+    report.autoZoom = await autoZoomCheck()
     report.follow = await followCheck(outDir)
     report.anim = await animCheck(outDir)
     report.reframe = await reframeCheck(outDir)

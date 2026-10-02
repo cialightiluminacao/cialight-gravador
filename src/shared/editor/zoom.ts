@@ -33,7 +33,7 @@ export type ZoomCorner = 'tl' | 'tr' | 'bl' | 'br'
  * Outra rotação: o maior retângulo na proporção do quadro inscrito na caixa girada (conservador: pode prender mais que
  * o necessário, nunca menos).
  */
-function coverBox(lw: number, lh: number, rotation: number, canvas: ZoomCanvas): [number, number] {
+export function coverBox(lw: number, lh: number, rotation: number, canvas: ZoomCanvas): [number, number] {
   const q = ((rotation % 360) + 360) % 360
   if (Math.abs(q - Math.round(q / 90) * 90) < 1e-9) {
     const turned = Math.round(q / 90) % 2 === 1
@@ -102,13 +102,13 @@ export function kenBurnsRect(corner: ZoomCorner, amount = KEN_BURNS_SCALE): Zoom
 }
 
 /** Keys da animação em [from, to] (os que o trecho substitui). */
-const keysIn = (a: Anim<number>, from: Us, to: Us): number => (a.keys ?? []).filter((k) => k.tUs >= from && k.tUs <= to).length
+export const keysIn = (a: Anim<number>, from: Us, to: Us): number => (a.keys ?? []).filter((k) => k.tUs >= from && k.tUs <= to).length
 
 /**
  * Substitui o trecho [from, to] da animação pelos keys dados, sem mudar a curva antes de `from` nem depois de `to`
  * (insertKeyExact nas pontas): o último key herda o ease do pedaço que segue.
  */
-function spliceKeys(a: Anim<number>, keys: Keyframe<number>[]): Anim<number> {
+export function spliceKeys(a: Anim<number>, keys: Keyframe<number>[]): Anim<number> {
   const from = keys[0].tUs
   const to = keys[keys.length - 1].tUs
   if (!a.keys || a.keys.length === 0) return { value: a.value, keys }
