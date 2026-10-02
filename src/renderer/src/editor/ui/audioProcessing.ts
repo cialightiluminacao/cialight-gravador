@@ -71,8 +71,11 @@ export function startAudioProcessing(projectId: string): () => void {
   inflight.clear()
   failed.clear()
   sync(projectId)
+  // durante uma transação (arrasto: um projeto por evento) não replaneja; o commit ou o cancelamento fecha a
+  // transação e replaneja uma vez com o projeto final
   const unsub = useEditorStore.subscribe((s, prev) => {
-    if (s.project !== prev.project) sync(projectId)
+    if (s.txBase) return
+    if (s.project !== prev.project || prev.txBase) sync(projectId)
   })
   return () => {
     unsub()

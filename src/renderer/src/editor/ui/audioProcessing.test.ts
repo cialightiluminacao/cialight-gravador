@@ -86,6 +86,25 @@ describe('audioProcessing', () => {
     await flush()
     expect(calls).toHaveLength(1)
   })
+
+  it('revisão final (M2): durante uma transação (arrasto) não replaneja; no commit, sim; cancelar volta ao de antes', async () => {
+    const id = st().project!.tracks.flatMap((t) => t.items)[0].id
+    const normalize = (on: boolean) => (p: Project): Project => ops.updateItem<MediaItem>(p, id, (d) => { d.audio.normalize = on })
+    st().begin()
+    st().apply(normalize(true), { transient: true })
+    await flush()
+    expect(calls).toHaveLength(1)
+    expect(Object.keys(st().audioJobs)).toEqual(['a1~dn-sh'])
+    st().commitTx()
+    await flush()
+    expect(calls).toHaveLength(2)
+    // transação cancelada: o projeto volta ao de antes e nada novo é pedido
+    st().begin()
+    st().apply(normalize(false), { transient: true })
+    st().cancelTx()
+    await flush()
+    expect(calls).toHaveLength(2)
+  })
 })
 
 describe('voiceProcessStatus (inspetor)', () => {
