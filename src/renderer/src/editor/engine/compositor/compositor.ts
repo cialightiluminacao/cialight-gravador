@@ -2,16 +2,18 @@
 // no canvas inteiro (= quadro do projeto na resolução do canvas). Mesmo código no preview e na exportação.
 // F1: mídia (vídeo/imagem) e anotações. F2: efeitos de privacidade (effects.ts) — com efeito no quadro, as
 // camadas vão para um FBO de acumulação que o efeito lê. F4: desfoque por camada (preset de animação 'blur') — a
-// camada é desenhada isolada no FBO auxiliar, desfocada pelo blur dos efeitos e composta. Texto/forma/transições
-// chegam depois (ignorados).
+// camada é desenhada isolada no FBO auxiliar, desfocada pelo blur dos efeitos e composta. F5: transições — A e B
+// desenhados cada um no seu FBO (sub-pilha com os próprios efeitos) e misturados pelo shader da transição
+// (shadersTransitions.ts). Texto/forma chegam depois (ignorados).
 import * as twgl from 'twgl.js'
-import { effectBound, type AnnotationsLayer, type EffectLayer, type Layer, type MediaLayer } from '@shared/editor/resolve'
+import { effectBound, type AnnotationsLayer, type EffectLayer, type Layer, type MediaLayer, type TransitionLayer } from '@shared/editor/resolve'
 import { parseColor } from './color'
 import { EffectPass } from './effects'
 import { createGl, createTexture, sourceSize, uploadTexture } from './gl'
 import { applyMat3, layerMatrix, type Mat3, type Rotation } from './matrix'
 import { layerBlurRect } from './effectsMath'
-import { FS_MEDIA, FS_SOLID, VS_QUAD } from './shaders'
+import { FS_MEDIA, FS_SOLID, VS_FULL, VS_QUAD } from './shaders'
+import { FS_TRANSITION, TRANSITION_MODES, transitionBlurPx } from './shadersTransitions'
 
 /** Geometria da fonte: dimensões antes da rotação e rotação horária a aplicar. */
 export interface SourceMeta { w: number; h: number; rotation: Rotation }
@@ -57,6 +59,7 @@ export class Compositor {
   private readonly gl: WebGL2RenderingContext
   private readonly media: twgl.ProgramInfo
   private readonly solid: twgl.ProgramInfo
+  private readonly transition: twgl.ProgramInfo
   private readonly quad: twgl.BufferInfo
   private readonly loop: twgl.BufferInfo
   private readonly textures = new Map<string, TexEntry>()
@@ -69,6 +72,7 @@ export class Compositor {
     this.gl = gl
     this.media = twgl.createProgramInfo(gl, [VS_QUAD, FS_MEDIA])
     this.solid = twgl.createProgramInfo(gl, [VS_QUAD, FS_SOLID])
+    this.transition = twgl.createProgramInfo(gl, [VS_FULL, FS_TRANSITION])
     this.quad = twgl.createBufferInfoFromArrays(gl, { a_pos: { numComponents: 2, data: [0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1] } })
     this.loop = twgl.createBufferInfoFromArrays(gl, { a_pos: { numComponents: 2, data: [0, 0, 1, 0, 1, 1, 0, 1] } })
     this.effects = new EffectPass(gl, this.quad)
@@ -83,15 +87,15 @@ export class Compositor {
     const gl = this.gl
     const W = this.canvas.width
     const H = this.canvas.height
-    // Com efeito no quadro, as camadas vão para o FBO de acumulação (o efeito precisa ler o que está abaixo)
-    // e o resultado é copiado ao canvas no fim; sem efeito, direto no canvas (caminho da F1, sem custo extra).
-    const blurOf = (l: Layer): number => (l.kind === 'media' && l.blur ? (l.blur * H) / BLUR_REFERENCE_HEIGHT : 0)
-    const hasFx = layers.some((l) => l.kind === 'effect' || blurOf(l) >= MIN_LAYER_BLUR_PX)
+    // Com efeito ou transição no quadro, as camadas vão para o FBO de acumulação (o efeito precisa ler o que está
+    // abaixo; a transição usa FBOs do mesmo pool) e o resultado é copiado ao canvas no fim; sem nada disso, direto no
+    // canvas (caminho da F1, sem custo extra).
+    const hasFx = layers.some((l) => l.kind === 'effect' || l.kind === 'transition' || this.blurOf(l, H) >= MIN_LAYER_BLUR_PX)
     // FBOs de efeito liberados depois de IDLE_RELEASE_FRAMES quadros seguidos sem efeito (realocados no próximo)
     this.framesWithoutFx = hasFx ? 0 : this.framesWithoutFx + 1
     if (this.framesWithoutFx === IDLE_RELEASE_FRAMES) this.effects.release()
-    const fx = hasFx ? { accum: this.effects.accum(W, H) } : null
-    this.bindTarget(fx?.accum ?? null)
+    const accum = hasFx ? this.effects.accum(W, H) : null
+    this.bindTarget(accum)
     const [r, g, b] = parseColor(background)
     gl.clearColor(r, g, b, 1)
     gl.clear(gl.COLOR_BUFFER_BIT)
@@ -99,48 +103,10 @@ export class Compositor {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 
     const ctx: LayerCtx = { sources, extra, W, H, px: W / REFERENCE_WIDTH, used: new Set<string>(), boxes: new Map<string, Mat3>() }
-    for (let i = 0; i < layers.length; i++) {
-      const layer = layers[i]
-      if (layer.kind === 'effect') {
-        // escopo `track` sem a camada da faixa logo abaixo (lacuna, outro efeito…): nada a afetar
-        if (fx && layer.scope === 'below') this.applyEffect(fx.accum, layer, W, H)
-        continue
-      }
-      // efeitos de escopo `track` desta faixa (resolveFrame os põe logo depois dela, pelo targetTrackId) e o desfoque
-      // da própria camada: ela é desenhada isolada no FBO auxiliar, desfocada, recebe os efeitos e só então é composta
-      // sobre o acumulado (o efeito de privacidade age sobre a camada já desfocada)
-      let last = i
-      while (fx && layers[last + 1]?.kind === 'effect' && (layers[last + 1] as EffectLayer).scope === 'track' && effectBound(layers, last + 1)) last++
-      const blur = blurOf(layer)
-      if (fx && (last > i || blur >= MIN_LAYER_BLUR_PX)) {
-        const aux = this.effects.aux(W, H)
-        this.bindTarget(aux)
-        gl.clearColor(0, 0, 0, 0)
-        gl.clear(gl.COLOR_BUFFER_BIT)
-        this.drawLayer(layer, ctx)
-        const box = blur >= MIN_LAYER_BLUR_PX && layer.kind === 'media' ? ctx.boxes.get(layer.itemId) : undefined
-        if (box) {
-          // só a caixa da camada + o alcance do blur (cantos do quad local em px GL, origem embaixo)
-          const pts = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map(([a, b]): [number, number] => {
-            const [x, y] = applyMat3(box, a, b)
-            return [((x + 1) / 2) * W, ((y + 1) / 2) * H]
-          })
-          this.effects.blurLayer(aux, blur, W, H, layerBlurRect(pts, blur, W, H))
-          this.bindTarget(aux)
-          gl.enable(gl.BLEND)
-          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
-        }
-        for (let j = i + 1; j <= last; j++) this.applyEffect(aux, layers[j] as EffectLayer, W, H)
-        this.bindTarget(fx.accum)
-        this.effects.composite(aux)
-        i = last
-        continue
-      }
-      this.drawLayer(layer, ctx)
-    }
+    this.drawStack(layers, accum, ctx, 'aux')
 
-    if (fx) {
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fx.accum.framebuffer)
+    if (accum) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, accum.framebuffer)
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null)
       gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST)
       this.bindTarget(null)
@@ -185,6 +151,7 @@ export class Compositor {
     this.textures.clear()
     gl.deleteProgram(this.media.program)
     gl.deleteProgram(this.solid.program)
+    gl.deleteProgram(this.transition.program)
     this.effects.dispose()
     for (const b of [this.quad, this.loop]) {
       for (const a of Object.values(b.attribs ?? {})) if (a.buffer) gl.deleteBuffer(a.buffer)
@@ -194,7 +161,120 @@ export class Compositor {
 
   // ---- internos ----
 
-  /** Desenha uma camada de mídia/anotações no framebuffer ligado (texto e forma: F2+/F5, ignorados). */
+  /** Raio (px de saída) do desfoque próprio da camada (preset de animação 'blur'); só mídia por enquanto. */
+  private blurOf(l: Layer, H: number): number {
+    return l.kind === 'media' && l.blur ? (l.blur * H) / BLUR_REFERENCE_HEIGHT : 0
+  }
+
+  /**
+   * Desenha uma pilha de camadas, do fundo ao topo, sobre `target` (já ligado, blend premultiplicado). target null =
+   * canvas direto (só quando o quadro não tem efeito, transição nem desfoque). `auxName`: FBO do pool para a camada
+   * isolada — a pilha principal usa 'aux'; as sub-pilhas de uma transição usam outro (a própria transição pode estar
+   * isolada no 'aux' quando um efeito `track` age sobre ela).
+   */
+  private drawStack(layers: Layer[], target: twgl.FramebufferInfo | null, ctx: LayerCtx, auxName: string): void {
+    const gl = this.gl
+    const { W, H } = ctx
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i]
+      if (layer.kind === 'effect') {
+        // escopo `track` sem a camada da faixa logo abaixo (lacuna, outro efeito…): nada a afetar
+        if (target && layer.scope === 'below') this.applyEffect(target, layer, W, H)
+        continue
+      }
+      // efeitos de escopo `track` desta faixa (resolveFrame os põe logo depois dela, pelo targetTrackId) e o desfoque
+      // da própria camada: ela é desenhada isolada no FBO auxiliar, desfocada, recebe os efeitos e só então é composta
+      // sobre o alvo (o efeito age sobre a camada já desfocada; numa transição, sobre a mistura de A e B)
+      let last = i
+      while (target && layers[last + 1]?.kind === 'effect' && (layers[last + 1] as EffectLayer).scope === 'track' && effectBound(layers, last + 1)) last++
+      const blur = this.blurOf(layer, H)
+      if (target && (last > i || blur >= MIN_LAYER_BLUR_PX)) {
+        const aux = this.effects.fbo(auxName, W, H)
+        this.bindTarget(aux)
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        this.drawOne(layer, aux, ctx)
+        const box = blur >= MIN_LAYER_BLUR_PX && layer.kind === 'media' ? ctx.boxes.get(layer.itemId) : undefined
+        if (box) {
+          // só a caixa da camada + o alcance do blur (cantos do quad local em px GL, origem embaixo)
+          const pts = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map(([a, b]): [number, number] => {
+            const [x, y] = applyMat3(box, a, b)
+            return [((x + 1) / 2) * W, ((y + 1) / 2) * H]
+          })
+          this.effects.blurLayer(aux, blur, W, H, layerBlurRect(pts, blur, W, H))
+          this.bindTarget(aux)
+          gl.enable(gl.BLEND)
+          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+        }
+        for (let j = i + 1; j <= last; j++) this.applyEffect(aux, layers[j] as EffectLayer, W, H)
+        this.bindTarget(target)
+        this.effects.composite(aux)
+        i = last
+        continue
+      }
+      this.drawOne(layer, target, ctx)
+    }
+  }
+
+  /** Uma camada sobre `target` (ligado). A transição precisa de alvo FBO (draw garante: transição → acumulação). */
+  private drawOne(layer: Layer, target: twgl.FramebufferInfo | null, ctx: LayerCtx): void {
+    if (layer.kind === 'transition') {
+      if (target) this.drawTransition(layer, target, ctx)
+      return
+    }
+    this.drawLayer(layer, ctx)
+  }
+
+  /**
+   * Transição: `from` no FBO 'transA' e `to` no 'transB' (transparentes, W×H), cada sub-pilha com a própria acumulação
+   * — os efeitos dentro dela (os que cobrem A/B, avaliados nos instantes congelados) agem só sobre o conteúdo dela —;
+   * depois o shader mistura A e B sobre `target` (premultiplicado; no 'blur', mistura num FBO e compõe o desfoque dela).
+   * Deixa `target` ligado com o blend premultiplicado.
+   */
+  private drawTransition(t: TransitionLayer, target: twgl.FramebufferInfo, ctx: LayerCtx): void {
+    const gl = this.gl
+    const { W, H } = ctx
+    const a = this.effects.fbo('transA', W, H)
+    const b = this.effects.fbo('transB', W, H)
+    for (const [fbo, sub] of [[a, t.from], [b, t.to]] as const) {
+      this.bindTarget(fbo)
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      gl.enable(gl.BLEND)
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+      this.drawStack(sub, fbo, ctx, 'transAux')
+    }
+    // 'blur': o desfoque é linear, então desfocar A e B e misturar = misturar e desfocar uma vez só (metade do custo):
+    // a mistura vai para 'transMix' e o desfoque dela é composto sobre o alvo
+    const radius = t.transition === 'blur' ? transitionBlurPx(t.progress, H) : 0
+    const mixFbo = radius >= MIN_LAYER_BLUR_PX ? this.effects.fbo('transMix', W, H) : null
+    this.bindTarget(mixFbo ?? target)
+    if (mixFbo) {
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+    }
+    const m = TRANSITION_MODES[t.transition]
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+    gl.useProgram(this.transition.program)
+    twgl.setBuffersAndAttributes(gl, this.transition, this.quad)
+    twgl.setUniforms(this.transition, {
+      u_a: a.attachments[0] as WebGLTexture,
+      u_b: b.attachments[0] as WebGLTexture,
+      u_frame: [W, H],
+      u_mode: m.mode,
+      u_p: t.progress,
+      u_dir: m.dir,
+      u_color: m.color
+    })
+    twgl.drawBufferInfo(gl, this.quad)
+    if (mixFbo) {
+      this.effects.blurOnto(mixFbo, target, radius, W, H)
+      this.bindTarget(target)
+    }
+  }
+
+  /** Desenha uma camada de mídia/anotações no framebuffer ligado (texto e forma: Task 4 da F5, ignorados). */
   private drawLayer(layer: Layer, ctx: LayerCtx): void {
     const { W, H, px, sources, extra } = ctx
     switch (layer.kind) {
@@ -239,7 +319,7 @@ export class Compositor {
         break
       }
       default:
-        break // texto, forma e transições: F2+/F5
+        break // texto e forma: Task 4 da F5; transição: drawOne → drawTransition
     }
   }
 

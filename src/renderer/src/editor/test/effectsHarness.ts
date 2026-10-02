@@ -106,7 +106,7 @@ const localContrast = (d: Img, b: Box): number => localContrastPx(d, W, H, b)
 const lapVar = (d: Img, b: Box): number => laplacianVar(d, W, H, b)
 
 /** Nome da GPU (WebGL2 desta página: o worker usa o mesmo adaptador). */
-function rendererName(): string {
+export function rendererName(): string {
   const gl = document.createElement('canvas').getContext('webgl2')
   if (!gl) return '?'
   const ext = gl.getExtension('WEBGL_debug_renderer_info')

@@ -135,6 +135,14 @@ void main() {
   o = acc / float(n * n);
 }`
 
+// Ampliação bilinear do resultado reduzido do blur (u_fxScale: px do alvo → uv da textura reduzida), sem máscara.
+export const FS_UPSAMPLE = `#version 300 es
+precision highp float;
+uniform sampler2D u_fx;
+uniform vec2 u_fxScale;
+out vec4 o;
+void main() { o = texture(u_fx, gl_FragCoord.xy * u_fxScale); }`
+
 // Blur gaussiano separável (u_dir = (1,0) ou (0,1)); pesos calculados na CPU (effectsMath.gaussianWeights),
 // u_w[0] = centro. Amostras clampadas à textura (região que sai do quadro repete a borda).
 export const FS_BLUR = `#version 300 es

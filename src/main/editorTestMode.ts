@@ -7,6 +7,7 @@ import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
 import { laplacianVar, localContrast, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
 import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShots'
+import { meanDiffPerChannel, paritySample, type TransitionReport } from '@shared/testing/transitionOracle'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -34,6 +35,8 @@ const ZOOM_PROJECT_ID = 'p-editor-zoom-test'
 // cópia 9:16 pelo IPC project.duplicate (reframeHarness.ts)
 const REFRAME_PROJECT_ID = 'p-editor-reframe-test'
 const REFRAME_COPY_ID = 'p-editor-reframe-copia'
+// transições (F5): vermelho e azul puros, com e sem quadrado branco, 2 s cada; o harness monta as cenas (transitionHarness.ts)
+const TRANSITION_PROJECT_ID = 'p-editor-transition-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -56,6 +59,7 @@ interface HarnessReport {
   follow?: FollowReport
   anim?: AnimReport
   reframe?: ReframeReport
+  transition?: TransitionReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -280,6 +284,18 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(REFRAME_PROJECT_ID), { recursive: true, force: true })
   rmSync(projects.dirOf(REFRAME_COPY_ID), { recursive: true, force: true })
   projects.create(reframeProject)
+  // transições: A = vermelho puro, B = azul puro, e os dois com um quadrado branco 400×300 em (760, 390); 1920×1080@30, 2 s
+  const box = 'drawbox=x=760:y=390:w=400:h=300:color=white:t=fill'
+  const trAssets: Asset[] = []
+  for (const [id, color, withBox] of [['a_tr_red', 'red', false], ['a_tr_blue', 'blue', false], ['a_tr_redbox', 'red', true], ['a_tr_bluebox', 'blue', true]] as const) {
+    const file = join(dir, `transicao-${id}.mp4`)
+    await gen(['-f', 'lavfi', '-i', `color=c=${color}:s=1920x1080:r=30${withBox ? `,${box}` : ''}`, '-t', '2', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '15', '-pix_fmt', 'yuv420p', file], `editor: transição ${id}`)
+    trAssets.push({ ...assetFromInfo(id, file, statSync(file), await probe(file)), status: 'ready' })
+  }
+  let trProject: Project = { ...createEmptyProject('Transições', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: TRANSITION_PROJECT_ID }
+  for (const a of trAssets) trProject = addAsset(trProject, a)
+  rmSync(projects.dirOf(TRANSITION_PROJECT_ID), { recursive: true, force: true })
+  projects.create(trProject)
 
   // janela visível sem foco (fora da barra de tarefas): oculta, o Chromium derruba o requestAnimationFrame para ~2/s
   // depois de umas dezenas de segundos, e a reprodução do editor anda por rAF
@@ -287,7 +303,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const win = new BrowserWindow({ width: 800, height: 600, show: false, focusable: false, skipTaskbar: true, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
   win.showInactive()
   const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 180 s'] } }), 180_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 300 s'] } }), 300_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
       clearTimeout(timer)
       resolve(r)
@@ -357,6 +373,23 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       if (rf.textBox && rf.ref && w === 1080 && h === 1920) rf.exported.legib = { c: r4(localContrast(d, w, h, rf.textBox, 4, 3) / rf.ref.c), lap: r4(laplacianVar(d, w, h, rf.textBox, 4, 3) / rf.ref.lap) }
     } catch (e) {
       rf.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
+  // transições: paridade preview × exportação nos mesmos quadros (amostra a cada 4 px); a amostra do preview sai do relatório
+  for (const run of result.report.transition?.parity ?? []) {
+    try {
+      if (!run.exportPath) continue
+      run.meanDiff = []
+      for (const f of run.frames) {
+        const k = f.frame - Math.round((run.fromUs * 30) / 1e6)
+        const raw = join(dir, `transicao-${run.kind}-${f.frame}.rgb`)
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', ...(k > 0 ? ['-ss', ((k - 0.5) / 30).toFixed(4)] : []), '-i', run.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro da transição' })
+        run.meanDiff.push(Math.max(...meanDiffPerChannel(f.preview, paritySample(new Uint8Array(readFileSync(raw)), 1920, 1080, 3))))
+      }
+    } catch (e) {
+      run.exportError = e instanceof Error ? e.message : String(e)
+    } finally {
+      for (const f of run.frames) f.preview = []
     }
   }
   win.destroy()
@@ -572,6 +605,35 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(re?.width === 1080 && re.height === 1920, `reenquadrar: exportação em 1080×1920 (${re?.width}×${re?.height}) ${rr?.exportError ?? ''}`, failures)
   check(!!re?.red && Math.abs(re.red.cx - 540) <= 3 && Math.abs(re.red.cy - 960) <= 3, `reenquadrar (exportação): foco no centro — ${at(re?.red ?? null)} ±3 px`, failures)
   check(unreadable(re?.legib), `reenquadrar (exportação): texto sob o blur ilegível (${fmt([re?.legib])})`, failures)
+
+  const tr = r.transition
+  console.log(`transições: ${JSON.stringify({ ...tr, kinds: undefined, privacy: undefined })}`)
+  check(!!tr && !tr.error, `transições: harness sem erro (${tr?.error ?? ''})`, failures)
+  const [cA, cB] = [tr?.colors?.A, tr?.colors?.B]
+  check(!!cA && !!cB && cA[0] > 200 && cA[1] < 40 && cA[2] < 40 && cB[2] > 200 && cB[0] < 40 && cB[1] < 40, `transições: fontes vermelha ${JSON.stringify(cA)} e azul ${JSON.stringify(cB)}`, failures)
+  check(tr?.kinds?.length === 11, `transições: os 11 tipos medidos (${tr?.kinds?.length})`, failures)
+  for (const k of tr?.kinds ?? []) {
+    check(k.before.maxErr <= 3 && k.after.maxErr <= 3 && k.before.n === 100 && k.after.n === 100, `transição ${k.kind}: fora da janela a cor é pura — antes = A (erro máx. ${k.before.maxErr}), depois = B (${k.after.maxErr}) ≤ 3`, failures)
+    for (const s of k.inside) {
+      check(s.n >= 40 && s.maxErr <= 8, `transição ${k.kind} em linear ${s.linear} (p ${s.p}): ${s.n} pontos da grade = modelo ±8 (erro máx. ${s.maxErr}${s.worst ? ` em (${s.worst.u}, ${s.worst.v}): ${JSON.stringify(s.worst.got)} × ${JSON.stringify(s.worst.want)}` : ''})`, failures)
+    }
+  }
+  for (const pv of tr?.privacy ?? []) {
+    check(pv.frames === 30 && pv.whiteMax === 0, `transição ${pv.kind}, tarja ${pv.side === 'A' ? 'vinculada a A (termina no corte)' : 'ancorada em B (começa no corte)'}: nenhum pixel branco em ${pv.frames} quadros da janela (máx. ${pv.whiteMax}, ${pv.whiteFrames} quadros com branco)`, failures)
+    check(pv.controlWhiteMax > 1000, `transição ${pv.kind}, controle sem tarja (${pv.side}): o quadrado branco aparece (${pv.controlWhiteMax} px)`, failures)
+  }
+  check((tr?.privacy?.length ?? 0) === 6, `transições: 6 cenários de privacidade (${tr?.privacy?.length})`, failures)
+  const tc = tr?.trackScope?.centers ?? []
+  check(tc.length === 3 && tc.every((c) => Math.abs(c[0] - 0x12) <= 1 && Math.abs(c[1] - 0x34) <= 1 && Math.abs(c[2] - 0x56) <= 1), `transição: efeito \`track\` na faixa da transição cobre a composição (centro ${JSON.stringify(tc)} = #123456)`, failures)
+  const be = tr?.blurEdge
+  check(!!be && be.sharp > 300 && be.mid < 0.25 * be.sharp, `transição blur: borda do quadrado desfocada no meio (degrau ${be?.mid} < 25 % do nítido ${be?.sharp})`, failures)
+  for (const pr of tr?.parity ?? []) {
+    const md = pr.meanDiff ?? []
+    check(md.length === pr.frames.length && md.length === 3 && md.every((d) => d <= 4), `transição ${pr.kind}: exportação = preview nos quadros ${pr.frames.map((f) => f.frame).join('/')} (diferença média por canal ${JSON.stringify(md)} ≤ 4) ${pr.exportError ?? ''}`, failures)
+  }
+  const tb = tr?.bench
+  console.log(`transições — desempenho 1080p (${tr?.renderer}): crossfade ${JSON.stringify(tb?.crossfade)} ms; blur ${JSON.stringify(tb?.blur)} ms`)
+  check(!!tb && !tb.error && !!tb.crossfade && !!tb.blur && tb.crossfade.mean < 20 && tb.blur.mean < 20, `transições: 1080p < 20 ms/quadro (compositor + GPU; alvo 12) — crossfade média ${tb?.crossfade?.mean} / p95 ${tb?.crossfade?.p95}, blur média ${tb?.blur?.mean} / p95 ${tb?.blur?.p95} ${tb?.error ?? ''}`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

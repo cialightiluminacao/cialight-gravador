@@ -10,7 +10,7 @@ import * as twgl from 'twgl.js'
 import type { EffectLayer } from '@shared/editor/resolve'
 import { parseColor } from './color'
 import { downsampleFactor, effectBlurRadiusPx, effectPixelBlockPx, gaussianWeights, featherPx, pixelCellQ, regionScissor, type PxRect } from './effectsMath'
-import { BLUR_MAX_TAPS, FS_APPLY, FS_BLUR, FS_COPY, FS_DOWN, FS_PIXH, FS_PIXV, VS_FULL } from './shaders'
+import { BLUR_MAX_TAPS, FS_APPLY, FS_BLUR, FS_COPY, FS_DOWN, FS_PIXH, FS_PIXV, FS_UPSAMPLE, VS_FULL } from './shaders'
 
 const MODE = { blur: 0, pixelate: 1, solid: 2 } as const
 // raio do blur abaixo disso (px de saída): sem efeito visível, o passe não roda
@@ -21,8 +21,11 @@ interface Sized {
   h: number
   /** Acumulado das camadas (destino do quadro antes de ir ao canvas). */
   accum: twgl.FramebufferInfo
-  /** Camada isolada (efeito de escopo `track`), transparente; criado só quando usado. */
-  aux: twgl.FramebufferInfo | null
+  /**
+   * FBOs W×H transparentes nomeados, criados no primeiro uso: 'aux' (camada isolada do escopo `track`/desfoque de
+   * camada) e os das transições (A, B e o auxiliar das sub-pilhas deles — ver compositor.ts).
+   */
+  pool: Map<string, twgl.FramebufferInfo>
   /** Cópia do que está abaixo do efeito (só a área afetada é atualizada). */
   snapshot: WebGLTexture
   /** Pares ping-pong do blur por fator de redução (tamanho ⌈W/ds⌉×⌈H/ds⌉). */
@@ -38,6 +41,7 @@ export class EffectPass {
   private readonly apply: twgl.ProgramInfo
   private readonly pixH: twgl.ProgramInfo
   private readonly pixV: twgl.ProgramInfo
+  private readonly upsample: twgl.ProgramInfo
   private sized: Sized | null = null
   private readonly weights = new Float32Array(BLUR_MAX_TAPS + 1)
 
@@ -48,6 +52,7 @@ export class EffectPass {
     this.apply = twgl.createProgramInfo(gl, [VS_FULL, FS_APPLY])
     this.pixH = twgl.createProgramInfo(gl, [VS_FULL, FS_PIXH])
     this.pixV = twgl.createProgramInfo(gl, [VS_FULL, FS_PIXV])
+    this.upsample = twgl.createProgramInfo(gl, [VS_FULL, FS_UPSAMPLE])
   }
 
   /** FBO de acumulação W×H (recriado só quando o tamanho muda). */
@@ -55,11 +60,15 @@ export class EffectPass {
     return this.ensure(W, H).accum
   }
 
-  /** FBO auxiliar W×H (camada isolada do escopo `track`), alocado no primeiro uso. */
-  aux(W: number, H: number): twgl.FramebufferInfo {
+  /** FBO W×H do pool por nome, alocado no primeiro uso e reaproveitado (liberado ao mudar o tamanho/release/dispose). */
+  fbo(name: string, W: number, H: number): twgl.FramebufferInfo {
     const s = this.ensure(W, H)
-    if (!s.aux) s.aux = this.makeFbo(W, H)
-    return s.aux
+    let f = s.pool.get(name)
+    if (!f) {
+      f = this.makeFbo(W, H)
+      s.pool.set(name, f)
+    }
+    return f
   }
 
   /** Libera os FBOs/texturas por tamanho (quadros sem efeito); o próximo efeito os realoca. */
@@ -158,11 +167,29 @@ export class EffectPass {
     gl.disable(gl.SCISSOR_TEST)
   }
 
+  /**
+   * Desfoque gaussiano de raio `radius` px de `src` inteiro (W×H, premultiplicado), composto sobre `target` (blend
+   * premultiplicado; o resultado fica ligado com esse blend). Lê `src` direto (sem cópia) e amplia bilinear na própria
+   * composição — usado pela transição 'blur' (compositor.ts). Redução fixa de 4× a partir de 12 px (2× abaixo).
+   */
+  blurOnto(src: twgl.FramebufferInfo, target: twgl.FramebufferInfo, radius: number, W: number, H: number): void {
+    const gl = this.gl
+    const s = this.ensure(W, H)
+    gl.disable(gl.BLEND)
+    gl.enable(gl.SCISSOR_TEST)
+    const b = this.blurArea(s, src, { x: 0, y: 0, w: W, h: H }, radius, W, H, true, radius >= 12 ? 4 : 2)
+    gl.disable(gl.SCISSOR_TEST)
+    twgl.bindFramebufferInfo(gl, target)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+    this.pass(this.upsample, { u_fx: b.tex, u_fxScale: b.scale })
+  }
+
   /** Libera programas, FBOs e texturas. */
   dispose(): void {
     const gl = this.gl
     this.freeSized()
-    for (const p of [this.copy, this.down, this.blurProg, this.apply, this.pixH, this.pixV]) gl.deleteProgram(p.program)
+    for (const p of [this.copy, this.down, this.blurProg, this.apply, this.pixH, this.pixV, this.upsample]) gl.deleteProgram(p.program)
   }
 
   // ---- internos ----
@@ -175,7 +202,7 @@ export class EffectPass {
       w: W,
       h: H,
       accum: this.makeFbo(W, H),
-      aux: null,
+      pool: new Map(),
       snapshot: twgl.createTexture(gl, { internalFormat: gl.RGBA8, format: gl.RGBA, type: gl.UNSIGNED_BYTE, min: gl.LINEAR, mag: gl.LINEAR, wrap: gl.CLAMP_TO_EDGE, width: W, height: H }),
       blur: new Map(),
       pix: null
@@ -186,10 +213,11 @@ export class EffectPass {
   /**
    * Blur da área `area` do alvo (scissor ligado, blend desligado): copia a área + alcance do kernel para o snapshot,
    * reduz ds× e aplica o gaussiano H e V. Devolve a textura reduzida e a escala para lê-la em px do alvo.
+   * `direct`: lê a textura do próprio alvo (que ninguém escreve durante o blur), sem a cópia; `ds`: redução fixa.
    */
-  private blurArea(s: Sized, target: twgl.FramebufferInfo, area: PxRect, radius: number, W: number, H: number): { tex: WebGLTexture; scale: [number, number] } {
+  private blurArea(s: Sized, target: twgl.FramebufferInfo, area: PxRect, radius: number, W: number, H: number, direct = false, dsFixed?: 2 | 4 | 8): { tex: WebGLTexture; scale: [number, number] } {
     const gl = this.gl
-    const ds = downsampleFactor(radius)
+    const ds = dsFixed ?? downsampleFactor(radius)
     const w = gaussianWeights(radius / ds, BLUR_MAX_TAPS)
     this.weights.fill(0)
     this.weights.set(w)
@@ -203,10 +231,10 @@ export class EffectPass {
     const hRect = grow(vRect, e, dw, dh)
     const dRect = grow(vRect, 2 * e, dw, dh)
     const copyRect = clampRect({ x: dRect.x * ds, y: dRect.y * ds, w: dRect.w * ds, h: dRect.h * ds }, W, H)
-    this.snap(target, s.snapshot, copyRect)
+    if (!direct) this.snap(target, s.snapshot, copyRect)
     twgl.bindFramebufferInfo(gl, a)
     this.scissor(dRect)
-    this.pass(this.down, { u_src: s.snapshot, u_srcSize: [W, H], u_ds: ds })
+    this.pass(this.down, { u_src: direct ? (target.attachments[0] as WebGLTexture) : s.snapshot, u_srcSize: [W, H], u_ds: ds })
     twgl.bindFramebufferInfo(gl, b)
     this.scissor(hRect)
     this.pass(this.blurProg, { u_tex: a.attachments[0], u_dir: [1, 0], u_n: n, u_w: this.weights })
@@ -251,7 +279,7 @@ export class EffectPass {
     const s = this.sized
     if (!s) return
     this.freeFbo(s.accum)
-    if (s.aux) this.freeFbo(s.aux)
+    for (const f of s.pool.values()) this.freeFbo(f)
     this.gl.deleteTexture(s.snapshot)
     for (const [a, b] of [...s.blur.values(), ...(s.pix ? [s.pix] : [])]) {
       this.freeFbo(a)

@@ -29,6 +29,7 @@ import { FILE_PROTOCOL } from '@shared/ipc'
 import { h264LevelFor } from '@/engine/encoderSupport'
 import { Compositor, type SourceMeta } from './compositor/compositor'
 import { DecoderPool } from './decoderPool'
+import { firstDrawUs, flatLayers } from './layerSources'
 import { SR } from './audio/mixer'
 import type { AudioIn, AudioOut } from './audio/protocol'
 import { frameCount } from '../export/exportPlan'
@@ -191,8 +192,9 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
   try {
     // allSettled + try/catch por camada: nenhuma camada aborta a coleta das outras, e todo quadro
     // obtido entra em `frames` antes do finally (sem vazamento quando uma camada falha).
+    // fontes também das camadas de A e B das transições (flatLayers); slots na ordem de desenho
     await Promise.allSettled(
-      layers.map(async (layer) => {
+      flatLayers(layers).map(async (layer) => {
         if (layer.kind === 'annotations') {
           await loadSession(layer.sessionId)
           if (!sessions.get(layer.sessionId)?.session) missingAnnotations.add(layer.sessionId)
@@ -271,8 +273,9 @@ async function bench(m: Extract<RenderIn, { t: 'testBench' }>): Promise<void> {
 }
 
 /**
- * Reprodução: aquece o decoder dos itens que começam em até PREFETCH_US (uma vez por item), no slot e
- * na posição da fonte do quadro em que começam. Devolve as entradas a manter fora do releaseExcept.
+ * Reprodução: aquece o decoder dos itens que passam a ser desenhados em até PREFETCH_US (uma vez por item), no slot e
+ * na posição da fonte do quadro em que aparecem — o B de uma transição aparece no início da janela (corte − d/2),
+ * congelado no 1º quadro. Devolve as entradas a manter fora do releaseExcept.
  * Não mexe numa entrada em uso no quadro atual (reposicionar o iterador quebraria a reprodução dela).
  */
 function prefetchUpcoming(p: Project, tUs: number, used: [string, number][]): [string, number][] {
@@ -281,10 +284,12 @@ function prefetchUpcoming(p: Project, tUs: number, used: [string, number][]): [s
   for (const track of p.tracks) {
     if (track.hidden) continue
     for (const item of track.items) {
-      if (item.type !== 'media' || item.enabled === false || item.startUs <= tUs || item.startUs > tUs + PREFETCH_US) continue
-      // slots como em renderFrame: ordem das camadas de vídeo com asset disponível
+      if (item.type !== 'media' || item.enabled === false) continue
+      const atUs = firstDrawUs(track, item)
+      if (atUs <= tUs || atUs > tUs + PREFETCH_US) continue
+      // slots como em composeAt: ordem de desenho das camadas de vídeo com asset disponível (A/B das transições inclusos)
       const slots = new Map<string, number>()
-      for (const layer of resolveFrame(p, item.startUs)) {
+      for (const layer of flatLayers(resolveFrame(p, atUs))) {
         if (layer.kind !== 'media' || layer.srcUs === null) continue
         const asset = p.assets.find((a) => a.id === layer.assetId)
         if (!asset || asset.status === 'missing') continue
