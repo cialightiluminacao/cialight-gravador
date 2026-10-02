@@ -83,7 +83,7 @@ export function poseError(ref: ContentPose, cur: ContentPose): { px: number; deg
 }
 
 /** Ponto da fonte exibida (px) → ponto do quadro (px). */
-function toScreen(cf: ClipFrame, qx: number, qy: number): { x: number; y: number } {
+export function toScreen(cf: ClipFrame, qx: number, qy: number): { x: number; y: number } {
   const g = cf.g
   const [u0, v0, u1, v1] = g.uv
   let ax = (qx / g.dw - u0) / (u1 - u0) - 0.5
@@ -136,16 +136,59 @@ function extents(pts: { x: number; y: number }[], c: { x: number; y: number }, d
 export const ATTACH_PAD_PX = 1
 
 /**
- * Região ancorada (espaço do conteúdo) → região do quadro com o clipe na geometria `cf`. Os 4 cantos vão à tela e a
- * região é o retângulo que os envolve no ângulo da região na tela (rotação do clipe ± a da região; espelho inverte):
- * exato quando o clipe tem a mesma escala nos dois eixos, conservador quando não (fit esticar); elipse num mapeamento
- * não conforme cresce √2 (a elipse que contém o retângulo). Folga de ATTACH_PAD_PX px.
+ * Como a região ancorada vai à tela. 'cover' (efeito normal: a região é o que se esconde) — maior é o seguro: a região
+ * que CONTÉM a imagem exata. 'hole' (efeito invertido: a região é o buraco nítido) — menor é o seguro: a região
+ * CONTIDA na imagem exata.
  */
-export function contentToScreen(cf: ClipFrame, c: RegionValues, shape: 'rect' | 'ellipse', pad = ATTACH_PAD_PX): RegionValues {
+export type RegionFit = 'cover' | 'hole'
+
+/** Norma espectral (maior valor singular) da matriz 2×2 [a b; c d]. */
+function spectralNorm(a: number, b: number, c: number, d: number): number {
+  const t = a * a + b * b + c * c + d * d, det = a * d - b * c
+  return Math.sqrt((t + Math.sqrt(Math.max(0, t * t - 4 * det * det))) / 2)
+}
+
+/**
+ * Região ancorada (espaço do conteúdo) → região do quadro com o clipe na geometria `cf`, no ângulo da região na tela
+ * (rotação do clipe ± a da região; espelho inverte). A imagem exata da região é a região do conteúdo pelo afim do
+ * clipe: igual a ela (girada, escalada) quando o clipe tem a mesma escala nos dois eixos; um paralelogramo / elipse
+ * torta quando não (fit esticar com corte desproporcional).
+ * - 'cover': o retângulo que envolve os 4 cantos levados à tela; elipse num mapeamento não conforme cresce √2 (a que
+ *   contém o retângulo); + `pad` px de cada lado.
+ * - 'hole': a maior região da mesma proporção da exata (λ·|M₁₁|·hw, λ·|M₂₂|·hh no sistema da região na tela) contida
+ *   nela — M = afim no sistema da região (conteúdo) → sistema da região (tela), N = M⁻¹. Retângulo: os 4 cantos de
+ *   N·retângulo dentro de [−hw, hw]×[−hh, hh] (convexo ⇒ tudo dentro). Elipse: N·elipse dentro da elipse do conteúdo
+ *   ⇔ ‖diag(1/hw, 1/hh)·N·diag(ex, ey)‖₂ ≤ 1. No caso conforme λ = 1 (exata). − `pad` px de cada lado.
+ */
+export function contentToScreen(cf: ClipFrame, c: RegionValues, shape: 'rect' | 'ellipse', pad = ATTACH_PAD_PX, fit: RegionFit = 'cover'): RegionValues {
   const { g, W, H } = cf
-  const pts = corners(c.x * g.dw, c.y * g.dh, (Math.abs(c.w) * g.dw) / 2, (Math.abs(c.h) * g.dh) / 2, c.rotation).map((p) => toScreen(cf, p.x, p.y))
-  const center = toScreen(cf, c.x * g.dw, c.y * g.dh)
+  const qx = c.x * g.dw, qy = c.y * g.dh
+  const center = toScreen(cf, qx, qy)
   const a = cf.rotation + (cf.mirror ? -c.rotation : c.rotation)
+  const hw = (Math.abs(c.w) * g.dw) / 2, hh = (Math.abs(c.h) * g.dh) / 2
+  if (fit === 'hole') {
+    const ra = (a * Math.PI) / 180, ca = Math.cos(ra), sa = Math.sin(ra)
+    const rp = (c.rotation * Math.PI) / 180, cp = Math.cos(rp), sp = Math.sin(rp)
+    // coluna de M: o vetor unitário do sistema da região no conteúdo, na tela, no sistema da região na tela
+    const col = (ux: number, uy: number): [number, number] => {
+      const s = toScreen(cf, qx + cp * ux - sp * uy, qy + sp * ux + cp * uy)
+      const dx = s.x - center.x, dy = s.y - center.y
+      return [ca * dx + sa * dy, -sa * dx + ca * dy]
+    }
+    const [m11, m21] = col(1, 0), [m12, m22] = col(0, 1)
+    const det = m11 * m22 - m12 * m21
+    const none = { x: center.x / W, y: center.y / H, w: 0, h: 0, rotation: a }
+    if (!(hw > 0 && hh > 0) || !(Math.abs(det) > 1e-12)) return none
+    const n11 = m22 / det, n12 = -m12 / det, n21 = -m21 / det, n22 = m11 / det
+    const ex0 = Math.abs(m11) * hw, ey0 = Math.abs(m22) * hh
+    const lambda = shape === 'rect'
+      ? Math.min(1, hw / (Math.abs(n11) * ex0 + Math.abs(n12) * ey0), hh / (Math.abs(n21) * ex0 + Math.abs(n22) * ey0))
+      : Math.min(1, 1 / spectralNorm((n11 * ex0) / hw, (n12 * ey0) / hw, (n21 * ex0) / hh, (n22 * ey0) / hh))
+    if (!(lambda > 0)) return none
+    const ex = Math.max(0, lambda * ex0 - pad), ey = Math.max(0, lambda * ey0 - pad)
+    return { x: center.x / W, y: center.y / H, w: (2 * ex) / W, h: (2 * ey) / H, rotation: a }
+  }
+  const pts = corners(qx, qy, hw, hh, c.rotation).map((p) => toScreen(cf, p.x, p.y))
   let [ex, ey] = extents(pts, center, a)
   if (shape === 'ellipse' && !conformal(cf)) { ex *= Math.SQRT2; ey *= Math.SQRT2 }
   return { x: center.x / W, y: center.y / H, w: (2 * ex + 2 * pad) / W, h: (2 * ey + 2 * pad) / H, rotation: a }

@@ -138,7 +138,8 @@ export function attachedMedia(p: Project, fx: EffectItem): MediaItem | null {
 /**
  * Região do efeito NO QUADRO no instante absoluto tUs. Sem âncora: as anims da região. Ancorado: as anims estão no
  * espaço do conteúdo do clipe e, enquanto o clipe dura ([início, fim) dele), vão à tela pela geometria dele neste
- * instante (conservadora, contentToScreen, com `pad` px de folga — desancorar assa sem ela). Fora do clipe (efeito mais
+ * instante (conservadora, contentToScreen, com `pad` px de folga — desancorar assa sem ela; invertido, 'hole': a
+ * região contida na exata, menos a folga — o buraco nítido nunca cresce). Fora do clipe (efeito mais
  * longo que ele: aviso attachBeyondClip) ou com o clipe apagado/desativado (attachLost): conservativeRegion da caixa de
  * reserva (a que envolve a região ao longo de todo o clipe, anchoredUnion) — nunca os valores do conteúdo crus. Normal:
  * a caixa (elipse ×√2; sem caixa, o quadro inteiro). Invertido: o buraco nulo (esconde o quadro inteiro).
@@ -149,7 +150,7 @@ export function effectRegionAt(p: Project, fx: EffectItem, tUs: Us, pad = ATTACH
   if (!fx.attach) return v
   const m = attachedMedia(p, fx)
   if (!m || tUs < m.startUs || tUs >= m.startUs + m.durationUs) return conservativeRegion(fx, fx.attach.fallback ?? null)
-  return contentToScreen(clipFrameAt(p, m, tUs, true)!, v, r.shape, pad)
+  return contentToScreen(clipFrameAt(p, m, tUs, true)!, v, r.shape, pad, fx.invert ? 'hole' : 'cover')
 }
 
 const ev = (a: Anim<number>, local: Us): number => evalAnim(a, local)

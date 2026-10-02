@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
 import { anchoredUnion, refreshAttachments, withDeferredFallbacks } from './attachment'
-import { NO_HOLE, type RegionValues } from './contentPose'
+import { NO_HOLE, toScreen, type RegionValues } from './contentPose'
+import { evalAnim } from './anim'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
-import { attachCandidate, attachEffects, effectsOverClip } from './followTransform'
+import { attachCandidate, attachEffects, detachEffect, effectsOverClip } from './followTransform'
 import { deleteItems, duplicateItems, findItem, setItemEnabled, updateAsset } from './ops'
 import { privacyWarnings } from './privacy'
 import type { Anim, Asset, Ease, EffectItem, MediaItem, Project, Us } from './project'
-import { effectRegionAt } from './resolve'
+import { clipFrameAt, effectRegionAt } from './resolve'
 import { parseProject, toDiskProject } from './schema'
 import { applyKenBurns } from './zoom'
 
@@ -194,7 +195,7 @@ function holeOutside(cons: RegionValues, hole: RegionValues, shape: 'rect' | 'el
 }
 
 describe('efeito invertido: o caminho conservador nunca abre um buraco maior que o do build novo', () => {
-  it.each(cases)('%s (invertido): o buraco gravado para a v1.3 cabe no buraco do build novo em todo instante (1/240 s)', (_n, make) => {
+  it.each(cases)('%s (invertido): o buraco gravado para a v1.3 cabe no buraco do build novo em todo instante (1/240 s)', (n, make) => {
     const q = inverted(make())
     const fx = fxOf(q)
     const hole = v13Region(q)
@@ -206,6 +207,8 @@ describe('efeito invertido: o caminho conservador nunca abre um buraco maior que
     // ida e volta pela v1.3 (abre e grava sem attach): o build novo desenha o mesmo buraco nulo; pelo parse novo, sem perda
     const disk = JSON.parse(JSON.stringify(toDiskProject(q)))
     const v13 = parseProjectV13(disk)
+    // a v1.3 abre todos menos o Ken Burns por corte (keys de corte, que ela já recusava — nada a vazar)
+    expect(v13.success).toBe(n !== 'Ken Burns pelo corte (PiP)')
     if (v13.success) {
       const back = parseProject(JSON.parse(JSON.stringify(v13.data)))
       const fb = back.tracks.flatMap((t) => t.items).find((i) => i.id === 'fx') as EffectItem
@@ -270,5 +273,79 @@ describe('caixa de reserva: mudanças de geometria fora do clipe e do efeito', (
     // só a cor de fundo: nada muda
     const bg = { ...q, canvas: { ...q.canvas, background: '#ffffff' } }
     expect(refreshAttachments(bg, q)).toBe(bg)
+  })
+})
+
+describe('efeito invertido dentro do clipe: o buraco desenhado cabe no buraco exato (fit esticar, mapeamento não conforme)', { timeout: 60_000 }, () => {
+  /** Pontos da borda da região do quadro `r` (px): retângulo pelos 4 cantos (o buraco exato é convexo); elipse, n pontos. */
+  const border = (r: RegionValues, shape: 'rect' | 'ellipse', n: number): [number, number][] => {
+    const th = (r.rotation * Math.PI) / 180, c = Math.cos(th), sn = Math.sin(th)
+    const hw = (r.w * W) / 2, hh = (r.h * H) / 2
+    const loc: [number, number][] = shape === 'rect' ? [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]] : Array.from({ length: n }, (_, i): [number, number] => [hw * Math.cos((2 * Math.PI * i) / n), hh * Math.sin((2 * Math.PI * i) / n)])
+    return loc.map(([x, y]) => [r.x * W + c * x - sn * y, r.y * H + sn * x + c * y])
+  }
+  /**
+   * O buraco EXATO no instante t: a borda da região do conteúdo (keys de `fx` no instante, sistema da fonte exibida),
+   * amostrada densamente e levada à tela ponto a ponto pela pose do clipe (toScreen) — um polígono convexo inscrito.
+   */
+  function trueHole(p: Project, fx: EffectItem, t: Us): [number, number][] {
+    const m = findItem(p, 'm')!.item as MediaItem
+    const cf = clipFrameAt(p, m, t, true)!, g = cf.g, l = t - fx.startUs, r = fx.region
+    const cx = evalAnim(r.x, l) * g.dw, cy = evalAnim(r.y, l) * g.dh, hw = (evalAnim(r.w, l) * g.dw) / 2, hh = (evalAnim(r.h, l) * g.dh) / 2
+    const ph = (evalAnim(r.rotation, l) * Math.PI) / 180, c = Math.cos(ph), sn = Math.sin(ph)
+    const loc: [number, number][] = r.shape === 'rect'
+      ? [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]
+      : Array.from({ length: 512 }, (_, i): [number, number] => [hw * Math.cos((2 * Math.PI * i) / 512), hh * Math.sin((2 * Math.PI * i) / 512)])
+    return loc.map(([x, y]) => { const s = toScreen(cf, cx + c * x - sn * y, cy + sn * x + c * y); return [s.x, s.y] })
+  }
+  /** Teste "ponto dentro" do polígono convexo `poly` (qualquer orientação), com folga `eps` px: semiplanos pré-calculados. */
+  const convexTest = (poly: [number, number][], eps: number): ((pt: [number, number]) => boolean) => {
+    const o = Math.sign(poly.reduce((s, [x, y], i) => { const [u, v] = poly[(i + 1) % poly.length]; return s + x * v - u * y }, 0))
+    const hs: [number, number, number][] = []
+    for (let i = 0; i < poly.length; i++) {
+      const [ax, ay] = poly[i], [bx, by] = poly[(i + 1) % poly.length]
+      const len = Math.hypot(bx - ax, by - ay)
+      if (len < 1e-12) continue
+      const nx = (-(by - ay) * o) / len, ny = ((bx - ax) * o) / len
+      hs.push([nx, ny, nx * ax + ny * ay])
+    }
+    return ([x, y]) => hs.every(([nx, ny, c]) => nx * x + ny * y - c >= -eps)
+  }
+  const area = (poly: [number, number][]): number => Math.abs(poly.reduce((s, [x, y], i) => { const [u, v] = poly[(i + 1) % poly.length]; return s + x * v - u * y }, 0)) / 2
+  const fill = (shape: 'rect' | 'ellipse', mirror = false): Project => inverted(attached(scene((m, fx) => {
+    m.visual!.fit = 'fill'; m.visual!.crop.l = { value: 0.4 }; m.visual!.mirror = mirror
+    m.visual!.transform.scale = anim(1, 2, 'inOut'); m.visual!.transform.rotation = anim(0, 40, 'out')
+    fx.region = { ...fx.region, shape, x: { value: 0.45 }, y: { value: 0.4 }, w: { value: 0.2 }, h: { value: 0.12 }, rotation: { value: 30 } }
+  })))
+  /** O buraco desenhado por `draw` cabe no exato em todo instante (1/240 s) e não é trivial (≥ `minFrac` da área exata). */
+  function holeContained(q: Project, draw: (t: Us) => RegionValues, minFrac: number): void {
+    const fx = fxOf(q)
+    let worst = Infinity
+    for (let t = fx.startUs; t < fx.startUs + fx.durationUs; t += Math.round(S / 240)) {
+      const tru = trueHole(q, fx, t), r = draw(t)
+      const inside = convexTest(tru, 1e-3)
+      const bad = border(r, fx.region.shape, 64).find((pt) => !inside(pt))
+      if (bad) throw new Error(`buraco desenhado sai do exato em ${t}: ${bad} (${JSON.stringify(r)})`)
+      const drawn = fx.region.shape === 'rect' ? (r.w * W) * (r.h * H) : (Math.PI * r.w * W * r.h * H) / 4
+      worst = Math.min(worst, drawn / area(tru))
+    }
+    expect(worst).toBeGreaterThan(minFrac)
+  }
+  it.each([['retângulo girado', 'rect', false], ['elipse girada', 'ellipse', false], ['elipse girada com espelho', 'ellipse', true]] as const)('%s + fit esticar: o resolve desenha um buraco contido no exato', (_n, shape, mirror) => {
+    const q = fill(shape, mirror)
+    holeContained(q, (t) => screen(q, t), 0.3)
+  })
+  it.each([['retângulo girado', 'rect'], ['elipse girada', 'ellipse']] as const)('%s + fit esticar: desancorar assa um buraco contido no exato em todo instante', (_n, shape) => {
+    const q = fill(shape)
+    const d = detachEffect(q, 'fx')
+    expect(fxOf(d).attach).toBeUndefined()
+    holeContained(q, (t) => effectRegionAt(d, fxOf(d), t), 0.25)
+  })
+  it('mapeamento conforme (fit conter): o buraco é o exato menos a folga de 1 px', () => {
+    const q = inverted(attached(scene((m, fx) => { m.visual!.transform.scale = anim(1, 2); fx.region.rotation = { value: 30 } })))
+    const n = effectRegionAt(inverted(q), fxOf(q), 5 * S, 0), r = screen(q, 5 * S)
+    expect((n.w - r.w) * W).toBeCloseTo(2, 6)
+    expect((n.h - r.h) * H).toBeCloseTo(2, 6)
+    holeContained(q, (t) => screen(q, t), 0.9)
   })
 })

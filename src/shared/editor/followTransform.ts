@@ -16,6 +16,8 @@ import { frameToUs, itemEndUs } from './time'
 /** Desvio máximo da região assada ao desancorar: 0,5 % do maior lado do quadro e 0,5°. */
 export const FIT_TOL = 0.005
 export const FIT_TOL_DEG = 0.5
+/** Invertido: o desancorar simplifica com tolerância este tanto menor (menos margem tirada do buraco). */
+const HOLE_TOL_DIV = 4
 /** Amostragem mínima do assar: 60 amostras por segundo (exportar a 60 fps não cai entre amostras). */
 const MIN_SAMPLE_FPS = 60
 
@@ -135,7 +137,10 @@ function sampleTimes(p: Project, fx: EffectItem, m: MediaItem | null, a: Us, b: 
     addKeys(m.startUs, [t.x, t.y, t.scale, t.rotation, c.l, c.t, c.r, c.b])
     if (v.animIn) must.add(m.startUs + v.animIn.durationUs)
     if (v.animOut) must.add(itemEndUs(m) - v.animOut.durationUs)
+    // bordas do clipe com o instante 1 µs antes: dentro/fora dele a região salta (fora: a reserva) — sem rampa entre
+    must.add(m.startUs - 1)
     must.add(m.startUs)
+    must.add(itemEndUs(m) - 1)
     must.add(itemEndUs(m))
   }
   const kept = new Set([...must].filter((x) => x >= a && x < b))
@@ -156,19 +161,37 @@ function sampleTimes(p: Project, fx: EffectItem, m: MediaItem | null, a: Us, b: 
  * medida que o clipe se aproxima, e a privacidade (que mede o desvio no espaço do conteúdo, × escala atual) acusaria
  * "não acompanha" num zoom forte (~19×: 1,9 px de conteúdo × 19 ≈ 36 px na tela, acima da tolerância de 1 %). Sem a
  * folga, a pose assada é constante no conteúdo; a folga só serve à renderização do ancorado.
+ * Invertido (a região é o buraco nítido): as amostras são o buraco contido na região exata ('hole', effectRegionAt) e
+ * a simplificação não pode alargá-lo. Com tolerância HOLE_TOL_DIV× menor, cada amostra encolhe antes pela margem μ que
+ * cobre o desvio máximo da interpolação (centro ≤ tol, meio-tamanho ≤ tol/2 em cada eixo, rotação ≤ tolDeg num raio
+ * de meia-diagonal R): μ = tol + tol·√2/2 + R·tolDeg. Retângulo: meias-larguras − μ; elipse: × (1 − μ/min(a, b))
+ * (a elipse assim encolhida, somada a um disco de raio μ, cabe na original). O desvio fica dentro dela ⇒ o buraco
+ * interpolado cabe no buraco de cada amostra.
  */
 export function bakeScreenRegion(p: Project, fx: EffectItem): EffectRegion {
   const W = p.canvas.width, H = p.canvas.height
   const a = fx.startUs, b = itemEndUs(fx)
   const { times, must } = sampleTimes(p, fx, attachedMedia(p, fx), a, b)
-  const samples = times.map((t) => ({ t, r: effectRegionAt(p, fx, t, 0), must: must.has(t) }))
-  const tolPx = FIT_TOL * Math.max(W, H)
+  const div = fx.invert ? HOLE_TOL_DIV : 1
+  const tolPx = (FIT_TOL * Math.max(W, H)) / div, tolDeg = FIT_TOL_DEG / div
+  const shrink = (r: RegionValues): RegionValues => {
+    const hx = (r.w * W) / 2, hy = (r.h * H) / 2
+    const mu = tolPx * (1 + Math.SQRT1_2) + Math.hypot(hx, hy) * ((tolDeg * Math.PI) / 180)
+    const [ex, ey] = fx.region.shape === 'rect'
+      ? [Math.max(0, hx - mu), Math.max(0, hy - mu)]
+      : ((k) => [hx * k, hy * k])(Math.max(0, 1 - mu / Math.max(1e-9, Math.min(hx, hy))))
+    return { ...r, w: (2 * ex) / W, h: (2 * ey) / H }
+  }
+  const samples = times.map((t) => {
+    const r = effectRegionAt(p, fx, t, 0)
+    return { t, r: fx.invert ? shrink(r) : r, must: must.has(t) }
+  })
   const err = (k: number, i: number, j: number): number => {
     const si = samples[i], sj = samples[j], sk = samples[k]
     const u = (sk.t - si.t) / (sj.t - si.t)
     const at = (c: Channel): number => si.r[c] + (sj.r[c] - si.r[c]) * u - sk.r[c]
     const px = Math.max(Math.hypot(at('x') * W, at('y') * H), Math.abs(at('w')) * W, Math.abs(at('h')) * H)
-    return Math.max(px / tolPx, Math.abs(at('rotation')) / FIT_TOL_DEG)
+    return Math.max(px / tolPx, Math.abs(at('rotation')) / tolDeg)
   }
   const keep = samples.map((s, i) => s.must || i === 0 || i === samples.length - 1)
   const fixed = keep.flatMap((k, i) => (k ? [i] : []))
