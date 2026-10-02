@@ -3,6 +3,8 @@
 // alvo pequeno demais, uma exportação pequena personalizada (640×360) e a tela de concluído (codec/resolução).
 // Task 2: formatos GIF (exportado, I–O), Quadro (PNG) e Só áudio (MP3 exportado), o botão "Quadro" da barra e
 // Ctrl+Shift+E (PNG direto na pasta, toast com "Abrir pasta", nome numerado).
+// Task 4: fila — dois itens enfileirados ("Adicionar à fila"), painel "Exportações" durante e depois, resumo final,
+// a confirmação de sair do editor com a fila ativa (contagem; sem sair) e "Cancelar todas".
 // Teclas e cliques são sintéticos (CDP Input.dispatchKeyEvent / element.click), nunca entrada do SO.
 //
 // uso (depois de `npm run build`, sob o lock):
@@ -364,6 +366,132 @@ async function main() {
   await sleep(600)
   toastText = await ev(`return [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.textContent).join(' | ')`)
   check('sem marcadores: toast "Adicione marcadores (M)…"', toastText.includes('Adicione marcadores (M) para gerar capítulos'), toastText)
+
+  // ---- F7 Task 4: fila de exportações ----
+  const PANEL = `document.querySelector('[data-export-queue-panel]')`
+  const queueState = `return window.__qaEditor.queue.items.map((i) => i.state)`
+  const openPanel = async () => {
+    if (!(await ev(`return !!${PANEL}`))) await ev(`document.querySelector('[data-export-queue-button]').click(); return 1`)
+    await sleep(400)
+  }
+  await ev(`window.__qaEditor.queue.clearFinished(); const s = window.__qaEditor.store.getState(); s.setInOut(2000000, 5000000); return 1`)
+  await sleep(300)
+  await ev(`document.activeElement?.blur?.(); return 1`)
+  await key('e', 'KeyE', 69, 2)
+  await sleep(500)
+  // 1) vídeo YouTube 1080p, Tudo → "Adicionar à fila" (o diálogo continua aberto)
+  await ev(`${clickText('Vídeo')}; return 1`)
+  await sleep(200)
+  await ev(`${DLG}.querySelector('[data-preset="youtube1080"]').click(); return 1`)
+  await ev(`${clickText('Tudo')}; return 1`)
+  await sleep(250)
+  await ev(`${setInput('[data-export-name]', 'fila-video.mp4')}; return 1`)
+  await sleep(150)
+  await ev(`${DLG}.querySelector('[data-export-enqueue]').click(); return 1`)
+  await sleep(300)
+  toastText = await ev(`return [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.textContent).join(' | ')`)
+  check('"Adicionar à fila": toast "Adicionado à fila (posição 1)" e o diálogo continua aberto', toastText.includes('Adicionado à fila (posição 1)') && (await ev(dialogText)).includes('Exportar vídeo'), toastText)
+  // 2) GIF do trecho I–O
+  await ev(`${clickText('GIF')}; return 1`)
+  await sleep(200)
+  await ev(`${clickText('Entrada–Saída (I–O)')}; return 1`)
+  await sleep(200)
+  await ev(`${setInput('[data-export-name]', 'fila-gif.gif')}; return 1`)
+  await sleep(150)
+  await ev(`${DLG}.querySelector('[data-export-enqueue]').click(); return 1`)
+  await sleep(300)
+  toastText = await ev(`return [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.textContent).join(' | ')`)
+  check('GIF enfileirado: "Adicionado à fila (posição 2)"', toastText.includes('Adicionado à fila (posição 2)'), toastText)
+  await key('Escape', 'Escape', 27)
+  await sleep(400)
+  check('o diálogo fecha com a fila rodando (o editor não fica bloqueado)', (await ev(`return !document.querySelector('[role="dialog"]:not([data-export-queue-panel])')`)) === true, null)
+  const badge = await ev(`return document.querySelector('[data-export-queue-badge]')?.textContent ?? null`)
+  check('barra superior: "Exportações" com o número de itens ativos', badge === '2' || badge === '1', badge)
+  await openPanel()
+  let panelText = ''
+  for (let i = 0; i < 100; i++) {
+    panelText = await ev(`return ${PANEL}?.textContent ?? ''`)
+    if (/Exportando \d+%/.test(panelText)) break
+    await sleep(100)
+  }
+  const labels4 = await ev(`return [...${PANEL}.querySelectorAll('button[aria-label]')].map((b) => b.getAttribute('aria-label'))`)
+  check('painel durante a fila: item exportando com %, o outro "Na fila", botões rotulados (cancelar/mover)', /Exportando \d+%/.test(panelText) && panelText.includes('Na fila') && labels4.some((l) => l.startsWith('Cancelar: fila-video.mp4')) && labels4.some((l) => l.startsWith('Mover para cima: fila-gif.gif')), { panelText: panelText.slice(0, 400), labels4 })
+  check('rótulo do item: "<arquivo> · <preset> · <duração>"', /fila-video\.mp4 · YouTube 1080p · \d+:\d\d/.test(panelText) && /fila-gif\.gif · GIF 480×270, 12 fps · 0?0:03/.test(panelText), panelText.slice(0, 400))
+  await shot('f7-16-fila-rodando.png')
+  for (let i = 0; i < 1800; i++) {
+    const states = await ev(queueState)
+    if (states.every((s) => s !== 'pending' && s !== 'running')) break
+    await sleep(100)
+  }
+  await sleep(500)
+  panelText = await ev(`return ${PANEL}?.textContent ?? ''`)
+  const states2 = await ev(queueState)
+  check('fila concluída: 2 itens "Concluída", com copiar/abrir pasta', JSON.stringify(states2) === JSON.stringify(['done', 'done']) && (panelText.match(/Concluída/g) ?? []).length === 2 && (await ev(`return !!${PANEL}.querySelector('button[aria-label^="Abrir pasta: fila-gif.gif"]')`)), { states2, panelText: panelText.slice(0, 300) })
+  toastText = await ev(`return [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.textContent).join(' | ')`)
+  check('toast final com o resumo "Fila de exportações: 2 concluídas"', toastText.includes('Fila de exportações: 2 concluídas'), toastText)
+  await shot('f7-17-fila-concluida.png')
+  const qfiles = readdirSync(OUT)
+  check('arquivos da fila na pasta do QA, sem .part', qfiles.includes('fila-video.mp4') && qfiles.includes('fila-gif.gif') && qfiles.every((f) => !f.endsWith('.part')), qfiles)
+  await ev(`[...${PANEL}.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Limpar concluídas').click(); return 1`)
+  await sleep(300)
+  panelText = await ev(`return ${PANEL}?.textContent ?? ''`)
+  check('"Limpar concluídas" esvazia a fila (o painel aberto mostra "Nada na fila")', (await ev(`return window.__qaEditor.queue.items.length === 0`)) === true && panelText.includes('Nada na fila'), panelText)
+  await key('Escape', 'Escape', 27)
+  await sleep(300)
+  check('Esc fecha o painel e o botão "Exportações" some (fila vazia)', (await ev(`return !${PANEL} && !document.querySelector('[data-export-queue-button]')`)) === true, null)
+
+  // 3) sair do editor com a fila ativa: confirmação com a contagem (sem sair: "Continuar exportando")
+  await ev(`document.activeElement?.blur?.(); return 1`)
+  await key('e', 'KeyE', 69, 2)
+  await sleep(500)
+  await ev(`${clickText('Vídeo')}; return 1`)
+  await sleep(200)
+  await ev(`${DLG}.querySelector('[data-preset="youtube1080"]').click(); return 1`)
+  await ev(`${clickText('Tudo')}; return 1`)
+  await sleep(200)
+  await ev(`${setInput('[data-export-name]', 'fila-sair.mp4')}; return 1`)
+  await sleep(150)
+  await ev(`${DLG}.querySelector('[data-export-enqueue]').click(); return 1`)
+  await sleep(150)
+  await ev(`${DLG}.querySelector('[data-export-enqueue]').click(); return 1`)
+  await sleep(150)
+  // "Exportar" com a fila ocupada: entra na fila (posição 3), toast e o diálogo fecha
+  await ev(`${exportBtn}.click(); return 1`)
+  await sleep(400)
+  toastText = await ev(`return [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.textContent).join(' | ')`)
+  check('"Exportar" com a fila ocupada: "Adicionado à fila (posição 3)" e o diálogo fecha', toastText.includes('Adicionado à fila (posição 3)') && (await ev(`return !document.querySelector('[role="dialog"]')`)) === true, toastText)
+  // Esc continua fechando diálogos depois do painel ter sido aberto/fechado
+  await ev(`document.activeElement?.blur?.(); return 1`)
+  await key('e', 'KeyE', 69, 2)
+  await sleep(500)
+  await key('Escape', 'Escape', 27)
+  await sleep(400)
+  check('Esc fecha o diálogo com a fila rodando (depois de o painel ter sido fechado)', (await ev(`return !document.querySelector('[role="dialog"]')`)) === true, null)
+  await ev(`document.querySelector('button[aria-label="Voltar aos projetos"]').click(); return 1`)
+  await sleep(500)
+  // texto e estado da fila lidos juntos (o 1º item pode terminar enquanto o QA clica)
+  const leave = await ev(`const q = window.__qaEditor.queue.items; return { text: document.querySelector('[data-queue-leave]')?.textContent ?? null, running: q.filter((i) => i.state === 'running').length, pending: q.filter((i) => i.state === 'pending').length }`)
+  const expectLeave = `Há 1 exportação em andamento e ${leave.pending} na fila.`
+  check(`voltar aos projetos com a fila ativa: "${expectLeave} Sair cancela todas (a fila não é salva)."`, !!leave.text && leave.running === 1 && leave.pending >= 1 && leave.text.includes(expectLeave) && leave.text.includes('Sair cancela todas (a fila não é salva).'), leave)
+  await shot('f7-18-fila-sair-confirmacao.png')
+  await ev(`[...document.querySelector('[data-queue-leave]').querySelectorAll('button')].find((b) => b.textContent.trim() === 'Continuar exportando').click(); return 1`)
+  await sleep(400)
+  check('"Continuar exportando": continua no editor, fila intacta', (await ev(`return !!document.querySelector('[data-editor-topbar]') && window.__qaEditor.queue.active()`)) === true, null)
+  // cancelar todas pelo painel: nada de parcial na pasta
+  await openPanel()
+  await ev(`[...${PANEL}.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Cancelar todas').click(); return 1`)
+  for (let i = 0; i < 100; i++) {
+    if (!(await ev(`return window.__qaEditor.queue.active()`))) break
+    await sleep(100)
+  }
+  await sleep(600)
+  const states3 = await ev(queueState)
+  const left = readdirSync(OUT)
+  const doneCount = states3.filter((s) => s === 'done').length
+  const sairFiles = left.filter((f) => f.startsWith('fila-sair'))
+  check('"Cancelar todas": os que não terminaram cancelados (≥ 2), nenhum .part e nenhum parcial dos cancelados', states3.length === 3 && states3.every((s) => s === 'cancelled' || s === 'done') && states3.filter((s) => s === 'cancelled').length >= 2 && left.every((f) => !f.endsWith('.part')) && sairFiles.length === doneCount, { states3, left })
+  await shot('f7-19-fila-cancelada.png')
+  await key('Escape', 'Escape', 27)
 }
 
 try {
