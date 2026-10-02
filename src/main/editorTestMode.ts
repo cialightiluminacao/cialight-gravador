@@ -107,7 +107,7 @@ interface ZoomScenario { before: RedBlob | null; after: RedBlob | null; mid: Red
 interface ZoomReport { error?: string; full?: ZoomScenario; cropped?: ZoomScenario; exportPath?: string; exportError?: string }
 interface AutoZoomShot { tUs: number; scale: number; x: number; y: number; red: RedBlob | null; expected: { x: number; y: number } | null; borderBg: number; borderMin: number; gapRight: number; gapBottom: number }
 interface AutoZoomScenario { error?: string; segments?: number; inUs?: number; fullUs?: number; outStartUs?: number; outUs?: number; before?: AutoZoomShot; full?: AutoZoomShot; after?: AutoZoomShot; during?: AutoZoomShot[] }
-interface AutoZoomReport { error?: string; centered?: AutoZoomScenario; follow?: AutoZoomScenario; control?: AutoZoomShot }
+interface AutoZoomReport { error?: string; centered?: AutoZoomScenario; follow?: AutoZoomScenario; control?: AutoZoomShot; engine?: { error?: string; plainW?: number; previewW?: number; afterEditW?: number; previewCleared?: boolean; zoomKeysInHistory?: boolean; historyLen?: number } }
 type Legib = { c: number; lap: number }
 interface FollowInstant { frame: number; tUs: number; box: PxBox; ref: Legib; preview: Legib; unadjusted?: Legib; exported?: Legib }
 interface FollowRun { instants: FollowInstant[]; exportPath?: string; exportError?: string }
@@ -538,6 +538,11 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const cz = az?.centered?.full
   check(!!cz?.red && Math.abs(cz.red.cx - 960) <= 3 && Math.abs(cz.red.cy - 540) <= 3, `zoom automático (centrado): o vermelho clicado vai ao centro do quadro ${at(cz?.red)} ±3 px`, failures)
   check((az?.control?.borderBg ?? 0) > 1000, `zoom automático (controle): o mesmo canto sem o clamp deixa ${az?.control?.borderBg} pixels de borda no fundo preto (> 1000 — a medida da borda não é vazia)`, failures)
+  const fz = az?.follow?.full?.red
+  check(!!fz && Math.abs(fz.cx - 960) <= 3 && Math.abs(fz.cy - 540) <= 3, `zoom automático (seguindo): no 1º clique (3×, sem clamp ali) o vermelho clicado vai ao centro ${at(fz)} ±3 px`, failures)
+  const ze = az?.engine
+  check(!!ze && !ze.error && Math.abs((ze.plainW ?? 0) - 12) <= 1 && Math.abs((ze.previewW ?? 0) - 24) <= 2, `zoom automático (motor do editor): a prévia fora do histórico aparece no visualizador — vermelho ${ze?.plainW} px → ${ze?.previewW} px (2×) ${ze?.error ?? ''}`, failures)
+  check(!!ze && ze.previewCleared === true && Math.abs((ze.afterEditW ?? 0) - 12) <= 1 && ze.zoomKeysInHistory === false && ze.historyLen === 1, `zoom automático (motor do editor): uma edição comum com a prévia aberta a descarta (vermelho ${ze?.afterEditW} px) e o histórico (${ze?.historyLen} passo) não tem os keys do zoom (${ze?.zoomKeysInHistory})`, failures)
   const end = az?.follow?.during?.[az.follow.during.length - 1]
   check(!!end && end.gapRight >= -0.5 && end.gapRight <= 2 && end.gapBottom >= -0.5 && end.gapBottom <= 2, `zoom automático (seguindo): o pan chega ao canto preso pelo clamp — folga da camada à direita ${end?.gapRight.toFixed(2)} px e embaixo ${end?.gapBottom.toFixed(2)} px (0–2)`, failures)
 

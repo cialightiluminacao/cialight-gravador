@@ -38,6 +38,9 @@ const MSG = {
   attachBeyondClip: 'O efeito vai além do clipe da âncora: fora dele a região fica parada numa caixa que cobre todo o movimento — confira o que fica por baixo'
 } as const
 
+/** Textos dos avisos de clipe que se move sob um efeito (o zoom automático os usa com a regra do F4). */
+export const MOVING_EFFECT_MESSAGES = { transformedUnderEffect: MSG.transformedUnderEffect, unlinkedOverMoving: MSG.unlinkedOverMoving } as const
+
 /**
  * Escopo `track`: primeiro instante de [a, b) em que a faixa-alvo (targetTrackId; projeto antigo: visualTrackBelow)
  * não tem camada que resolveFrame desenharia — faixa apagada ou oculta, ou sem mídia (com asset) / anotações ativas.

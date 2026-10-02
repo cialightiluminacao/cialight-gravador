@@ -205,6 +205,51 @@ describe('applyAutoZoom: sem bordas pretas, continuidade, keys (denso a 1/240 s)
     expect(uncovered).toBe(0)
   })
 
+  /** Instantes (1/240 s) em que o original cobria o quadro e o resultado não. */
+  const lostCover = (p0: Project, q: Project, D: Us): number => {
+    const v0 = itemOf(p0).visual!, v = itemOf(q).visual!, src = sourceOf(p0, itemOf(p0)), c = canvasOf(p0)
+    let n = 0
+    for (let t = 0; t < D; t += DT) if (coversFrame(v0, src, c, t) && !coversFrame(v, src, c, t)) n++
+    return n
+  }
+  it.each([1, 2, 3])('rotação com keys (0° → 90° → 180°, degraus) e corte animado rápido, semente %i: coberto a 1/240 s', (seed) => {
+    const D = 30 * S
+    const p = proj('girado 90°', D)
+    const v0 = itemOf(p).visual!
+    v0.transform.rotation = { value: 0, keys: [{ tUs: 0, value: 0, ease: 'hold' }, { tUs: 9 * S, value: 90, ease: 'hold' }, { tUs: 21 * S, value: 180, ease: 'linear' }] }
+    v0.fit = 'cover'
+    v0.crop.t = { value: 0, keys: [{ tUs: 0, value: 0, ease: 'inOut' }, { tUs: 4 * S, value: 0.25, ease: 'inOut' }, { tUs: 8 * S, value: 0, ease: 'linear' }, { tUs: 16 * S, value: 0.3, ease: 'linear' }] }
+    const r = rng(seed)
+    const clicks = [...randomClicks(30_000, r), 8_950, 9_000, 20_950]
+    const track = synthTrack(30_000, clicks.sort((a, b) => a - b), r)
+    const res = applyAutoZoom(p, 'm', track, { ...randomOpts(r), smoothing: 0 })
+    expect(lostCover(p, res.project, D)).toBe(0)
+    for (const [, a] of itemAnimEntries(itemOf(res.project))) (a.keys ?? []).forEach((k, i, ks) => i > 0 && expect(k.tUs).toBeGreaterThan(ks[i - 1].tUs))
+  })
+
+  it.each(ASPECTS)('%s: sem salto nas pontas de cada trecho (|Δpose| ≈ 0 entre inUs ± 1 µs e outUs ± 1 µs)', (aspect) => {
+    const D = 60 * S
+    const r = rng(99)
+    const p = proj(aspect, D)
+    // curva do usuário mexendo fora dos trechos também
+    itemOf(p).visual!.transform.scale = { value: 1, keys: [{ tUs: 0, value: itemOf(p).visual!.transform.scale.value, ease: 'inOut' }, { tUs: 50 * S, value: itemOf(p).visual!.transform.scale.value * 1.1, ease: 'linear' }] }
+    const opts = randomOpts(r)
+    const track = synthTrack(60_000, randomClicks(60_000, r), r)
+    const segs = planAutoZoom(track, cursorTimeMap(p, itemOf(p))!, opts)
+    expect(segs.length).toBeGreaterThan(1)
+    const t = itemOf(applyAutoZoom(p, 'm', track, opts).project).visual!.transform
+    const W = p.canvas.width, H = p.canvas.height
+    for (const sg of segs) {
+      for (const at of [sg.inUs, sg.outUs]) {
+        if (at <= 0 || at >= D) continue
+        const a = at - 1, b = at + 1
+        expect(Math.abs(evalAnim(t.x, b) - evalAnim(t.x, a)) * W).toBeLessThan(0.01)
+        expect(Math.abs(evalAnim(t.y, b) - evalAnim(t.y, a)) * H).toBeLessThan(0.01)
+        expect(Math.abs(evalAnim(t.scale, b) - evalAnim(t.scale, a))).toBeLessThan(1e-5)
+      }
+    }
+  })
+
   it('no instante do clique (zoom cheio) o ponto clicado vai ao centro do quadro; perto do canto, fica preso à borda', () => {
     const D = 20 * S
     for (const [cx, cy] of [[0.5, 0.4], [0.62, 0.55], [0.02, 0.03]]) {
@@ -293,6 +338,12 @@ describe('applyAutoZoom: sem bordas pretas, continuidade, keys (denso a 1/240 s)
     expect(itemClicks({ ...track, clicks: [] }, map)).toEqual([])
   })
 
+  it('clipe mais curto que a transição: motivo certo, não "nenhum clique"', () => {
+    const p = proj('16:9', 600_000)
+    const track = synthTrack(10_000, [100, 300], rng(2))
+    expect(() => applyAutoZoom(p, 'm', track, DEFAULT_AUTO_ZOOM)).toThrow(/mais curto que a transição/)
+  })
+
   it('invertido, congelado, sem trilha, imagem ou sem cliques: EditError com mensagem em português', () => {
     const track = synthTrack(10_000, [3000], rng(2))
     const err = (p: Project): EditError => {
@@ -367,6 +418,17 @@ describe('privacidade (invariante 2)', () => {
     p.tracks = [p.tracks[0], { id: 'tf', kind: 'video', name: 'Efeitos', role: 'effects', muted: false, hidden: false, locked: false, volume: 1, items: [fx] }]
     return p
   }
+  it('blur sem âncora sobre este clipe e sobre um clipe que se move antes: o aviso é deste clipe também', () => {
+    const p = scene()
+    // clipe que se move desde o início numa faixa abaixo do efeito (privacyWarnings atribui o aviso a ele)
+    const other: MediaItem = { ...createMediaItem(p.assets[0], 0, 'video'), id: 'o', durationUs: D }
+    other.visual!.transform.scale = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'linear' }, { tUs: 2 * S, value: 1.5, ease: 'linear' }] }
+    p.tracks = [{ ...p.tracks[0], id: 'tb', items: [other] }, { ...p.tracks[0], id: 'tv' }, p.tracks[1]]
+    const res = applyAutoZoom(p, 'm', track, DEFAULT_AUTO_ZOOM)
+    const w = res.privacyWarnings.find((x) => x.itemId === 'fx')
+    expect(w).toMatchObject({ kind: 'unlinkedOverMoving', mediaItemId: 'm' })
+    expect(w!.message.length).toBeGreaterThan(10)
+  })
   it('blur sem âncora sobre o clipe: aviso (a região não acompanha o zoom)', () => {
     const res = applyAutoZoom(scene(), 'm', track, DEFAULT_AUTO_ZOOM)
     expect(res.privacyWarnings.some((w) => w.itemId === 'fx' && w.kind === 'unlinkedOverMoving')).toBe(true)

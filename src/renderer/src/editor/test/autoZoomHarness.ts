@@ -3,13 +3,15 @@ import { evalAnim } from '@shared/editor/anim'
 import { applyAutoZoom, planAutoZoom, type AutoZoomOpts } from '@shared/editor/autoZoom'
 import { toScreen } from '@shared/editor/contentPose'
 import { cursorTimeMap } from '@shared/editor/cursorTime'
-import { findItem } from '@shared/editor/ops'
+import { addMarker, findItem } from '@shared/editor/ops'
 import { applyZoom } from '@shared/editor/zoom'
 import type { MediaItem, Project } from '@shared/editor/project'
 import { clipFrameAt } from '@shared/editor/resolve'
 import { redBlob, type RedBlob } from '@shared/testing/pixels'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
+import { useEditorStore } from '../state/editorStore'
+import { createEditorEngine } from '../ui/editorEngine'
 
 // Zoom automático nos cliques (F6) no motor real (CIALIGHT_TEST=editor-render): projeto p-editor-autozoom-test
 // (vídeo de 6 s do alvo do zoom: fundo 0x203040, quadrado vermelho de 12 px em (1300, 350); quadro do projeto com fundo
@@ -36,7 +38,12 @@ export interface AutoZoomShot {
   gapRight: number; gapBottom: number
 }
 export interface AutoZoomScenario { error?: string; segments?: number; inUs?: number; fullUs?: number; outStartUs?: number; outUs?: number; before?: AutoZoomShot; full?: AutoZoomShot; after?: AutoZoomShot; during?: AutoZoomShot[] }
-export interface AutoZoomReport { error?: string; centered?: AutoZoomScenario; follow?: AutoZoomScenario; control?: AutoZoomShot }
+/**
+ * Prévia pelo motor real do editor (createEditorEngine + store): o visualizador desenha store.preview (vermelho 2×) e uma
+ * edição comum com a prévia aberta a descarta (vermelho volta a 1×) sem gravar os keys do zoom no histórico.
+ */
+export interface AutoZoomEnginePreview { error?: string; plainW?: number; previewW?: number; afterEditW?: number; previewCleared?: boolean; zoomKeysInHistory?: boolean; historyLen?: number }
+export interface AutoZoomReport { error?: string; centered?: AutoZoomScenario; follow?: AutoZoomScenario; control?: AutoZoomShot; engine?: AutoZoomEnginePreview }
 
 /** Trilha de 6 s a 60 Hz: posição por função do tempo; cliques nos instantes dados. */
 function track(pos: (tMs: number) => { x: number; y: number }, clicks: number[]): CursorTrackV1 {
@@ -72,6 +79,48 @@ async function shot(client: RenderClient, p: Project, itemId: string, tUs: numbe
   const cf = clipFrameAt(p, item, tUs)
   const expected = cf ? toScreen(cf, RED.x * cf.g.dw, RED.y * cf.g.dh) : null
   return { tUs, scale, x, y, red: redBlob(full, W, H), expected, borderBg, borderMin, gapRight: x * W + (scale * W) / 2 - W, gapBottom: y * H + (scale * H) / 2 - H }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+async function enginePreview(base: Project, itemId: string, tr: CursorTrackV1, opts: AutoZoomOpts): Promise<AutoZoomEnginePreview> {
+  const store = useEditorStore.getState()
+  store.open(base)
+  const item = findItem(base, itemId)!.item as MediaItem
+  const fullUs = planAutoZoom(tr, cursorTimeMap(base, item)!, opts)[0].fullUs + item.startUs
+  store.setPlayhead(fullUs)
+  const engine = createEditorEngine()
+  const host = document.createElement('div')
+  host.style.width = '480px'
+  document.body.appendChild(host)
+  host.appendChild(engine.canvas)
+  try {
+    await engine.render.ready
+    engine.render.resize(W, H)
+    const d = window.devicePixelRatio || 1
+    const w = Math.round(W * d), h = Math.round(H * d)
+    // o motor redesenha sozinho no próximo rAF (assinatura da store); o pedido depois da espera lê o estado atual
+    const redW = async (): Promise<number> => {
+      await sleep(200)
+      const r = await engine.render.requestFrame(fullUs, false)
+      if (r.t !== 'rendered') throw new Error(`quadro: ${JSON.stringify(r)}`)
+      return (redBlob(await engine.render.readPixels(0, 0, w, h), w, h)?.w ?? 0) / d
+    }
+    const plainW = await redW()
+    useEditorStore.getState().setPreview(applyAutoZoom(useEditorStore.getState().project!, itemId, tr, opts).project)
+    const previewW = await redW()
+    useEditorStore.getState().apply((p) => addMarker(p, 100_000))
+    const afterEditW = await redW()
+    const st = useEditorStore.getState()
+    const zoomed = (p: Project): boolean => ((findItem(p, itemId)!.item as MediaItem).visual!.transform.scale.keys?.length ?? 0) > 0
+    return { plainW, previewW, afterEditW, previewCleared: st.preview === null, zoomKeysInHistory: [...st.history.past, st.history.present].some(zoomed), historyLen: st.history.past.length }
+  } catch (e) {
+    return { error: e instanceof Error ? (e.stack ?? e.message) : String(e) }
+  } finally {
+    engine.dispose()
+    host.remove()
+    useEditorStore.getState().close()
+  }
 }
 
 async function scenario(client: RenderClient, base: Project, itemId: string, tr: CursorTrackV1, opts: AutoZoomOpts): Promise<AutoZoomScenario> {
@@ -120,6 +169,7 @@ export async function autoZoomCheck(): Promise<AutoZoomReport> {
     // controle: o mesmo enquadramento do canto SEM o clamp (zoom manual) mostra o fundo na borda — a medida acusa
     const loose = applyZoom(p, itemId, { x: corner.x, y: corner.y, w: 1 / 3, h: 1 / 3 }, 0, 300_000, null, 'linear', { clamp: false }).project
     report.control = await shot(client, loose, itemId, 1_000_000)
+    report.engine = await enginePreview(p, itemId, track(() => RED, [2000]), { scale: 2, holdMs: 1800, transitionMs: 700, smoothing: 0.6 })
   } catch (e) {
     report.error = e instanceof Error ? (e.stack ?? e.message) : String(e)
   } finally {

@@ -21,7 +21,8 @@ import { cursorTimeMap, type CursorTimeMap } from './cursorTime'
 import { defaultVisual } from './factory'
 import { layerBase, type LayerBase } from './layerGeometry'
 import { EditError, findItem, updateItem } from './ops'
-import { privacyWarnings, type PrivacyWarning } from './privacy'
+import { effectsOverClip } from './followTransform'
+import { MOVING_EFFECT_MESSAGES, privacyWarnings, type PrivacyWarning } from './privacy'
 import type { Anim, Ease, Keyframe, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
 import { coverBox, keysIn, sourceOf, zoomPose, type ZoomCanvas, type ZoomClampBase, type ZoomEdit, type ZoomPose } from './zoom'
@@ -256,6 +257,8 @@ export function applyAutoZoom(p: Project, itemId: string, track: CursorTrackV1, 
   if (item.reverse || item.freeze) return refuse('O zoom automático não funciona em clipes invertidos ou congelados')
   const map = cursorTimeMap(p, item)
   if (!map) return refuse('O zoom automático só vale para clipes de vídeo')
+  const T = Math.round(normalizeAutoZoomOpts(opts).transitionMs * 1000)
+  if (item.durationUs <= T) return refuse(`O clipe é mais curto que a transição (${(T / 1e6).toLocaleString('pt-BR')} s): diminua a Transição ou use um trecho maior`)
   const segs = planAutoZoom(track, map, opts)
   if (segs.length === 0) return refuse('Nenhum clique neste clipe para o zoom automático')
   const Z = normalizeAutoZoomOpts(opts).scale
@@ -291,7 +294,10 @@ export function applyAutoZoom(p: Project, itemId: string, track: CursorTrackV1, 
     const keys: PoseKey[] = [{ tUs: s.inUs, pose: B, ease: 'inOut' }]
     held.forEach((k, i) => keys.push({ tUs: k.tUs, pose: k.pose, ease: hasOut && i === held.length - 1 ? 'inOut' : 'linear' }))
     if (hasOut) keys.push({ tUs: s.outUs, pose: origAt(s.outUs), ease: 'linear' })
-    const safe = refine(keys, (u) => geoAt(u).clamp, canvas, baseAnimated)
+    const clampAt = (u: Us): ZoomClampBase => geoAt(u).clamp
+    const refined = refine(keys, clampAt, canvas, baseAnimated)
+    // garantia final ("nunca bordas pretas"): com a geometria base animada ou o refino no limite, conferência densa
+    const safe = baseAnimated || refined.exhausted ? denseFix(refined.keys, clampAt, canvas) : refined.keys
     for (const k of ['x', 'y', 'scale'] as const) own[k].push(safe.map((q) => ({ tUs: q.tUs, value: q.pose[k], ease: q.ease })))
   }
   const project = updateItem<MediaItem>(p, itemId, (d) => {
@@ -300,7 +306,19 @@ export function applyAutoZoom(p: Project, itemId: string, track: CursorTrackV1, 
     vis.transform.y = spliceMany(tr.y, own.y)
     vis.transform.scale = spliceMany(tr.scale, own.scale)
   })
-  const warnings = privacyWarnings(project, item.startUs, itemEndUs(item)).filter((w) => (w.kind === 'transformedUnderEffect' || w.kind === 'unlinkedOverMoving') && w.mediaItemId === itemId)
+  // regra do F4 (efeitos sem âncora cujo tempo e região encostam no clipe: effectsOverClip); o detalhe (instante,
+  // texto) vem do privacyWarnings quando ele atribui o aviso a este clipe — ele aponta só o 1º clipe que se move
+  const found = privacyWarnings(project, item.startUs, itemEndUs(item))
+  const over = effectsOverClip(project, itemId)
+  const warnings: PrivacyWarning[] = [
+    ...over.linked.map((id) => [id, 'transformedUnderEffect'] as const),
+    ...over.unlinked.map((id) => [id, 'unlinkedOverMoving'] as const)
+  ].map(([id, kind]) => {
+    const w = found.find((x) => x.itemId === id && x.kind === kind && x.mediaItemId === itemId)
+    if (w) return w
+    const fx = findItem(project, id)!.item
+    return { itemId: id, kind, message: MOVING_EFFECT_MESSAGES[kind], tUs: Math.max(fx.startUs, item.startUs + segs[0].inUs), mediaItemId: itemId }
+  })
   return { project, replaced, segments: segs.length, privacyWarnings: warnings }
 }
 
@@ -344,16 +362,17 @@ function poseCovers(pose: ZoomPose, cl: ZoomClampBase, canvas: ZoomCanvas): bool
  * interpolação descobriria o quadro, insere um key preso ali e continua dele (o pedaço de antes é conferido de novo,
  * até REFINE_DEPTH divisões). Com a geometria base fixa nunca insere nada (convexidade, ver o topo do arquivo).
  */
-function refine(keys: PoseKey[], clampAt: (u: Us) => ZoomClampBase, canvas: ZoomCanvas, dense: boolean): PoseKey[] {
+function refine(keys: PoseKey[], clampAt: (u: Us) => ZoomClampBase, canvas: ZoomCanvas, dense: boolean): { keys: PoseKey[]; exhausted: boolean } {
   const out: PoseKey[] = [keys[0]]
+  let exhausted = false
   const walk = (a: PoseKey, b: PoseKey, depth: number): void => {
-    if (depth < REFINE_DEPTH && b.tUs - a.tUs > 2) {
+    if (depth >= REFINE_DEPTH) exhausted = true
+    else if (b.tUs - a.tUs > 2) {
       const n = dense ? Math.max(REFINE_SAMPLES, Math.ceil((b.tUs - a.tUs) / REFINE_DENSE_US)) : REFINE_SAMPLES
       for (let i = 1; i < n; i++) {
         const u = Math.round(a.tUs + ((b.tUs - a.tUs) * i) / n)
         if (u <= a.tUs || u >= b.tUs) continue
-        const e = easeValue(a.ease, (u - a.tUs) / (b.tUs - a.tUs))
-        const pose = { x: a.pose.x + (b.pose.x - a.pose.x) * e, y: a.pose.y + (b.pose.y - a.pose.y) * e, scale: a.pose.scale + (b.pose.scale - a.pose.scale) * e }
+        const pose = poseBetween(a, b, u)
         const cl = clampAt(u)
         if (poseCovers(pose, cl, canvas)) continue
         const mid: PoseKey = { tUs: u, pose: zoomPose(pose, FULL, canvas, cl), ease: a.ease }
@@ -366,5 +385,34 @@ function refine(keys: PoseKey[], clampAt: (u: Us) => ZoomClampBase, canvas: Zoom
     out.push(b)
   }
   for (let i = 1; i < keys.length; i++) walk(keys[i - 1], keys[i], 0)
-  return out
+  return { keys: out, exhausted }
+}
+
+/** Pose que a animação dos keys dá em u (a mesma conta do evalAnim, igual nos três). */
+function poseBetween(a: PoseKey, b: PoseKey, u: Us): ZoomPose {
+  const e = easeValue(a.ease, (u - a.tUs) / (b.tUs - a.tUs))
+  return { x: a.pose.x + (b.pose.x - a.pose.x) * e, y: a.pose.y + (b.pose.y - a.pose.y) * e, scale: a.pose.scale + (b.pose.scale - a.pose.scale) * e }
+}
+
+/**
+ * Conferência densa final: cada instante local múltiplo de 1/240 s (REFINE_DENSE_US) dentro do trecho em que a pose
+ * interpolada descobre o quadro ganha um key preso ali (o key fica coberto para sempre); repete até não sobrar falha
+ * — termina, porque cada passada transforma ao menos uma amostra em key.
+ */
+function denseFix(keys: PoseKey[], clampAt: (u: Us) => ZoomClampBase, canvas: ZoomCanvas): PoseKey[] {
+  let cur = keys
+  for (;;) {
+    const add: PoseKey[] = []
+    let j = 0
+    const last = cur[cur.length - 1].tUs
+    for (let u = Math.ceil(cur[0].tUs / REFINE_DENSE_US) * REFINE_DENSE_US; u < last; u += REFINE_DENSE_US) {
+      while (cur[j + 1].tUs <= u) j++
+      if (u === cur[j].tUs) continue
+      const pose = poseBetween(cur[j], cur[j + 1], u)
+      const cl = clampAt(u)
+      if (!poseCovers(pose, cl, canvas)) add.push({ tUs: u, pose: zoomPose(pose, FULL, canvas, cl), ease: cur[j].ease })
+    }
+    if (add.length === 0) return cur
+    cur = [...cur, ...add].sort((p, q) => p.tUs - q.tUs)
+  }
 }

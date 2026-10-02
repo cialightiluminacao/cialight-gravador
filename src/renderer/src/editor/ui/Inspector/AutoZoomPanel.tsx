@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { applyAutoZoom, AUTO_ZOOM_LIMITS, DEFAULT_AUTO_ZOOM, itemClicks, type AutoZoomOpts } from '@shared/editor/autoZoom'
 import { cursorTimeMap } from '@shared/editor/cursorTime'
-import type { MediaItem } from '@shared/editor/project'
+import { EditError } from '@shared/editor/ops'
+import type { MediaItem, Project } from '@shared/editor/project'
 import { Button } from '@/components/ui/Button'
 import { Slider, Tip } from '@/components/ui/primitives'
 import { useCursorTrack } from '../../engine/cursorTracks'
@@ -12,10 +13,11 @@ import { warnLinkedEffects } from '../viewer/ZoomTool'
 import { PanelSection } from './common'
 
 // "Zoom automático nos cliques" (F6) no inspetor do clipe de tela (só com a trilha do cursor gravada): gera os keys
-// de zoom/pan a partir dos cliques (shared/editor/autoZoom). "Pré-visualizar" abre uma transação e aplica como
-// transitório (nada no histórico; mexer nos controles refaz a prévia a partir do projeto de antes); "Aplicar" grava
-// um passo de desfazer (fechando a prévia, se aberta); "Cancelar" descarta. Depois de aplicar: toast com os zooms e
-// os keyframes trocados, e a oferta do F4 de ancorar os efeitos de privacidade sem âncora (warnLinkedEffects).
+// de zoom/pan a partir dos cliques (shared/editor/autoZoom). "Pré-visualizar" põe o resultado como prévia FORA do
+// histórico (store.preview: só o visualizador a desenha; nenhuma transação aberta, então nenhuma outra edição pode
+// gravá-la — qualquer mudança do projeto a descarta, com aviso); mexer nos controles refaz a prévia. "Aplicar" é uma
+// edição normal sobre o projeto atual (um passo de desfazer); "Cancelar" descarta a prévia. Depois de aplicar: toast
+// com os zooms e os keyframes trocados, e a oferta do F4 de ancorar os efeitos de privacidade sem âncora.
 
 const nf = (n: number, d: number): string => n.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d })
 
@@ -30,11 +32,14 @@ const SLIDERS: SliderSpec[] = [
 export function AutoZoomPanel({ item, locked }: { item: MediaItem; locked?: boolean }): React.JSX.Element {
   const track = useCursorTrack(item.assetId)
   const project = useEditorStore((s) => s.project)
-  const txOpen = useEditorStore((s) => s.txBase !== null)
+  const shownPreview = useEditorStore((s) => s.preview)
   const [opts, setOpts] = useState<AutoZoomOpts>(DEFAULT_AUTO_ZOOM)
+  const optsRef = useRef(opts)
+  optsRef.current = opts
+  /** A prévia que este painel pôs no store (null = nenhuma). */
+  const mine = useRef<Project | null>(null)
   const [previewing, setPreviewing] = useState(false)
-  const previewRef = useRef(false)
-  previewRef.current = previewing
+  const [appliedOnce, setAppliedOnce] = useState(false)
 
   const clicks = useMemo(() => {
     if (!track || !project) return 0
@@ -42,60 +47,77 @@ export function AutoZoomPanel({ item, locked }: { item: MediaItem; locked?: bool
     return map ? itemClicks(track, map).length : 0
   }, [track, project, item])
 
-  // a prévia foi encerrada por fora (desfazer, outra edição): o painel volta ao normal
+  // a prévia sumiu por fora (o projeto foi editado, desfeito…): nada foi gravado; o painel avisa e volta ao normal
   useEffect(() => {
-    if (previewing && !txOpen) setPreviewing(false)
-  }, [previewing, txOpen])
+    if (!previewing || shownPreview === mine.current) return
+    mine.current = null
+    setPreviewing(false)
+    toast.info('Pré-visualização do zoom automático descartada', { description: 'O projeto mudou. Nada foi gravado; pré-visualize de novo se quiser.' })
+  }, [previewing, shownPreview])
   // sair do painel (outra seleção) com a prévia aberta: descarta
   useEffect(() => () => {
-    if (previewRef.current) useEditorStore.getState().cancelTx()
+    const st = useEditorStore.getState()
+    if (mine.current && st.preview === mine.current) st.setPreview(null)
   }, [])
 
+  const tooShort = item.durationUs <= Math.round(opts.transitionMs * 1000)
   const blocked = locked
-    ? 'A faixa deste clipe está bloqueada'
+    ? 'A faixa deste clipe está bloqueada.'
     : item.reverse || item.freeze
-      ? 'O zoom automático não funciona em clipes invertidos ou congelados'
+      ? 'O zoom automático não funciona em clipes invertidos ou congelados.'
       : !track
-        ? 'Lendo a trilha do cursor… (se não carregar, a gravação não tem cliques utilizáveis)'
+        ? 'Lendo a trilha do cursor… Se não carregar, a gravação não tem cliques utilizáveis.'
         : clicks === 0
-          ? 'Nenhum clique gravado no trecho usado deste clipe'
-          : null
+          ? 'Nenhum clique gravado no trecho usado deste clipe.'
+          : tooShort
+            ? 'O clipe é mais curto que a transição: diminua a Transição ou use um trecho maior.'
+            : null
 
-  /** Gera os zooms a partir do projeto de antes da prévia; transitório = dentro da transação aberta. */
-  const run = (o: AutoZoomOpts, transient: boolean): { segments: number; replaced: number } | null => {
+  /** Prévia fora do histórico, calculada sobre o projeto atual (qualquer edição a descarta — store). */
+  const showPreview = (o: AutoZoomOpts): void => {
     const st = useEditorStore.getState()
-    const base = st.txBase ?? st.project
-    if (!base || !track) return null
-    let out: { segments: number; replaced: number } | null = null
-    const ok = st.apply(() => {
-      const r = applyAutoZoom(base, item.id, track, o)
-      out = { segments: r.segments, replaced: r.replaced }
-      return r.project
-    }, transient ? { transient: true } : undefined)
-    return ok ? out : null
-  }
-
-  const preview = (): void => {
-    const st = useEditorStore.getState()
-    st.begin()
-    if (run(opts, true)) setPreviewing(true)
-    else st.cancelTx()
+    if (!st.project || !track) return
+    try {
+      const r = applyAutoZoom(st.project, item.id, track, o)
+      mine.current = r.project
+      st.setPreview(r.project)
+      setPreviewing(true)
+    } catch (e) {
+      if (!(e instanceof EditError)) throw e
+      toast.error(e.message)
+      cancel()
+    }
   }
   const cancel = (): void => {
-    useEditorStore.getState().cancelTx()
+    const st = useEditorStore.getState()
+    if (mine.current && st.preview === mine.current) st.setPreview(null)
+    mine.current = null
     setPreviewing(false)
   }
   const apply = (): void => {
-    const r = run(opts, false)
-    setPreviewing(false)
-    if (!r) return
-    toast.success(r.segments === 1 ? '1 zoom automático aplicado' : `${r.segments} zooms automáticos aplicados`, {
-      description: `${r.replaced > 0 ? (r.replaced === 1 ? '1 keyframe existente foi substituído. ' : `${r.replaced} keyframes existentes foram substituídos. `) : ''}Ctrl+Z desfaz.`
+    if (!track) return
+    let out: { segments: number; replaced: number } | null = null
+    // edição normal sobre o projeto atual: um passo de desfazer; a prévia (se houver) some com a mudança do projeto
+    const ok = useEditorStore.getState().apply((p) => {
+      const r = applyAutoZoom(p, item.id, track, optsRef.current)
+      out = { segments: r.segments, replaced: r.replaced }
+      return r.project
     })
+    mine.current = null
+    setPreviewing(false)
+    const r = out as { segments: number; replaced: number } | null
+    if (!ok || !r) return
+    const again = appliedOnce ? ' Para trocar os ajustes de um zoom automático já aplicado, desfaça-o antes (Ctrl+Z): aplicar de novo soma os zooms.' : ''
+    toast.success(r.segments === 1 ? '1 zoom automático aplicado' : `${r.segments} zooms automáticos aplicados`, {
+      description: `${r.replaced > 0 ? (r.replaced === 1 ? '1 keyframe existente foi substituído. ' : `${r.replaced} keyframes existentes foram substituídos. `) : ''}Ctrl+Z desfaz.${again}`
+    })
+    setAppliedOnce(true)
     warnLinkedEffects(item.id, 'o zoom automático')
   }
-  const commitSlider = (o: AutoZoomOpts): void => {
-    if (previewRef.current) run(o, true)
+  const commitSlider = (key: keyof AutoZoomOpts, v: number): void => {
+    const o = { ...optsRef.current, [key]: v }
+    optsRef.current = o
+    if (previewing) showPreview(o)
   }
 
   const disabled = !!blocked
@@ -119,7 +141,7 @@ export function AutoZoomPanel({ item, locked }: { item: MediaItem; locked?: bool
                 disabled={disabled}
                 value={[opts[sp.key]]}
                 onValueChange={([v]) => setOpts((o) => ({ ...o, [sp.key]: v }))}
-                onValueCommit={([v]) => commitSlider({ ...opts, [sp.key]: v })}
+                onValueCommit={([v]) => commitSlider(sp.key, v)}
               />
             </div>
           )
@@ -132,7 +154,7 @@ export function AutoZoomPanel({ item, locked }: { item: MediaItem; locked?: bool
           ) : (
             <Tip content={blocked ?? 'Mostra os zooms sem gravar no histórico'}>
               <span className="flex flex-1">
-                <Button size="sm" variant="secondary" className="flex-1" disabled={disabled} onClick={preview}>
+                <Button size="sm" variant="secondary" className="flex-1" disabled={disabled} onClick={() => showPreview(optsRef.current)}>
                   <Eye className="h-3.5 w-3.5" /> Pré-visualizar
                 </Button>
               </span>
@@ -146,8 +168,9 @@ export function AutoZoomPanel({ item, locked }: { item: MediaItem; locked?: bool
             </span>
           </Tip>
         </div>
-        {previewing ? <p className="text-[11px] leading-snug text-fg-2" role="status">Pré-visualização: toque o trecho para conferir. Ajustes nos controles refazem os zooms.</p> : null}
-        {blocked && track ? <p className="text-[11px] leading-snug text-muted">{blocked}</p> : null}
+        {previewing ? <p className="text-[11px] leading-snug text-fg-2" role="status">Pré-visualização (fora do histórico): toque o trecho para conferir. Ajustes nos controles refazem os zooms; qualquer outra edição descarta a prévia.</p> : null}
+        {blocked ? <p data-auto-zoom-reason="" className="text-[11px] leading-snug text-muted" role="status">{blocked}</p> : null}
+        {appliedOnce && !previewing ? <p className="text-[11px] leading-snug text-muted">Já aplicado: para mudar os ajustes, desfaça o zoom automático anterior (Ctrl+Z) antes de aplicar de novo.</p> : null}
       </div>
     </PanelSection>
   )

@@ -74,15 +74,21 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
   // store → workers, no máximo uma vez por quadro de tela
   let raf = 0
   let lastProject: unknown = null
+  let lastShown: unknown = null
   let lastBypass = false
   let lastSelection: unknown = null
   const flush = (): void => {
     raf = 0
     const s = useEditorStore.getState()
     if (!s.project) return
+    // o visualizador desenha a prévia fora do histórico, se houver (zoom automático); o áudio é sempre o do projeto
+    const shown = s.preview ?? s.project
+    if (shown !== lastShown) {
+      render.setProject(shown, mediaUrlsFor(shown, 'preview'), true)
+      lastShown = shown
+    }
     if (s.project !== lastProject || s.audioBypass !== lastBypass) {
       const urls = mediaUrlsFor(s.project, 'preview')
-      if (s.project !== lastProject) render.setProject(s.project, urls, true)
       // comparar A/B (botão segurado no inspetor de áudio): toca o original sem ruído/normalização
       audio.setProject(s.project, urls, true, s.audioBypass)
       lastProject = s.project
@@ -100,7 +106,7 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
   }
   const unsub = useEditorStore.subscribe((s, prev) => {
     if (prev.playing && !s.playing) render.idle()
-    if (s.project !== prev.project || s.audioBypass !== prev.audioBypass || s.selection !== prev.selection || (!s.playing && s.playheadUs !== prev.playheadUs)) schedule()
+    if (s.project !== prev.project || s.preview !== prev.preview || s.audioBypass !== prev.audioBypass || s.selection !== prev.selection || (!s.playing && s.playheadUs !== prev.playheadUs)) schedule()
   })
   schedule()
 

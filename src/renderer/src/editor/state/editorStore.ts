@@ -32,6 +32,12 @@ export interface EditorState {
   inUs: Us | null
   outUs: Us | null
   txBase: Project | null // transação aberta
+  /**
+   * Prévia fora do histórico (zoom automático): o visualizador desenha este projeto no lugar de `project` enquanto
+   * existir. Nunca entra no histórico nem no disco; qualquer mudança de `project` (edição, desfazer, transação) a
+   * descarta — a edição acontece sobre o projeto de verdade, que a prévia nunca tocou.
+   */
+  preview: Project | null
   ingest: Record<string, IngestProgress>
   /** Processamentos de áudio em curso/falhos por `assetId~chave` (audioProcess.audioSourceKey). */
   audioJobs: Record<string, AudioJobState>
@@ -54,6 +60,8 @@ export interface EditorState {
   setAudioJob(id: string, state: AudioJobState | null): void
   setAudioBypass(on: boolean): void
   setSpeechFailed(assetId: string): void
+  /** Mostra (ou, com null, descarta) a prévia; só vale sobre o `project` atual. */
+  setPreview(p: Project | null): void
   begin(): void
   commitTx(): void
   cancelTx(): void
@@ -96,6 +104,7 @@ const INITIAL = {
   inUs: null,
   outUs: null,
   txBase: null,
+  preview: null as Project | null,
   ingest: {} as Record<string, IngestProgress>,
   audioJobs: {} as Record<string, AudioJobState>,
   audioBypass: false,
@@ -183,6 +192,8 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       return { ingest }
     }),
 
+  setPreview: (p) => set({ preview: p && get().project ? p : null }),
+
   begin: () => {
     const { project, txBase } = get()
     if (project && !txBase) set({ txBase: project })
@@ -247,6 +258,11 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
   setInOut: (inUs, outUs) => set({ inUs, outUs }),
   toggleSnapping: () => set((s) => ({ snapping: !s.snapping })),
 }))
+
+// a prévia é do projeto em que foi calculada: mudou o projeto (edição, desfazer, transação, ingestão), ela some
+useEditorStore.subscribe((s, prev) => {
+  if (s.preview && s.project !== prev.project) useEditorStore.setState({ preview: null })
+})
 
 // ---------------------------------------------------------------- autosave
 

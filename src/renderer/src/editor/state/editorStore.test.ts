@@ -355,3 +355,57 @@ describe('autosave', () => {
     stop()
   })
 })
+
+describe('prévia fora do histórico (zoom automático, I1)', () => {
+  const withPreview = (): { p0: Project; preview: Project } => {
+    const p0 = st().project!
+    const preview = addMarker(p0, 42) // qualquer projeto derivado serve: a prévia nunca entra no histórico
+    st().setPreview(preview)
+    return { p0, preview }
+  }
+  it('mostrar e cancelar: o projeto e o histórico não mudam (restaura exatamente)', () => {
+    const { p0, preview } = withPreview()
+    expect(st().preview).toBe(preview)
+    expect(st().project).toBe(p0)
+    expect(st().history.past).toHaveLength(0)
+    expect(st().txBase).toBeNull()
+    st().setPreview(null)
+    expect(st().project).toBe(p0)
+    expect(st().dirty).toBe(false)
+  })
+  it('edição do inspetor (commit direto) com a prévia aberta: a prévia some e não entra no histórico', () => {
+    const { p0 } = withPreview()
+    st().apply((p) => addMarker(p, 7))
+    expect(st().preview).toBeNull()
+    expect(st().history.past).toEqual([p0])
+    expect(st().project!.markers.map((m) => m.tUs)).toEqual([7])
+  })
+  it('gesto transitório (begin/transient/commitTx) com a prévia aberta: as edições valem, a prévia não', () => {
+    const { p0 } = withPreview()
+    st().begin()
+    st().apply((p) => addMarker(p, 1), { transient: true })
+    expect(st().preview).toBeNull()
+    st().apply((p) => addMarker(p, 2), { transient: true })
+    st().commitTx()
+    expect(st().history.past).toEqual([p0])
+    expect(st().project!.markers.map((m) => m.tUs).sort()).toEqual([1, 2])
+  })
+  it('desfazer e transient sem transação também descartam; nunca grava a prévia', () => {
+    st().apply((p) => addMarker(p, 5))
+    withPreview()
+    st().undo()
+    expect(st().preview).toBeNull()
+    expect(st().history.future.every((p) => !p.markers.some((m) => m.tUs === 42))).toBe(true)
+    withPreview()
+    st().apply((p) => addMarker(p, 9), { transient: true })
+    expect(st().preview).toBeNull()
+    expect([...st().history.past, st().project!].every((p) => !p.markers.some((m) => m.tUs === 42))).toBe(true)
+  })
+  it('sem projeto aberto a prévia é ignorada; fechar limpa', () => {
+    withPreview()
+    st().close()
+    expect(st().preview).toBeNull()
+    st().setPreview(base())
+    expect(st().preview).toBeNull()
+  })
+})
