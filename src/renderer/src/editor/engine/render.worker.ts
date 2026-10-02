@@ -8,6 +8,9 @@
 // → VideoSample(canvas) → VideoSampleSource H.264 (ou HEVC, só hardware); o áudio vem em blocos de 100 ms do audio worker de
 // exportação pela MessagePort, em ordem, → AudioSampleSource (AAC, ou Opus se AAC indisponível). O MP4
 // (mdat antes do moov; o main remuxa com faststart) sai em chunks `exportChunk` com contrapressão por `chunkAck`.
+// Quadros (`exportFramesStart`: GIF; fallback libx264): o mesmo laço de quadros, mas cada quadro é lido do canvas
+// (RGBA de cima para baixo) e sai em `exportFrame`, com até FRAMES_MAX_INFLIGHT sem ack. Quadro único
+// (`exportStill`): composeAt → canvas.convertToBlob PNG (opaco: o contexto não tem alfa e o fundo é desenhado).
 import {
   AudioSample,
   AudioSampleSource,
@@ -32,7 +35,7 @@ import { DecoderPool } from './decoderPool'
 import { SR } from './audio/mixer'
 import type { AudioIn, AudioOut } from './audio/protocol'
 import { frameCount } from '../export/exportPlan'
-import type { ExportJobSpec, RenderIn, RenderOut } from './protocol'
+import type { ExportJobSpec, FramesJobSpec, RenderIn, RenderOut } from './protocol'
 
 type FrameMsg = Extract<RenderIn, { t: 'frame' }>
 
@@ -129,6 +132,12 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
         break
       case 'chunkAck':
         if (exporting?.jobId === m.jobId) exporting.outbox.ack(m.seq)
+        break
+      case 'exportFramesStart':
+        startFrames(m.job)
+        break
+      case 'exportStill':
+        void exportStill(m.id, m.tUs)
         break
     }
   } catch (err) {
@@ -347,7 +356,10 @@ const AUDIO_CHANNELS = 2
 // taxas de AAC tentadas abaixo da pedida antes de cair para Opus
 const AAC_FALLBACK_BPS = [256_000, 192_000, 160_000, 128_000]
 
-let exporting: { jobId: string; abort: AbortController; outbox: ChunkOutbox } | null = null
+// quadros RGBA em voo (GIF: o renderer espera cada pipeWrite antes do ack)
+const FRAMES_MAX_INFLIGHT = 2
+
+let exporting: { jobId: string; abort: AbortController; outbox: { ack(seq: number): void } } | null = null
 
 class Cancelled extends Error {
   constructor() {
@@ -376,13 +388,13 @@ async function encoderCall<T>(fn: () => Promise<T>): Promise<T> {
 // Bloco de áudio que não chega nesse tempo: o audio worker morreu ou travou → erro claro (sem pendurar).
 const AUDIO_BLOCK_TIMEOUT_MS = 20_000
 
-/** Fila de chunks do MP4 com contrapressão: com muitos em voo, espera o ack do cliente (gravou no disco). */
-class ChunkOutbox {
+/** Janela de contrapressão: numera o que sai e, com mais de `max` sem ack do cliente, espera. */
+class AckWindow {
   private seq = 0
   private acked = 0
   private waiter: (() => void) | null = null
 
-  constructor(private readonly jobId: string, private readonly signal: AbortSignal) {
+  constructor(private readonly max: number, private readonly signal: AbortSignal) {
     signal.addEventListener('abort', () => this.release())
   }
 
@@ -390,9 +402,13 @@ class ChunkOutbox {
     return this.seq
   }
 
+  next(): number {
+    return ++this.seq
+  }
+
   ack(seq: number): void {
     this.acked = Math.max(this.acked, seq)
-    if (this.seq - this.acked <= EXPORT_MAX_INFLIGHT) this.release()
+    if (this.seq - this.acked <= this.max) this.release()
   }
 
   private release(): void {
@@ -401,17 +417,39 @@ class ChunkOutbox {
     w?.()
   }
 
-  async send(chunk: StreamTargetChunk): Promise<void> {
+  /** Depois de enviar: espera enquanto houver mais de `max` em voo (cancelado → Cancelled). */
+  async wait(): Promise<void> {
     if (this.signal.aborted) throw new Cancelled()
-    const data = chunk.data.slice()
-    this.seq++
-    post({ t: 'exportChunk', jobId: this.jobId, seq: this.seq, data, position: chunk.position }, [data.buffer])
-    if (this.seq - this.acked > EXPORT_MAX_INFLIGHT) {
+    if (this.seq - this.acked > this.max) {
       await new Promise<void>((resolve) => {
         this.waiter = resolve
       })
       if (this.signal.aborted) throw new Cancelled()
     }
+  }
+}
+
+/** Fila de chunks do MP4 com contrapressão: com muitos em voo, espera o ack do cliente (gravou no disco). */
+class ChunkOutbox {
+  private readonly win: AckWindow
+
+  constructor(private readonly jobId: string, private readonly signal: AbortSignal) {
+    this.win = new AckWindow(EXPORT_MAX_INFLIGHT, signal)
+  }
+
+  get lastSeq(): number {
+    return this.win.lastSeq
+  }
+
+  ack(seq: number): void {
+    this.win.ack(seq)
+  }
+
+  async send(chunk: StreamTargetChunk): Promise<void> {
+    if (this.signal.aborted) throw new Cancelled()
+    const data = chunk.data.slice()
+    post({ t: 'exportChunk', jobId: this.jobId, seq: this.win.next(), data, position: chunk.position }, [data.buffer])
+    await this.win.wait()
   }
 }
 
@@ -596,6 +634,76 @@ async function runExport(
     throw err
   } finally {
     feed?.close()
+  }
+}
+
+function startFrames(job: FramesJobSpec): void {
+  if (exporting) {
+    post({ t: 'exportError', jobId: job.jobId, message: 'Já existe uma exportação em andamento neste worker', cancelled: false, beforeFirstPacket: false, encoderError: false })
+    return
+  }
+  const abort = new AbortController()
+  const win = new AckWindow(FRAMES_MAX_INFLIGHT, abort.signal)
+  const me = { jobId: job.jobId, abort, outbox: win }
+  exporting = me
+  runFrames(job, abort.signal, win)
+    .then((done) => post({ t: 'exportFramesDone', jobId: job.jobId, ...done }))
+    .catch((err: unknown) => {
+      const cancelled = abort.signal.aborted || err instanceof Cancelled
+      post({ t: 'exportError', jobId: job.jobId, message: cancelled ? 'cancelado' : errMsg(err), cancelled, beforeFirstPacket: false, encoderError: false })
+    })
+    .finally(() => {
+      if (exporting === me) exporting = null
+      prefetched.clear()
+      pool.releaseAll()
+    })
+}
+
+/** Laço de quadros da exportação (o mesmo do vídeo), com cada quadro lido do canvas e enviado em RGBA. */
+async function runFrames(job: FramesJobSpec, signal: AbortSignal, win: AckWindow): Promise<{ frames: number; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }> {
+  const p = project
+  const comp = compositor
+  if (!comp || !canvas || !p) throw new Error('exportação antes de init/project')
+  comp.resize(job.width, job.height)
+  selection = []
+  prefetched.clear()
+  const total = frameCount(job.fromUs, job.toUs, job.fps)
+  if (total <= 0) throw new Error('Intervalo de exportação vazio')
+  const missingFrames = new Map<string, number>()
+  const missingAnnotations = new Set<string>()
+  for (let n = 0; n < total; n++) {
+    if (signal.aborted) throw new Cancelled()
+    const tUs = job.fromUs + frameToUs(n, job.fps)
+    const composed = await composeAt(p, tUs, true)
+    for (const id of composed.missing) missingFrames.set(id, (missingFrames.get(id) ?? 0) + 1)
+    for (const id of composed.missingAnnotations) missingAnnotations.add(id)
+    // RGBA de cima para baixo (o readPixels do compositor já desvira o framebuffer)
+    const px = comp.readPixels(0, 0, job.width, job.height)
+    post({ t: 'exportFrame', jobId: job.jobId, seq: win.next(), total, rgba: px.buffer as ArrayBuffer, w: job.width, h: job.height }, [px.buffer])
+    pool.releaseExcept([...composed.used, ...prefetchUpcoming(p, tUs, composed.used)])
+    await win.wait()
+  }
+  return { frames: total, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations] }
+}
+
+/** Quadro único (PNG) no tamanho do canvas: composeAt (seek) → convertToBlob. */
+async function exportStill(id: number, tUs: Us): Promise<void> {
+  let missing: string[] = []
+  let missingAnnotations: string[] = []
+  try {
+    const p = project
+    if (!compositor || !canvas || !p) throw new Error('quadro antes de init/project')
+    selection = []
+    const composed = await composeAt(p, tUs, false)
+    missing = [...composed.missing]
+    missingAnnotations = [...composed.missingAnnotations]
+    // preserveDrawingBuffer: o desenho continua no canvas até o blob ficar pronto (nada mais desenha nesta instância)
+    const png = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer()
+    post({ t: 'still', id, png, missing, missingAnnotations }, [png])
+  } catch (err) {
+    post({ t: 'still', id, png: null, error: errMsg(err), missing, missingAnnotations })
+  } finally {
+    pool.releaseAll()
   }
 }
 

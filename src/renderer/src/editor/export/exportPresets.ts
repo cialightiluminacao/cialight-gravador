@@ -251,6 +251,6 @@ export function sizeForHeight(height: number, canvas: Pick<Canvas, 'width' | 'he
 const KNOWN_EXT = /\.(mp4|mov|m4v|mkv|webm|gif|png|mp3|wav|m4a)$/i
 
 /** Nome do arquivo com a extensão do formato (troca uma extensão de mídia já digitada). */
-export function outputFileName(base: string, ext: 'mp4'): string {
+export function outputFileName(base: string, ext: 'mp4' | 'gif' | 'png' | 'wav' | 'mp3' | 'm4a'): string {
   return `${base.replace(KNOWN_EXT, '')}.${ext}`
 }

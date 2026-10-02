@@ -107,11 +107,19 @@ describe('exportar (Ctrl+E)', () => {
     expect(shortcutFor(key('e'))).toBeNull()
     expect(shortcutFor(key('E', { shiftKey: true }))).toBe('toggleEnabled')
     expect(shortcutFor(key('E', { shiftKey: true, altKey: true }))).toBe('toggleEnabledUnlinked')
-    expect(shortcutFor(key('E', { ctrlKey: true, shiftKey: true }))).toBeNull()
     expect(shortcutFor(key('e', { ctrlKey: true, altKey: true }))).toBeNull()
     // digitando num campo não abre
     expect(shortcutFor(key('e', { ctrlKey: true, target: { tagName: 'INPUT', type: 'text' } as unknown as EventTarget }))).toBeNull()
     expect(SHORTCUT_LABELS.export).toBe('Ctrl+E')
+  })
+  it('Ctrl+Shift+E exporta o quadro atual como PNG (sem conflito com Shift+E / Alt+Shift+E / Ctrl+E)', () => {
+    expect(shortcutFor(key('E', { ctrlKey: true, shiftKey: true }))).toBe('exportFrame')
+    expect(shortcutFor(key('e', { ctrlKey: true, shiftKey: true }))).toBe('exportFrame')
+    expect(shortcutFor(key('E', { metaKey: true, shiftKey: true }))).toBe('exportFrame')
+    expect(shortcutFor(key('E', { ctrlKey: true, shiftKey: true, altKey: true }))).toBeNull()
+    expect(shortcutFor(key('E', { ctrlKey: true, shiftKey: true, target: { tagName: 'INPUT', type: 'text' } as unknown as EventTarget }))).toBeNull()
+    expect(SHORTCUT_LABELS.exportFrame).toBe('Ctrl+Shift+E')
+    expect(Object.entries(SHORTCUT_LABELS).filter(([, v]) => v === 'Ctrl+Shift+E')).toEqual([['exportFrame', 'Ctrl+Shift+E']])
   })
   it('nenhum outro atalho usa Ctrl+E', () => {
     const labels = Object.entries(SHORTCUT_LABELS).filter(([, v]) => v === 'Ctrl+E')

@@ -23,6 +23,19 @@ export interface ExportJobSpec {
   simulateHevcFailure?: boolean
 }
 
+/**
+ * Quadros RGBA da exportação (GIF; fallback libx264): o mesmo caminho de quadros da exportação de vídeo
+ * (tUs = fromUs + frameToUs(n, fps), frameCount, composeAt sequencial), lidos do canvas em vez de codificados.
+ */
+export interface FramesJobSpec {
+  jobId: string
+  width: number
+  height: number
+  fps: number
+  fromUs: Us
+  toUs: Us
+}
+
 export type RenderIn =
   | { t: 'init'; canvas: OffscreenCanvas; width: number; height: number; dpr: number }
   | { t: 'project'; project: Project; mediaUrls: MediaUrls; useProxy: boolean }
@@ -34,7 +47,11 @@ export type RenderIn =
   // exportação (instância própria do worker, canvas na resolução de saída): ver render.worker.ts
   | { t: 'exportStart'; job: ExportJobSpec; audioPort: MessagePort | null }
   | { t: 'exportCancel'; jobId: string }
+  // chunk (exportChunk) ou quadro (exportFrame) `seq` gravado: libera o worker (contrapressão)
   | { t: 'chunkAck'; jobId: string; seq: number }
+  | { t: 'exportFramesStart'; job: FramesJobSpec }
+  // quadro único em tUs no tamanho do canvas, como PNG (canvas.convertToBlob)
+  | { t: 'exportStill'; id: number; tUs: Us }
   // testes: lê pixels do último quadro (coordenadas do canvas, origem em cima à esquerda)
   | { t: 'readPixels'; id: number; x: number; y: number; w: number; h: number }
   // testes: trava a thread do worker por `ms` (simula decoder/GPU pendurado para o watchdog)
@@ -57,6 +74,11 @@ export type RenderOut =
   // encoderError: a falha veio do codificador; beforeFirstPacket: antes de qualquer pacote de vídeo
   // (só as duas juntas justificam tentar outro modo de hardware)
   | { t: 'exportError'; jobId: string; message: string; cancelled: boolean; beforeFirstPacket: boolean; encoderError: boolean }
+  // quadro n = seq − 1 de `total`: RGBA w×h linha a linha de cima para baixo (buffer transferido); responder chunkAck
+  | { t: 'exportFrame'; jobId: string; seq: number; total: number; rgba: ArrayBuffer; w: number; h: number }
+  | { t: 'exportFramesDone'; jobId: string; frames: number; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }
+  // png null: falhou (error)
+  | { t: 'still'; id: number; png: ArrayBuffer | null; error?: string; missing: string[]; missingAnnotations: string[] }
   // testes: RGBA linha a linha de cima para baixo
   | { t: 'pixels'; id: number; data: Uint8Array }
   // testes: drawMs = compositor (desenho + espera da GPU); frameMs = quadro inteiro (decodificação inclusa)

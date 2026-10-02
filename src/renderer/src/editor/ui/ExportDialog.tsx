@@ -35,19 +35,55 @@ import {
   type VideoCodecChoice
 } from '../export/exportPresets'
 import { probeHevc } from '../export/hevcSupport'
+import {
+  AUDIO_FORMATS,
+  audioEstimateBytes,
+  audioOnlyBlocker,
+  GIF_DEFAULT_FPS,
+  GIF_DEFAULT_WIDTH,
+  GIF_FPS,
+  gifDiskBytes,
+  gifEstimateBytes,
+  gifSize,
+  gifWidthOptions,
+  stillFileName,
+  validateGif,
+  type AudioFormat,
+  type ExportFormat
+} from '../export/formatPlan'
+import { exportStill, runAudioExport, runGifExport, type FormatExportResult } from '../export/formatExport'
+import { defaultExportFolder } from './frameExport'
 
-// Diálogo de exportação do editor: preset (cartões com o motivo quando indisponível), "Personalizar"
-// (resolução na proporção do projeto, fps, qualidade por taxa ou tamanho alvo, codec H.264/HEVC — HEVC só
-// quando o hardware confirma), intervalo (tudo / I–O), nome e pasta, estimativa e avisos; um bloqueio desativa
-// Exportar com o motivo. Depois: progresso (%, velocidade × tempo real, tempo restante, cancelar) e o resultado
-// (codec usado, resolução, passadas, avisos; abrir pasta / copiar arquivo). A exportação usa workers próprios:
-// o preview continua vivo (pausado ao começar). Avisos de privacidade do intervalo aparecem com "Revisar".
+// Diálogo de exportação do editor. Formato: Vídeo, GIF, Quadro (PNG) ou Só áudio.
+// Vídeo: preset (cartões com o motivo quando indisponível), "Personalizar" (resolução na proporção do projeto,
+// fps, qualidade por taxa ou tamanho alvo, codec H.264/HEVC — HEVC só quando o hardware confirma).
+// GIF: largura (até a do projeto), fps, até 30 s, estimativa aproximada. Quadro: o do cursor, no tamanho do
+// projeto. Só áudio: WAV/MP3/M4A. Todos: intervalo (tudo / I–O; o quadro não tem), nome (a extensão segue o
+// formato) e pasta, estimativa e avisos; um bloqueio desativa Exportar com o motivo. Depois: progresso (%,
+// velocidade × tempo real, tempo restante, cancelar) e o resultado (abrir pasta / copiar arquivo). A exportação
+// usa workers próprios: o preview continua vivo (pausado ao começar). Avisos de privacidade com "Revisar".
 
+type Done = { kind: 'video'; result: EditorExportResult } | { kind: 'format'; result: FormatExportResult }
 type Phase =
   | { kind: 'form' }
   | { kind: 'running'; progress: EditorExportProgress | null; cancelling: boolean }
-  | { kind: 'done'; result: EditorExportResult }
+  | { kind: 'done'; done: Done }
   | { kind: 'error'; message: string }
+
+const FORMAT_OPTIONS: { value: ExportFormat; label: string }[] = [
+  { value: 'video', label: 'Vídeo' },
+  { value: 'gif', label: 'GIF' },
+  { value: 'png', label: 'Quadro (PNG)' },
+  { value: 'audio', label: 'Só áudio' }
+]
+const FORMAT_TITLE: Record<ExportFormat, [string, string]> = {
+  video: ['Exportar vídeo', 'Vídeo exportado'],
+  gif: ['Exportar GIF', 'GIF exportado'],
+  png: ['Exportar quadro (PNG)', 'Quadro exportado'],
+  audio: ['Exportar áudio', 'Áudio exportado']
+}
+const AUDIO_DONE_LABEL: Record<AudioFormat, string> = { wav: 'WAV · PCM 16 bits', mp3: 'MP3 · 192 kbps', m4a: 'M4A · AAC 192 kbps' }
+const formatExt = (f: ExportFormat, audio: AudioFormat): 'mp4' | 'gif' | 'png' | AudioFormat => (f === 'video' ? 'mp4' : f === 'audio' ? audio : f)
 
 const DEFAULT_PRESET: ExportPresetId = 'youtube1080'
 const formatMbps = (bps: number): string => `${(bps / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} Mbps`
@@ -56,6 +92,11 @@ const CODEC_LABEL: Record<VideoCodecChoice, string> = { h264: 'H.264', hevc: 'HE
 const ISSUE_LABEL: Record<ExportMediaIssue['status'], string> = { missing: 'ausente', processing: 'ainda processando', error: 'com erro' }
 const EFFECT_LABEL = { blur: 'Blur', pixelate: 'Pixelizar', solid: 'Tarja' } as const
 const canvasKey = (c: Project['canvas']): string => `${c.width}x${c.height}@${c.fps}`
+
+/** Nome padrão do formato: "<projeto>.<ext>"; o quadro leva o instante ("<projeto> - 00m12s.png"). */
+function defaultName(p: Project, f: ExportFormat, audio: AudioFormat, tUs: number): string {
+  return f === 'png' ? stillFileName(p.name, tUs) : outputFileName(fileNameFromTitle(p.name) || 'Vídeo', formatExt(f, audio))
+}
 
 export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { open: boolean; onOpenChange: (open: boolean) => void; onBeforeExport: () => void; onSeek: (us: number) => void }): React.JSX.Element | null {
   const project = useEditorStore((s) => s.project)
@@ -70,8 +111,15 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const [customOpen, setCustomOpen] = useState(false)
   const [hevc, setHevc] = useState<{ key: string; ok: boolean } | null>(null)
   const [rangeMode, setRangeMode] = useState<'all' | 'inout'>('all')
+  const [format, setFormat] = useState<ExportFormat>('video')
+  const [gifOpts, setGifOpts] = useState<{ width: number; fps: number }>({ width: GIF_DEFAULT_WIDTH, fps: GIF_DEFAULT_FPS })
+  const [audioFormat, setAudioFormat] = useState<AudioFormat>('mp3')
   const [fileName, setFileName] = useState('')
+  // nome digitado pelo usuário: trocar o formato só troca a extensão; senão vale o nome padrão do formato
+  const [nameTouched, setNameTouched] = useState(false)
   const [folder, setFolder] = useState<string | null>(null)
+  // quadro (PNG): o instante do cursor; lido só com o diálogo aberto (fechado não re-renderiza a cada quadro)
+  const playheadUs = useEditorStore((s) => (open ? s.playheadUs : 0))
   const abortRef = useRef<AbortController | null>(null)
   const ids = useId()
 
@@ -84,7 +132,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   useEffect(() => {
     if (!open || !project || phase.kind === 'running') return
     setPhase({ kind: 'form' })
-    setFileName(outputFileName(fileNameFromTitle(project.name) || 'Vídeo', 'mp4'))
+    setNameTouched(false)
+    setFileName(defaultName(project, format, audioFormat, useEditorStore.getState().playheadUs))
     const range0 = hasInOut(contentEndUs(project), useEditorStore.getState().inUs, useEditorStore.getState().outUs)
     setRangeMode(range0 ? 'inout' : 'all')
     const key = canvasKey(project.canvas)
@@ -115,11 +164,15 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
 
   if (!project || !exp || !s) return null
   const canvas = project.canvas
+  const isPng = format === 'png'
   const range = exportRange(totalUs, inUs, outUs, rangeMode)
   const durationUs = range.toUs - range.fromUs
+  // intervalo verificado (mídia, privacidade, voz): o quadro do cursor, ou o trecho
+  const checkFrom = isPng ? playheadUs : range.fromUs
+  const checkTo = isPng ? playheadUs + 1 : range.toUs
   const hasAudio = planAudio(project).some((x) => x.mode !== 'mute')
   // redução de ruído/normalização ainda processando ou que falhou: a exportação sairia com o original nesses trechos
-  const voiceIssues = audioProcessIssues(project, audioJobs, range.fromUs, range.toUs)
+  const voiceIssues = format === 'video' || format === 'audio' ? audioProcessIssues(project, audioJobs, range.fromUs, range.toUs) : { failed: [], pending: [] }
   const base = basePreset(s.presetId)
   const customized = !!s.customized
   const hevcState: 'checking' | 'ok' | 'no' = hevc?.key === probeKey ? (hevc.ok ? 'ok' : 'no') : 'checking'
@@ -127,25 +180,31 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const validation = validateExport(s, canvas, durationUs, hevcState !== 'no')
   const videoBps = videoBitrateFor(s, durationUs)
   const estimate = estimateFor(s, durationUs, hasAudio)
+  const gif = gifSize(gifOpts.width, canvas)
+  const gifCheck = validateGif(gif.width, gif.height, gifOpts.fps, durationUs)
+  const gifEstimate = gifEstimateBytes(gif.width, gif.height, gifOpts.fps, durationUs)
+  const audioBlocker = format === 'audio' ? (audioOnlyBlocker(project) ?? (durationUs > 0 ? null : 'A linha do tempo está vazia.')) : null
+  const audioEstimate = audioEstimateBytes(audioFormat, durationUs)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
-  const issues = durationUs > 0 ? exportMediaIssues(project, range.fromUs, range.toUs) : []
-  const privacy = durationUs > 0 ? privacyWarnings(project, range.fromUs, range.toUs) : []
+  const issues = checkTo > checkFrom && (isPng || durationUs > 0) ? exportMediaIssues(project, checkFrom, checkTo) : []
+  const privacy = format !== 'audio' && (isPng || durationUs > 0) ? privacyWarnings(project, checkFrom, checkTo) : []
   // "Revisar": seleciona o efeito, leva o playhead ao instante do aviso (o mais fraco, o início da mídia por
   // cima…, sempre dentro do intervalo) e fecha o diálogo
   const review = (w: PrivacyWarning): void => {
     if (!findItem(project, w.itemId)) return
     useEditorStore.getState().select([w.itemId])
-    onSeek(Math.min(Math.max(w.tUs, range.fromUs), Math.max(range.fromUs, range.toUs - 1)))
+    onSeek(Math.min(Math.max(w.tUs, checkFrom), Math.max(checkFrom, checkTo - 1)))
     onOpenChange(false)
   }
   // QA (só fora do pacote): window.__qaEditor.exportDir troca a pasta padrão (o QA nunca grava na pasta real)
-  const qaDir = appInfo?.isPackaged === false ? window.__qaEditor?.exportDir : undefined
-  const defaultFolder = qaDir ?? settings.outputDir ?? appInfo?.paths.output ?? null
+  const defaultFolder = defaultExportFolder(settings, appInfo)
   const targetFolder = folder ?? defaultFolder
   const name = sanitizeFileName(fileName.trim())
   const running = phase.kind === 'running'
   const codecBlocked = s.codec === 'hevc' && hevcState === 'checking' ? 'Verificando o suporte a HEVC…' : null
-  const blocker = validation.blocker ?? codecBlocked ?? (!targetFolder ? 'Escolha a pasta de destino.' : !name ? 'Dê um nome ao arquivo.' : null)
+  const formatBlocker = format === 'video' ? (validation.blocker ?? codecBlocked) : format === 'gif' ? gifCheck.blocker : format === 'audio' ? audioBlocker : null
+  const formatWarnings = format === 'video' ? validation.warnings : format === 'gif' ? gifCheck.warnings : []
+  const blocker = formatBlocker ?? (!targetFolder ? 'Escolha a pasta de destino.' : !name ? 'Dê um nome ao arquivo.' : null)
 
   const pickPreset = (id: ExportPresetId): void => setExp({ settings: settingsForPreset(id, canvas), canvas: canvasKey(canvas) })
   const edit = (patch: Partial<ExportSettings>): void => setExp((cur) => (cur ? { ...cur, settings: { ...cur.settings, ...patch, customized: true } } : cur))
@@ -153,6 +212,12 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const hevcTitle = hevcState === 'checking' ? 'Verificando o suporte a HEVC…' : hevcState === 'no' ? 'HEVC não suportado neste computador' : undefined
   const hevcNote = hevcTitle ?? (!base.allowHevc && !customized ? `O preset “${base.label}” usa H.264 (compatibilidade); escolher HEVC personaliza o preset.` : undefined)
   const fpsOptions = fpsChoices(canvas.fps).map((f) => ({ value: String(f), label: formatFps(f), hint: f === canvas.fps ? 'do projeto' : undefined }))
+  // trocar o formato: nome padrão do formato, ou só a extensão de um nome digitado
+  const pickFormat = (f: ExportFormat, audio = audioFormat): void => {
+    setFormat(f)
+    setAudioFormat(audio)
+    setFileName((cur) => (nameTouched ? outputFileName(cur.trim() || fileNameFromTitle(project.name) || 'Vídeo', formatExt(f, audio)) : defaultName(project, f, audio, playheadUs)))
+  }
 
   const start = async (): Promise<void> => {
     if (!targetFolder || blocker || editorExportRunning()) return
@@ -161,12 +226,21 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     const ac = new AbortController()
     abortRef.current = ac
     setPhase({ kind: 'running', progress: null, cancelling: false })
+    const opts = { signal: ac.signal, onProgress: (progress: EditorExportProgress) => setPhase((p) => (p.kind === 'running' ? { ...p, progress } : p)) }
+    const common = { project: snapshot, outputDir: targetFolder, fileName: name }
     try {
-      const result = await runEditorExport(
-        { project: snapshot, fromUs: range.fromUs, toUs: range.toUs, ...exportRequestFor(s, durationUs), outputDir: targetFolder, fileName: name, estimateBytes: estimate },
-        { signal: ac.signal, onProgress: (progress) => setPhase((p) => (p.kind === 'running' ? { ...p, progress } : p)) }
-      )
-      setPhase({ kind: 'done', result })
+      let done: Done
+      if (format === 'video') {
+        done = { kind: 'video', result: await runEditorExport({ ...common, fromUs: range.fromUs, toUs: range.toUs, ...exportRequestFor(s, durationUs), estimateBytes: estimate }, opts) }
+      } else if (format === 'gif') {
+        const estimateBytes = gifDiskBytes(gif.width, gif.height, gifOpts.fps, range.fromUs, range.toUs)
+        done = { kind: 'format', result: await runGifExport({ ...common, ...gif, fps: gifOpts.fps, fromUs: range.fromUs, toUs: range.toUs, estimateBytes }, opts) }
+      } else if (format === 'audio') {
+        done = { kind: 'format', result: await runAudioExport({ ...common, fromUs: range.fromUs, toUs: range.toUs, format: audioFormat, estimateBytes: audioEstimate }, opts) }
+      } else {
+        done = { kind: 'format', result: await exportStill({ ...common, tUs: useEditorStore.getState().playheadUs }) }
+      }
+      setPhase({ kind: 'done', done })
     } catch (e) {
       if (e instanceof EditorExportCancelled) setPhase({ kind: 'form' })
       else setPhase({ kind: 'error', message: ipcErrorMessage(e) })
@@ -180,7 +254,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     setPhase((p) => (p.kind === 'running' ? { ...p, cancelling: true } : p))
   }
 
-  const title = phase.kind === 'done' ? 'Vídeo exportado' : phase.kind === 'running' ? 'Exportando…' : phase.kind === 'error' ? 'A exportação falhou' : 'Exportar vídeo'
+  const [formTitle, doneTitle] = FORMAT_TITLE[format]
+  const title = phase.kind === 'done' ? doneTitle : phase.kind === 'running' ? 'Exportando…' : phase.kind === 'error' ? 'A exportação falhou' : formTitle
   const label = (id: string): string => `${ids}-${id}`
 
   return (
@@ -188,156 +263,212 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
       <DialogContent title={title} hideClose={running} className="w-[min(680px,94vw)]">
         {phase.kind === 'form' ? (
           <div className="flex max-h-[min(78vh,760px)] flex-col gap-4 overflow-y-auto pr-1">
-            <div className="flex items-baseline justify-between gap-3">
-              <span id={label('presets')} className="text-[12px] font-medium text-fg-2">
-                Preset
-              </span>
-              {customized ? (
-                <span className="text-[11px] text-accent-2" data-export-custom="">
-                  Personalizado (a partir de {base.label})
-                </span>
-              ) : null}
-            </div>
-            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-labelledby={label('presets')}>
-              {EXPORT_PRESETS.map((p) => {
-                const av = presetAvailability(p.id, canvas, durationUs)
-                const selected = s.presetId === p.id
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={selected}
-                    aria-disabled={!av.ok}
-                    disabled={!av.ok}
-                    title={av.ok ? p.hint : av.reason}
-                    data-preset={p.id}
-                    onClick={() => pickPreset(p.id)}
-                    className={cn(
-                      'rounded-xl border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55',
-                      selected ? 'border-accent/70 bg-accent/10' : 'border-border-strong bg-bg-2 enabled:hover:border-white/20'
-                    )}
-                  >
-                    <span className="block text-[13px] font-semibold text-fg">
-                      {p.label}
-                      {selected && customized ? <span className="ml-1.5 text-[11px] font-medium text-accent-2">· Personalizado</span> : null}
-                    </span>
-                    <span className={cn('block text-[11px]', av.ok ? 'text-muted' : 'text-warn')}>{av.ok ? p.hint : av.reason}</span>
-                  </button>
-                )
-              })}
-            </div>
-
-            <div className="rounded-xl border border-border">
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-fg-2 hover:text-fg"
-                aria-expanded={customOpen}
-                aria-controls={label('custom')}
-                onClick={() => setCustomOpen((v) => !v)}
-                data-export-customize=""
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5" />
-                Personalizar
-                <span className="ml-auto text-[11px] font-normal text-muted">
-                  {s.width}×{s.height} · {formatFps(s.fps)} · {s.quality.kind === 'bitrate' ? formatMbps(s.quality.bps) : `alvo ${s.quality.mb.toLocaleString('pt-BR')} MB`} · {CODEC_LABEL[s.codec]}
-                </span>
-                <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', customOpen && 'rotate-180')} />
-              </button>
-              {customOpen ? (
-                <div id={label('custom')} className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2.5 border-t border-border px-3 py-3" data-export-custom-panel="">
-                  <span className="text-[12px] text-fg-2">Resolução</span>
-                  <div className="flex items-center gap-2">
-                    <NumberField
-                      id={label('w')}
-                      ariaLabel="Largura (pixels)"
-                      value={s.width}
-                      step={2}
-                      commitOnBlur
-                      onCommit={(v) => edit(sizeForWidth(v, canvas))}
-                    />
-                    <span className="text-muted">×</span>
-                    <NumberField
-                      id={label('h')}
-                      ariaLabel="Altura (pixels)"
-                      value={s.height}
-                      step={2}
-                      commitOnBlur
-                      onCommit={(v) => edit(sizeForHeight(v, canvas))}
-                    />
-                    <span className="text-[11px] text-muted">proporção do projeto mantida</span>
-                  </div>
-
-                  <label htmlFor={label('fps')} className="text-[12px] text-fg-2">
-                    Quadros por segundo
-                  </label>
-                  <Select id={label('fps')} ariaLabel="Quadros por segundo" triggerClassName="h-8 w-40" value={String(s.fps)} options={fpsOptions} onValueChange={(v) => edit({ fps: Number(v) })} />
-
-                  <span className="text-[12px] text-fg-2">Qualidade</span>
-                  <div className="flex items-center gap-2">
-                    <Segmented
-                      size="sm"
-                      ariaLabel="Tipo de qualidade"
-                      value={s.quality.kind}
-                      onValueChange={(k) =>
-                        edit({ quality: k === 'bitrate' ? { kind: 'bitrate', bps: Math.round(videoBps / 100_000) * 100_000 } : { kind: 'target', mb: Math.max(1, Math.round(estimate / (1024 * 1024))) } })
-                      }
-                      options={[
-                        { value: 'bitrate', label: 'Taxa (Mbps)' },
-                        { value: 'target', label: 'Tamanho alvo (MB)' }
-                      ]}
-                    />
-                    {s.quality.kind === 'bitrate' ? (
-                      <NumberField id={label('bps')} ariaLabel="Taxa de vídeo em Mbps" value={s.quality.bps / 1e6} step={0.5} onCommit={(v) => edit({ quality: { kind: 'bitrate', bps: Math.round(v * 1e6) } })} />
-                    ) : (
-                      <NumberField id={label('mb')} ariaLabel="Tamanho alvo em MB" value={s.quality.mb} step={1} onCommit={(v) => edit({ quality: { kind: 'target', mb: v } })} />
-                    )}
-                  </div>
-
-                  <span className="text-[12px] text-fg-2">Codec</span>
-                  <div className="flex items-center gap-2" title={hevcTitle}>
-                    <Segmented
-                      size="sm"
-                      ariaLabel="Codec de vídeo"
-                      value={s.codec}
-                      onValueChange={(c) => edit({ codec: c })}
-                      options={[
-                        { value: 'h264', label: 'H.264' },
-                        { value: 'hevc', label: 'HEVC', disabled: !!hevcTitle && s.codec !== 'hevc', title: hevcTitle }
-                      ]}
-                    />
-                    {hevcNote ? (
-                      <span className="text-[11px] text-muted" data-hevc-note="">
-                        {hevcNote}
-                      </span>
-                    ) : (
-                      <span className="text-[11px] text-muted">HEVC: arquivo menor; nem todo aparelho reproduz</span>
-                    )}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
             <div className="flex items-center justify-between gap-3">
-              <span className="text-[12px] font-medium text-fg-2">Intervalo</span>
-              <Segmented
-                size="sm"
-                ariaLabel="Intervalo exportado"
-                value={rangeMode}
-                onValueChange={setRangeMode}
-                options={[
-                  { value: 'all', label: 'Tudo' },
-                  { value: 'inout', label: 'Entrada–Saída (I–O)', disabled: !inOutUsable, title: inOutUsable ? undefined : 'Marque a entrada (I) e/ou a saída (O) na linha do tempo' }
-                ]}
-              />
+              <span className="text-[12px] font-medium text-fg-2">Formato</span>
+              <Segmented size="sm" ariaLabel="Formato da exportação" value={format} onValueChange={(f) => pickFormat(f)} options={FORMAT_OPTIONS} />
             </div>
+
+            {format === 'video' ? (
+              <>
+                <div className="flex items-baseline justify-between gap-3">
+                  <span id={label('presets')} className="text-[12px] font-medium text-fg-2">
+                    Preset
+                  </span>
+                  {customized ? (
+                    <span className="text-[11px] text-accent-2" data-export-custom="">
+                      Personalizado (a partir de {base.label})
+                    </span>
+                  ) : null}
+                </div>
+                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-labelledby={label('presets')}>
+                  {EXPORT_PRESETS.map((p) => {
+                    const av = presetAvailability(p.id, canvas, durationUs)
+                    const selected = s.presetId === p.id
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        aria-disabled={!av.ok}
+                        disabled={!av.ok}
+                        title={av.ok ? p.hint : av.reason}
+                        data-preset={p.id}
+                        onClick={() => pickPreset(p.id)}
+                        className={cn(
+                          'rounded-xl border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55',
+                          selected ? 'border-accent/70 bg-accent/10' : 'border-border-strong bg-bg-2 enabled:hover:border-white/20'
+                        )}
+                      >
+                        <span className="block text-[13px] font-semibold text-fg">
+                          {p.label}
+                          {selected && customized ? <span className="ml-1.5 text-[11px] font-medium text-accent-2">· Personalizado</span> : null}
+                        </span>
+                        <span className={cn('block text-[11px]', av.ok ? 'text-muted' : 'text-warn')}>{av.ok ? p.hint : av.reason}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+
+                <div className="rounded-xl border border-border">
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-fg-2 hover:text-fg"
+                    aria-expanded={customOpen}
+                    aria-controls={label('custom')}
+                    onClick={() => setCustomOpen((v) => !v)}
+                    data-export-customize=""
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                    Personalizar
+                    <span className="ml-auto text-[11px] font-normal text-muted">
+                      {s.width}×{s.height} · {formatFps(s.fps)} · {s.quality.kind === 'bitrate' ? formatMbps(s.quality.bps) : `alvo ${s.quality.mb.toLocaleString('pt-BR')} MB`} · {CODEC_LABEL[s.codec]}
+                    </span>
+                    <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', customOpen && 'rotate-180')} />
+                  </button>
+                  {customOpen ? (
+                    <div id={label('custom')} className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2.5 border-t border-border px-3 py-3" data-export-custom-panel="">
+                      <span className="text-[12px] text-fg-2">Resolução</span>
+                      <div className="flex items-center gap-2">
+                        <NumberField
+                          id={label('w')}
+                          ariaLabel="Largura (pixels)"
+                          value={s.width}
+                          step={2}
+                          commitOnBlur
+                          onCommit={(v) => edit(sizeForWidth(v, canvas))}
+                        />
+                        <span className="text-muted">×</span>
+                        <NumberField
+                          id={label('h')}
+                          ariaLabel="Altura (pixels)"
+                          value={s.height}
+                          step={2}
+                          commitOnBlur
+                          onCommit={(v) => edit(sizeForHeight(v, canvas))}
+                        />
+                        <span className="text-[11px] text-muted">proporção do projeto mantida</span>
+                      </div>
+
+                      <label htmlFor={label('fps')} className="text-[12px] text-fg-2">
+                        Quadros por segundo
+                      </label>
+                      <Select id={label('fps')} ariaLabel="Quadros por segundo" triggerClassName="h-8 w-40" value={String(s.fps)} options={fpsOptions} onValueChange={(v) => edit({ fps: Number(v) })} />
+
+                      <span className="text-[12px] text-fg-2">Qualidade</span>
+                      <div className="flex items-center gap-2">
+                        <Segmented
+                          size="sm"
+                          ariaLabel="Tipo de qualidade"
+                          value={s.quality.kind}
+                          onValueChange={(k) =>
+                            edit({ quality: k === 'bitrate' ? { kind: 'bitrate', bps: Math.round(videoBps / 100_000) * 100_000 } : { kind: 'target', mb: Math.max(1, Math.round(estimate / (1024 * 1024))) } })
+                          }
+                          options={[
+                            { value: 'bitrate', label: 'Taxa (Mbps)' },
+                            { value: 'target', label: 'Tamanho alvo (MB)' }
+                          ]}
+                        />
+                        {s.quality.kind === 'bitrate' ? (
+                          <NumberField id={label('bps')} ariaLabel="Taxa de vídeo em Mbps" value={s.quality.bps / 1e6} step={0.5} onCommit={(v) => edit({ quality: { kind: 'bitrate', bps: Math.round(v * 1e6) } })} />
+                        ) : (
+                          <NumberField id={label('mb')} ariaLabel="Tamanho alvo em MB" value={s.quality.mb} step={1} onCommit={(v) => edit({ quality: { kind: 'target', mb: v } })} />
+                        )}
+                      </div>
+
+                      <span className="text-[12px] text-fg-2">Codec</span>
+                      <div className="flex items-center gap-2" title={hevcTitle}>
+                        <Segmented
+                          size="sm"
+                          ariaLabel="Codec de vídeo"
+                          value={s.codec}
+                          onValueChange={(c) => edit({ codec: c })}
+                          options={[
+                            { value: 'h264', label: 'H.264' },
+                            { value: 'hevc', label: 'HEVC', disabled: !!hevcTitle && s.codec !== 'hevc', title: hevcTitle }
+                          ]}
+                        />
+                        {hevcNote ? (
+                          <span className="text-[11px] text-muted" data-hevc-note="">
+                            {hevcNote}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-muted">HEVC: arquivo menor; nem todo aparelho reproduz</span>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
+
+            {format === 'gif' ? (
+              <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2.5 rounded-xl border border-border px-3 py-3" data-export-gif="">
+                <span className="text-[12px] text-fg-2">Largura</span>
+                <Segmented
+                  size="sm"
+                  ariaLabel="Largura do GIF"
+                  value={String(gif.width)}
+                  onValueChange={(v) => setGifOpts((o) => ({ ...o, width: Number(v) }))}
+                  options={gifWidthOptions(canvas).map((w) => ({ value: String(w), label: `${w} px` }))}
+                />
+                <span className="text-[12px] text-fg-2">Quadros por segundo</span>
+                <Segmented
+                  size="sm"
+                  ariaLabel="Quadros por segundo do GIF"
+                  value={String(gifOpts.fps)}
+                  onValueChange={(v) => setGifOpts((o) => ({ ...o, fps: Number(v) }))}
+                  options={GIF_FPS.map((f) => ({ value: String(f), label: `${f} fps` }))}
+                />
+                <span className="col-span-2 text-[11px] text-muted">Sem áudio · repete sem parar · até 30 s (use I–O para escolher o trecho)</span>
+              </div>
+            ) : null}
+
+            {format === 'audio' ? (
+              <div className="flex items-center justify-between gap-3" data-export-audio="">
+                <label htmlFor={label('afmt')} className="text-[12px] font-medium text-fg-2">
+                  Formato do áudio
+                </label>
+                <Select
+                  id={label('afmt')}
+                  ariaLabel="Formato do áudio"
+                  triggerClassName="h-8 w-56"
+                  value={audioFormat}
+                  options={AUDIO_FORMATS.map((f) => ({ value: f.id, label: f.label, hint: f.hint }))}
+                  onValueChange={(v) => pickFormat('audio', v as AudioFormat)}
+                />
+              </div>
+            ) : null}
+
+            {isPng ? (
+              <div className="rounded-xl border border-border px-3 py-2.5 text-[12px] text-fg-2" data-export-png="">
+                Quadro na posição do cursor (<span className="font-mono tabular-nums text-fg">{formatClock(playheadUs / 1000, true)}</span>), no tamanho do projeto ({canvas.width}×{canvas.height}). Atalho no editor: Ctrl+Shift+E.
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[12px] font-medium text-fg-2">Intervalo</span>
+                <Segmented
+                  size="sm"
+                  ariaLabel="Intervalo exportado"
+                  value={rangeMode}
+                  onValueChange={setRangeMode}
+                  options={[
+                    { value: 'all', label: 'Tudo' },
+                    { value: 'inout', label: 'Entrada–Saída (I–O)', disabled: !inOutUsable, title: inOutUsable ? undefined : 'Marque a entrada (I) e/ou a saída (O) na linha do tempo' }
+                  ]}
+                />
+              </div>
+            )}
 
             <label className="flex flex-col gap-1.5">
               <span className="text-[12px] font-medium text-fg-2">Nome do arquivo</span>
               <input
                 className="h-10 rounded-xl border border-border-strong bg-bg-2 px-3 text-[13px] text-fg outline-none focus:border-accent/60"
                 value={fileName}
-                onChange={(e) => setFileName(e.target.value)}
+                onChange={(e) => {
+                  setFileName(e.target.value)
+                  setNameTouched(true)
+                }}
                 onKeyDown={(e) => {
                   // com mídia indisponível, só o botão "Exportar mesmo assim" confirma
                   if (e.key === 'Enter' && !blocker && !issues.length) void start()
@@ -353,7 +484,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
             </div>
 
             <div className="rounded-xl border border-border bg-bg-2/60 px-3 py-2.5 text-[12px] text-fg-2" data-export-estimate="" aria-live="polite">
-              {durationUs > 0 ? (
+              {format === 'video' && durationUs > 0 ? (
                 <>
                   <span className="block">
                     <span className="font-semibold text-fg">≈ {formatBytes(estimate)}</span> · {s.width}×{s.height} · {formatFps(s.fps)} · {CODEC_LABEL[s.codec]}
@@ -365,9 +496,30 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                   </span>
                 </>
               ) : null}
-              {validation.warnings.length ? (
+              {format === 'gif' && durationUs > 0 ? (
+                <>
+                  <span className="block">
+                    <span className="font-semibold text-fg">≈ {formatBytes(gifEstimate)}</span> (estimativa aproximada) · GIF {gif.width}×{gif.height} · {gifOpts.fps} fps
+                  </span>
+                  <span className="block text-[11px] text-muted">{formatClock(durationUs / 1000, false)} · sem áudio · repete sem parar</span>
+                </>
+              ) : null}
+              {format === 'audio' && durationUs > 0 ? (
+                <>
+                  <span className="block">
+                    <span className="font-semibold text-fg">≈ {formatBytes(audioEstimate)}</span> · {AUDIO_DONE_LABEL[audioFormat]} · 48 kHz estéreo
+                  </span>
+                  <span className="block text-[11px] text-muted">{formatClock(durationUs / 1000, false)} · o mesmo áudio da exportação de vídeo</span>
+                </>
+              ) : null}
+              {isPng ? (
+                <span className="block">
+                  PNG {canvas.width}×{canvas.height} · sem perdas · em {formatClock(playheadUs / 1000, true)}
+                </span>
+              ) : null}
+              {formatWarnings.length ? (
                 <ul className="mt-1.5 flex flex-col gap-0.5 text-warn" data-export-warnings="">
-                  {validation.warnings.map((w) => (
+                  {formatWarnings.map((w) => (
                     <li key={w} className="flex items-start gap-1.5">
                       <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                       {w}
@@ -429,7 +581,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
           </div>
         ) : null}
 
-        {phase.kind === 'running' ? <RunningView progress={phase.progress} cancelling={phase.cancelling} onCancel={cancel} /> : null}
+        {phase.kind === 'running' ? <RunningView format={format} progress={phase.progress} cancelling={phase.cancelling} onCancel={cancel} /> : null}
 
         {phase.kind === 'done' ? (
           <div className="flex flex-col gap-4">
@@ -438,21 +590,15 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                 <CircleCheckBig className="h-5 w-5" />
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13px] font-semibold" title={phase.result.path}>
-                  {phase.result.path.split(/[\\/]/).pop()}
+                <span className="block truncate text-[13px] font-semibold" title={phase.done.result.path}>
+                  {phase.done.result.path.split(/[\\/]/).pop()}
                 </span>
-                <span className="block text-[11px] text-muted" data-export-done-info="">
-                  MP4 · {CODEC_LABEL[phase.result.codec]} · {phase.result.width}×{phase.result.height} · {formatFps(phase.result.fps)} · {formatBytes(phase.result.size)}
-                  {phase.result.audioCodec ? ` · áudio ${phase.result.audioCodec === 'aac' ? 'AAC' : 'Opus'} ${Math.round(phase.result.audioBitrate / 1000)} kbps` : ''}
-                  {phase.result.passes > 1 ? ` · ${phase.result.passes} passadas (refeito para caber no tamanho alvo)` : ''}
-                </span>
-                {phase.result.fellBackFromHevc ? <span className="block text-[11px] text-warn">O HEVC falhou neste computador; o vídeo saiu em H.264.</span> : null}
-                {phase.result.fellBackToSoftware ? <span className="block text-[11px] text-muted">Codificado em software (o encoder de hardware falhou).</span> : null}
+                {phase.done.kind === 'video' ? <VideoDoneInfo result={phase.done.result} /> : <FormatDoneInfo result={phase.done.result} />}
               </span>
             </div>
-            {phase.result.warnings.length ? (
+            {phase.done.result.warnings.length ? (
               <ul className="flex flex-col gap-1 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] text-warn">
-                {phase.result.warnings.map((w) => (
+                {phase.done.result.warnings.map((w) => (
                   <li key={w} className="flex items-start gap-1.5">
                     <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                     <span className="min-w-0 break-words">{w}</span>
@@ -464,10 +610,10 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 Fechar
               </Button>
-              <Button variant="secondary" onClick={() => void copyOutputFile(phase.result.path)}>
+              <Button variant="secondary" onClick={() => void copyOutputFile(phase.done.result.path)}>
                 <Copy className="h-4 w-4" /> Copiar arquivo
               </Button>
-              <Button variant="primary" onClick={() => showOutputInFolder(phase.result.path)}>
+              <Button variant="primary" onClick={() => showOutputInFolder(phase.done.result.path)}>
                 <FolderOpen className="h-4 w-4" /> Abrir pasta
               </Button>
             </div>
@@ -572,24 +718,52 @@ function PrivacySection({ warnings, onReview }: { warnings: PrivacyWarning[]; on
   )
 }
 
-function RunningView({ progress, cancelling, onCancel }: { progress: EditorExportProgress | null; cancelling: boolean; onCancel: () => void }): React.JSX.Element {
+function VideoDoneInfo({ result }: { result: EditorExportResult }): React.JSX.Element {
+  return (
+    <>
+      <span className="block text-[11px] text-muted" data-export-done-info="">
+        MP4 · {CODEC_LABEL[result.codec]} · {result.width}×{result.height} · {formatFps(result.fps)} · {formatBytes(result.size)}
+        {result.audioCodec ? ` · áudio ${result.audioCodec === 'aac' ? 'AAC' : 'Opus'} ${Math.round(result.audioBitrate / 1000)} kbps` : ''}
+        {result.passes > 1 ? ` · ${result.passes} passadas (refeito para caber no tamanho alvo)` : ''}
+      </span>
+      {result.fellBackFromHevc ? <span className="block text-[11px] text-warn">O HEVC falhou neste computador; o vídeo saiu em H.264.</span> : null}
+      {result.fellBackToSoftware ? <span className="block text-[11px] text-muted">Codificado em software (o encoder de hardware falhou).</span> : null}
+    </>
+  )
+}
+
+function FormatDoneInfo({ result }: { result: FormatExportResult }): React.JSX.Element {
+  const info =
+    result.kind === 'gif'
+      ? `GIF · ${result.width}×${result.height} · ${result.fps} fps · ${result.frames} quadros · repete sem parar`
+      : result.kind === 'png'
+        ? `PNG · ${result.width}×${result.height}`
+        : `${AUDIO_DONE_LABEL[result.format ?? 'wav']} · 48 kHz estéreo`
+  return (
+    <span className="block text-[11px] text-muted" data-export-done-info="">
+      {info} · {formatBytes(result.size)}
+    </span>
+  )
+}
+
+/** Rótulo da etapa em andamento (por formato). */
+function stageLabel(format: ExportFormat, progress: EditorExportProgress | null): string {
+  if (!progress) return 'Preparando…'
+  if (progress.stage === 'finalize') return format === 'gif' ? 'Gerando a paleta do GIF…' : 'Finalizando o arquivo…'
+  if (progress.stage === 'resize') return `Ajustando tamanho… quadro ${progress.frame} de ${progress.total}`
+  if (format === 'audio') return 'Mixando o áudio…'
+  return `Quadro ${progress.frame} de ${progress.total}`
+}
+
+function RunningView({ format, progress, cancelling, onCancel }: { format: ExportFormat; progress: EditorExportProgress | null; cancelling: boolean; onCancel: () => void }): React.JSX.Element {
   const pct = progress?.percent ?? 0
   const finalizing = progress?.stage === 'finalize'
-  const resizing = progress?.stage === 'resize'
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-baseline justify-between gap-3">
         <span className="flex items-center gap-2 text-[13px] text-fg-2">
           <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-          {cancelling
-            ? 'Cancelando…'
-            : finalizing
-              ? 'Finalizando o arquivo…'
-              : resizing
-                ? `Ajustando tamanho… quadro ${progress.frame} de ${progress.total}`
-                : progress
-                  ? `Quadro ${progress.frame} de ${progress.total}`
-                  : 'Preparando…'}
+          {cancelling ? 'Cancelando…' : stageLabel(format, progress)}
         </span>
         <span className="font-mono text-[13px] font-semibold tabular-nums text-fg">{Math.floor(pct)}%</span>
       </div>

@@ -13,6 +13,7 @@ import { useViewerTool } from '../state/viewerTool'
 import { autoMusicLanding, moveToVoice } from './musicLanding'
 import { narrationActive } from './narrationFlow'
 import { planKeyframePaste } from './keyframePaste'
+import { exportCurrentFrame } from './frameExport'
 
 /** Efeito ancorado colado/duplicado sem o clipe da âncora: a cópia fica solta na caixa de reserva (ops.duplicateItems). */
 const LOOSE_PASTE = 'Efeito colado sem o clipe — ficou solto'
@@ -328,6 +329,9 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'export':
       if (!exportOpenHandler) return false
       exportOpenHandler()
+      return true
+    case 'exportFrame':
+      void exportCurrentFrame()
       return true
     case 'toggleSnap':
       s.toggleSnapping()

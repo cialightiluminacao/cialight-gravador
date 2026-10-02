@@ -4,7 +4,7 @@
 // OffscreenCanvas só pode ser transferido uma vez — e restaura projeto, seleção e tamanho.
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from './mediaUrls'
-import type { ExportJobSpec, RenderIn, RenderOut } from './protocol'
+import type { ExportJobSpec, FramesJobSpec, RenderIn, RenderOut } from './protocol'
 
 type Rendered = Extract<RenderOut, { t: 'rendered' }>
 type ErrorOut = Extract<RenderOut, { t: 'error' }>
@@ -157,7 +157,26 @@ export class RenderClient {
     this.send({ t: 'exportCancel', jobId })
   }
 
-  /** Chunk `seq` gravado: libera o encoder (contrapressão). */
+  /** Exportação em quadros RGBA (GIF; fallback libx264): `exportFrame` por quadro, responder chunkAck. */
+  exportFramesStart(job: FramesJobSpec): void {
+    this.send({ t: 'exportFramesStart', job })
+  }
+
+  /** Quadro tUs (no tamanho do canvas) como PNG. */
+  exportStill(tUs: Us): Promise<Extract<RenderOut, { t: 'still' }>> {
+    const id = ++this.pixelId
+    return new Promise((resolve) => {
+      const off = this.onMessage((m) => {
+        if ((m.t === 'still' && m.id === id) || (m.t === 'error' && m.fatal)) {
+          off()
+          resolve(m.t === 'still' ? m : { t: 'still', id, png: null, error: m.message, missing: [], missingAnnotations: [] })
+        }
+      })
+      this.send({ t: 'exportStill', id, tUs })
+    })
+  }
+
+  /** Chunk/quadro `seq` gravado: libera o encoder/worker (contrapressão). */
   chunkAck(jobId: string, seq: number): void {
     this.send({ t: 'chunkAck', jobId, seq })
   }

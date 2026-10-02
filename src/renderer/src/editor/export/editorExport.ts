@@ -14,6 +14,7 @@ import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
 import { audioRateWarning, KEYFRAME_INTERVAL_S, missingMediaWarnings, resizeBitrate } from './exportPlan'
 import type { VideoCodecChoice } from './exportPresets'
 import { EditorExportCancelled, finalizeOrCancel, type Finalized } from './finalize'
+import { editorExportRunning, withExportLock } from './exportLock'
 import { ipcErrorMessage } from '@/lib/ipcError'
 
 export interface EditorExportRequest {
@@ -91,75 +92,68 @@ class AttemptError extends Error {
 const MiB = 1024 * 1024
 const formatMB = (b: number): string => `${(b / MiB).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} MB`
 
-let running = false
-
-/** Há uma exportação do editor em andamento. */
-export function editorExportRunning(): boolean {
-  return running
-}
+export { editorExportRunning }
 
 type OnProgress = (p: EditorExportProgress) => void
 
 export async function runEditorExport(req: EditorExportRequest, opts: { onProgress?: OnProgress; signal?: AbortSignal } = {}): Promise<EditorExportResult> {
-  if (running) throw new Error('Já existe uma exportação em andamento')
-  running = true
+  return withExportLock(() => runLocked(req, opts))
+}
+
+async function runLocked(req: EditorExportRequest, opts: { onProgress?: OnProgress; signal?: AbortSignal }): Promise<EditorExportResult> {
   const api = window.api
   const signal = opts.signal ?? new AbortController().signal
   const durationUs = req.toUs - req.fromUs
-  try {
-    let videoBitrate = req.simulateFirstPassOvershoot ? req.videoBitrate * 4 : req.videoBitrate
-    let hw: HwPref = 'prefer-hardware'
-    let codec: VideoCodecChoice = req.codec ?? 'h264'
-    let fellBack = false
-    let fellBackFromHevc = false
-    const warnings = new Set<string>()
-    for (let pass = 1; ; pass++) {
-      const stage = pass === 1 ? 'render' : 'resize'
-      const enc = await encode({ ...req, videoBitrate }, codec, hw, stage, signal, opts.onProgress)
-      hw = enc.hardware
-      codec = enc.codec
-      fellBack ||= enc.fellBack
-      fellBackFromHevc ||= enc.fellBackFromHevc
-      for (const w of enc.warnings) warnings.add(w)
-      // remux: progresso real do ffmpeg nos últimos 2 %
-      const off = api.editorExport.onFinalizeProgress((p) => {
-        if (p.jobId === enc.jobId) opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98 + 2 * p.fraction, speed: null, etaS: null })
-      })
-      let out: Finalized
-      try {
-        opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98, speed: null, etaS: null })
-        out = await finalizeOrCancel(api.editorExport, enc.jobId, { durationUs, maxBytes: pass === 1 ? req.targetBytes : undefined }, signal)
-      } finally {
-        off()
-      }
-      if (out.oversize && req.targetBytes && pass === 1) {
-        // nunca acima do bitrate do pedido (o do alvo): com a 1ª passada inflada (teste) a regra linear subestimaria a correção
-        videoBitrate = Math.min(req.videoBitrate, resizeBitrate(videoBitrate, req.targetBytes, out.size))
-        console.warn(`exportação: ${out.size} bytes > alvo ${req.targetBytes}; refazendo a ${videoBitrate} bps`)
-        continue
-      }
-      if (out.warning) warnings.add(out.warning)
-      if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}.`)
-      opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 100, speed: null, etaS: null })
-      return {
-        path: out.path,
-        size: out.size,
-        width: req.width,
-        height: req.height,
-        fps: req.fps,
-        codec,
-        videoCodec: enc.videoCodec,
-        audioCodec: enc.audioCodec,
-        audioBitrate: enc.audioBitrate,
-        hardware: hw,
-        fellBackToSoftware: fellBack,
-        fellBackFromHevc,
-        passes: pass,
-        warnings: [...warnings]
-      }
+  let videoBitrate = req.simulateFirstPassOvershoot ? req.videoBitrate * 4 : req.videoBitrate
+  let hw: HwPref = 'prefer-hardware'
+  let codec: VideoCodecChoice = req.codec ?? 'h264'
+  let fellBack = false
+  let fellBackFromHevc = false
+  const warnings = new Set<string>()
+  for (let pass = 1; ; pass++) {
+    const stage = pass === 1 ? 'render' : 'resize'
+    const enc = await encode({ ...req, videoBitrate }, codec, hw, stage, signal, opts.onProgress)
+    hw = enc.hardware
+    codec = enc.codec
+    fellBack ||= enc.fellBack
+    fellBackFromHevc ||= enc.fellBackFromHevc
+    for (const w of enc.warnings) warnings.add(w)
+    // remux: progresso real do ffmpeg nos últimos 2 %
+    const off = api.editorExport.onFinalizeProgress((p) => {
+      if (p.jobId === enc.jobId) opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98 + 2 * p.fraction, speed: null, etaS: null })
+    })
+    let out: Finalized
+    try {
+      opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 98, speed: null, etaS: null })
+      out = await finalizeOrCancel(api.editorExport, enc.jobId, { durationUs, maxBytes: pass === 1 ? req.targetBytes : undefined }, signal)
+    } finally {
+      off()
     }
-  } finally {
-    running = false
+    if (out.oversize && req.targetBytes && pass === 1) {
+      // nunca acima do bitrate do pedido (o do alvo): com a 1ª passada inflada (teste) a regra linear subestimaria a correção
+      videoBitrate = Math.min(req.videoBitrate, resizeBitrate(videoBitrate, req.targetBytes, out.size))
+      console.warn(`exportação: ${out.size} bytes > alvo ${req.targetBytes}; refazendo a ${videoBitrate} bps`)
+      continue
+    }
+    if (out.warning) warnings.add(out.warning)
+    if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}.`)
+    opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 100, speed: null, etaS: null })
+    return {
+      path: out.path,
+      size: out.size,
+      width: req.width,
+      height: req.height,
+      fps: req.fps,
+      codec,
+      videoCodec: enc.videoCodec,
+      audioCodec: enc.audioCodec,
+      audioBitrate: enc.audioBitrate,
+      hardware: hw,
+      fellBackToSoftware: fellBack,
+      fellBackFromHevc,
+      passes: pass,
+      warnings: [...warnings]
+    }
   }
 }
 
