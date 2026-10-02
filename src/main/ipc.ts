@@ -248,7 +248,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     projects.cacheAssets(projectId, assets)
     return assets
   })
-  ipcMain.handle(IPC.media.enqueue, (_e, projectId: string, assetId: string, opts: { decodable: boolean; audioDecodable?: boolean }) => {
+  ipcMain.handle(IPC.media.enqueue, (_e, projectId: string, assetId: string, opts: { decodable: boolean; audioDecodable?: boolean; analyzeAudio?: boolean }) => {
     const a = projects.cached(projectId).assets.find((x) => x.id === assetId)
     if (!a) throw new Error(`Asset não encontrado: ${assetId}`)
     // mídia só de áudio: `decodable` é o da faixa de áudio
@@ -257,7 +257,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       ...a,
       ...(a.video ? { video: { ...a.video, decodable: !!opts?.decodable } } : {}),
       ...(a.audio ? { audio: { ...a.audio, decodable: audioDecodable } } : {})
-    })
+    }, { analyzeAudio: !!opts?.analyzeAudio })
   })
   ipcMain.handle(IPC.media.relink, async (_e, projectId: string, assetId: string, newPath: string) => {
     const a = projects.cached(projectId).assets.find((x) => x.id === assetId)

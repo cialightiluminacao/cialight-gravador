@@ -123,15 +123,17 @@ export class IngestQueue {
    * Enfileira o processamento de um asset (com `video.decodable` já decidido pelo renderer).
    * Se o asset já está em processamento (ex.: relink), a execução anterior é cancelada e esta a
    * substitui: só a execução vigente pode emitir 'done'.
+   * `analyzeAudio`: só fala + loudness (sem probe, proxy nem filmstrip/peaks), para completar assets já prontos; o
+   * patch traz só o que foi medido e nunca mexe no status (falha vira aviso no log).
    */
-  enqueue(projectId: string, asset: Asset): void {
+  enqueue(projectId: string, asset: Asset, opts: { analyzeAudio?: boolean } = {}): void {
     let runs = this.active.get(projectId)
     if (!runs) this.active.set(projectId, (runs = new Map()))
     runs.get(asset.id)?.abort()
     const ctl = new AbortController()
     runs.set(asset.id, ctl)
     const current = (): boolean => this.active.get(projectId)?.get(asset.id) === ctl && !ctl.signal.aborted
-    void this.run(projectId, asset, ctl.signal)
+    void (opts.analyzeAudio ? this.runAudioAnalysis(projectId, asset, ctl.signal) : this.run(projectId, asset, ctl.signal))
       .then((patch) => {
         if (current()) this.emitDone(projectId, asset.id, patch)
       })
@@ -190,6 +192,50 @@ export class IngestQueue {
       retryable: (e) => e instanceof FfmpegError && !signal.aborted,
       onFallback: (from, to, e) => this.deps.log?.warn(`ingestão ${assetId}: encoder ${from} falhou (${messageOf(e)}); tentando ${to}`)
     })
+  }
+
+  /**
+   * Fala + loudness da faixa de áudio do asset (mic/sistema da sessão: -map 0:a:N), jobs leves e NÃO essenciais:
+   * falha (que não seja cancelamento) só vira aviso no log; o campo fica ausente e o status do asset não muda.
+   */
+  private audioAnalysisTasks(projectId: string, asset: Asset, input: IngestInput, durationUs: number, signal: AbortSignal, patch: Partial<Asset>): Promise<void>[] {
+    const id = { projectId, assetId: asset.id }
+    const soft = async (what: string, p: Promise<void>): Promise<void> => {
+      try {
+        await p
+      } catch (e) {
+        if (signal.aborted || e instanceof CancelledError) throw e
+        this.deps.log?.warn(`ingestão ${asset.id}: ${what} falhou (opcional; segue sem ele)`, e)
+      }
+    }
+    return [
+      soft(
+        'fala',
+        this.step(this.light, signal, { ...id, step: 'speech' }, async (onProgress) => {
+          const rel = speechRel(asset.id)
+          await buildSpeech(input.path, this.out(projectId, rel), durationUs, { signal, onProgress, map: input.audioMap })
+          patch.speech = rel
+        })
+      ),
+      soft(
+        'loudness',
+        this.step(this.light, signal, { ...id, step: 'loudness' }, async (onProgress) => {
+          patch.loudness = await buildLoudness(input.path, durationUs, { signal, onProgress, map: input.audioMap })
+        })
+      )
+    ]
+  }
+
+  /** Modo `analyzeAudio`: só as análises de áudio de um asset que já está pronto. */
+  private async runAudioAnalysis(projectId: string, asset: Asset, signal: AbortSignal): Promise<Partial<Asset>> {
+    const hasAudio = asset.kind === 'audio' || !!asset.audio
+    const durationUs = asset.durationUs ?? 0
+    const patch: Partial<Asset> = {}
+    if (!hasAudio || !(durationUs > 0)) return patch
+    const settled = await Promise.allSettled(this.audioAnalysisTasks(projectId, asset, this.deps.resolveInput(projectId, asset), durationUs, signal, patch))
+    const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected')
+    if (rejected) throw rejected.reason
+    return patch
   }
 
   private async run(projectId: string, asset: Asset, signal: AbortSignal): Promise<Partial<Asset>> {
@@ -296,25 +342,7 @@ export class IngestQueue {
           })
         )
       )
-      // fala e loudness da mesma faixa de áudio (mic/sistema da sessão: -map 0:a:N), como jobs leves à parte
-      tasks.push(
-        guard(
-          'fala',
-          this.step(this.light, signal, { ...id, step: 'speech' }, async (onProgress) => {
-            const rel = speechRel(asset.id)
-            await buildSpeech(input.path, this.out(projectId, rel), durationUs, { signal, onProgress, map: input.audioMap })
-            patch.speech = rel
-          })
-        )
-      )
-      tasks.push(
-        guard(
-          'loudness',
-          this.step(this.light, signal, { ...id, step: 'loudness' }, async (onProgress) => {
-            patch.loudness = await buildLoudness(input.path, durationUs, { signal, onProgress, map: input.audioMap })
-          })
-        )
-      )
+      tasks.push(...this.audioAnalysisTasks(projectId, asset, input, durationUs, signal, patch))
     }
 
     // allSettled: um cancelamento não deixa outra tarefa escrevendo depois do retorno

@@ -3,6 +3,8 @@ import { colorTagArgs } from '@shared/editor/sourceColor'
 import type { Asset } from '@shared/editor/project'
 import type { MediaInfo } from './probe'
 
+export { audioAnalysisComplete } from '@shared/editor/speech'
+
 // Decide se um vídeo importado precisa de proxy (preview fluido) ou de intermediário
 // (codec que o WebCodecs não decodifica) e monta os argumentos do ffmpeg para gerá-los.
 // O autorotate padrão do ffmpeg aplica a rotação de exibição: proxy/intermediário saem "em pé".
@@ -141,15 +143,15 @@ export function audioIntermediateArgs(input: string, output: string, info: Media
 }
 
 /**
- * Derivados de um asset já prontos? Vídeo: filmstrip, peaks/fala/loudness (se tem áudio) e proxy/intermediário
- * quando a política pede (VFR não fica no Asset, então não entra aqui). Áudio: peaks/fala/loudness (e o intermediário
+ * Derivados de um asset já prontos? Vídeo: filmstrip, peaks (se tem áudio) e proxy/intermediário
+ * quando a política pede (VFR não fica no Asset, então não entra aqui). Áudio: peaks (e o intermediário
  * quando o WebCodecs não decodifica). Imagem: sempre.
  */
 export function derivedComplete(a: Asset): boolean {
   if (a.kind === 'image') return true
   const audioDecodable = a.audio?.decodable !== false
-  if (a.kind === 'audio') return !!a.peaks && !!a.speech && !!a.loudness && (audioDecodable || !!a.intermediate)
-  if (!a.filmstrip || (a.audio && !(a.peaks && a.speech && a.loudness))) return false
+  if (a.kind === 'audio') return !!a.peaks && (audioDecodable || !!a.intermediate)
+  if (!a.filmstrip || (a.audio && !a.peaks)) return false
   if (!a.video) return true
   const { video } = a
   const d = needsProxy({ durationUs: a.durationUs, kind: 'video', video, audio: a.audio, vfr: false, formatName: '' }, video.decodable, audioDecodable)

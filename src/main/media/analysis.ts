@@ -4,7 +4,7 @@ import { ffmpegPath } from '../export/ffmpegPath'
 import { jpegScaleColorOpts, type SourceColor } from '@shared/editor/sourceColor'
 import { FfmpegError, probeFile, runFfmpeg } from '../export/ffmpegRunner'
 import { log } from '../log'
-import { parseEbur128, parseSilencedetect, speechIntervals, SPEECH_DEFAULTS, type Loudness, type SpeechFile } from '@shared/editor/speech'
+import { parseEbur128, parseSilencedetect, SPEECH_DEFAULTS, type Loudness, type SpeechFile } from '@shared/editor/speech'
 
 // Análises para a timeline: filmstrip (sprite horizontal de miniaturas), peaks de áudio
 // (min/max por 10 ms) e a miniatura do projeto. Saídas são escritas em <arquivo>.part e
@@ -269,14 +269,13 @@ export interface SpeechOpts extends AnalysisOpts {
   minSilenceUs?: number
 }
 
-/** Intervalos de fala (silencedetect + padding/mescla de speech.ts) gravados em JSON (.part → rename). */
+/** Silêncios brutos (silencedetect, limiar fixo -35 dB / 0,35 s) gravados em JSON (.part → rename); os intervalos de fala saem de speechFromFile. */
 export async function buildSpeech(input: string, outJson: string, durationUs: number, opts: SpeechOpts = {}): Promise<SpeechFile> {
   const thresholdDb = opts.thresholdDb ?? SPEECH_DEFAULTS.thresholdDb
   const minSilenceUs = opts.minSilenceUs ?? SPEECH_DEFAULTS.minSilenceUs
   const filter = `silencedetect=n=${thresholdDb}dB:d=${minSilenceUs / 1_000_000}`
   const text = await runAnalysisFilter(input, opts.map ?? '0:a:0', filter, /silence_(start|end)/, durationUs, opts, 'speech')
-  const intervals = speechIntervals(parseSilencedetect(text), durationUs, SPEECH_DEFAULTS.padUs, SPEECH_DEFAULTS.minSpeechUs, SPEECH_DEFAULTS.mergeGapUs)
-  const result: SpeechFile = { version: 1, thresholdDb, minSilenceUs, intervals, durationUs }
+  const result: SpeechFile = { version: 1, thresholdDb, minSilenceUs, silences: parseSilencedetect(text), durationUs }
   const tmp = partPath(outJson)
   try {
     writeFileSync(tmp, JSON.stringify(result))
@@ -291,7 +290,7 @@ export async function buildSpeech(input: string, outJson: string, durationUs: nu
 /** Loudness integrado (LUFS), true peak (dBFS) e LRA (LU) pelo ebur128 do ffmpeg. */
 export async function buildLoudness(input: string, durationUs: number, opts: AnalysisOpts = {}): Promise<Loudness> {
   // framelog=quiet: sem a linha por 100 ms; o resumo final continua saindo
-  const text = await runAnalysisFilter(input, opts.map ?? '0:a:0', 'ebur128=peak=true:framelog=quiet', /./, durationUs, opts, 'loudness')
+  const text = await runAnalysisFilter(input, opts.map ?? '0:a:0', 'ebur128=peak=true:framelog=quiet', /Summary:|^\s*(I|LRA|Peak):\s/, durationUs, opts, 'loudness')
   const r = parseEbur128(text)
   if (!r) throw new FfmpegError('ffmpeg (loudness) não devolveu o resumo do ebur128', text.split('\n').slice(-5).join('\n'), 0)
   return r

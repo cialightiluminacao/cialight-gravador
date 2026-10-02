@@ -222,8 +222,11 @@ export interface IpcApi {
    */
   media: {
     import(projectId: string, paths: string[]): Promise<Asset[]>
-    /** decodable: faixa de vídeo (ou a de áudio, em mídia só de áudio); audioDecodable: faixa de áudio de um vídeo (ausente = sim). */
-    enqueue(projectId: string, assetId: string, opts: { decodable: boolean; audioDecodable?: boolean }): Promise<void>
+    /**
+     * decodable: faixa de vídeo (ou a de áudio, em mídia só de áudio); audioDecodable: faixa de áudio de um vídeo (ausente = sim).
+     * analyzeAudio: só fala + loudness de um asset já pronto (sem probe/proxy); falha não altera o status.
+     */
+    enqueue(projectId: string, assetId: string, opts: { decodable: boolean; audioDecodable?: boolean; analyzeAudio?: boolean }): Promise<void>
     /** Novo caminho para um asset de arquivo (ausente/movido): devolve o asset atualizado com status 'processing'; o renderer aplica e chama `enqueue`. */
     relink(projectId: string, assetId: string, newPath: string): Promise<Asset>
     /**

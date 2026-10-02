@@ -1,13 +1,18 @@
 // Fala e loudness a partir da saída do ffmpeg (silencedetect / ebur128). Funções puras; tempos em Us inteiros.
-import type { Us } from './project'
+import type { Asset, Us } from './project'
 
 /** Silêncio detectado; `toUs` null = começou e o arquivo acabou antes de terminar (até o fim da mídia). */
 export interface Silence { fromUs: Us; toUs: Us | null }
 export interface SpeechInterval { fromUs: Us; toUs: Us }
 export interface Loudness { integrated: number; truePeak: number; lra: number }
 
-/** Formato do cache/<id>.speech.json. */
-export interface SpeechFile { version: 1; thresholdDb: number; minSilenceUs: Us; intervals: SpeechInterval[]; durationUs: Us }
+/**
+ * Formato do cache/<id>.speech.json: os silêncios BRUTOS do silencedetect. Os intervalos de fala (padding, mescla)
+ * saem sob demanda de `speechFromFile`, para ducking e remoção de silêncio ajustarem os parâmetros sem reanalisar.
+ * O limiar (`thresholdDb`/`minSilenceUs`) é fixado na ingestão (-35 dB, 0,35 s); reanalisar com outro limiar
+ * é uma ação futura.
+ */
+export interface SpeechFile { version: 1; thresholdDb: number; minSilenceUs: Us; silences: Silence[]; durationUs: Us }
 
 export const SPEECH_DEFAULTS = { thresholdDb: -35, minSilenceUs: 350_000, padUs: 120_000, minSpeechUs: 100_000, mergeGapUs: 250_000 } as const
 
@@ -79,4 +84,25 @@ export function parseEbur128(stderr: string): Loudness | null {
   const truePeak = pick(/^\s*Peak:\s*(-?[\d.]+|-?inf)\s*dBFS/m, -120)
   if (integrated === null || lra === null || truePeak === null) return null
   return { integrated, truePeak, lra }
+}
+
+/** Intervalos de fala de um speech.json, com o padding/mescla padrão (SPEECH_DEFAULTS) ou os do chamador. */
+export function speechFromFile(file: SpeechFile, opts: { padUs?: Us; minSpeechUs?: Us; mergeGapUs?: Us } = {}): SpeechInterval[] {
+  return speechIntervals(
+    file.silences,
+    file.durationUs,
+    opts.padUs ?? SPEECH_DEFAULTS.padUs,
+    opts.minSpeechUs ?? SPEECH_DEFAULTS.minSpeechUs,
+    opts.mergeGapUs ?? SPEECH_DEFAULTS.mergeGapUs
+  )
+}
+
+/**
+ * Análises de áudio (fala + loudness) prontas? Não entram em `derivedComplete`: são opcionais (falha não quebra o
+ * asset); quem precisa delas (ducking, remoção de silêncio, normalização) consulta aqui. Sem áudio: sempre completo.
+ */
+export function audioAnalysisComplete(a: Asset): boolean {
+  if (a.kind === 'image') return true
+  if (a.kind !== 'audio' && !a.audio) return true
+  return !!a.speech && !!a.loudness
 }

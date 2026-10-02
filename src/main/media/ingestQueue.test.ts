@@ -9,7 +9,7 @@ import type { MediaInfo } from './probe'
 // concorrência (1 pesado + 2 leves), a substituição de execuções e o cancelamento.
 
 type Kind = 'heavy' | 'light'
-interface Call { kind: Kind; what: string; signal?: AbortSignal; resolve: (v?: unknown) => void; settled: boolean }
+interface Call { kind: Kind; what: string; signal?: AbortSignal; resolve: (v?: unknown) => void; fail: (e: Error) => void; settled: boolean }
 
 const h = vi.hoisted(() => ({
   calls: [] as Call[],
@@ -31,6 +31,12 @@ function gate(kind: Kind, what: string, signal: AbortSignal | undefined, value?:
         call.settled = true
         h.running[kind]--
         resolve(value)
+      },
+      fail: (e) => {
+        if (call.settled) return
+        call.settled = true
+        h.running[kind]--
+        reject(e)
       }
     }
     signal?.addEventListener('abort', async () => {
@@ -167,5 +173,46 @@ describe('IngestQueue', () => {
     await drain()
     expect(h.calls.filter((c) => c.kind === 'heavy')).toHaveLength(2)
     expect(done[0].patch).toMatchObject({ status: 'ready', intermediate: 'proxies/a.intermediate.mp4', proxy: 'proxies/a.mp4', audio: { decodable: false } })
+  })
+
+  it('falha na fala/loudness é opcional: o asset segue ready, só sem esses campos', async () => {
+    queue.enqueue('p', asset('a'))
+    // a fala espera um slot leve: libera as etapas à frente até ela começar
+    for (let i = 0; i < 20 && !h.calls.some((c) => c.what === 'speech'); i++) {
+      await flush()
+      h.calls.find((c) => !c.settled && c.what !== 'speech')?.resolve()
+    }
+    const speech = h.calls.find((c) => c.what === 'speech')
+    expect(speech).toBeDefined()
+    speech!.fail(new Error('silencedetect quebrou'))
+    await drain()
+    expect(done).toHaveLength(1)
+    expect(done[0].patch).toMatchObject({ status: 'ready', peaks: 'cache/a.peaks.bin', loudness: { integrated: -23, truePeak: -1, lra: 4 } })
+    expect(done[0].patch.error).toBeUndefined()
+    expect(done[0].patch.speech).toBeUndefined()
+  })
+
+  it('analyzeAudio: só fala + loudness (sem proxy, filmstrip nem peaks) e sem tocar no status', async () => {
+    queue.enqueue('p', { ...asset('a'), status: 'ready' }, { analyzeAudio: true })
+    await drain()
+    expect(h.calls.map((c) => c.what).sort()).toEqual(['loudness', 'speech'])
+    expect(done).toHaveLength(1)
+    expect(done[0].patch).toEqual({ speech: 'cache/a.speech.json', loudness: { integrated: -23, truePeak: -1, lra: 4 } })
+  })
+
+  it('analyzeAudio com falha nas duas análises: patch vazio, nunca status error', async () => {
+    queue.enqueue('p', { ...asset('a'), status: 'ready' }, { analyzeAudio: true })
+    await flush()
+    for (const c of h.calls) c.fail(new Error('x'))
+    await drain()
+    expect(done).toHaveLength(1)
+    expect(done[0].patch).toEqual({})
+  })
+
+  it('analyzeAudio em asset sem áudio não faz nada', async () => {
+    queue.enqueue('p', { ...asset('a'), status: 'ready', audio: undefined }, { analyzeAudio: true })
+    await drain()
+    expect(h.calls).toHaveLength(0)
+    expect(done[0].patch).toEqual({})
   })
 })

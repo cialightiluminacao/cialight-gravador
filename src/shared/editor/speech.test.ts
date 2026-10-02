@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { parseEbur128, parseSilencedetect, speechIntervals } from './speech'
+import type { Asset } from './project'
+import { audioAnalysisComplete, parseEbur128, parseSilencedetect, speechFromFile, speechIntervals, type SpeechFile } from './speech'
 
 // Saídas reais do ffmpeg 8.1 (stderr), capturadas com os mesmos filtros da ingestão.
 // Ruído rosa em 1–2,5 s, 4–5 s e 6,2–8 s num arquivo de 10 s.
@@ -113,5 +114,37 @@ describe('parseEbur128', () => {
   })
   it('sem resumo: null', () => {
     expect(parseEbur128('nada aqui')).toBeNull()
+  })
+})
+
+describe('speechFromFile', () => {
+  const file: SpeechFile = { version: 1, thresholdDb: -35, minSilenceUs: 350_000, silences: parseSilencedetect(SILENCE_REAL), durationUs: 10_000_000 }
+  it('padrão: padding 120 ms, fala mínima 100 ms, mescla 250 ms', () => {
+    expect(speechFromFile(file)).toEqual(speechIntervals(file.silences, 10_000_000, 120_000, 100_000, 250_000))
+    expect(speechFromFile(file)).toHaveLength(3)
+  })
+  it('o chamador ajusta os parâmetros sem reanalisar (sem padding; mescla de 2 s une tudo)', () => {
+    expect(speechFromFile(file, { padUs: 0 })[0]).toEqual({ fromUs: 1_002_667, toUs: 2_517_333 })
+    expect(speechFromFile(file, { mergeGapUs: 2_000_000 })).toHaveLength(1)
+  })
+  it('silêncio aberto no arquivo (toUs null) vai até durationUs; sobrevive ao JSON', () => {
+    const open: SpeechFile = { ...file, silences: [{ fromUs: 8_000_000, toUs: null }] }
+    const back = JSON.parse(JSON.stringify(open)) as SpeechFile
+    expect(speechFromFile(back, { padUs: 0 })).toEqual([{ fromUs: 0, toUs: 8_000_000 }])
+  })
+})
+
+describe('audioAnalysisComplete', () => {
+  const base: Asset = { id: 'a', name: 'a', kind: 'video', source: { type: 'file', path: 'x', size: 1, mtimeMs: 1 }, durationUs: 1_000_000, status: 'ready', audio: { channels: 2, sampleRate: 48000, codec: 'aac' } }
+  const loud = { integrated: -23, truePeak: -1, lra: 4 }
+  it('com áudio exige fala e loudness', () => {
+    expect(audioAnalysisComplete(base)).toBe(false)
+    expect(audioAnalysisComplete({ ...base, speech: 's' })).toBe(false)
+    expect(audioAnalysisComplete({ ...base, speech: 's', loudness: loud })).toBe(true)
+    expect(audioAnalysisComplete({ ...base, kind: 'audio', audio: undefined })).toBe(false)
+  })
+  it('sem áudio (vídeo mudo, imagem): sempre completo', () => {
+    expect(audioAnalysisComplete({ ...base, audio: undefined })).toBe(true)
+    expect(audioAnalysisComplete({ ...base, kind: 'image', audio: undefined })).toBe(true)
   })
 })

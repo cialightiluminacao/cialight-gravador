@@ -145,10 +145,8 @@ describe('derivedComplete', () => {
     expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p', ...an })).toBe(true)
     expect(derivedComplete({ ...base, filmstrip: 'f' })).toBe(false)
     expect(derivedComplete({ ...base, peaks: 'p', ...an })).toBe(false)
-    // sem a análise de fala/loudness a ingestão ainda não terminou
-    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p' })).toBe(false)
-    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p', speech: 's' })).toBe(false)
-    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p', loudness: an.loudness })).toBe(false)
+    // fala/loudness são opcionais: não entram em derivedComplete (ver audioAnalysisComplete)
+    expect(derivedComplete({ ...base, filmstrip: 'f', peaks: 'p' })).toBe(true)
     expect(derivedComplete({ ...base, audio: undefined, filmstrip: 'f' })).toBe(true)
   })
   it('GOP longo exige proxy; não decodificável exige intermediário', () => {
@@ -167,10 +165,10 @@ describe('derivedComplete', () => {
     expect(derivedComplete(ac3)).toBe(false)
     expect(derivedComplete({ ...ac3, intermediate: 'i' })).toBe(true)
   })
-  it('áudio precisa de peaks, fala e loudness; imagem sempre completa', () => {
+  it('áudio precisa de peaks; imagem sempre completa', () => {
     expect(derivedComplete({ ...base, kind: 'audio', video: undefined })).toBe(false)
     expect(derivedComplete({ ...base, kind: 'audio', video: undefined, peaks: 'p', ...an })).toBe(true)
-    expect(derivedComplete({ ...base, kind: 'audio', video: undefined, peaks: 'p' })).toBe(false)
+    expect(derivedComplete({ ...base, kind: 'audio', video: undefined, peaks: 'p' })).toBe(true)
     expect(derivedComplete({ ...base, kind: 'image', durationUs: null })).toBe(true)
   })
 })

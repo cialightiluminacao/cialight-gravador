@@ -14,7 +14,7 @@ import { probe, type MediaInfo } from './media/probe'
 import { needsProxy } from './media/proxyPolicy'
 import { IngestQueue, assetFromInfo, type IngestJob } from './media/ingest'
 import { buildLoudness, buildSpeech } from './media/analysis'
-import type { SpeechFile } from '@shared/editor/speech'
+import { speechFromFile, type SpeechFile } from '@shared/editor/speech'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { getSettings } from './settings/settingsStore'
 import { startExportJob } from './export/exportJob'
@@ -454,19 +454,25 @@ async function testIngest(store: SessionStore): Promise<number> {
   ok(pSpeech.status === 'ready' && pSpeech.speech === 'cache/a_speech.speech.json' && exists(pSpeech.speech) && !!pSpeech.loudness, `fala sintética: speech.json + loudness (${JSON.stringify(pSpeech)})`, failures)
   if (exists(pSpeech.speech)) {
     const sf = JSON.parse(readFileSync(abs(pSpeech.speech), 'utf8')) as SpeechFile
-    ok(sf.version === 1 && sf.thresholdDb === -35 && sf.minSilenceUs === 350_000 && sf.durationUs === 10_000_000, `speech.json: formato (${JSON.stringify({ ...sf, intervals: undefined })})`, failures)
+    ok(sf.version === 1 && sf.thresholdDb === -35 && sf.minSilenceUs === 350_000 && sf.durationUs === 10_000_000 && sf.silences.length === 4 && !('intervals' in sf), `speech.json: formato com silêncios brutos (${JSON.stringify(sf)})`, failures)
     // verdade + padding de 120 ms, ±50 ms
+    const got = speechFromFile(sf)
     const want = [[1_000_000, 2_500_000], [4_000_000, 5_000_000], [6_200_000, 8_000_000]].map(([a, b]) => [a - 120_000, b + 120_000])
-    ok(sf.intervals.length === want.length && sf.intervals.every((iv, i) => Math.abs(iv.fromUs - want[i][0]) <= 50_000 && Math.abs(iv.toUs - want[i][1]) <= 50_000), `fala: intervalos ±50 ms (${JSON.stringify(sf.intervals)} vs ${JSON.stringify(want)})`, failures)
+    ok(got.length === want.length && got.every((iv, i) => Math.abs(iv.fromUs - want[i][0]) <= 50_000 && Math.abs(iv.toUs - want[i][1]) <= 50_000), `fala: intervalos ±50 ms (${JSON.stringify(got)} vs ${JSON.stringify(want)})`, failures)
   }
   const sineL = pSine.loudness
   ok(!!sineL && Math.abs(sineL.integrated + 23) <= 1 && Math.abs(sineL.truePeak + 20) <= 1 && sineL.lra < 1, `seno −20 dBFS: ≈ −23 LUFS (${JSON.stringify(sineL)})`, failures)
   // faixa escolhida por -map (mic/sistema da sessão): a:0 é a fala em rajadas, a:1 o seno contínuo
-  const sp0 = await buildSpeech(twoTracks, join(dir, 'duas-0.speech.json'), 10_000_000, { map: '0:a:0' })
-  const sp1 = await buildSpeech(twoTracks, join(dir, 'duas-1.speech.json'), 6_000_000, { map: '0:a:1' })
+  const sp0 = speechFromFile(await buildSpeech(twoTracks, join(dir, 'duas-0.speech.json'), 10_000_000, { map: '0:a:0' }))
+  const sp1 = speechFromFile(await buildSpeech(twoTracks, join(dir, 'duas-1.speech.json'), 6_000_000, { map: '0:a:1' }))
   const ld1 = await buildLoudness(twoTracks, 6_000_000, { map: '0:a:1' })
-  ok(sp0.intervals.length === 3 && sp1.intervals.length === 1 && sp1.intervals[0].fromUs === 0 && sp1.intervals[0].toUs === 6_000_000, `-map: fala a:0 ${sp0.intervals.length} intervalos, seno a:1 ${JSON.stringify(sp1.intervals)}`, failures)
+  ok(sp0.length === 3 && sp1.length === 1 && sp1[0].fromUs === 0 && sp1[0].toUs === 6_000_000, `-map: fala a:0 ${sp0.length} intervalos, seno a:1 ${JSON.stringify(sp1)}`, failures)
   ok(Math.abs(ld1.integrated + 23) <= 1.5, `-map: loudness da faixa a:1 ≈ −23 LUFS (${ld1.integrated})`, failures)
+  // modo analyzeAudio (backfill): só fala + loudness, sem proxy/filmstrip/peaks e sem mexer no status
+  const wBack = waitDone(queue, project.id, 'a_backfill')
+  queue.enqueue(project.id, { ...mk('a_backfill', sineWav, await probe(sineWav)), status: 'ready' }, { analyzeAudio: true })
+  const pBack = await wBack
+  ok(pBack.speech === 'cache/a_backfill.speech.json' && exists(pBack.speech) && !!pBack.loudness && Math.abs(pBack.loudness.integrated + 23) <= 1 && !('status' in pBack) && !pBack.peaks && !pBack.proxy && !pBack.filmstrip, `analyzeAudio: só fala + loudness (${JSON.stringify(pBack)})`, failures)
   // cancelamento durante a análise: rejeita com CancelledError e não deixa .part
   const ctl = new AbortController()
   const cancelled = buildSpeech(twoTracks, join(dir, 'cancelada.speech.json'), 10_000_000, { map: '0:a:0', signal: ctl.signal }).then(() => false, (e) => e instanceof Error && e.name === 'CancelledError')

@@ -6,6 +6,7 @@ import { FILE_HOST_MEDIA, FILE_HOST_PROJECT, FILE_PROTOCOL } from '@shared/ipc'
 import { addAsset } from '@shared/editor/ops'
 import { newId } from '@shared/editor/ids'
 import { sessionAssets } from '@shared/editor/fromSession'
+import { audioAnalysisComplete } from '@shared/editor/speech'
 import type { Asset } from '@shared/editor/project'
 import { ipcErrorMessage } from '@/lib/ipcError'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
@@ -50,21 +51,23 @@ export async function decideDecodable(projectId: string, a: Asset): Promise<{ de
 }
 
 /** Decide `decodable` e põe o asset na fila de ingestão do main. */
-export async function enqueueAsset(projectId: string, a: Asset): Promise<void> {
+export async function enqueueAsset(projectId: string, a: Asset, analyzeAudio = false): Promise<void> {
   try {
-    await window.api.media.enqueue(projectId, a.id, await decideDecodable(projectId, a))
+    await window.api.media.enqueue(projectId, a.id, { ...(await decideDecodable(projectId, a)), ...(analyzeAudio ? { analyzeAudio } : {}) })
   } catch (e) {
     toast.error(`Não foi possível processar “${a.name}”: ${errMsg(e)}`)
   }
 }
 
-/** Ao abrir: retoma o que ficou em processamento e gera filmstrip/peaks/fala/loudness das gravações que ainda não têm. */
+/**
+ * Ao abrir: retoma o que ficou em processamento e gera filmstrip/peaks das gravações que ainda não têm; assets
+ * prontos com áudio mas sem fala/loudness (gravações e importados antigos) ganham só essas duas análises.
+ */
 export function enqueuePending(projectId: string, assets: Asset[]): void {
   for (const a of assets) {
-    const fromSession = a.source.type === 'session' && a.status === 'ready'
-    // gravações antigas ganham também fala/loudness (análise de áudio da F3)
-    const sessionNeedsAnalysis = fromSession && ((a.kind === 'video' ? !a.filmstrip : !a.peaks) || ((a.kind === 'audio' || !!a.audio) && !(a.speech && a.loudness)))
+    const sessionNeedsAnalysis = a.source.type === 'session' && a.status === 'ready' && (a.kind === 'video' ? !a.filmstrip : !a.peaks)
     if (a.status === 'processing' || sessionNeedsAnalysis) void enqueueAsset(projectId, a)
+    else if (a.status === 'ready' && !audioAnalysisComplete(a)) void enqueueAsset(projectId, a, true)
   }
 }
 
