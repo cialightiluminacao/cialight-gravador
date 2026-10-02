@@ -16,12 +16,15 @@
 // speech.json que não carrega é avisado uma vez por URL ('speechError'); falha ao montar o plano com a fala mantém o
 // plano sem ducking e avisa ('error') — os blocos nunca ficam esperando.
 // Medidores: no preview cada bloco devolve o pico por faixa (mixBlock), poucos números por bloco; a exportação não mede.
+// Projetos: só o mais recente é aplicado (LatestOnly) — num arrasto os superados antes de aplicados são descartados;
+// um pedido de bloco aplica o pendente antes, então nenhum bloco é mixado com um projeto mais velho que o pedido.
 import { splitAudioSourceKey } from '@shared/editor/audioProcess'
 import { abPlan, shuttleSegments, voiceAssetIds, type AudioSegment } from '@shared/editor/audioPlan'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from '../mediaUrls'
 import { AssetPcm } from './assetPcm'
 import { mixBlock, SR, StretchBank, type PcmSource } from './mixer'
+import { LatestOnly } from './latestOnly'
 import type { AudioIn, AudioOut } from './protocol'
 import { createStretcher } from './stretch'
 import { SpeechLoader } from './speechLoader'
@@ -57,13 +60,21 @@ let planGen = 0
 let meters = false
 // muda a cada `cancel`: pedidos e aquecimentos de antes ficam obsoletos
 let epoch = 0
+type ProjectMsg = Extract<AudioIn, { t: 'project' }>
+const projects = new LatestOnly<ProjectMsg>((m) => {
+  try {
+    setProject(m.project, m.mediaUrls, m.useProxy, !!m.bypassProcessing)
+  } catch (err) {
+    post({ t: 'error', message: errMsg(err) })
+  }
+})
 
 self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
   const m = e.data
   try {
     switch (m.t) {
       case 'project':
-        setProject(m.project, m.mediaUrls, m.useProxy, !!m.bypassProcessing)
+        projects.push(m)
         break
       case 'render':
         enqueue(m, post)
@@ -81,6 +92,7 @@ self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
         epoch++
         break
       case 'dispose':
+        projects.drop()
         queue.length = 0
         segments = []
         alternate = []
@@ -95,6 +107,7 @@ self.addEventListener('message', (e: MessageEvent<AudioIn>) => {
 })
 
 function enqueue(m: Extract<AudioIn, { t: 'render' }>, reply: RenderMsg['reply']): void {
+  projects.flush()
   queue.push({ ...m, reply })
   if (!busy) void pump()
 }
@@ -175,6 +188,7 @@ async function pump(): Promise<void> {
   busy = true
   try {
     while (queue.length) {
+      projects.flush()
       await planSettled()
       const m = queue.shift()!
       const e0 = epoch
