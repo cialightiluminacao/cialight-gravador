@@ -46,7 +46,7 @@ function check(name, ok, detail) {
 function runCapture() {
   rmSync(E2E, { recursive: true, force: true })
   mkdirSync(E2E, { recursive: true })
-  console.log('gravando pelo caminho do test:capture (≈ 10 s)…')
+  console.log('gravando pelo caminho do test:capture (9 s com 2 s de pausa → ≈ 7 s de mídia)…')
   const r = spawn(electronPath, ['.'], {
     cwd: ROOT,
     env: { ...process.env, CIALIGHT_TEST: 'capture', CIALIGHT_CAPTURE_KEEP: '1', CIALIGHT_RAW_DIR: RAW_REL },
