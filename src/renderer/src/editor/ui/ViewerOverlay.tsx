@@ -3,6 +3,8 @@ import { cn } from '@/lib/cn'
 import { useEditorStore } from '../state/editorStore'
 import { usePausedPlayhead } from '../state/pausedPlayhead'
 import { useViewerTool } from '../state/viewerTool'
+import { addEffectAt } from './editorActions'
+import { effectFromDrag, isEffectDrag } from './EffectLibrary'
 import { effectBoxes, hitTest, hitTestRegions, itemBoxes, type Guides, type Pt } from './viewerGeometry'
 import { EffectRegionHandles, RegionOutline, selectedRegion, startRegionDraw, startRegionGesture } from './viewer/EffectRegionHandles'
 import { editableMedia, ItemTransformHandles, startItemTransform, type GestureCtx } from './viewer/ItemTransformHandles'
@@ -12,7 +14,8 @@ import { cancelViewerGesture } from './viewer/viewerGesture'
 // primeiro (ficam sempre "por cima" para seleção), senão a mídia abaixo —, arrastar move; alças do
 // selecionado (mídia: viewer/ItemTransformHandles; efeito: viewer/EffectRegionHandles). Com a
 // ferramenta "Desenhar região" (B) ligada, arrastar no quadro cria um efeito. Guias do quadro durante
-// os gestos; cada gesto é uma transação (viewer/viewerGesture).
+// os gestos; cada gesto é uma transação (viewer/viewerGesture). Soltar um efeito da biblioteca o cria no
+// playhead com a região centrada no ponto solto.
 
 const NO_GUIDES: Guides = { v: [], h: [] }
 
@@ -24,6 +27,7 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
   const playing = useEditorStore((s) => s.playing)
   const drawing = useViewerTool((s) => s.drawing)
   const [guides, setGuides] = useState<Guides>(NO_GUIDES)
+  const [dropHover, setDropHover] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const clearHover = (): void => {
     if (rootRef.current) rootRef.current.style.cursor = ''
@@ -95,15 +99,36 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
     if (root.style.cursor !== cursor) root.style.cursor = cursor
   }
 
+  const onDrop = (e: React.DragEvent): void => {
+    setDropHover(false)
+    const preset = effectFromDrag(e)
+    if (!preset) return
+    e.preventDefault()
+    if (useEditorStore.getState().playing) onPause()
+    const pt = ctx.toCanvas(e)
+    const clamp01 = (v: number): number => Math.min(1, Math.max(0, v))
+    addEffectAt(preset, useEditorStore.getState().playheadUs, { region: { x: clamp01(pt.x / project.canvas.width), y: clamp01(pt.y / project.canvas.height) } })
+  }
+
   return (
     <div
       ref={rootRef}
       data-viewer-overlay
-      className={cn('absolute inset-0', drawing && 'cursor-crosshair')}
+      className={cn('absolute inset-0', drawing && 'cursor-crosshair', dropHover && 'ring-2 ring-inset ring-accent/70')}
       style={{ width, height }}
       onPointerDown={onBackgroundDown}
       onPointerMove={onHover}
       onPointerLeave={clearHover}
+      onDragOver={(e) => {
+        if (!isEffectDrag(e)) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+        if (!dropHover) setDropHover(true)
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropHover(false)
+      }}
+      onDrop={onDrop}
     >
       {guides.v.map((x) => (
         <div key={`v${x}`} data-guide="v" className="pointer-events-none absolute inset-y-0 w-px bg-accent/80" style={{ left: `calc(${x * 100}% - ${x}px)` }} />

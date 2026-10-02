@@ -7,14 +7,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger, Tip } from '@/components/ui/p
 import { formatClock } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { useEditorStore } from '../state/editorStore'
+import { EffectLibrary } from './EffectLibrary'
 import { MediaCard } from './MediaCard'
 import { addAssetAtPlayhead } from './editorActions'
 import { importPaths, importSession, relinkAsset } from './mediaImport'
 
-// Biblioteca (coluna esquerda): abas Mídia / Áudio / Gravações; importar por botão ou arrastando
-// arquivos do Explorer; cartões arrastáveis para a linha do tempo.
+// Biblioteca (coluna esquerda): abas Mídia / Áudio / Gravações / Efeitos; importar por botão ou arrastando
+// arquivos do Explorer; cartões arrastáveis para a linha do tempo (efeitos também para o visualizador).
 
-type Tab = 'media' | 'audio' | 'recordings'
+type Tab = 'media' | 'audio' | 'recordings' | 'effects'
 const NO_ASSETS: Asset[] = []
 
 const pad2 = (n: number): string => String(n).padStart(2, '0')
@@ -95,10 +96,14 @@ export function MediaBin({ projectId }: { projectId: string }): React.JSX.Elemen
             <TabsTrigger value="recordings" className="h-6 rounded-md px-2 text-[11px]">
               Gravações
             </TabsTrigger>
+            <TabsTrigger value="effects" className="h-6 rounded-md px-2 text-[11px]">
+              Efeitos
+            </TabsTrigger>
           </TabsList>
           <Tip content="Importar vídeos, áudios e imagens">
-            <Button variant="secondary" size="sm" className="ml-auto h-7 gap-1 rounded-lg px-2 text-[11px]" onClick={() => void pick()} disabled={busy}>
-              {busy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />} Importar
+            {/* só o ícone: com 4 abas a coluna de 280 px não comporta o rótulo */}
+            <Button variant="secondary" size="sm" className="ml-auto h-7 w-7 shrink-0 rounded-lg px-0" aria-label="Importar" onClick={() => void pick()} disabled={busy}>
+              {busy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
             </Button>
           </Tip>
         </div>
@@ -110,6 +115,9 @@ export function MediaBin({ projectId }: { projectId: string }): React.JSX.Elemen
         </TabsContent>
         <TabsContent value="recordings" className="min-h-0 flex-1 overflow-y-auto">
           <Recordings projectId={projectId} onAdded={() => setTab('media')} />
+        </TabsContent>
+        <TabsContent value="effects" className="min-h-0 flex-1 overflow-y-auto">
+          <EffectLibrary />
         </TabsContent>
       </Tabs>
       {dropping ? (

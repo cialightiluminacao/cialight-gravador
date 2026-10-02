@@ -285,6 +285,11 @@ describe('efeitos de privacidade', () => {
     expect(fxItems(ops.addEffect(p, 'pixelate', 3 * S).project, 1)[0].durationUs).toBe(5 * S)
     expect(fxItems(ops.addEffect(p, 'solid', 0, { durationUs: 2 * S }).project, 1)[0].durationUs).toBe(2 * S)
   })
+  it('defaultEffectDurationUs: até o fim do clipe sob o ponto, senão 5 s (o mesmo que addEffect usa)', () => {
+    const { p } = base()
+    expect(ops.defaultEffectDurationUs(p, 4 * S)).toBe(6 * S)
+    expect(ops.defaultEffectDurationUs(createEmptyProject('t'), 3 * S)).toBe(5 * S)
+  })
   it('reaproveita a faixa "Efeitos" quando livre; cria "Efeitos 2" quando ocupada', () => {
     const { p } = base()
     const a = ops.addEffect(p, 'blur', 0, { durationUs: 2 * S })

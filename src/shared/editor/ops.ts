@@ -1033,18 +1033,21 @@ const FX_TRACK = /^Efeitos( \d+)?$/
  * (faixa mais alta, sem contar efeitos) ou 5 s. Faixa: a explícita; senão uma faixa de vídeo "Efeitos"
  * acima de todas as demais faixas de vídeo e livre no intervalo; senão cria uma nova no topo.
  */
+/** Duração padrão de um efeito em atUs: até o fim do clipe de vídeo sob ele (faixa mais alta, não-efeito) ou 5 s. */
+export function defaultEffectDurationUs(p: Project, at: Us): Us {
+  const atUs = Math.max(0, Math.round(at))
+  for (let i = p.tracks.length - 1; i >= 0; i--) {
+    const t = p.tracks[i]
+    if (t.kind !== 'video') continue
+    const under = t.items.find((it) => it.type !== 'effect' && it.startUs <= atUs && atUs < end(it))
+    if (under) return Math.max(MIN_ITEM_US, end(under) - atUs)
+  }
+  return 5_000_000
+}
+
 export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { durationUs?: Us; trackId?: string; region?: EffectRegionInit }): { project: Project; itemId: string } {
   const atUs = Math.max(0, Math.round(at))
-  let durationUs = opts?.durationUs === undefined ? undefined : Math.max(MIN_ITEM_US, Math.round(opts.durationUs))
-  if (durationUs === undefined) {
-    durationUs = 5_000_000
-    for (let i = p.tracks.length - 1; i >= 0; i--) {
-      const t = p.tracks[i]
-      if (t.kind !== 'video') continue
-      const under = t.items.find((it) => it.type !== 'effect' && it.startUs <= atUs && atUs < end(it))
-      if (under) { durationUs = Math.max(MIN_ITEM_US, end(under) - atUs); break }
-    }
-  }
+  const durationUs = opts?.durationUs === undefined ? defaultEffectDurationUs(p, atUs) : Math.max(MIN_ITEM_US, Math.round(opts.durationUs))
   const item = createEffectItem(preset, atUs, durationUs, opts?.region)
   if (opts?.trackId) {
     if (mustTrack(p, opts.trackId).kind !== 'video') throw new EditError('invalid', 'Efeitos só podem ficar em faixas de vídeo')

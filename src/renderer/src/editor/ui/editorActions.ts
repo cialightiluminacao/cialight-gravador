@@ -1,7 +1,8 @@
 // Ações do editor disparadas por atalhos e botões (transporte, edição no playhead, histórico).
 // Operam sobre o store e o PlaybackController; as operações de edição são as puras de @shared/editor/ops.
 import { toast } from 'sonner'
-import { addMarker, addMediaFromAsset, addTrack, deleteItems, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
+import { addEffect, addMarker, addMediaFromAsset, addTrack, deleteItems, deleteRange, duplicateItems, findItem, keyframePaths, nextKeyframeUs, projectDurationUs, removeKeyframesAt, splitAt, toggleEnabled, toggleKeyframes, trimItem } from '@shared/editor/ops'
+import type { EffectPresetId, EffectRegionInit } from '@shared/editor/factory'
 import type { Item, Project, TrackKind, Us } from '@shared/editor/project'
 import { frameDurUs, frameToUs, itemEndUs, usToFrame } from '@shared/editor/time'
 import type { PlaybackController } from '../engine/PlaybackController'
@@ -91,6 +92,21 @@ export function addAssetAt(assetId: string, atUs: Us, track?: { trackId: string 
 /** Adiciona o asset no playhead (vídeo + áudio vinculado) e seleciona o que entrou. */
 export function addAssetAtPlayhead(assetId: string): void {
   addAssetAt(assetId, st().playheadUs)
+}
+
+/**
+ * Adiciona um efeito da biblioteca em atUs (duração: até o fim do clipe sob ele, ou 5 s) e o seleciona.
+ * `trackId`: faixa escolhida ao soltar na linha do tempo; sem ela, a faixa "Efeitos" (ou uma nova).
+ */
+export function addEffectAt(preset: EffectPresetId, atUs: Us, opts?: { trackId?: string; region?: EffectRegionInit }): void {
+  const s = st()
+  let id = ''
+  const ok = s.apply((p) => {
+    const r = addEffect(p, preset, atUs, opts)
+    id = r.itemId
+    return r.project
+  })
+  if (ok) s.select([id])
 }
 
 export function splitAtPlayhead(): void {

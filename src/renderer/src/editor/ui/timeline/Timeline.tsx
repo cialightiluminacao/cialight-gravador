@@ -7,11 +7,12 @@ import { formatTimecodeUs } from '@shared/editor/time'
 import { cn } from '@/lib/cn'
 import type { PlaybackController } from '../../engine/PlaybackController'
 import { useEditorStore } from '../../state/editorStore'
-import { addAssetAt, registerZoomFit, seekTo } from '../editorActions'
+import { addAssetAt, addEffectAt, registerZoomFit, seekTo } from '../editorActions'
+import { effectFromDrag, isEffectDrag } from '../EffectLibrary'
 import { ASSET_MIME } from '../MediaCard'
 import { ContextMenu, type MenuEntry } from './ContextMenu'
 import { HScrollbar } from './HScrollbar'
-import { dropTarget } from './dragMath'
+import { dropTarget, effectDropTrack } from './dragMath'
 import { itemMenuEntries, markerMenuEntries } from './itemMenu'
 import { buildLayout, displayNeighborIndex, HEADER_W, RULER_H, SEP_H, zoneAt } from './layout'
 import { Playhead } from './Playhead'
@@ -25,7 +26,7 @@ import { fitZoom, maxScrollUs, pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../
 // Linha do tempo multifaixa (spec §9). Rolagem horizontal virtual (scrollUs no store) e vertical
 // nativa; roda = rolar na horizontal, Ctrl+roda = zoom ancorado no mouse, Shift+roda = vertical.
 // Na reprodução a vista acompanha o playhead página a página. Soltar mídia da biblioteca adiciona
-// no ponto/faixa sob o ponteiro.
+// no ponto/faixa sob o ponteiro; soltar um efeito, no ponto e na faixa de vídeo livre sob ele (ou na "Efeitos").
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 const SCROLLBAR_H = 11
@@ -161,19 +162,24 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
   const onSeek = useCallback((us: number) => seekTo(playback, us), [playback])
   const drag = useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu, onSeek })
 
-  // ---- soltar mídia da biblioteca no ponto/faixa sob o ponteiro
+  // ---- soltar mídia/efeito da biblioteca no ponto/faixa sob o ponteiro
   const onDrop = (e: React.DragEvent): void => {
     setDropHover(false)
     const assetId = e.dataTransfer.getData(ASSET_MIME)
+    const preset = effectFromDrag(e)
     const scroller = scrollerRef.current
-    if (!assetId || !scroller) return
+    if ((!assetId && !preset) || !scroller) return
     e.preventDefault()
     const s = st()
     const r = scroller.getBoundingClientRect()
     let atUs = Math.max(0, pxToUs(Math.max(0, e.clientX - r.left - HEADER_W), s.zoomPxPerSec, s.scrollUs))
     if (s.snapping && s.project) atUs += snapDelta([atUs], snapPoints(s.project, s.playheadUs, []), pxToDurUs(SNAP_PX, s.zoomPxPerSec)).deltaUs
+    atUs = Math.max(0, atUs)
     const zone = zoneAt(layoutRef.current, e.clientY - r.top + scroller.scrollTop)
-    addAssetAt(assetId, Math.max(0, atUs), s.project ? dropTarget(s.project, assetId, zone) : undefined)
+    if (preset) {
+      const trackId = s.project ? effectDropTrack(s.project, zone, atUs) : undefined
+      addEffectAt(preset, atUs, trackId ? { trackId } : undefined)
+    } else addAssetAt(assetId, atUs, s.project ? dropTarget(s.project, assetId, zone) : undefined)
   }
 
   if (!project) return null
@@ -187,7 +193,7 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
       className="flex h-full min-h-0 flex-col bg-bg-2"
       aria-label="Linha do tempo"
       onDragOver={(e) => {
-        if (!Array.from(e.dataTransfer.types).includes(ASSET_MIME)) return
+        if (!Array.from(e.dataTransfer.types).includes(ASSET_MIME) && !isEffectDrag(e)) return
         e.preventDefault()
         e.dataTransfer.dropEffect = 'copy'
         if (!dropHover) setDropHover(true)

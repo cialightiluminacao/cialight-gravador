@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, TriangleAlert, Upload, X } from 'lucide-react'
+import { CircleCheckBig, Copy, FolderOpen, LoaderCircle, ShieldAlert, TriangleAlert, Upload, X } from 'lucide-react'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
-import { projectDurationUs } from '@shared/editor/ops'
+import { findItem, projectDurationUs } from '@shared/editor/ops'
+import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
 import { planAudio } from '@shared/editor/audioPlan'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, Progress, Segmented } from '@/components/ui/primitives'
@@ -18,6 +19,7 @@ import { AUDIO_KBPS, EDITOR_EXPORT_PRESETS, estimateBytes, exportMediaIssues, ex
 // Diálogo de exportação do editor: preset, intervalo (tudo / I–O), nome e pasta, estimativa de tamanho;
 // depois progresso (%, velocidade × tempo real, tempo restante, cancelar) e o resultado (abrir pasta /
 // copiar arquivo). A exportação usa workers próprios: o preview continua vivo (pausado ao começar).
+// Avisos de privacidade do intervalo (efeito fraco/desativado) aparecem com "Revisar"; nunca bloqueiam.
 
 type Phase =
   | { kind: 'form' }
@@ -27,8 +29,9 @@ type Phase =
 
 const formatMbps = (bps: number): string => `${(bps / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} Mbps`
 const ISSUE_LABEL: Record<ExportMediaIssue['status'], string> = { missing: 'ausente', processing: 'ainda processando', error: 'com erro' }
+const EFFECT_LABEL = { blur: 'Blur', pixelate: 'Pixelizar', solid: 'Tarja' } as const
 
-export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boolean; onOpenChange: (open: boolean) => void; onBeforeExport: () => void }): React.JSX.Element | null {
+export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { open: boolean; onOpenChange: (open: boolean) => void; onBeforeExport: () => void; onSeek: (us: number) => void }): React.JSX.Element | null {
   const project = useEditorStore((s) => s.project)
   const inUs = useEditorStore((s) => s.inUs)
   const outUs = useEditorStore((s) => s.outUs)
@@ -66,6 +69,15 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
   const estimate = estimateBytes(videoBps, audioBps, durationUs)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
   const issues = durationUs > 0 ? exportMediaIssues(project, range.fromUs, range.toUs) : []
+  const privacy = durationUs > 0 ? privacyWarnings(project, range.fromUs, range.toUs) : []
+  // "Revisar": seleciona o efeito, leva o playhead ao começo dele (dentro do intervalo) e fecha o diálogo
+  const review = (w: PrivacyWarning): void => {
+    const f = findItem(project, w.itemId)
+    if (!f) return
+    useEditorStore.getState().select([w.itemId])
+    onSeek(Math.max(f.item.startUs, range.fromUs))
+    onOpenChange(false)
+  }
   // QA (só fora do pacote): window.__qaEditor.exportDir troca a pasta padrão (o QA nunca grava na pasta real)
   const qaDir = appInfo?.isPackaged === false ? window.__qaEditor?.exportDir : undefined
   const defaultFolder = qaDir ?? settings.outputDir ?? appInfo?.paths.output ?? null
@@ -211,6 +223,8 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
               </div>
             ) : null}
 
+            {privacy.length ? <PrivacySection warnings={privacy} onReview={review} /> : null}
+
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 Cancelar
@@ -283,6 +297,41 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport }: { open: boo
         ) : null}
       </DialogContent>
     </Dialog>
+  )
+}
+
+function PrivacySection({ warnings, onReview }: { warnings: PrivacyWarning[]; onReview: (w: PrivacyWarning) => void }): React.JSX.Element | null {
+  const project = useEditorStore((s) => s.project)
+  if (!project) return null
+  return (
+    <div data-privacy-warnings="" className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-2.5 text-[12px] text-warn" role="status">
+      <span className="flex items-start gap-1.5 font-semibold">
+        <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        Privacidade
+      </span>
+      <ul className="mt-1.5 flex max-h-32 flex-col gap-1 overflow-y-auto">
+        {warnings.map((w) => {
+          const f = findItem(project, w.itemId)
+          const item = f?.item
+          const name = item?.type === 'effect' ? (item.name ?? EFFECT_LABEL[item.effect]) : 'Efeito'
+          return (
+            <li key={`${w.itemId}:${w.kind}`} className="flex items-center gap-2 pl-5">
+              <span className="min-w-0 flex-1">
+                <span className="font-semibold">
+                  {name}
+                  {item ? ` em ${formatClock(item.startUs / 1000, false)}` : ''}
+                </span>
+                {' — '}
+                {w.message}
+              </span>
+              <Button variant="secondary" size="sm" className="h-6 shrink-0 rounded-md px-2 text-[11px]" onClick={() => onReview(w)}>
+                Revisar
+              </Button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
   )
 }
 

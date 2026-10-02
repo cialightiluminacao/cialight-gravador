@@ -6,7 +6,7 @@ import { useAppStore } from '@/app/store'
 import { flushAutosave, startAutosave, useEditorStore } from '../state/editorStore'
 import { shortcutFor } from '../shortcuts'
 import { createEditorEngine, type EditorEngine } from './editorEngine'
-import { runShortcut } from './editorActions'
+import { runShortcut, seekTo } from './editorActions'
 import { enqueuePending, importPaths } from './mediaImport'
 import { TopBar } from './TopBar'
 import { ExportDialog } from './ExportDialog'
@@ -211,7 +211,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       <div className="min-h-0 shrink-0" style={{ height: timelineH }}>
         {loaded ? <Timeline playback={engine?.playback ?? null} /> : <div className="h-full bg-bg-2" />}
       </div>
-      {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} /> : null}
+      {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} onSeek={(us) => seekTo(engineRef.current?.playback ?? null, us)} /> : null}
     </div>
   )
 }

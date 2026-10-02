@@ -3,7 +3,7 @@ import { createEmptyProject } from '@shared/editor/factory'
 import * as ops from '@shared/editor/ops'
 import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/project'
 import { snapPoints } from '@shared/editor/snap'
-import { canChangeTrack, dropTarget, edgeScrollPx, EDGE_SCROLL_MAX, fadeHandleLefts, gestureSnapPoints, keyframeMarkLefts, planFade, planKeyframeDrag, planMove, planTrim } from './dragMath'
+import { canChangeTrack, dropTarget, effectDropTrack, edgeScrollPx, EDGE_SCROLL_MAX, fadeHandleLefts, gestureSnapPoints, keyframeMarkLefts, planFade, planKeyframeDrag, planMove, planTrim } from './dragMath'
 
 const S = 1_000_000
 const vid = (id: string, dur = 10 * S): Asset => ({ id, name: id, kind: 'video', source: { type: 'file', path: `C:/${id}.mp4`, size: 1, mtimeMs: 1 }, durationUs: dur, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
@@ -195,6 +195,27 @@ describe('dropTarget', () => {
     expect(dropTarget(p, 'a', { kind: 'track', trackId: vTrack })).toEqual({ trackId: vTrack })
     expect(dropTarget(p, 'a', { kind: 'newTrack', trackKind: 'audio' })).toEqual({ newTrack: 'audio' })
     expect(dropTarget(p, 'a', null)).toBeUndefined()
+  })
+})
+
+describe('effectDropTrack (soltar efeito da biblioteca na linha do tempo)', () => {
+  it('faixa de vídeo sob o ponteiro livre no intervalo do efeito → ela', () => {
+    const r = ops.addEffect(fixture().p, 'blur', 0, { durationUs: 2 * S })
+    const fx = ops.findItem(r.project, r.itemId)!.track.id
+    expect(effectDropTrack(r.project, { kind: 'track', trackId: fx }, 3 * S)).toBe(fx)
+  })
+  it('faixa ocupada no intervalo, de áudio, bloqueada, nova faixa ou fora → undefined (faixa "Efeitos" automática)', () => {
+    const { p } = fixture()
+    const v = p.tracks.find((t) => t.kind === 'video')!.id
+    const a = p.tracks.find((t) => t.kind === 'audio')!.id
+    expect(effectDropTrack(p, { kind: 'track', trackId: v }, S)).toBeUndefined() // sobre o clipe: não sobrescreve a mídia
+    expect(effectDropTrack(p, { kind: 'track', trackId: v }, 4.5 * S)).toBeUndefined() // 5 s padrão invadem o clipe de 6 s
+    expect(effectDropTrack(p, { kind: 'track', trackId: a }, 20 * S)).toBeUndefined()
+    expect(effectDropTrack(p, { kind: 'newTrack', trackKind: 'video' }, 0)).toBeUndefined()
+    expect(effectDropTrack(p, null, 0)).toBeUndefined()
+    expect(effectDropTrack(p, { kind: 'track', trackId: v }, 20 * S)).toBe(v)
+    const locked = ops.updateTrack(p, v, { locked: true })
+    expect(effectDropTrack(locked, { kind: 'track', trackId: v }, 20 * S)).toBeUndefined()
   })
 })
 
