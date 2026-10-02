@@ -8,6 +8,7 @@ import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
 import { laplacianVar, localContrast, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
 import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShots'
 import { meanDiffPerChannel, paritySample, type TransitionReport } from '@shared/testing/transitionOracle'
+import type { PxBounds, TextReport } from '@shared/testing/textReport'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -37,6 +38,8 @@ const REFRAME_PROJECT_ID = 'p-editor-reframe-test'
 const REFRAME_COPY_ID = 'p-editor-reframe-copia'
 // transições (F5): vermelho e azul puros, com e sem quadrado branco, 2 s cada; o harness monta as cenas (transitionHarness.ts)
 const TRANSITION_PROJECT_ID = 'p-editor-transition-test'
+// texto e formas (F5 Task 4): imagens cinza 128, listras de 2 px e vermelha; o harness monta as cenas (textHarness.ts)
+const TEXT_PROJECT_ID = 'p-editor-text-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -60,6 +63,7 @@ interface HarnessReport {
   anim?: AnimReport
   reframe?: ReframeReport
   transition?: TransitionReport
+  text?: TextReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -296,6 +300,15 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   for (const a of trAssets) trProject = addAsset(trProject, a)
   rmSync(projects.dirOf(TRANSITION_PROJECT_ID), { recursive: true, force: true })
   projects.create(trProject)
+  // texto e formas: cinza 128 liso, listras verticais preto/branco de 2 px (detalhe para medir desfoque) e vermelho
+  let txProject: Project = { ...createEmptyProject('Texto e formas', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: TEXT_PROJECT_ID }
+  for (const [id, src] of [['a_tx_gray', 'color=c=0x808080:s=1920x1080'], ['a_tx_stripes', "nullsrc=s=1920x1080,format=gray,geq=lum='255*mod(floor(X/2),2)'"], ['a_tx_red', 'color=c=red:s=1920x1080']] as const) {
+    const file = join(dir, `texto-${id}.png`)
+    await gen(['-f', 'lavfi', '-i', src, '-frames:v', '1', '-update', '1', file], `editor: texto ${id}`)
+    txProject = addAsset(txProject, assetFromInfo(id, file, statSync(file), await probe(file)))
+  }
+  rmSync(projects.dirOf(TEXT_PROJECT_ID), { recursive: true, force: true })
+  projects.create(txProject)
 
   // janela visível sem foco (fora da barra de tarefas): oculta, o Chromium derruba o requestAnimationFrame para ~2/s
   // depois de umas dezenas de segundos, e a reprodução do editor anda por rAF
@@ -390,6 +403,21 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       run.exportError = e instanceof Error ? e.message : String(e)
     } finally {
       for (const f of run.frames) f.preview = []
+    }
+  }
+  // texto: paridade preview × exportação do título (mesmo quadro, amostra a cada 4 px)
+  const tp = result.report.text?.parity
+  if (tp) {
+    try {
+      if (tp.exportPath) {
+        const raw = join(dir, 'texto-titulo.rgb')
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', ((tp.frame - 0.5) / 30).toFixed(4), '-i', tp.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do título' })
+        tp.meanDiff = meanDiffPerChannel(tp.preview, paritySample(new Uint8Array(readFileSync(raw)), 1920, 1080, 3))
+      }
+    } catch (e) {
+      tp.exportError = e instanceof Error ? e.message : String(e)
+    } finally {
+      tp.preview = []
     }
   }
   win.destroy()
@@ -635,6 +663,8 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   console.log(`transições — desempenho 1080p (${tr?.renderer}): crossfade ${JSON.stringify(tb?.crossfade)} ms; blur ${JSON.stringify(tb?.blur)} ms`)
   check(!!tb && !tb.error && !!tb.crossfade && !!tb.blur && tb.crossfade.mean < 20 && tb.blur.mean < 20, `transições: 1080p < 20 ms/quadro (compositor + GPU; alvo 12) — crossfade média ${tb?.crossfade?.mean} / p95 ${tb?.crossfade?.p95}, blur média ${tb?.blur?.mean} / p95 ${tb?.blur?.p95} ${tb?.error ?? ''}`, failures)
 
+  checkText(r.text, failures)
+
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)
   const wdBefore = wd?.before as Rgba | undefined
@@ -647,4 +677,53 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   writeFileSync(join(outDir, 'editor-render-report.json'), JSON.stringify({ result, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE RENDER DO EDITOR PASSOU')
   return failures.length ? 1 : 0
+}
+
+/** Texto e formas (F5 Task 4): verificações das medidas do textHarness. */
+function checkText(tx: TextReport | undefined, failures: string[]): void {
+  console.log(`texto/formas: ${JSON.stringify(tx)}`)
+  check(!!tx && !tx.error, `texto: harness sem erro (${tx?.error ?? ''})`, failures)
+  const bx = (b: PxBounds | null | undefined): string => (b ? `[${b.x0},${b.y0})–[${b.x1},${b.y1}) n=${b.n}` : 'nenhum')
+  const close = (c: number[] | undefined, want: number[], tol: number): boolean => !!c && c.every((v, i) => Math.abs(v - want[i]) <= tol)
+  for (const t of tx?.titles ?? []) {
+    const e = t.expected
+    const ex0 = e.cx - e.w / 2, ex1 = e.cx + e.w / 2, ey0 = e.cy - e.h / 2, ey1 = e.cy + e.h / 2
+    const b = t.blue
+    // caixa medida = a da thread principal com a Manrope: ±2 px (borda antisserrilhada do fundo); fonte de reserva no worker daria outra largura
+    check(!!b && Math.abs(b.x0 - ex0) <= 2 && Math.abs(b.x1 - ex1) <= 2 && Math.abs(b.y0 - ey0) <= 2 && Math.abs(b.y1 - ey1) <= 2, `texto (${t.align}): fundo #2050ff ocupa a caixa de measureTextBox (${bx(b)} × [${ex0.toFixed(1)},${ey0.toFixed(1)})–[${ex1.toFixed(1)},${ey1.toFixed(1)}); fonte após ${t.fontTries} quadro(s))`, failures)
+    check(close(t.bgPixel, [32, 80, 255], 2), `texto (${t.align}): pixel do padding = (32,80,255) ±2 (${JSON.stringify(t.bgPixel)})`, failures)
+    const w = t.white
+    check(!!w && w.n > 0.05 * e.w * e.h && w.x0 >= ex0 - 1 && w.x1 <= ex1 + 1, `texto (${t.align}): letras brancas dentro da caixa, ${w?.n} px > 5 % da caixa (${bx(w)})`, failures)
+    const l2 = t.line2
+    // tolerância de alinhamento: o "T" tem margem lateral de tinta de poucos px (≤ 0,06 em ≈ 7 px a 110 px) + 1 px de antisserrilhado
+    const em = 0.07 * 110
+    const ok = !!l2 && (t.align === 'center'
+      ? Math.abs((l2.x0 + l2.x1) / 2 - e.cx) <= 3
+      : t.align === 'left' ? l2.x0 - (ex0 + t.pad) >= -2 && l2.x0 - (ex0 + t.pad) <= em : (ex1 - t.pad) - l2.x1 >= -2 && (ex1 - t.pad) - l2.x1 <= em)
+    check(ok, `texto (${t.align}): 2ª linha alinhada na caixa (tinta ${bx(l2)}; caixa x ${ex0.toFixed(1)}–${ex1.toFixed(1)}, padding ${t.pad.toFixed(1)})`, failures)
+  }
+  check(tx?.titles?.length === 3, `texto: 3 alinhamentos medidos (${tx?.titles?.length})`, failures)
+  const st = tx?.stroke
+  const sw = st?.white, sr = st?.red
+  check(!!sw && !!sr && sr.n > 500 && sw.x0 - sr.x0 >= 3 && sw.x0 - sr.x0 <= 9 && sr.x1 - sw.x1 >= 3 && sr.x1 - sw.x1 <= 9 && sw.y0 - sr.y0 >= 3 && sr.y1 - sw.y1 >= 3, `texto: contorno vermelho de ${st?.strokePx} px em volta das letras (branco ${bx(sw)}, vermelho ${bx(sr)})`, failures)
+  const sh = tx?.shadow
+  const hw = sh?.white, hd = sh?.dark
+  check(!!hw && !!hd && hd.n > 500 && Math.abs(hd.x1 - hw.x1 - (sh?.offsetPx ?? 0)) <= 3 && Math.abs(hd.y1 - hw.y1 - (sh?.offsetPx ?? 0)) <= 3, `texto: sombra preta deslocada (+${sh?.offsetPx}, +${sh?.offsetPx}) px (branco ${bx(hw)}, sombra ${bx(hd)})`, failures)
+  const wr = tx?.wrap
+  const wb = wr?.blue
+  check(!!wr && !!wb && wr.lines >= 3 && Math.abs(wb.y1 - wb.y0 - wr.expectedH) <= 3 && wb.x1 - wb.x0 <= wr.maxW + 2, `texto: quebra com maxWidth 0,3 — ${wr?.lines} linhas, altura da caixa ${wb ? wb.y1 - wb.y0 : '?'} ≈ ${wr?.expectedH.toFixed(1)} ±3, largura ${wb ? wb.x1 - wb.x0 : '?'} ≤ ${wr?.maxW.toFixed(1)}`, failures)
+  const sp = tx?.shapes
+  check(close(sp?.rectCenter, [0, 192, 0], 1), `formas: centro do retângulo = (0,192,0) (${JSON.stringify(sp?.rectCenter)})`, failures)
+  check(close(sp?.ellipseCenter, [0, 192, 0], 1) && close(sp?.ellipseCorner, [128, 128, 128], 2), `formas: elipse preenchida no centro (${JSON.stringify(sp?.ellipseCenter)}), canto da caixa NÃO (${JSON.stringify(sp?.ellipseCorner)} = cinza)`, failures)
+  check(close(sp?.arrowTip, [255, 0, 255], 2) && close(sp?.arrowTail, [255, 0, 255], 2), `formas: seta magenta na ponta direita (${JSON.stringify(sp?.arrowTip)}) e na haste (${JSON.stringify(sp?.arrowTail)})`, failures)
+  check(close(sp?.spotOutside, [51, 51, 51], 3) && close(sp?.spotEdgeOutside, [51, 51, 51], 3) && close(sp?.spotInside, [128, 128, 128], 2), `formas: holofote dim 0,6 sobre cinza 128 — fora ${JSON.stringify(sp?.spotOutside)} / logo fora da borda ${JSON.stringify(sp?.spotEdgeOutside)} ≈ 51 ±3, dentro ${JSON.stringify(sp?.spotInside)} = 128 ±2`, failures)
+  const lb = tx?.layerBlur
+  check(!!lb && lb.blurPx > 3 && lb.outsideMaxDiff <= 1 && lb.insideDiff > 100_000, `texto: desfoque da camada (${lb?.blurPx.toFixed(1)} px) só na caixa — fora dela idêntico ao sem desfoque (dif. máx. ${lb?.outsideMaxDiff}), dentro borrado (Σ dif. ${lb?.insideDiff})`, failures)
+  const ts = tx?.trackScope
+  check(!!ts && ts.mediaPixels > 100_000 && ts.mediaMaxDiff <= 1 && ts.textDiff > 100_000, `texto: efeito \`track\` (raio ${ts?.radius.toFixed(1)} px) na faixa do texto borra o texto (Σ dif. ${ts?.textDiff}) e não as listras abaixo (${ts?.mediaPixels} px da região, dif. máx. ${ts?.mediaMaxDiff})`, failures)
+  const cf = tx?.crossfade
+  check(!!cf && Math.abs(cf.p - 0.5) < 0.01 && close(cf.inBox, cf.expectedIn, 3) && close(cf.outside, cf.expectedOut, 3), `texto: crossfade imagem → título no meio (p ${cf?.p}): no fundo do título ${JSON.stringify(cf?.inBox)} ≈ ${JSON.stringify(cf?.expectedIn.map(Math.round))}, fora ${JSON.stringify(cf?.outside)} ≈ ${JSON.stringify(cf?.expectedOut.map(Math.round))} ±3`, failures)
+  const pr = tx?.parity
+  const md = pr?.meanDiff ?? []
+  check(md.length === 3 && md.every((d) => d <= 4), `texto: exportação = preview no quadro ${pr?.frame} do título (diferença média por canal ${JSON.stringify(md)} ≤ 4) ${pr?.exportError ?? ''}`, failures)
 }

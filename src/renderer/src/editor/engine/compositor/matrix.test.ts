@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyMat3, layerMatrix } from './matrix'
+import { anchoredMatrix, applyMat3, layerMatrix } from './matrix'
 
 const noCrop = { l: 0, t: 0, r: 0, b: 0 }
 const rect = (o: Partial<{ cx: number; cy: number; scale: number; rotation: number }> = {}): { cx: number; cy: number; scale: number; rotation: number } => ({ cx: 0.5, cy: 0.5, scale: 1, rotation: 0, ...o })
@@ -68,5 +68,32 @@ describe('layerMatrix', () => {
     // pixel: centro (960,540) + R90·(−960,−540) = (960+540, 540−960) = (1500, −420)
     expect(x).toBeCloseTo((1500 / 1920) * 2 - 1, 5)
     expect(y).toBeCloseTo(1 - (-420 / 1080) * 2, 5)
+  })
+})
+
+describe('anchoredMatrix (texto/forma: quad w×h com o ponto `anchor` no centro do rect)', () => {
+  const canvas = { w: 1920, h: 1080 }
+  const px = (m: Float32Array, a: number, b: number): [number, number] => {
+    const [x, y] = applyMat3(m, a, b)
+    return [((x + 1) / 2) * 1920, ((1 - y) / 2) * 1080]
+  }
+  it('âncora no meio = layerMatrix (fill: quad W·s × H·s) com a mesma escala/rotação', () => {
+    const r = { cx: 0.3, cy: 0.6, scale: 0.4, rotation: 33 }
+    const b = layerMatrix({ rect: r, fit: 'fill', crop: { l: 0, t: 0, r: 0, b: 0 } }, { w: 1920, h: 1080, rotation: 0 }, canvas)
+    const a = anchoredMatrix({ ...r, scale: 2 }, 1920 * 0.2, 1080 * 0.2, { x: 1920 * 0.1, y: 1080 * 0.1 }, canvas)
+    for (let i = 0; i < 9; i++) expect(a[i]).toBeCloseTo(b.mat[i], 6)
+    const at = px(a, 0.5, 0.5)
+    expect(at[0]).toBeCloseTo(0.3 * 1920, 3)
+    expect(at[1]).toBeCloseTo(0.6 * 1080, 3)
+  })
+  it('âncora fora do meio: escala e rotação em torno dela', () => {
+    const m = anchoredMatrix({ cx: 0.5, cy: 0.5, scale: 2, rotation: 90 }, 100, 50, { x: 10, y: 20 }, canvas)
+    const at = px(m, 0.1, 0.4)
+    expect(at[0]).toBeCloseTo(960, 3)
+    expect(at[1]).toBeCloseTo(540, 3)
+    // canto (0,0): (−10, −20)·2 girado 90° horário (x→y) = (40, −20) a partir do centro
+    const c = px(m, 0, 0)
+    expect(c[0]).toBeCloseTo(960 + 40, 3)
+    expect(c[1]).toBeCloseTo(540 - 20, 3)
   })
 })

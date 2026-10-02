@@ -140,7 +140,8 @@ export class EffectPass {
       u_rot: [Math.cos(th), Math.sin(th)],
       u_shape: fx.region.shape === 'ellipse' ? 1 : 0,
       u_feather: featherPx(fx.region, fx.feather, W, H),
-      u_invert: fx.invert ? 1 : 0
+      u_invert: fx.invert ? 1 : 0,
+      u_amount: 1
     })
     gl.disable(gl.SCISSOR_TEST)
   }
@@ -162,7 +163,31 @@ export class EffectPass {
     // região = o quadro inteiro + 1 px, sem borda suave: máscara 1 em todo pixel da área (o scissor limita)
     this.pass(this.apply, {
       u_src: s.snapshot, u_fx: b.tex, u_fxScale: b.scale, u_frame: [W, H], u_mode: MODE.blur, u_q: 512, u_color: [0, 0, 0],
-      u_center: [W / 2, H / 2], u_half: [W / 2 + 1, H / 2 + 1], u_rot: [1, 0], u_shape: 0, u_feather: 0, u_invert: 0
+      u_center: [W / 2, H / 2], u_half: [W / 2 + 1, H / 2 + 1], u_rot: [1, 0], u_shape: 0, u_feather: 0, u_invert: 0, u_amount: 1
+    })
+    gl.disable(gl.SCISSOR_TEST)
+  }
+
+  /**
+   * Holofote (forma com `spotlight`, F5): escurece com preto·`amount` todo o alvo FORA da região (retângulo/elipse
+   * girado, frações do quadro); dentro fica intacto; borda suave de `featherPx` px para dentro. Mesmo FS_APPLY dos
+   * efeitos (sólido preto, invertido, máscara × u_amount). Deixa o blend e o scissor desligados.
+   */
+  dimOutside(target: twgl.FramebufferInfo, region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }, amount: number, featherPx: number, W: number, H: number): void {
+    if (!(amount > 0)) return
+    const gl = this.gl
+    const s = this.ensure(W, H)
+    const all: PxRect = { x: 0, y: 0, w: W, h: H }
+    gl.disable(gl.BLEND)
+    gl.enable(gl.SCISSOR_TEST)
+    this.snap(target, s.snapshot, all)
+    twgl.bindFramebufferInfo(gl, target)
+    this.scissor(all)
+    const th = (region.rotation * Math.PI) / 180
+    this.pass(this.apply, {
+      u_src: s.snapshot, u_fx: s.snapshot, u_fxScale: [1 / W, 1 / H], u_frame: [W, H], u_mode: MODE.solid, u_q: 512, u_color: [0, 0, 0],
+      u_center: [region.x * W, region.y * H], u_half: [(Math.abs(region.w) * W) / 2, (Math.abs(region.h) * H) / 2], u_rot: [Math.cos(th), Math.sin(th)],
+      u_shape: region.shape === 'ellipse' ? 1 : 0, u_feather: featherPx, u_invert: 1, u_amount: Math.min(1, amount)
     })
     gl.disable(gl.SCISSOR_TEST)
   }

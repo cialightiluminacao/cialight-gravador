@@ -8,7 +8,7 @@
 //   movimento do Ken Burns/zoom).
 // - Sobreposições (PiP, logos): mesmo tamanho em px relativo ao lado menor do quadro, posição proporcional, presas
 //   dentro do quadro se estavam dentro.
-// - Textos/formas: posição proporcional (normalizada), tamanho do texto pelo lado menor.
+// - Textos/formas: posição proporcional (normalizada), tamanho do texto e caixa da forma pelo lado menor.
 // - Privacidade: todo efeito continua cobrindo o MESMO conteúdo. "Clipes" sob o efeito, para essa decisão: a mídia de
 //   vídeo das faixas que ele esconde — também desativada ou em faixa oculta (pode voltar a aparecer) — e as anotações
 //   da gravação (camada parada no quadro inteiro: o conteúdo delas fica no mesmo ponto normalizado). Ancorado ou solto
@@ -25,7 +25,7 @@ import { contentToScreen, NO_HOLE, regionAabb, regionTouchesClip, screenToConten
 import { FIT_TOL, simplifyRegionSamples, toContentRegion, type RegionSample } from './followTransform'
 import { newId } from './ids'
 import { layerBase } from './layerGeometry'
-import type { Anim, AnnotationsItem, EffectItem, Item, Keyframe, MediaItem, Project, TextItem, Us, VisualProps } from './project'
+import { DEFAULT_SHAPE_BOX, type Anim, type AnnotationsItem, type EffectItem, type Item, type Keyframe, type MediaItem, type Project, type ShapeItem, type TextItem, type Us, type VisualProps } from './project'
 import { attachedMedia, clipFrameAt, effectRegionAt, visualStateAt, visualTrackBelow } from './resolve'
 import { frameToUs, itemEndUs } from './time'
 import { coverRange, coversFrame, sourceOf } from './zoom'
@@ -538,6 +538,11 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
           return { ...it, visual: { ...it.visual, fit: 'cover', transform: { ...it.visual.transform, ...xy } } }
         }
         if (it.type === 'text') return { ...it, style: { ...it.style, size: mapAnim(it.style.size, (s) => s * short) } } satisfies TextItem
+        if (it.type === 'shape') {
+          // caixa em frações de W e H separadas: mantém w e h em px proporcionais ao lado menor (a forma não estica)
+          const b = it.box ?? DEFAULT_SHAPE_BOX
+          return { ...it, box: { w: (b.w * p.canvas.width * short) / canvas.width, h: (b.h * p.canvas.height * short) / canvas.height } } satisfies ShapeItem
+        }
         if (it.type === 'annotations') warnings.push({ itemId: it.id, kind: 'annotations', message: MSG.annotations, tUs: it.startUs })
         return it
       })

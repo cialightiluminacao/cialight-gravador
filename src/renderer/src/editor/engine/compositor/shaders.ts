@@ -218,6 +218,7 @@ void main() {
 // 1 dentro, borda suave para FORA com largura u_feather (0 = borda dura, cobre exatamente a região);
 // u_invert: efeito fora da região, borda suave para DENTRO dela (fora = 100 % efeito). u_mode: 0 blur, 1 pixelização (média do bloco, grade presa ao quadro), 2 sólido
 // (cor exata; × alpha do que está abaixo, que no acumulado é 1). mix com m ∈ {0,1} devolve os pixels exatos.
+// u_amount multiplica a máscara (1 nos efeitos; o holofote das formas usa sólido preto invertido com u_amount = dim).
 export const FS_APPLY = `#version 300 es
 precision highp float;
 uniform sampler2D u_src;
@@ -233,6 +234,7 @@ uniform vec2 u_rot;
 uniform int u_shape;
 uniform float u_feather;
 uniform int u_invert;
+uniform float u_amount;
 out vec4 o;
 void main() {
   vec2 p = gl_FragCoord.xy;
@@ -270,5 +272,5 @@ void main() {
   } else {
     e = vec4(u_color * s.a, s.a);
   }
-  o = mix(s, e, m);
+  o = mix(s, e, m * u_amount);
 }`

@@ -111,9 +111,16 @@ describe('schema', () => {
 
 describe('schema F4: propriedades que viraram animáveis (compatível com v1.1–v1.3)', () => {
   // projeto no formato da v1.3 (corte/ajuste/raio/tamanho do texto numéricos) e o que a v1.3 resolvia/mixava
-  // (golden gerado com o código da v1.3 antes da mudança; ShapeLayer.item reduzido ao id)
+  // (golden gerado com o código da v1.3 antes da mudança; ShapeLayer.item reduzido ao id). F5: TextLayer/ShapeLayer
+  // ganharam `trackId` (escopo `track` com alvo em texto/forma) — campo novo, não um valor diferente: a comparação o
+  // ignora em vez de regenerar o golden (o resto da camada continua idêntico ao da v1.3).
   const old = fixture as unknown
-  const shrink = (layers: ReturnType<typeof resolveFrame>) => layers.map((l) => (l.kind === 'shape' ? { ...l, item: l.item.id } : l))
+  const shrink = (layers: ReturnType<typeof resolveFrame>) =>
+    layers.map((l) => {
+      if (l.kind !== 'text' && l.kind !== 'shape') return l
+      const { trackId: _trackId, ...rest } = l
+      return rest.kind === 'shape' ? { ...rest, item: rest.item.id } : rest
+    })
   it('número vira { value } no parse, sem mudar version', () => {
     const p = parseProject(old)
     expect(p.version).toBe(1)

@@ -41,7 +41,8 @@ export type RenderIn =
 
 export type RenderOut =
   | { t: 'ready' }
-  | { t: 'rendered'; seq: number; tUs: Us; ms: number; missing: string[] }
+  // fontsPending: algum texto saiu com a fonte de reserva (ainda carregando); o worker redesenha quando ela carregar
+  | { t: 'rendered'; seq: number; tUs: Us; ms: number; missing: string[]; fontsPending?: boolean }
   // seq: erro ao renderizar esse pedido de quadro (encerra os pedidos até ele); sem seq: erro de outra mensagem
   | { t: 'error'; message: string; fatal: boolean; seq?: number }
   | { t: 'disposed' }

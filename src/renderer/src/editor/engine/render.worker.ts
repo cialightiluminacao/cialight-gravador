@@ -2,6 +2,8 @@
 // Único caminho de render para preview e exportação ("preview = export"). Pedidos de quadro que chegam
 // durante um render são coalescidos (fica só o último); o cliente resolve os intermediários com o resultado dele.
 // Todo VideoFrame entregue ao compositor é fechado no mesmo quadro (ver posse em decoderPool.ts).
+// Fontes dos textos (F5): registradas/carregadas ao receber o projeto (text/fonts.ts); um quadro desenhado com a
+// fonte de reserva sai com `fontsPending` e é redesenhado quando a fonte carrega; a exportação espera as fontes.
 //
 // Exportação (`exportStart`, numa instância própria com o canvas na resolução de saída): para n = 0..N−1,
 // tUs = fromUs + frameToUs(n, fps) → o mesmo composeAt do preview (fontes originais/intermediárias, sequencial)
@@ -30,6 +32,9 @@ import { h264LevelFor } from '@/engine/encoderSupport'
 import { Compositor, type SourceMeta } from './compositor/compositor'
 import { DecoderPool } from './decoderPool'
 import { firstDrawUs, flatLayers } from './layerSources'
+import { loadFonts, registerAppFonts } from './text/fonts'
+import { projectFontRequests, type FontRequest } from './text/fontRequests'
+import { fontReady } from './text/textRaster'
 import { SR } from './audio/mixer'
 import type { AudioIn, AudioOut } from './audio/protocol'
 import { frameCount } from '../export/exportPlan'
@@ -57,6 +62,13 @@ const sessions = new Map<string, { load: Promise<void>; session: Session | null;
 let annCanvas: OffscreenCanvas | null = null
 // itens já aquecidos nesta reprodução (zera ao pausar/seek)
 const prefetched = new Set<string>()
+// último quadro pedido (redesenho quando uma fonte pendente carrega) e se há redesenho por fazer
+let lastFrame: FrameMsg | null = null
+let fontRedraw = false
+// fontes já pedidas ao FontFaceSet (cada uma uma vez)
+const fontLoads = new Map<string, Promise<void>>()
+
+registerAppFonts()
 
 self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
   const m = e.data
@@ -72,6 +84,7 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
         break
       case 'project': {
         project = m.project
+        void requestFonts(projectFontRequests(m.project))
         const urls: Record<string, string> = {}
         const videoTracks: Record<string, number> = {}
         for (const [id, u] of Object.entries(m.mediaUrls)) {
@@ -153,20 +166,68 @@ async function pump(): Promise<void> {
   } finally {
     busy = false
   }
+  if (fontRedraw) void redrawForFonts()
+}
+
+/** Pede ao FontFaceSet as fontes (cada uma uma vez); resolve quando todas carregaram ou falharam. */
+function requestFonts(reqs: readonly FontRequest[]): Promise<void> {
+  return Promise.all(
+    reqs.map((r) => {
+      const key = `${r.font}|${r.text}`
+      let load = fontLoads.get(key)
+      if (!load) {
+        // cada texto digitado gera uma chave nova: o mapa não cresce sem limite (pedir de novo é barato)
+        if (fontLoads.size >= 256) fontLoads.clear()
+        load = loadFonts([r])
+        fontLoads.set(key, load)
+      }
+      return load
+    })
+  ).then(() => {})
+}
+
+/** Redesenha quando alguma das fontes pendentes ficar pronta (fonte que não carrega nunca: sem laço de redesenho). */
+function redrawWhenLoaded(reqs: readonly FontRequest[]): void {
+  void requestFonts(reqs).then(() => {
+    if (reqs.some((r) => fontReady(r.font, r.text))) void redrawForFonts()
+  })
+}
+
+/**
+ * Fonte que faltava carregou: redesenha o último quadro pedido (só o canvas; nada de `rendered`). Com um quadro em
+ * andamento ou na fila, fica para depois dele (pump) — esse já sai com a fonte, ou pede outro redesenho.
+ */
+async function redrawForFonts(): Promise<void> {
+  fontRedraw = true
+  if (busy || pending || exporting || !lastFrame || !project) return
+  fontRedraw = false
+  busy = true
+  try {
+    const { fontsPending } = await composeAt(project, lastFrame.tUs, false)
+    if (!lastFrame.playing) pool.releaseAll()
+    if (fontsPending.length) redrawWhenLoaded(fontsPending)
+  } catch {
+    // o próximo quadro pedido mostra o erro, se ele persistir
+  } finally {
+    busy = false
+  }
+  if (pending) void pump()
 }
 
 async function renderFrame(m: FrameMsg): Promise<void> {
   const t0 = performance.now()
   const p = project
   if (!compositor || !p || !canvas) throw new Error('render antes de init/project')
-  const { missing, used } = await composeAt(p, m.tUs, m.playing)
+  lastFrame = m
+  const { missing, used, fontsPending } = await composeAt(p, m.tUs, m.playing)
+  if (fontsPending.length) redrawWhenLoaded(fontsPending)
   // buffers de reprodução só para o que está no quadro (e o que vai começar) e só durante a reprodução
   if (m.playing) pool.releaseExcept([...used, ...prefetchUpcoming(p, m.tUs, used)])
   else {
     prefetched.clear()
     pool.releaseAll()
   }
-  post({ t: 'rendered', seq: m.seq, tUs: m.tUs, ms: performance.now() - t0, missing: [...missing] })
+  post({ t: 'rendered', seq: m.seq, tUs: m.tUs, ms: performance.now() - t0, missing: [...missing], ...(fontsPending.length ? { fontsPending: true } : {}) })
 }
 
 /**
@@ -174,7 +235,7 @@ async function renderFrame(m: FrameMsg): Promise<void> {
  * antes de retornar; o desenho fica no canvas (preserveDrawingBuffer). `sequential`: reprodução/exportação
  * (iterador por entrada do pool); senão, seek. Devolve os assets ausentes e as entradas [asset, slot] usadas.
  */
-async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { drawMs: number }): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][] }> {
+async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { drawMs: number }): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][]; fontsPending: readonly FontRequest[] }> {
   const comp = compositor
   if (!comp || !canvas) throw new Error('render antes de init')
   const W = canvas.width
@@ -248,7 +309,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
   } finally {
     for (const f of frames) f.close()
   }
-  return { missing, missingAnnotations, used }
+  return { missing, missingAnnotations, used, fontsPending: comp.pendingFonts }
 }
 
 /** Teste de desempenho: quadros sequenciais (como na reprodução), com o tempo do compositor medido com sync da GPU. */
@@ -514,6 +575,8 @@ async function runExport(
   compositor.resize(job.width, job.height)
   selection = []
   prefetched.clear()
+  // fontes dos textos carregadas antes do 1º quadro (nenhum quadro exportado com a fonte de reserva)
+  await requestFonts(projectFontRequests(p))
   const durationUs = job.toUs - job.fromUs
   const total = frameCount(job.fromUs, job.toUs, job.fps)
   if (total <= 0) throw new Error('Intervalo de exportação vazio')

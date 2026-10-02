@@ -37,8 +37,9 @@ export interface EffectLayer {
   region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }
   strength: number; feather: number; color: string; invert: boolean; scope: 'below' | 'track'
 }
-export interface TextLayer { kind: 'text'; itemId: string; text: string; style: ResolvedTextStyle; rect: Rect; opacity: number; blur?: number }
-export interface ShapeLayer { kind: 'shape'; itemId: string; item: ShapeItem; rect: Rect; opacity: number; blur?: number }
+/** Texto (F5): `trackId` = faixa dele (escopo `track` com alvo nela; o golden v1.3 é comparado sem esse campo). */
+export interface TextLayer { kind: 'text'; itemId: string; trackId: string; text: string; style: ResolvedTextStyle; rect: Rect; opacity: number; blur?: number }
+export interface ShapeLayer { kind: 'shape'; itemId: string; trackId: string; item: ShapeItem; rect: Rect; opacity: number; blur?: number }
 /**
  * Transição em andamento numa faixa de vídeo (substitui, na mesma posição da pilha, a camada normal da faixa).
  * `from`/`to`: as camadas de A/B exatamente como resolveFrame as produziria sem a transição nos instantes congelados
@@ -223,8 +224,8 @@ const adjustAt = (a: NonNullable<VisualProps['adjust']>, local: Us): AdjustValue
 
 /**
  * O efeito layers[i] age no quadro? Escopo `below`: sempre. Escopo `track`: só se, pulando os outros efeitos `track`
- * do mesmo alvo logo antes dele, a camada anterior for a mídia/anotações da faixa `targetTrackId` (a mesma condição do
- * compositor; sem ela o efeito não esconde nada).
+ * do mesmo alvo logo antes dele, a camada anterior for a camada (mídia, anotações, texto, forma ou transição) da faixa
+ * `targetTrackId` (a mesma condição do compositor; sem ela o efeito não esconde nada).
  */
 export function effectBound(layers: Layer[], i: number): boolean {
   const fx = layers[i]
@@ -240,8 +241,8 @@ export function effectBound(layers: Layer[], i: number): boolean {
   return !!prev && isTrackLayer(prev) && prev.trackId === fx.targetTrackId
 }
 
-/** Camada que representa o conteúdo de uma faixa para o escopo `track`: mídia, anotações ou a transição da faixa. */
-const isTrackLayer = (l: Layer): l is MediaLayer | AnnotationsLayer | TransitionLayer => l.kind === 'media' || l.kind === 'annotations' || l.kind === 'transition'
+/** Camada que representa o conteúdo de uma faixa para o escopo `track`: tudo menos efeito (inclui texto/forma, F5). */
+const isTrackLayer = (l: Layer): l is Exclude<Layer, EffectLayer> => l.kind !== 'effect'
 
 /** Faixa de vídeo não oculta imediatamente abaixo de trackId (faixas de áudio e ocultas são puladas). */
 export function visualTrackBelow(p: Project, trackId: string): string | null {
@@ -276,11 +277,11 @@ function itemLayer(p: Project, track: Track, item: Item, tUs: Us): Layer | null 
       return { kind: 'annotations', itemId: item.id, trackId: track.id, sessionId: item.sessionId, sessionMs: (item.inUs + local) / 1000, autoFadeMs: item.autoFadeMs ?? null }
     case 'text': {
       const s = visualStateAt(item.visual, item.durationUs, local)
-      return { kind: 'text', itemId: item.id, text: textContentAt(item, local), style: { ...item.style, size: Math.max(0, ev(item.style.size, local)) }, rect: s.rect, opacity: s.opacity, ...(s.blur > 0 ? { blur: s.blur } : {}) }
+      return { kind: 'text', itemId: item.id, trackId: track.id, text: textContentAt(item, local), style: { ...item.style, size: Math.max(0, ev(item.style.size, local)) }, rect: s.rect, opacity: s.opacity, ...(s.blur > 0 ? { blur: s.blur } : {}) }
     }
     case 'shape': {
       const s = visualStateAt(item.visual, item.durationUs, local)
-      return { kind: 'shape', itemId: item.id, item, rect: s.rect, opacity: s.opacity, ...(s.blur > 0 ? { blur: s.blur } : {}) }
+      return { kind: 'shape', itemId: item.id, trackId: track.id, item, rect: s.rect, opacity: s.opacity, ...(s.blur > 0 ? { blur: s.blur } : {}) }
     }
     case 'effect':
       return {
