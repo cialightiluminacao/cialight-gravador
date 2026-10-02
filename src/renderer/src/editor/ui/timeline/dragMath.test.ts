@@ -5,6 +5,8 @@ import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/proje
 import { snapPoints } from '@shared/editor/snap'
 import { canChangeTrack, dropTarget, effectDropTrack, edgeScrollPx, EDGE_SCROLL_MAX, fadeHandleLefts, gestureSnapPoints, keyframeMarkLefts, planFade, planKeyframeDrag, planMove, planTrim } from './dragMath'
 
+import { concreteRefs, dragGroup } from '../../state/keyframeSelection'
+
 const S = 1_000_000
 const vid = (id: string, dur = 10 * S): Asset => ({ id, name: id, kind: 'video', source: { type: 'file', path: `C:/${id}.mp4`, size: 1, mtimeMs: 1 }, durationUs: dur, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
 
@@ -324,6 +326,17 @@ describe('planKeyframeDrag', () => {
     expect(keys(g.project!, id)).toEqual([[2 * S, 10], [4 * S, 90]])
     // a região (sem keys aqui) não muda
     expect((ops.findItem(g.project!, id)!.item as EffectItem).region.x.keys).toBeUndefined()
+  })
+  it('seleção mista (combinado em 1 s + intensidade em 3 s): arrastar a linha da região em 1 s move tudo junto', () => {
+    const { p, id } = fx()
+    let q = ops.toggleKeyframe(p, id, 'region.x', 2 * S) // região com key em 1 s (local), junto da intensidade
+    const item = ops.findItem(q, id)!.item
+    const refs = concreteRefs(item, dragGroup({ itemId: id, keys: [{ path: null, tUs: S }, { path: 'strength', tUs: 3 * S }] }, id, { path: 'region.x', tUs: S }))
+    const r = planKeyframeDrag(q, { itemId: id, fromUs: S, deltaUs: 0.5 * S, keys: refs })
+    q = r.project!
+    expect(r.toUs).toBe(1.5 * S)
+    expect(keys(q, id)).toEqual([[1.5 * S, 10], [3.5 * S, 90]])
+    expect((ops.findItem(q, id)!.item as EffectItem).region.x.keys!.map((k) => k.tUs)).toEqual([1.5 * S])
   })
   it('keys escolhidos em faixa bloqueada: erro, sem mudar nada', () => {
     const { p, id } = fx()

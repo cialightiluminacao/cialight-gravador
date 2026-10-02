@@ -27,14 +27,15 @@ export function presetOf(e: Ease): CurvePresetId | null {
 }
 
 /**
- * Alças de partida para arrastar: a própria bezier, ou a do preset (linear/segurar = diagonal; as cúbicas, pela
- * bezier equivalente usual). Arrastar uma alça transforma o ease em bezier personalizada.
+ * Alças de partida para arrastar: a própria bezier, ou a do preset (linear/segurar = diagonal; entrada/saída, a
+ * bezier exata; "ambos" não tem bezier exata — fica a equivalente usual). Arrastar uma alça transforma o ease em bezier personalizada.
  */
 export function handlesOf(e: Ease): Bez {
   if (typeof e === 'object') return [...e.bezier]
   switch (e) {
-    case 'in': return [0.32, 0, 0.67, 0]
-    case 'out': return [0.33, 1, 0.68, 1]
+    // cúbicas exatas: com x1 = 1/3 e x2 = 2/3, x(t) = t e y(t) = t³ (entrada) / 1 − (1 − t)³ (saída)
+    case 'in': return [1 / 3, 0, 2 / 3, 0]
+    case 'out': return [1 / 3, 1, 2 / 3, 1]
     case 'inOut': return [0.65, 0, 0.35, 1]
     default: return [0.25, 0.25, 0.75, 0.75]
   }

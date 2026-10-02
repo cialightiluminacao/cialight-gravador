@@ -1,4 +1,4 @@
-import { AudioLines, ChevronsUpDown, Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
+import { AudioLines, ChevronsUpDown, ClipboardCopy, ClipboardPaste, Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
 import { convertEffects, detachAudio, enableGroupIds, findItem, linkedIds, linkItems, setSpeed, unlinkMedia } from '@shared/editor/ops'
 import type { EffectItem, Marker, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
@@ -7,7 +7,7 @@ import { SHORTCUT_LABELS } from '../../shortcuts'
 import { useEditorStore } from '../../state/editorStore'
 import { useExpandedItems } from '../../state/keyframeLanes'
 import { useSilencePreview } from '../../state/silencePreview'
-import { deleteSelection, runShortcut, seekTo, splitAtPlayhead, toggleEnabledSelection } from '../editorActions'
+import { deleteSelection, hasClipboard, runShortcut, seekTo, splitAtPlayhead, toggleEnabledSelection } from '../editorActions'
 import type { MenuEntry } from './ContextMenu'
 
 // Entradas dos menus de contexto da linha do tempo (item e marcador).
@@ -71,6 +71,8 @@ export function itemMenuEntries(p: Project, itemId: string, playback: PlaybackCo
   const anyOn = enableGroupIds(p, sel.filter((id) => findItem(p, id)), true).some((id) => findItem(p, id)?.item.enabled !== false)
   return [
     { label: 'Dividir no playhead', icon: Scissors, shortcut: SHORTCUT_LABELS.split, disabled: !splittable, onSelect: splitAtPlayhead },
+    { label: 'Copiar', icon: ClipboardCopy, shortcut: SHORTCUT_LABELS.copy, onSelect: () => runShortcut('copy', playback) },
+    { label: 'Colar', icon: ClipboardPaste, shortcut: SHORTCUT_LABELS.paste, disabled: !hasClipboard(), onSelect: () => runShortcut('paste', playback) },
     { label: 'Duplicar', icon: Copy, shortcut: SHORTCUT_LABELS.duplicate, onSelect: () => runShortcut('duplicate', playback) },
     linkEntry(p, itemId, sel),
     {

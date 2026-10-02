@@ -42,6 +42,9 @@ export type ShortcutAction =
 /** Transporte (tocar/pausar, J/K/L, quadro a quadro, ±1 s, início/fim): o que passa com o painel não modal aberto. */
 export const TRANSPORT_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(['playPause', 'pause', 'shuttleBack', 'shuttleForward', 'prevFrame', 'nextFrame', 'back1s', 'fwd1s', 'home', 'end'])
 
+/** Com o editor de curvas aberto (popover não modal): o transporte e desfazer/refazer continuam valendo. */
+export const CURVE_EDITOR_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>([...TRANSPORT_ACTIONS, 'undo', 'redo'])
+
 export interface KeyLike {
   key: string
   code?: string

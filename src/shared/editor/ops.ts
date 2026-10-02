@@ -1699,6 +1699,13 @@ export function copyKeyframes(p: Project, itemId: string, opts?: { paths?: AnimP
   return { keys: Object.fromEntries(found.map(([pt, k]) => [pt, k.map((x) => ({ ...x, tUs: x.tUs - t0 }))])) }
 }
 
+/** Propriedades do clipboard que o item pode receber (as que ele tem; Tarja não tem intensidade animável). */
+export function pastablePaths(item: Item, clip: KeyframeClipboard): AnimPath[] {
+  return (Object.entries(clip.keys) as [AnimPath, Keyframe<number>[]][])
+    .filter(([pt, keys]) => keys.length > 0 && !!getAnim(item, pt) && !(pt === 'strength' && item.type === 'effect' && item.effect === 'solid'))
+    .map(([pt]) => pt)
+}
+
 /**
  * Cola keyframes no item a partir de atUs (absoluto, dentro do item): tempos relativos preservados e presos à
  * duração do item (o que passar dela é cortado com key de borda exato, sem salto — pasteKeys). Propriedades que o
@@ -1710,12 +1717,8 @@ export function pasteKeyframes(p: Project, itemId: string, clip: KeyframeClipboa
   const local = Math.round(atUs) - f.item.startUs
   if (local < 0 || local > f.item.durationUs) throw new EditError('bounds', 'Instante fora do item')
   const changes: [AnimPath, Anim<number>][] = []
-  for (const [pt, keys] of Object.entries(clip.keys) as [AnimPath, Keyframe<number>[]][]) {
-    // Tarja não tem intensidade animável (convertEffects tira os keys): não cola nela
-    if (pt === 'strength' && f.item.type === 'effect' && f.item.effect === 'solid') continue
-    const a = getAnim(f.item, pt)
-    if (a && keys.length) changes.push([pt, pasteKeys(a, keys, local, f.item.durationUs)])
-  }
+  // Tarja não tem intensidade animável (convertEffects tira os keys): não cola nela (pastablePaths)
+  for (const pt of pastablePaths(f.item, clip)) changes.push([pt, pasteKeys(getAnim(f.item, pt)!, clip.keys[pt]!, local, f.item.durationUs)])
   if (changes.length === 0) return p
   return edit(p, (d) => {
     const it = d.tracks[f.trackIndex].items[f.itemIndex]

@@ -12,11 +12,15 @@ import { concreteRefs, useKeyframeSelection, type KeyframeSel } from '../state/k
 import { useViewerTool } from '../state/viewerTool'
 import { autoMusicLanding, moveToVoice } from './musicLanding'
 import { narrationActive } from './narrationFlow'
+import { planKeyframePaste } from './keyframePaste'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 
 /** Área de transferência interna: itens (ids) ou keyframes — vale o que foi copiado por último. */
 let clipboard: { kind: 'items'; ids: string[] } | { kind: 'keys'; clip: KeyframeClipboard } | null = null
+
+/** Há algo copiado (itens ou keyframes) para o "Colar" do menu. */
+export const hasClipboard = (): boolean => clipboard !== null
 
 /** "Ajustar tudo" (Shift+Z) depende da largura da linha do tempo: ela registra o handler aqui. */
 let zoomFitHandler: (() => void) | null = null
@@ -176,22 +180,10 @@ function copySelectedKeyframes(): boolean {
 function pasteKeyframesAtPlayhead(clip: KeyframeClipboard): void {
   const { project, selection, playheadUs } = st()
   if (!project) return
-  const targets = selection.filter((id) => {
-    const f = findItem(project, id)
-    return !!f && playheadUs >= f.item.startUs && playheadUs < itemEndUs(f.item)
-  })
-  if (!targets.length) {
-    toast('Selecione um item sob o playhead para colar os keyframes.')
-    return
-  }
-  // apply mostra o erro (faixa bloqueada…); nada aplicável → o mesmo projeto, sem passo de desfazer
-  let same = false
-  st().apply((p) => {
-    const next = targets.reduce((q, id) => pasteKeyframes(q, id, clip, playheadUs), p)
-    same = next === p
-    return next
-  })
-  if (same) toast('Este item não tem as propriedades dos keyframes copiados.')
+  // faixa bloqueada e item sem as propriedades copiadas ficam de fora (com aviso); colar parcial avisa "N de M"
+  const plan = planKeyframePaste(project, selection, playheadUs, clip)
+  if (plan.targets.length) st().apply((p) => plan.targets.reduce((q, id) => pasteKeyframes(q, id, clip, playheadUs), p))
+  if (plan.message) toast(plan.message)
 }
 
 /**
@@ -276,6 +268,7 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
       if (copySelectedKeyframes()) return true
       if (!s.selection.length) return false
       clipboard = { kind: 'items', ids: [...s.selection] }
+      toast(s.selection.length === 1 ? 'Item copiado — Ctrl+V cola no playhead.' : `${s.selection.length} itens copiados — Ctrl+V cola no playhead.`, { duration: 1800 })
       return true
     case 'paste': {
       if (!clipboard) return true

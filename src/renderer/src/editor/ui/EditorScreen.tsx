@@ -4,7 +4,7 @@ import { ipcErrorMessage } from '@/lib/ipcError'
 import type { Asset } from '@shared/editor/project'
 import { useAppStore } from '@/app/store'
 import { flushAutosave, startAutosave, useEditorStore } from '../state/editorStore'
-import { shortcutFor, TRANSPORT_ACTIONS } from '../shortcuts'
+import { CURVE_EDITOR_ACTIONS, shortcutFor, TRANSPORT_ACTIONS } from '../shortcuts'
 import { createEditorEngine, type EditorEngine } from './editorEngine'
 import { runShortcut, seekTo } from './editorActions'
 import { enqueuePending, importPaths } from './mediaImport'
@@ -15,6 +15,7 @@ import { ExportDialog } from './ExportDialog'
 import { SilenceDialog } from './SilenceDialog'
 import { useSilencePreview } from '../state/silencePreview'
 import { useNarration } from '../state/narration'
+import { useExpandedItems } from '../state/keyframeLanes'
 import { NarrationOverlay } from './NarrationRecorder'
 import { abandonNarration, narrationActive, recoverNarrations, settleNarration } from './narrationFlow'
 import { MediaBin } from './MediaBin'
@@ -32,7 +33,7 @@ import { viewerGestureActive } from './viewer/viewerGesture'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; narration: typeof useNarration; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string; narrationFailWritesAfter?: number }
+    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; narration: typeof useNarration; expanded: typeof useExpandedItems; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string; narrationFailWritesAfter?: number }
   }
 }
 
@@ -71,7 +72,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     setEngine(eng)
     const stopAutosave = startAutosave((p) => api.project.save(p))
     // QA (fora do pacote): store e motor acessíveis por CDP
-    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, narration: useNarration, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
+    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, narration: useNarration, expanded: useExpandedItems, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
     const offProgress = api.media.onProgress((j) => {
       if (j.projectId.toLowerCase() !== projectId.toLowerCase()) return
       const st = useEditorStore.getState()
@@ -177,13 +178,17 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       // diálogo aberto (ex.: exportação): o teclado é dele. O painel "Remover silêncios" (não modal) só deixa passar o
       // transporte, e os controles dele (sliders, interruptores, botões) ficam com as próprias teclas
       const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+      // O editor de curvas (popover não modal) deixa passar o transporte e desfazer/refazer, também com o foco
+      // nele (as setas das alças são dele)
       const panel = dialogs.find((d) => d.hasAttribute('data-silence-dialog'))
-      if (dialogs.some((d) => d !== panel)) return
+      const curve = dialogs.find((d) => d.hasAttribute('data-curve-editor'))
+      if (dialogs.some((d) => d !== panel && d !== curve)) return
       const t = e.target as Element | null
       if (panel && t instanceof Node && panel.contains(t)) return
       if (!e.ctrlKey && t?.closest?.(OWN_KEYS)) return
       const action = shortcutFor(e, { kHeld })
       if (panel && action && !TRANSPORT_ACTIONS.has(action)) return
+      if (curve && action && (!CURVE_EDITOR_ACTIONS.has(action) || (t instanceof Node && curve.contains(t) && action !== 'undo' && action !== 'redo'))) return
       if (action && runShortcut(action, engineRef.current?.playback ?? null)) e.preventDefault()
     }
     // arquivos soltos fora da biblioteca não podem navegar a janela para o arquivo

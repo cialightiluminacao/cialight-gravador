@@ -35,6 +35,14 @@ export function isKeySelected(sel: KeyframeSel | null, itemId: string, path: Ani
   return sel.keys.some((k) => near(k.tUs, tUs) && (k.path === null || k.path === path))
 }
 
+/**
+ * O que anda ao arrastar o losango `key`: a seleção inteira se ele aparece selecionado (inclusive por um combinado
+ * selecionado no mesmo instante); senão só ele.
+ */
+export function dragGroup(sel: KeyframeSel | null, itemId: string, key: SelKey): SelKey[] {
+  return sel && isKeySelected(sel, itemId, key.path, key.tUs) ? sel.keys : [key]
+}
+
 /** Os keys de verdade (por propriedade) da seleção: o combinado vira as propriedades com key no instante; sem repetir. */
 export function concreteRefs(item: Item, keys: readonly SelKey[]): KeyRef[] {
   const out: KeyRef[] = []

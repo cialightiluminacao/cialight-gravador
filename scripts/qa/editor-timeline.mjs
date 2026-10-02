@@ -5,6 +5,7 @@
 //   node scripts/qa/editor-timeline.mjs            → abre o app (CIALIGHT_QA=editor-fixture,
 //                                                    CIALIGHT_RAW_DIR=test-out/raw), testa e fecha
 //   node scripts/qa/editor-timeline.mjs --attach   → usa um app já aberto com --remote-debugging-port=9333
+//   node scripts/qa/editor-timeline.mjs --expanded → no teste de desempenho, 10 itens vizinhos expandidos (2 linhas de keyframes cada)
 //
 // Confere o estado do store após dividir, mover (com vinculados / Alt / outra faixa / faixa nova),
 // ímã com linha guia, trim (normal e ripple com Ctrl), excluir com ripple (menu de contexto),
@@ -18,6 +19,7 @@ import electronPath from 'electron'
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9333'
 const ATTACH = process.argv.includes('--attach')
+const EXPANDED = process.argv.includes('--expanded')
 const SHOTS = join(ROOT, 'docs', 'qa', 'editor-f1')
 const SETTINGS = join(process.env.APPDATA ?? '', 'cialight-gravador', 'settings.json')
 const S = 1_000_000
@@ -418,11 +420,16 @@ async function main() {
   {
     const r = await ev(`const s = T.st(); const src = s.project.tracks.flatMap((t) => t.items).find((i) => i.assetId === 'a_qa_video' && i.visual)
       s.apply((p) => {
-        const mk = (ti, k) => ({ ...src, id: 'i_perf_' + ti + '_' + k, linkId: undefined, startUs: k * 400000, durationUs: 400000, inUs: (k % 25) * 400000 })
+        const anim = (a, b) => ({ value: a, keys: [{ tUs: 50000, value: a, ease: 'inOut' }, { tUs: 350000, value: b, ease: 'linear' }] })
+        const kf = (v) => (${EXPANDED} ? { ...v, transform: { ...v.transform, x: anim(0.3, 0.7), opacity: anim(1, 0.2) } } : v)
+        const mk = (ti, k) => ({ ...src, id: 'i_perf_' + ti + '_' + k, linkId: undefined, startUs: k * 400000, durationUs: 400000, inUs: (k % 25) * 400000, visual: kf(src.visual) })
         const tracks = [0, 1, 2, 3].map((ti) => ({ id: 't_perf_' + ti, kind: 'video', name: 'Carga ' + (ti + 1), muted: false, hidden: false, locked: false, volume: 1, items: Array.from({ length: 50 }, (_, k) => mk(ti, k)) }))
         return { ...p, tracks: [...tracks, ...p.tracks.filter((t) => t.kind === 'audio')] }
       })
       await T.key('Z', { shiftKey: true }); await T.settle()
+      if (${EXPANDED}) for (const ti of [0, 2]) for (let k = 21; k <= 25; k++) window.__qaEditor.expanded.getState().toggle('i_perf_' + ti + '_' + k)
+      await T.settle()
+      const nLanes = document.querySelectorAll('[data-lanes-item]').length
       const n = document.querySelectorAll('[data-item-id]').length
       const e = T.item('i_perf_1_25'); const a = T.pt(e); const lanes = T.el('[data-timeline-lanes]')
       T.down(e, a.x, a.y); T.move(a.x + 4, a.y); await T.settle()
@@ -435,12 +442,13 @@ async function main() {
         times.push(performance.now() - t0)
       }
       await T.settle()
-      return { n, times }`)
+      return { n, lanes: nLanes, times }`)
     await shot('timeline-200-items.png')
-    await ev(`await T.key('Escape'); T.up(0, 0); await T.settle(); await T.key('z', { ctrlKey: true }); return 1`)
+    await ev(`await T.key('Escape'); T.up(0, 0); await T.settle(); await T.key('z', { ctrlKey: true }); window.__qaEditor.expanded.getState().clear(); return 1`)
     const t = [...r.times].sort((a, b) => a - b)
     const avg = t.reduce((a, b) => a + b, 0) / t.length
     const p95 = t[Math.floor(t.length * 0.95)]
+    if (EXPANDED) console.log(`  itens expandidos com linhas visíveis: ${r.lanes}`)
     console.log(`  itens renderizados: ${r.n}; por evento de arraste: média ${avg.toFixed(2)} ms, p95 ${p95.toFixed(2)} ms, máx ${t[t.length - 1].toFixed(2)} ms`)
     check('200 itens renderizados', r.n >= 200, r.n)
     check('média < 8 ms por evento de arraste', avg < 8, { avg, p95 })

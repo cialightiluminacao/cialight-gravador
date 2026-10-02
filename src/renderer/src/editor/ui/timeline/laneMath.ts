@@ -29,6 +29,17 @@ export const PATH_LABEL: Record<AnimPath, string> = {
   'audio.volume': 'Volume'
 }
 
+const num = (n: number, digits = 1): string => String(Math.round(n * 10 ** digits) / 10 ** digits).replace('.', ',')
+
+/** Valor do key na unidade do inspetor (rótulo acessível e dica do losango). */
+export function formatKeyValue(path: AnimPath, v: number): string {
+  if (path === 'transform.rotation' || path === 'region.rotation') return `${num(v)}°`
+  if (path === 'visual.radius' || path === 'text.size') return `${num(v)} px`
+  if (path === 'strength') return num(v)
+  if (path === 'audio.volume') return v <= 0.001 ? 'mudo' : `${num(20 * Math.log10(v), 0)} dB`
+  return `${num(v * 100)}%`
+}
+
 export type EaseKind = 'linear' | 'hold' | 'in' | 'out' | 'inOut' | 'custom'
 
 export function easeKind(e: Ease): EaseKind {

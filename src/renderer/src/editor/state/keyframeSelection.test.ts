@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createEffectItem } from '@shared/editor/factory'
 import type { Anim, EffectItem } from '@shared/editor/project'
-import { concreteRefs, isKeySelected, keysInLaneBox, pruneSel, shiftSelKeys, toggleKey, type KeyframeSel } from './keyframeSelection'
+import { concreteRefs, dragGroup, isKeySelected, keysInLaneBox, pruneSel, shiftSelKeys, toggleKey, type KeyframeSel } from './keyframeSelection'
 
 const S = 1_000_000
 const k = (...ts: number[]): Anim<number> => ({ value: 0, keys: ts.map((tUs) => ({ tUs, value: tUs / S, ease: 'linear' as const })) })
@@ -49,5 +49,21 @@ describe('seleção de keyframes', () => {
     expect(pruneSel({ itemId: 'fx', keys: [{ path: 'strength', tUs: 2 * S }] }, fx())).toBeNull()
     const same: KeyframeSel = { itemId: 'fx', keys: [{ path: 'strength', tUs: 3 * S }] }
     expect(pruneSel(same, fx())).toBe(same) // nada mudou: o mesmo objeto (sem re-render)
+  })
+})
+
+describe('dragGroup (o que anda ao arrastar um losango)', () => {
+  it('losango mostrado como selecionado (inclusive pelo combinado) leva a seleção inteira; fora dela, só ele', () => {
+    const mixed: KeyframeSel = { itemId: 'fx', keys: [{ path: null, tUs: S }, { path: 'strength', tUs: 3 * S }] }
+    // a linha da região em 1 s aparece selecionada por causa do combinado: arrastá-la leva o grupo
+    expect(dragGroup(mixed, 'fx', { path: 'region.x', tUs: S })).toBe(mixed.keys)
+    expect(dragGroup(mixed, 'fx', { path: 'strength', tUs: 3 * S })).toBe(mixed.keys)
+    expect(dragGroup(mixed, 'fx', { path: 'region.x', tUs: 2 * S })).toEqual([{ path: 'region.x', tUs: 2 * S }])
+    expect(dragGroup(mixed, 'outro', { path: null, tUs: S })).toEqual([{ path: null, tUs: S }])
+    expect(dragGroup(null, 'fx', { path: null, tUs: S })).toEqual([{ path: null, tUs: S }])
+  })
+  it('grupo misto (combinado + linha) vira os keys de verdade de cada propriedade', () => {
+    const refs = concreteRefs(fx(), [{ path: null, tUs: S }, { path: 'strength', tUs: 3 * S }])
+    expect(refs).toEqual([{ path: 'region.x', tUs: S }, { path: 'strength', tUs: S }, { path: 'strength', tUs: 3 * S }])
   })
 })

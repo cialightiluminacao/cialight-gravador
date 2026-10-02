@@ -7,7 +7,7 @@ import { formatTimecodeUs, itemEndUs } from '@shared/editor/time'
 import type { SnapPoint } from '@shared/editor/snap'
 import { useEditorStore } from '../../state/editorStore'
 import { useCurveEditor } from '../../state/keyframeLanes'
-import { concreteRefs, keysInLaneBox, shiftSelKeys, toggleKey, useKeyframeSelection, type SelKey } from '../../state/keyframeSelection'
+import { concreteRefs, dragGroup, keysInLaneBox, shiftSelKeys, toggleKey, useKeyframeSelection, type SelKey } from '../../state/keyframeSelection'
 import { edgeScrollPx, gestureSnapPoints, planFade, planKeyframeDrag, planMove, planTrim, type MoveInput, type MovePlan } from './dragMath'
 import { HEADER_W, itemsInBox, laneAt, lanePaths, ROW_H, TOP_PAD, zoneAt, type Layout } from './layout'
 import { pxToDurUs, pxToUs, SNAP_PX, usToPx } from '../../state/zoom'
@@ -137,9 +137,8 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
           return
         }
         // arrastar um losango que já está numa seleção de vários leva o grupo junto
-        const prev = useKeyframeSelection.getState().sel
-        const inGroup = !!prev && prev.itemId === id && prev.keys.length > 1 && prev.keys.some((k) => k.path === kfKey.path && Math.abs(k.tUs - fromUs) <= 1)
-        const group = inGroup ? prev.keys : [kfKey]
+        // (inclusive um losango de linha que aparece selecionado por causa do combinado do mesmo instante)
+        const group = dragGroup(useKeyframeSelection.getState().sel, id, kfKey)
         setKf({ itemId: id, keys: group })
         const startItem = findItem(st().project!, id)?.item
         // combinado sozinho: todos os keys do instante (moveKeyframes); senão exatamente os keys escolhidos
@@ -166,6 +165,8 @@ export function useTimelineDrag({ scrollerRef, layoutRef, setOverlay, onItemMenu
         onEnd = (commit) => {
           const f = findItem(st().txBase ?? st().project!, id)
           if (!started) {
+            // clique sem arrastar: fica só este losango (como no item já selecionado)
+            if (commit) useKeyframeSelection.getState().set({ itemId: id, keys: [kfKey] })
             if (commit && f) onSeek(f.item.startUs + fromUs)
             return
           }

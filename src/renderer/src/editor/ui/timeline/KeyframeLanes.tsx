@@ -4,7 +4,7 @@ import type { Anim, Item } from '@shared/editor/project'
 import { cn } from '@/lib/cn'
 import { isKeySelected, useKeyframeSelection, type KeyframeSel } from '../../state/keyframeSelection'
 import { keyframeMarkLefts } from './dragMath'
-import { curveSegments, EASE_COLOR, EASE_LABEL, easeKind, PATH_LABEL } from './laneMath'
+import { curveSegments, EASE_COLOR, EASE_LABEL, easeKind, formatKeyValue, PATH_LABEL } from './laneMath'
 import { LANE_H, lanePaths } from './layout'
 
 // Linhas de keyframes do item expandido (seta no item): uma por propriedade animada, abaixo da caixa do
@@ -79,7 +79,10 @@ const Lane = memo(function Lane({ item, path, anim, index, pxPerSec, clipFrom, v
             data-lane-key={tUs}
             data-path={path}
             data-selected={selected || undefined}
-            title={`${label} em ${secLabel(tUs)} — curva: ${EASE_LABEL[kind]}\n${locked ? 'Clique para ir até ele' : 'Clique: ir até ele (Shift soma à seleção) · arrastar: mover · botão direito: curva · Delete: remover'}`}
+            role="button"
+            aria-pressed={selected}
+            aria-label={`Keyframe de ${label} em ${secLabel(tUs)}: ${formatKeyValue(path, k.value)}, curva ${EASE_LABEL[kind]}`}
+            title={`${label} em ${secLabel(tUs)}: ${formatKeyValue(path, k.value)} — curva: ${EASE_LABEL[kind]}\n${locked ? 'Clique para ir até ele' : 'Clique: ir até ele (Shift soma à seleção) · arrastar: mover · botão direito: curva · Delete: remover'}`}
             className={cn('absolute z-[2] flex items-center justify-center', locked ? 'cursor-pointer' : 'cursor-ew-resize')}
             style={{ left, top: (LANE_H - HIT) / 2, width: HIT, height: HIT }}
           >

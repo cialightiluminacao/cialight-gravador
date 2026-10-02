@@ -16,9 +16,11 @@ describe('presets da curva', () => {
   it('alças de partida: a bezier do preset (aproximada nos cúbicos) ou a própria', () => {
     expect(handlesOf('linear')).toEqual([0.25, 0.25, 0.75, 0.75])
     expect(handlesOf({ bezier: [0.1, 1.8, 0.9, -0.5] })).toEqual([0.1, 1.8, 0.9, -0.5])
-    // 'Suavizar saída' aproximada: perto da cúbica real
-    const b = handlesOf('out')
-    for (const p of [0.25, 0.5, 0.75]) expect(easeValue({ bezier: b }, p)).toBeCloseTo(easeValue('out', p), 1)
+    // entrada/saída são cúbicas exatas como bezier (x(t) = t); só "ambos" é aproximada
+    expect(handlesOf('in')).toEqual([1 / 3, 0, 2 / 3, 0])
+    expect(handlesOf('out')).toEqual([1 / 3, 1, 2 / 3, 1])
+    for (const e of ['in', 'out'] as const) for (const p of [0.1, 0.25, 0.5, 0.75, 0.9]) expect(easeValue({ bezier: handlesOf(e) }, p)).toBeCloseTo(easeValue(e, p), 6)
+    for (const p of [0.25, 0.5, 0.75]) expect(easeValue({ bezier: handlesOf('inOut') }, p)).toBeCloseTo(easeValue('inOut', p), 1)
   })
 })
 

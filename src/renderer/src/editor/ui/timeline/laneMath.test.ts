@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Anim } from '@shared/editor/project'
-import { curveSegments, easeKind, valueRange, valueToY } from './laneMath'
+import { curveSegments, easeKind, formatKeyValue, valueRange, valueToY } from './laneMath'
 
 const S = 1_000_000
 const OVERSHOOT: [number, number, number, number] = [0.34, 1.56, 0.64, 1]
@@ -62,5 +62,19 @@ describe('curveSegments', () => {
   })
   it('sem keys: nada a desenhar', () => {
     expect(curveSegments({ value: 3 }, S, 100, 0, 100, 20)).toEqual([])
+  })
+})
+
+describe('formatKeyValue (rótulo acessível do losango)', () => {
+  it('na unidade do inspetor', () => {
+    expect(formatKeyValue('transform.x', 0.305)).toBe('30,5%')
+    expect(formatKeyValue('transform.scale', 1.5)).toBe('150%')
+    expect(formatKeyValue('transform.rotation', -12.26)).toBe('-12,3°')
+    expect(formatKeyValue('adjust.brightness', -0.2)).toBe('-20%')
+    expect(formatKeyValue('visual.radius', 12)).toBe('12 px')
+    expect(formatKeyValue('strength', 40)).toBe('40')
+    expect(formatKeyValue('audio.volume', 1)).toBe('0 dB')
+    expect(formatKeyValue('audio.volume', 0.5)).toBe('-6 dB')
+    expect(formatKeyValue('audio.volume', 0)).toBe('mudo')
   })
 })

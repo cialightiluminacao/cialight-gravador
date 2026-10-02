@@ -16,7 +16,8 @@ import { curveKeyFor } from './curveMath'
 // Botão de keyframe genérico de uma propriedade animável (AnimPath): ◀ vai ao key anterior, ◇ liga/
 // desliga o key no playhead (cheio = há key aqui; contorno âmbar = propriedade animada), ▶ vai ao
 // próximo. Usado no efeito (região/intensidade), na transformação/opacidade do vídeo e no volume.
-// Botão direito no ◇ abre o editor de curvas do key no playhead (senão o do trecho em que ele está).
+// Botão direito no ◇ (no grupo inteiro: vale com o ◇ desativado — fora do item, faixa bloqueada → curva só
+// leitura) abre o editor de curvas do key no playhead (senão o do trecho em que ele está).
 
 /** Controle de reprodução para os saltos de keyframe (o inspetor não recebe o motor por props). */
 export const InspectorPlayback = createContext<PlaybackController | null>(null)
@@ -57,14 +58,14 @@ export function KeyframeButton({ item, path, label, disabled }: { item: Item; pa
     useCurveEditor.getState().open({ itemId: item.id, path, tUs: k.tUs, x: e.clientX, y: e.clientY })
   }
   return (
-    <div className="flex shrink-0 items-center" data-kf-path={path}>
+    <div className="flex shrink-0 items-center" data-kf-path={path} onContextMenu={openCurve}>
       <Tip content={`Keyframe anterior (${label})`}>
         <button type="button" data-kf="prev" aria-label={`Keyframe anterior de ${label}`} className={btn} disabled={prev === null} onClick={() => go(prev)}>
           <ChevronLeft className="h-3 w-3" />
         </button>
       </Tip>
       <Tip content={<>{here ? `Remover keyframe de ${label}` : `Adicionar keyframe de ${label}`}{animated ? <span className="block text-muted">Botão direito: curva</span> : null}</>}>
-        <button type="button" data-kf="toggle" aria-label={here ? `Remover keyframe de ${label}` : `Adicionar keyframe de ${label}`} aria-pressed={here} className={btn} disabled={!inside || disabled} onClick={toggle} onContextMenu={openCurve}>
+        <button type="button" data-kf="toggle" aria-label={here ? `Remover keyframe de ${label}` : `Adicionar keyframe de ${label}`} aria-pressed={here} className={btn} disabled={!inside || disabled} onClick={toggle}>
           <span className={cn('block h-2 w-2 rotate-45 border', here ? 'border-black/50 bg-warn' : animated ? 'border-warn' : 'border-muted')} />
         </button>
       </Tip>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isEditableTarget, SHORTCUT_LABELS, shortcutFor, TRANSPORT_ACTIONS, type KeyLike } from './shortcuts'
+import { CURVE_EDITOR_ACTIONS, isEditableTarget, SHORTCUT_LABELS, shortcutFor, TRANSPORT_ACTIONS, type KeyLike } from './shortcuts'
 
 const key = (k: string, mods: Partial<KeyLike> = {}): KeyLike => ({ key: k, ctrlKey: false, shiftKey: false, altKey: false, ...mods })
 
@@ -88,5 +88,12 @@ describe('SHORTCUT_LABELS', () => {
     expect(shortcutFor(key('v', { ctrlKey: true }))).toBe('paste')
     expect(SHORTCUT_LABELS.copy).toBe('Ctrl+C')
     expect(SHORTCUT_LABELS.paste).toBe('Ctrl+V')
+  })
+})
+
+describe('CURVE_EDITOR_ACTIONS', () => {
+  it('com o editor de curvas aberto passam o transporte e desfazer/refazer; editar não', () => {
+    for (const a of ['playPause', 'prevFrame', 'undo', 'redo'] as const) expect(CURVE_EDITOR_ACTIONS.has(a)).toBe(true)
+    for (const a of ['delete', 'split', 'paste', 'copy'] as const) expect(CURVE_EDITOR_ACTIONS.has(a)).toBe(false)
   })
 })

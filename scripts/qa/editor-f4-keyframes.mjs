@@ -9,8 +9,9 @@
 // A fixture é mídia sintética (testsrc2 + voz sintética + PNG). Confere no store e na tela: seta que expande o
 // item, uma linha por propriedade animada (cores por ease, mini-curva), clique/Shift/caixa para selecionar,
 // arrastar o grupo (um passo de desfazer), Delete, Ctrl+C/Ctrl+V no playhead, editor de curvas (losango com o
-// botão direito e ◇ do inspetor; presets; alças com x preso e y livre), linha combinada intacta e o custo por
-// evento ao arrastar um losango. Screenshots em docs/qa/editor-f4/.
+// botão direito e ◇ do inspetor, também desativado/bloqueado; presets; alças com x preso e y livre, por teclado),
+// seleção mista (combinado + linha), colar parcial, atalhos com o popover aberto, linha combinada intacta, o custo
+// por evento ao arrastar um losango e o projeto reaberto recolhido. Screenshots em docs/qa/editor-f4/.
 import { spawn, execFileSync } from 'child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
@@ -227,6 +228,16 @@ async function main() {
     await ev(`await T.key('z', { ctrlKey: true }); return 1`)
   }
 
+  console.log('colar keyframes parcial (item sem as propriedades)')
+  {
+    const r = await ev(`const a = T.items().find((i) => i.assetId === 'a_qa_video' && !i.visual).id; await T.seek(7e6); T.st().select(['${v}', a]); await T.settle()
+      const p0 = T.past(); await T.key('v', { ctrlKey: true }); await T.wait(200)
+      const toasts = T.all('[data-sonner-toast]').map((t) => t.textContent)
+      const out = { p0, past: T.past(), o: T.keysOf('${v}', 'transform', 'opacity').map((k) => k[0]), toasts }
+      await T.key('z', { ctrlKey: true }); T.st().select(['${v}']); await T.settle(); return out`)
+    check('cola só no clipe com opacidade (7 s e 10 s), um passo; aviso "Colado em 1 de 2 itens"', JSON.stringify(r.o) === JSON.stringify([2 * S, 5 * S, 7 * S, 10 * S]) && r.past === r.p0 + 1 && r.toasts.some((t) => t.includes('Colado em 1 de 2 itens (1 sem essas propriedades).')), r)
+  }
+
   console.log('editor de curvas (botão direito no losango)')
   {
     const r = await ev(`await T.seek(0); await T.rightClick(T.laneKey('${v}', 'transform.scale', 1e6))
@@ -273,6 +284,61 @@ async function main() {
     check('Segurar: ease "hold" no key de 2 s (degrau no gráfico), um passo', s.o[0][2] === 'hold' && s.o[1][2] === 'linear' && s.past === s.p0 + 1 && s.path.split('L').length === 3, s)
   }
 
+  console.log('seleção mista (combinado + linha)')
+  {
+    const r = await ev(`await T.seek(0); T.st().select(['${v}']); await T.settle()
+      await T.click(T.el('[data-item-id="${v}"] [data-keyframe="1000000"]')); await T.click(T.laneKey('${v}', 'transform.opacity', 2e6), { shiftKey: true })
+      // a escala em 1 s aparece selecionada por causa do combinado: arrastá-la leva o grupo inteiro
+      const shown = T.laneKey('${v}', 'transform.scale', 1e6).dataset.selected ?? null
+      const p0 = T.past(); const k = T.center(T.laneKey('${v}', 'transform.scale', 1e6))
+      await T.drag(k, { x: k.x + 50, y: k.y })
+      const out = { shown, p0, past: T.past(), x: T.keysOf('${v}', 'transform', 'x').map((k) => k[0]), s: T.keysOf('${v}', 'transform', 'scale').map((k) => k[0]), o: T.keysOf('${v}', 'transform', 'opacity').map((k) => k[0]) }
+      await T.key('z', { ctrlKey: true }); return out`)
+    check('arrastar a linha selecionada pelo combinado move combinado + opacidade juntos (+0,5 s), um passo', r.shown === 'true' && JSON.stringify(r.x) === JSON.stringify([1.5 * S, 4 * S]) && JSON.stringify(r.s) === JSON.stringify([1.5 * S, 4 * S]) && JSON.stringify(r.o) === JSON.stringify([2.5 * S, 5 * S]) && r.past === r.p0 + 1, r)
+    const c = await ev(`await T.click(T.el('[data-item-id="${v}"] [data-keyframe="1000000"]')); await T.click(T.laneKey('${v}', 'transform.opacity', 2e6), { shiftKey: true })
+      const before = T.all('[data-lanes-item="${v}"] [data-selected]').length
+      await T.click(T.laneKey('${v}', 'transform.x', 1e6)); await T.wait(100)
+      return { before, after: T.all('[data-lanes-item="${v}"] [data-selected]').map((e) => e.dataset.path + '@' + e.dataset.laneKey), combined: !!document.querySelector('[data-item-id="${v}"] [data-keyframe="1000000"] .ring-accent') }`)
+    check('clique sem arrastar num losango da seleção: fica só ele', c.before === 3 && JSON.stringify(c.after) === JSON.stringify(['transform.x@1000000']) && !c.combined, c)
+    const a = await ev(`return T.laneKey('${v}', 'transform.x', 1e6).getAttribute('aria-label') + ' | ' + T.laneKey('${v}', 'transform.x', 1e6).getAttribute('role')`)
+    check('losango acessível: role=button e rótulo com propriedade, instante e valor', a === 'Keyframe de Posição X em 1,00 s: 30%, curva Linear | button', a)
+  }
+
+  console.log('atalhos e teclado com o editor de curvas aberto')
+  {
+    const r = await ev(`await T.rightClick(T.laneKey('${v}', 'transform.scale', 1e6)); const e0 = T.keysOf('${v}', 'transform', 'scale')[0][2]
+      await T.click(T.el('[data-curve-editor] [data-curve-preset="linear"]')); const e1 = T.keysOf('${v}', 'transform', 'scale')[0][2]
+      await T.key('z', { ctrlKey: true }); const e2 = T.keysOf('${v}', 'transform', 'scale')[0][2]
+      const p0 = T.past(); await T.key('Delete')
+      return { e0, e1, e2, open: !!document.querySelector('[data-curve-editor]'), labelled: document.getElementById(T.el('[data-curve-editor]').getAttribute('aria-labelledby'))?.textContent, del: T.past() - p0, keys: T.keysOf('${v}', 'transform', 'scale').length }`)
+    check('Ctrl+Z passa com o editor aberto (desfaz o preset) e ele continua aberto', r.e1 === 'linear' && JSON.stringify(r.e2) === JSON.stringify(r.e0) && r.open, r)
+    check('Delete não passa (nada apagado); popover rotulado pelo título', r.del === 0 && r.keys === 2 && r.labelled === 'Curva — Escala', r)
+    const k = await ev(`const h = T.el('[data-curve-editor] [data-curve-handle="1"]'); h.focus(); const b0 = T.keysOf('${v}', 'transform', 'scale')[0][2]; const p0 = T.past(); const ph = T.st().playheadUs
+      for (let i = 0; i < 3; i++) h.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+      h.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', shiftKey: true, bubbles: true, cancelable: true })); await T.settle(); const tx = !!T.st().txBase
+      h.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', bubbles: true, cancelable: true })); await T.settle()
+      return { focused: document.activeElement === h, tab: h.getAttribute('tabindex'), b0, b1: T.keysOf('${v}', 'transform', 'scale')[0][2], tx, dp: T.past() - p0, ph: T.st().playheadUs === ph, label: h.getAttribute('aria-label') }`)
+    check('alça focável; setas: x1 +0,03 e y1 −0,1 numa transação, um passo ao soltar; playhead parado', k.focused && k.tab === '0' && k.tx && Math.abs(k.b1[0] - Math.min(1, k.b0[0] + 0.03)) < 1e-9 && Math.abs(k.b1[1] - Math.max(-1, k.b0[1] - 0.1)) < 1e-9 && k.dp === 1 && k.ph, k)
+    check('rótulo da alça com os valores', k.label.startsWith('Alça de saída do keyframe: tempo '), k.label)
+    await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await T.settle(); await T.wait(200); return 1`)
+  }
+
+  console.log('◇ desativado + faixa bloqueada: curva só leitura')
+  {
+    const tid = await ev(`return T.st().project.tracks.find((t) => t.items.some((i) => i.id === '${v}')).id`)
+    const r = await ev(`const lock = (on) => T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => (t.id === '${tid}' ? { ...t, locked: on } : t)) }))
+      lock(true); T.st().select(['${v}']); await T.seek(12e6); await T.wait(200)
+      const kf = T.el('[aria-label="Inspetor"] [data-kf-path="transform.opacity"] [data-kf="toggle"]'); const disabled = kf.disabled
+      await T.rightClick(kf); const pop = document.querySelector('[data-curve-editor]')
+      const out = { disabled, open: !!pop, text: pop?.textContent ?? '', presetsDisabled: T.all('[data-curve-editor] [data-curve-preset]').every((b) => b.disabled), handleTab: T.all('[data-curve-editor] [data-curve-handle]').map((h) => h.getAttribute('tabindex')) }
+      return out`)
+    await shot('f4-kf-07-curva-bloqueada.png')
+    await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await T.settle(); await T.wait(200)
+      T.st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => (t.id === '${tid}' ? { ...t, locked: false } : t)) })); await T.seek(0); return 1`)
+    check('botão direito com o ◇ desativado abre a curva (último key: opacidade a partir de 5 s)', r.disabled && r.open && r.text.includes('Curva — Opacidade') && r.text.includes('a partir de 00:05:00'), r)
+    check('faixa bloqueada: aviso, presets desativados, alças fora do Tab', r.text.includes('Faixa bloqueada') && r.presetsDisabled && r.handleTab.every((t) => t === '-1'), r)
+  }
+
   console.log('linha combinada (todas as propriedades no instante)')
   {
     const r = await ev(`const k = T.el('[data-item-id="${v}"] [data-keyframe="1000000"]'); await T.click(k); await T.wait(100)
@@ -305,6 +371,19 @@ async function main() {
     check('Esc cancela o arraste do losango (keys no lugar, sem transação)', JSON.stringify(r.x) === JSON.stringify([S, 4 * S]) && !r.tx, r)
   }
 
+  console.log('copiar itens: aviso e menu Copiar/Colar')
+  {
+    const r = await ev(`T.st().select(['${v}']); await T.settle(); await T.key('Escape'); T.st().select(['${v}']); await T.settle()
+      await T.key('c', { ctrlKey: true }); await T.wait(200); const toasts = T.all('[data-sonner-toast]').map((t) => t.textContent)
+      const e = T.el('[data-item-id="${v}"]'); const rr = e.getBoundingClientRect(); const x = rr.left + 140, y = rr.top + rr.height / 2
+      T.topAt(x, y).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2 })); await T.settle(); await T.wait(300)
+      const menu = T.all('[data-timeline-menu] [role="menuitem"]').map((m) => m.textContent)
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await T.settle(); await T.wait(200)
+      return { toasts, menu }`)
+    check('Ctrl+C de itens avisa "Item copiado"', r.toasts.some((t) => t.includes('Item copiado')), r.toasts)
+    check('menu do item: Copiar (Ctrl+C) e Colar (Ctrl+V)', r.menu.some((t) => t.includes('Copiar') && t.includes('Ctrl+C')) && r.menu.some((t) => t.includes('Colar') && t.includes('Ctrl+V')), r.menu)
+  }
+
   console.log('recolher')
   {
     const r = await ev(`const btn = T.el('[data-item-id="${v}"] [data-expand-item]'); await T.click(btn); await T.wait(150); return { lanes: !!T.lanes('${v}'), expanded: btn.getAttribute('aria-expanded') }`)
@@ -316,6 +395,20 @@ async function main() {
   {
     const r = await ev(`let n = 0; while (T.st().canUndo && n < 40) { await T.key('z', { ctrlKey: true }); n++ } return { n, x: T.keysOf('${v}', 'transform', 'x').length }`)
     check('Ctrl+Z até o início (sem keys de X)', r.x === 0, r)
+  }
+
+  console.log('carregar o projeto começa recolhido')
+  {
+    await ev(`await T.click(T.el('[data-item-id="${v}"] [data-expand-item]')); await T.wait(150); window.__navigate('projects'); return 1`)
+    await sleep(800)
+    await ev(`window.__navigate('editor:p-qa-editor-fixture'); return 1`)
+    for (let i = 0; i < 60; i++) {
+      if (await ev(`return !!document.querySelector('[data-item-id="${v}"]')`)) break
+      await sleep(500)
+    }
+    await ev(HELPERS + '; return 1')
+    const r = await ev(`await T.wait(300); return { lanes: !!T.lanes('${v}'), expanded: T.el('[data-item-id="${v}"] [data-expand-item]').getAttribute('aria-expanded') }`)
+    check('reabrir o projeto: nenhum item expandido', !r.lanes && r.expanded === 'false', r)
   }
 }
 

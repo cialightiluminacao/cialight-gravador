@@ -222,3 +222,16 @@ describe('keys por propriedade (linhas de keyframes na timeline)', () => {
     expect(ops.copyKeyframes(p, v, { keys: [{ path: 'crop.l', tUs: 3 * S }] })).toBeNull()
   })
 })
+
+describe('pastablePaths', () => {
+  it('propriedades do clipboard que o item tem (Tarja sem intensidade)', () => {
+    const { p, v, txt } = base()
+    const clip = ops.copyKeyframes(p, txt)!
+    expect(Object.keys(clip.keys).sort()).toEqual(['text.size'])
+    expect(ops.pastablePaths(byId(p, v), clip)).toEqual([])
+    expect(ops.pastablePaths(byId(p, txt), clip)).toEqual(['text.size'])
+    const solid = ops.addEffect(p, 'solid', 12 * S, { durationUs: S })
+    const fxClip = { keys: { strength: [{ tUs: 0, value: 1, ease: 'linear' as const }], 'region.x': [{ tUs: 0, value: 0.5, ease: 'linear' as const }] } }
+    expect(ops.pastablePaths(byId(solid.project, solid.itemId), fxClip)).toEqual(['region.x'])
+  })
+})
