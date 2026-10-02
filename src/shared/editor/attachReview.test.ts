@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
-import { withDeferredFallbacks } from './attachment'
-import type { RegionValues } from './contentPose'
+import { anchoredUnion, refreshAttachments, withDeferredFallbacks } from './attachment'
+import { NO_HOLE, type RegionValues } from './contentPose'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
 import { attachCandidate, attachEffects, effectsOverClip } from './followTransform'
-import { deleteItems, findItem, setItemEnabled } from './ops'
+import { deleteItems, duplicateItems, findItem, setItemEnabled, updateAsset } from './ops'
 import { privacyWarnings } from './privacy'
 import type { Anim, Asset, Ease, EffectItem, MediaItem, Project, Us } from './project'
 import { effectRegionAt } from './resolve'
@@ -151,5 +151,124 @@ describe('revisão: clipe desativado, sem caixa, além do clipe, oferta do zoom'
     const q = attachEffects({ ...p, tracks: [p.tracks[0], track('tp', [pip]), p.tracks[1]] }, 'pip', ['fx'])
     expect(fxOf(q).attach!.mediaItemId).toBe('pip')
     expect(effectsOverClip(q, 'm')).toEqual({ linked: [], unlinked: [] })
+  })
+})
+
+// ---------------------------------------------------------------- efeito invertido (região = buraco nítido)
+
+/** O mesmo projeto com o efeito `fx` invertido ("borrar tudo menos a região"). */
+const inverted = (p: Project): Project => ({ ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === 'fx' && i.type === 'effect' ? { ...i, invert: true } : i)) })) })
+
+/**
+ * O pixel de centro (px, py) fica no buraco nítido da região `r` do quadro? Mesma conta da máscara invertida de
+ * FS_APPLY (shaders.ts) com feather 0 — o feather do invertido só cresce para DENTRO: meia-largura presa a ≥ 1e-3 px,
+ * dentro ⇔ distância ≤ 0.
+ */
+function inHole(r: RegionValues, shape: 'rect' | 'ellipse', px: number, py: number): boolean {
+  const th = (r.rotation * Math.PI) / 180, c = Math.cos(th), sn = Math.sin(th)
+  const dx = px - r.x * W, dy = py - r.y * H
+  const lx = c * dx + sn * dy, ly = -sn * dx + c * dy
+  const hx = Math.max((Math.abs(r.w) * W) / 2, 1e-3), hy = Math.max((Math.abs(r.h) * H) / 2, 1e-3)
+  if (shape === 'ellipse') return Math.hypot(lx / hx, ly / hy) <= 1
+  const qx = Math.abs(lx) - hx, qy = Math.abs(ly) - hy
+  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) <= 0
+}
+/** Centros de pixel do quadro no buraco de `r` (varre a caixa dela, +1 px). */
+function holePixels(r: RegionValues, shape: 'rect' | 'ellipse'): [number, number][] {
+  const th = (r.rotation * Math.PI) / 180, c = Math.abs(Math.cos(th)), sn = Math.abs(Math.sin(th))
+  const hw = (Math.abs(r.w) * W) / 2, hh = (Math.abs(r.h) * H) / 2
+  const ex = shape === 'rect' ? c * hw + sn * hh : Math.hypot(hw * c, hh * sn)
+  const ey = shape === 'rect' ? sn * hw + c * hh : Math.hypot(hw * sn, hh * c)
+  const out: [number, number][] = []
+  for (let y = Math.max(0, Math.floor(r.y * H - ey - 1)); y < Math.min(H, Math.ceil(r.y * H + ey + 1)); y++) {
+    for (let x = Math.max(0, Math.floor(r.x * W - ex - 1)); x < Math.min(W, Math.ceil(r.x * W + ex + 1)); x++) {
+      if (inHole(r, shape, x + 0.5, y + 0.5)) out.push([x + 0.5, y + 0.5])
+    }
+  }
+  return out
+}
+/** Conferência invertida: todo pixel nítido no buraco conservador `cons` também é nítido no buraco `hole` do build novo. */
+function holeOutside(cons: RegionValues, hole: RegionValues, shape: 'rect' | 'ellipse'): [number, number] | null {
+  for (const [x, y] of holePixels(cons, shape)) if (!inHole(hole, shape, x, y)) return [x, y]
+  return null
+}
+
+describe('efeito invertido: o caminho conservador nunca abre um buraco maior que o do build novo', () => {
+  it.each(cases)('%s (invertido): o buraco gravado para a v1.3 cabe no buraco do build novo em todo instante (1/240 s)', (_n, make) => {
+    const q = inverted(make())
+    const fx = fxOf(q)
+    const hole = v13Region(q)
+    expect(hole).toEqual(NO_HOLE)
+    for (let t = fx.startUs; t < fx.startUs + fx.durationUs; t += Math.round(S / 240)) {
+      const bad = holeOutside(hole, screen(q, t), fx.region.shape)
+      if (bad) throw new Error(`pixel ${bad} nítido na v1.3 e escondido no build novo em ${t}`)
+    }
+    // ida e volta pela v1.3 (abre e grava sem attach): o build novo desenha o mesmo buraco nulo; pelo parse novo, sem perda
+    const disk = JSON.parse(JSON.stringify(toDiskProject(q)))
+    const v13 = parseProjectV13(disk)
+    if (v13.success) {
+      const back = parseProject(JSON.parse(JSON.stringify(v13.data)))
+      const fb = back.tracks.flatMap((t) => t.items).find((i) => i.id === 'fx') as EffectItem
+      expect(fb.attach).toBeUndefined()
+      expect(holePixels(effectRegionAt(back, fb, fx.startUs), fb.region.shape)).toEqual([])
+    }
+    expect(parseProject(disk)).toEqual(q)
+  })
+  it('âncora perdida (com e sem caixa de reserva): nenhum pixel nítido — no build novo e na v1.3', () => {
+    const q = inverted(deleteItems(cases[0][1](), ['m'], { includeLinked: false }))
+    for (const r of [q, withoutFallback(q)]) {
+      expect(screen(r, S)).toEqual(NO_HOLE)
+      expect(holePixels(screen(r, S), 'rect')).toEqual([])
+      expect(v13Region(r)).toEqual(NO_HOLE)
+    }
+  })
+  it('sem caixa de reserva (o normal usa o quadro inteiro): invertido esconde tudo, retângulo e elipse', () => {
+    const bare = inverted(withoutFallback(deleteItems(attached(scene((m) => { m.visual!.transform.scale = anim(1, 2) })), ['m'], { includeLinked: false })))
+    expect(screen(bare, S)).toEqual(NO_HOLE)
+    expect(holePixels(screen(bare, S), 'rect')).toEqual([])
+    expect(holePixels(screen(bare, S), 'ellipse')).toEqual([])
+    // o normal continua com o quadro inteiro
+    expect(screen(withoutFallback(deleteItems(attached(scene()), ['m'], { includeLinked: false })), S)).toEqual({ x: 0.5, y: 0.5, w: 1, h: 1, rotation: 0 })
+  })
+  it('além do clipe (antes do deslizar; depois do fim, no meio do zoom): nenhum pixel nítido; dentro do clipe, o buraco ancorado', () => {
+    const slide = inverted(attached(scene((m) => { m.startUs = 2 * S; m.durationUs = 8 * S; m.visual!.animIn = { preset: 'slideL', durationUs: S } })))
+    expect(warn(slide, 'attachBeyondClip')).toEqual([expect.objectContaining({ tUs: 0 })])
+    expect(screen(slide, S)).toEqual(NO_HOLE)
+    expect(holePixels(screen(slide, S), 'rect')).toEqual([])
+    const zoom = inverted(attached(scene((m, fx) => { m.durationUs = 6 * S; m.visual!.transform.scale = anim(1, 3, 'in', 3 * S, 6 * S); fx.durationUs = 10 * S })))
+    expect(screen(zoom, 8 * S)).toEqual(NO_HOLE)
+    expect(holePixels(screen(zoom, 8 * S), 'rect')).toEqual([])
+    expect(holePixels(screen(zoom, S), 'rect').length).toBeGreaterThan(100 * 100)
+  })
+  it('colado sem o clipe: a cópia solta invertida fica com o buraco nulo', () => {
+    const q = inverted(cases[0][1]())
+    const { project, itemIds } = duplicateItems(q, ['fx'], 12 * S)
+    const copy = findItem(project, itemIds[0])!.item as EffectItem
+    expect(copy.attach).toBeUndefined()
+    expect(effectRegionAt(project, copy, copy.startUs)).toEqual(NO_HOLE)
+  })
+})
+
+describe('caixa de reserva: mudanças de geometria fora do clipe e do efeito', () => {
+  const fbOf = (p: Project) => fxOf(p).attach!.fallback
+  const fresh = (p: Project) => anchoredUnion(p, fxOf(p), findItem(p, 'm')!.item as MediaItem)
+  it('religar o asset a outro tamanho/rotação recalcula a caixa (pela operação, incremental)', () => {
+    const q = attached(scene((m) => { m.visual!.transform.scale = anim(1, 2) }))
+    for (const video of [{ ...vid.video!, width: 1080, height: 1920 }, { ...vid.video!, rotation: 90 as const }]) {
+      const r = updateAsset(q, 'v', { video })
+      expect(fbOf(r)).not.toEqual(fbOf(q))
+      expect(fbOf(r)).toEqual(fresh(r))
+    }
+    // patch que não mexe na geometria (nome, análise de fala, áudio processado): a caixa fica
+    expect(fxOf(updateAsset(q, 'v', { name: 'outro' }))).toBe(fxOf(q))
+  })
+  it('mudar o tamanho do quadro (função crua do editor) recalcula a caixa no refresh', () => {
+    const q = attached(scene((m) => { m.visual!.transform.scale = anim(1, 2) }))
+    const r = refreshAttachments({ ...q, canvas: { ...q.canvas, width: 1080, height: 1920 } }, q)
+    expect(fbOf(r)).not.toEqual(fbOf(q))
+    expect(fbOf(r)).toEqual(fresh(r))
+    // só a cor de fundo: nada muda
+    const bg = { ...q, canvas: { ...q.canvas, background: '#ffffff' } }
+    expect(refreshAttachments(bg, q)).toBe(bg)
   })
 })

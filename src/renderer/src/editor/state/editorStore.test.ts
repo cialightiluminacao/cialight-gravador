@@ -83,6 +83,10 @@ describe('editorStore', () => {
     // a caixa do commit é a mesma de uma edição direta
     const direct = updateItem<MediaItem>(attachEffects(p, 'm', ['fx']), 'm', (d) => { d.visual!.transform.scale = { value: 3 } })
     expect(fb()).toEqual((findItem(direct, 'fx')!.item as EffectItem).attach!.fallback)
+    // função crua fora de transação (proporção do quadro na barra de cima): a caixa também se recalcula
+    const f1 = fb()
+    st().apply((q) => ({ ...q, canvas: { ...q.canvas, width: 1080, height: 1920 } }))
+    expect(fb()).not.toEqual(f1)
   })
 
   it('commitTx sem mudanças não cria entrada', () => {

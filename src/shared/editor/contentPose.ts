@@ -18,6 +18,30 @@ export interface RegionValues { x: number; y: number; w: number; h: number; rota
 export interface ClipFrame { cx: number; cy: number; rotation: number; sx: number; sy: number; mirror: boolean; g: LayerBase; W: number; H: number }
 
 /**
+ * Buraco nulo: região de tamanho 0 no canto (0, 0) do quadro. O canto cai sempre entre pixels (em qualquer resolução
+ * de saída), então nenhum centro de pixel fica dentro dela — invertido, o efeito cobre o quadro inteiro.
+ */
+export const NO_HOLE: RegionValues = { x: 0, y: 0, w: 0, h: 0, rotation: 0 }
+
+/**
+ * Região estática do quadro, conservadora, para um efeito ancorado cuja região exata não dá para desenhar (âncora
+ * perdida, instante fora do clipe, disco lido pela v1.3, efeito colado sem o clipe). `box`: a caixa que envolve a
+ * região ao longo do clipe (anchoredUnion; null = desconhecida).
+ * - Normal (esconde a região): esconder MAIS é o seguro → a caixa (elipse: a que a contém, ×√2); sem caixa, o quadro
+ *   inteiro (elipse ×√2).
+ * - Invertido (`invert`: a região é o buraco que fica nítido, todo o resto é escondido): uma região maior seria um
+ *   buraco maior, vazando o que está em volta. O seguro é o buraco nulo (NO_HOLE): esconde o quadro inteiro. A
+ *   interseção das poses também seria segura, mas some com qualquer movimento e exige geometria a mais — o buraco
+ *   nulo é simples, exato e vale em todos os caminhos.
+ */
+export function conservativeRegion(fx: Pick<EffectItem, 'invert' | 'region'>, box: { x: number; y: number; w: number; h: number } | null): RegionValues {
+  if (fx.invert) return NO_HOLE
+  const f = box ?? { x: 0.5, y: 0.5, w: 1, h: 1 }
+  const k = fx.region.shape === 'ellipse' ? Math.SQRT2 : 1
+  return { x: f.x, y: f.y, w: f.w * k, h: f.h * k, rotation: 0 }
+}
+
+/**
  * Pose da região no espaço do conteúdo: ponto da fonte exibida (px) sob o centro, tamanho em px da fonte e rotação
  * relativa à do clipe; fx/fy = px do quadro por px da fonte (para medir desvios na tela).
  */

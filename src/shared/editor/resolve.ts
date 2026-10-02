@@ -1,7 +1,7 @@
 // Resolve o estado do quadro em um instante da timeline: lista de camadas (fundo → topo)
 // consumida pelo compositor (preview e export). Pura, sem DOM/Electron.
 import { easeValue, evalAnim } from './anim'
-import { ATTACH_PAD_PX, contentToScreen, type ClipFrame, type RegionValues } from './contentPose'
+import { ATTACH_PAD_PX, conservativeRegion, contentToScreen, type ClipFrame, type RegionValues } from './contentPose'
 import { defaultVisual } from './factory'
 import { layerBase } from './layerGeometry'
 import type { Anim, AnimPreset, Asset, EffectItem, Item, MediaItem, Project, ShapeItem, TextStyle, Track, TransitionKind, Us, VisualProps } from './project'
@@ -135,27 +135,20 @@ export function attachedMedia(p: Project, fx: EffectItem): MediaItem | null {
   return null
 }
 
-/** Quadro inteiro: a região de um efeito ancorado sem clipe nem caixa de reserva (nunca os valores do conteúdo crus). */
-const FULL_FRAME_REGION: RegionValues = { x: 0.5, y: 0.5, w: 1, h: 1, rotation: 0 }
-
 /**
  * Região do efeito NO QUADRO no instante absoluto tUs. Sem âncora: as anims da região. Ancorado: as anims estão no
  * espaço do conteúdo do clipe e, enquanto o clipe dura ([início, fim) dele), vão à tela pela geometria dele neste
  * instante (conservadora, contentToScreen, com `pad` px de folga — desancorar assa sem ela). Fora do clipe (efeito mais
- * longo que ele: aviso attachBeyondClip) ou com o clipe apagado/desativado (attachLost): a caixa de reserva — a que
- * envolve a região ao longo de todo o clipe (anchoredUnion); elipse: a que contém a caixa (×√2); sem caixa, o quadro
- * inteiro.
+ * longo que ele: aviso attachBeyondClip) ou com o clipe apagado/desativado (attachLost): conservativeRegion da caixa de
+ * reserva (a que envolve a região ao longo de todo o clipe, anchoredUnion) — nunca os valores do conteúdo crus. Normal:
+ * a caixa (elipse ×√2; sem caixa, o quadro inteiro). Invertido: o buraco nulo (esconde o quadro inteiro).
  */
 export function effectRegionAt(p: Project, fx: EffectItem, tUs: Us, pad = ATTACH_PAD_PX): RegionValues {
   const r = fx.region, local = tUs - fx.startUs
   const v = { x: evalAnim(r.x, local), y: evalAnim(r.y, local), w: evalAnim(r.w, local), h: evalAnim(r.h, local), rotation: evalAnim(r.rotation, local) }
   if (!fx.attach) return v
   const m = attachedMedia(p, fx)
-  if (!m || tUs < m.startUs || tUs >= m.startUs + m.durationUs) {
-    const f = fx.attach.fallback ?? FULL_FRAME_REGION
-    const k = r.shape === 'ellipse' ? Math.SQRT2 : 1
-    return { x: f.x, y: f.y, w: f.w * k, h: f.h * k, rotation: 0 }
-  }
+  if (!m || tUs < m.startUs || tUs >= m.startUs + m.durationUs) return conservativeRegion(fx, fx.attach.fallback ?? null)
   return contentToScreen(clipFrameAt(p, m, tUs, true)!, v, r.shape, pad)
 }
 

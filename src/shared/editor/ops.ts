@@ -3,7 +3,7 @@ import { copyKeys, evalAnim, insertKeyExact, pasteKeys, removeKey, setEase, setK
 import { ANIM_PATHS, assignAnim, getAnim, mapItemAnims as mapAnims, mapVisualAnims as mapVisual, type AnimPath } from './animPaths'
 import { maintainAttachments } from './attachment'
 import { createEffectItem, createMediaItem } from './factory'
-import { regionAabb } from './contentPose'
+import { conservativeRegion, regionAabb } from './contentPose'
 import { effectRegionAt, sourceTimeUs, visualTrackBelow } from './resolve'
 import type { EffectPresetId, EffectRegionInit } from './factory'
 import { newId } from './ids'
@@ -1484,13 +1484,14 @@ export function duplicateItems(p0: Project, itemIds: string[], atUs?: Us): { pro
 }
 
 /**
- * Cópia `copy` do efeito ancorado `orig` sem a âncora: a região do quadro passa a ser a caixa de reserva (sem ela, a
- * caixa da região no início do efeito), parada; elipse cresce √2 (a que contém a caixa), como o resolve faz.
+ * Cópia `copy` do efeito ancorado `orig` sem a âncora: a região do quadro passa a ser conservativeRegion da caixa de
+ * reserva (sem ela, a caixa da região no início do efeito), parada — como o resolve desenha a âncora perdida: elipse
+ * cresce √2; invertido, o buraco nulo (esconde o quadro inteiro; o usuário redesenha o buraco).
  */
 function looseEffect(p: Project, orig: EffectItem, copy: EffectItem): EffectItem {
   const f = orig.attach?.fallback ?? ((b) => ({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2, w: b.x1 - b.x0, h: b.y1 - b.y0 }))(regionAabb(effectRegionAt(p, orig, orig.startUs), p.canvas.width, p.canvas.height))
-  const k = orig.region.shape === 'ellipse' ? Math.SQRT2 : 1
-  return { ...omit(copy, 'attach'), region: { shape: orig.region.shape, x: { value: f.x }, y: { value: f.y }, w: { value: f.w * k }, h: { value: f.h * k }, rotation: { value: 0 } } }
+  const r = conservativeRegion(orig, f)
+  return { ...omit(copy, 'attach'), region: { shape: orig.region.shape, x: { value: r.x }, y: { value: r.y }, w: { value: r.w }, h: { value: r.h }, rotation: { value: r.rotation } } }
 }
 
 /**

@@ -130,8 +130,11 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       set({ ...derive({ ...history, present: next }) })
       return true
     }
-    // commit real (se houver transação aberta, ela é encerrada com este estado; caixas das âncoras em dia)
-    const h = commit(txBase ? { ...history, present: txBase } : history, touch(txBase ? refreshAttachments(next, txBase) : next), HISTORY_LIMIT)
+    // commit real (se houver transação aberta, ela é encerrada com este estado; caixas das âncoras em dia). Fora de
+    // transação as operações já mantêm as âncoras (edit()); o tamanho do quadro muda por função crua (barra de cima,
+    // inspetor), que não passa por lá — então o refresh
+    const fresh = txBase ? refreshAttachments(next, txBase) : next.canvas !== history.present.canvas ? refreshAttachments(next, history.present) : next
+    const h = commit(txBase ? { ...history, present: txBase } : history, touch(fresh), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
     return true
   },

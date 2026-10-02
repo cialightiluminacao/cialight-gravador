@@ -75,6 +75,12 @@ export function withDeferredFallbacks<T>(fn: () => T): T {
   }
 }
 
+/** O que o asset muda na geometria do clipe (clipFrameAt): tamanho e rotação do vídeo. */
+const assetGeom = (p: Project, id: string): string => {
+  const v = p.assets.find((a) => a.id === id)?.video
+  return v ? `${v.width}x${v.height}r${v.rotation}` : ''
+}
+
 const sameBox = (a: ScreenBox | undefined, b: ScreenBox | null): boolean => !!a && !!b && Math.abs(a.x - b.x) < 1e-12 && Math.abs(a.y - b.y) < 1e-12 && Math.abs(a.w - b.w) < 1e-12 && Math.abs(a.h - b.h) < 1e-12
 
 /**
@@ -83,7 +89,8 @@ const sameBox = (a: ScreenBox | undefined, b: ScreenBox | null): boolean => !!a 
  *    duplicar/colar, congelar, apagar trechos, mover) passa ao clipe de vídeo do grupo que mais o cruza (empate: o do
  *    mesmo asset). Sem candidato, fica como está (apagado → attachLost).
  * 2. A caixa de reserva (anchoredUnion) é recalculada só para os efeitos cujo item ou clipe-âncora mudou em relação a
- *    `base` (padrão: o original do rascunho) — e não durante edições transitórias (withDeferredFallbacks).
+ *    `base` (padrão: o original do rascunho), cujo asset mudou de geometria (religar a outro tamanho/rotação) ou quando
+ *    o tamanho do quadro mudou — e não durante edições transitórias (withDeferredFallbacks).
  * O item é sempre trocado, nunca mutado: pedaços copiados (dividir, duplicar) dividem o mesmo `attach`, às vezes congelado.
  */
 export function maintainAttachments(d: Project, base?: Project): void {
@@ -102,6 +109,13 @@ export function maintainAttachments(d: Project, base?: Project): void {
   const before = base ?? (isDraft(d) ? original(d) : undefined)
   const old = new Map<string, Item>()
   if (before) for (const t of before.tracks) for (const it of t.items) old.set(it.id, it)
+  const canvasChanged = !!before && (before.canvas.width !== cur.canvas.width || before.canvas.height !== cur.canvas.height)
+  const geomChanged = new Map<string, boolean>()
+  const assetChanged = (id: string): boolean => {
+    if (!before) return true
+    if (!geomChanged.has(id)) geomChanged.set(id, assetGeom(before, id) !== assetGeom(cur, id))
+    return geomChanged.get(id)!
+  }
   for (const { fx, ti, ii } of fxs) {
     const at = fx.attach!
     const curM = media.get(at.mediaItemId)
@@ -118,7 +132,7 @@ export function maintainAttachments(d: Project, base?: Project): void {
     }
     const target = media.get(id)
     let fallback = at.fallback
-    const changed = !before || old.get(fx.id) !== fx || id !== at.mediaItemId || (!!target && old.get(target.id) !== target) || !fallback
+    const changed = !before || canvasChanged || old.get(fx.id) !== fx || id !== at.mediaItemId || (!!target && (old.get(target.id) !== target || assetChanged(target.assetId))) || !fallback
     if (changed && !deferFallbacks && target) fallback = anchoredUnion(cur, { ...fx, attach: { ...at, mediaItemId: id } }, target) ?? fallback
     if (id === at.mediaItemId && (fallback === at.fallback || sameBox(at.fallback, fallback ?? null))) continue
     // item trocado (não mutado): funciona no rascunho e na cópia rasa de refreshAttachments

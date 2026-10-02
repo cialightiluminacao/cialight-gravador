@@ -4,6 +4,7 @@ import { MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
 import type { Anim, EffectItem, EffectRegion, Item, Project, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
+import { conservativeRegion } from './contentPose'
 import { itemAnimEntries, type AnimPath } from './animPaths'
 
 const us = z.number().int()
@@ -236,9 +237,11 @@ function fromDiskAnchors(p: Project): Project {
  * Efeito ancorado no disco. Em memória, `region` está no espaço do conteúdo do clipe (resolve.effectRegionAt a leva ao
  * quadro). A v1.3 instalada não conhece `attach` (o zod dela o descarta) e desenharia esses valores como se fossem do
  * quadro — vazamento. Por isso o disco guarda em `region` uma caixa ESTÁTICA do quadro que cobre tudo o que o build
- * novo desenha ao longo do efeito (a união da região ancorada enquanto o clipe dura, anchoredUnion, com a caixa de
- * reserva usada fora dele; sem clipe nem caixa: o quadro inteiro; elipse ×√2; sem rotação) e a região do conteúdo em
- * `attach.region`. parseProject desfaz a troca; a ida e volta pelo parse novo não perde nada.
+ * novo desenha ao longo do efeito — conservativeRegion da união da região ancorada enquanto o clipe dura
+ * (anchoredUnion) com a caixa de reserva usada fora dele (sem clipe nem caixa: o quadro inteiro; elipse ×√2; sem
+ * rotação). Invertido (a região é o buraco nítido): o buraco nulo — a v1.3 esconde o quadro inteiro, nunca um buraco
+ * maior que o do build novo. A região do conteúdo vai em `attach.region`; parseProject desfaz a troca e a ida e volta
+ * pelo parse novo não perde nada.
  */
 function diskAnchored(p: Project, fx: EffectItem): unknown {
   const at = fx.attach!
@@ -247,11 +250,11 @@ function diskAnchored(p: Project, fx: EffectItem): unknown {
   const f = at.fallback
   const box = u && f
     ? ((x0, y0, x1, y1) => ({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 }))(Math.min(u.x - u.w / 2, f.x - f.w / 2), Math.min(u.y - u.h / 2, f.y - f.h / 2), Math.max(u.x + u.w / 2, f.x + f.w / 2), Math.max(u.y + u.h / 2, f.y + f.h / 2))
-    : (u ?? f ?? { x: 0.5, y: 0.5, w: 1, h: 1 })
-  const k = fx.region.shape === 'ellipse' ? Math.SQRT2 : 1
+    : (u ?? f ?? null)
+  const r = conservativeRegion(fx, box)
   return {
     ...fx,
-    region: { shape: fx.region.shape, x: { value: box.x }, y: { value: box.y }, w: { value: box.w * k }, h: { value: box.h * k }, rotation: { value: 0 } },
+    region: { shape: fx.region.shape, x: { value: r.x }, y: { value: r.y }, w: { value: r.w }, h: { value: r.h }, rotation: { value: r.rotation } },
     attach: { ...at, region: fx.region }
   }
 }
