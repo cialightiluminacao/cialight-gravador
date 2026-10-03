@@ -863,3 +863,48 @@ describe('fix round 1: revisão da Task 2', () => {
     })
   })
 })
+
+describe('fix round 2: revisão da Task 2', () => {
+  const withLuhn = (prefix: string): string => {
+    for (let c = 0; c <= 9; c++) if (luhnValid(prefix + c)) return prefix + c
+    throw new Error('sem dígito')
+  }
+  it('A: cartões de 13–15 dígitos agrupados 4-4-4-N', () => {
+    for (const prefix of ['411111111111', '4111111111111', '41111111111111', '511111111111', '5111111111111']) {
+      const d = withLuhn(prefix)
+      expect(d.length).toBeGreaterThanOrEqual(13)
+      const g = [d.slice(0, 4), d.slice(4, 8), d.slice(8, 12), d.slice(12)].join(' ')
+      const ds = only(detectSensitive([line(g, 0.03)]), 'card')
+      expect(ds, g).toHaveLength(1)
+      expect(ds[0]!.value).toBe(d)
+      expect(only(detectSensitive([line(g.replace(/ /g, '-'), 0.03)]), 'card')).toHaveLength(1)
+    }
+  })
+  it('B: celular sem parênteses com espaço entre as metades; fixo com espaço continua NÃO detectado', () => {
+    for (const t of ['11 98765 4321', '+55 11 98765 4321', '11 9 8765 4321']) {
+      const ds = only(detectSensitive([line(t, 0.03)]), 'phone')
+      expect(ds, t).toHaveLength(1)
+      expect(ds[0]!.value).toBe('11987654321')
+    }
+    // decisão do controlador: formato de fixo "11 3456 7890" é parecido demais com linha de tabela
+    expect(detectSensitive([line('11 3456 7890', 0.03)])).toEqual([])
+    expect(detectSensitive([line('+55 11 3456 7890', 0.03)])).toEqual([])
+  })
+  it('C: cartão começa com 2–6 (7/8/9 de propósito não casam)', () => {
+    for (const first of ['7', '8', '9', '1', '0']) {
+      const d = withLuhn(first + '23456789012345')
+      expect(kindsOf(detectSensitive([line(d)]))).not.toContain('card')
+    }
+  })
+  it('D: e-mail quebrado antes do ponto: joao@exemplo + .com.br', () => {
+    const l = raw([['joao@exemplo', 0.1, 0.096], ['.com.br', 0.1965, 0.056]])
+    const ds = only(detectSensitive([l]), 'email')
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.value).toBe('joao@exemplo.com.br')
+    expect(ds[0]!.box.x).toBeCloseTo(0.1, 9)
+    expect(ds[0]!.box.x + ds[0]!.box.w).toBeCloseTo(0.2525, 9)
+    // palavra seguinte sem ponto no começo não é anexada
+    const m = raw([['joao@exemplo.com', 0.1, 0.128], ['br', 0.2285, 0.016]])
+    expect(only(detectSensitive([m]), 'email')[0]!.value).toBe('joao@exemplo.com')
+  })
+})

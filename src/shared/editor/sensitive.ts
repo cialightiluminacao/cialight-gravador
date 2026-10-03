@@ -354,9 +354,11 @@ function emit(out: Cand[], p: Pass, kind: SensitiveKind, value: string, conf: Ca
 const DDD = '(?:1[1-9]|2[12478]|3[1-578]|4[1-9]|5[1345]|6[1-9]|7[134579]|8[1-9]|9[1-9])'
 // "9" pode vir separado ("9 8765-4321"). Só números COM parênteses aceitam espaço entre as
 // metades ("(41) 3456 7890"); sem parênteses exige hífen/colado, senão linhas de tabela
-// ("41 3456 7890") viram telefone.
+// ("41 3456 7890") viram telefone. Exceção: celular (assinante começando em 9) aceita espaço
+// simples entre as metades ("11 98765 4321"). Decisão: fixo com espaço ("11 3456 7890") NÃO é
+// detectado (parecido demais com linha de tabela).
 const PH_NUM_P = '(?:9\\s?\\d{4}|[2-5]\\d{3})[\\s-]{0,2}\\d{4}'
-const PH_NUM = '(?:9\\s?\\d{4}|[2-5]\\d{3})(?:\\s?[-–]\\s?)?\\d{4}'
+const PH_NUM = '(?:9\\s?\\d{4}(?:\\s?[-–]\\s?|\\s)?|[2-5]\\d{3}(?:\\s?[-–]\\s?)?)\\d{4}'
 // Telefone: com parênteses OU número "solto" com fronteira estrita; DDD + (9XXXX|[2-5]XXX) + 4 dígitos
 const RE_PHONE = new RegExp(
   `(?:(?<!\\d)(?:\\+?55[\\s-]?)?\\(0?${DDD}\\)[\\s-]{0,2}${PH_NUM_P}` +
@@ -368,9 +370,11 @@ const END = '(?!\\d|[.,]\\d)'
 // ',' é leitura errada comum de '.'; '\' e '|' de '/' no CNPJ (o checksum continua protegendo)
 const RE_CPF = new RegExp(`${NB}\\d{3}[.,\\s]{0,2}\\d{3}[.,\\s]{0,2}\\d{3}[-–—.,\\s]{0,3}\\d{2}${END}`, 'g')
 const RE_CNPJ = new RegExp(`${NB}\\d{2}[.,\\s]{0,2}\\d{3}[.,\\s]{0,2}\\d{3}[/\\\\|\\s]{0,2}\\d{4}[-–—.,\\s]{0,3}\\d{2}${END}`, 'g')
-// Cartão: agrupamentos regulares 4-4-4-4[-3], Amex 4-6-5, Diners 4-6-4, ou corrido de 13–19 dígitos
+// Cartão: agrupamentos regulares 4-4-4-4[-3], 4-4-4-N (13–15 dígitos), Amex 4-6-5, Diners 4-6-4, ou
+// corrido de 13–19 dígitos. O 1º dígito deve ser 2–6 (marcas BR: Visa 4, Master 2/5, Amex 3, Elo
+// 4/5/6, Hipercard 6, Diners 3); PANs começando em 7/8/9 (e 0/1) NÃO casam de propósito (menos ruído).
 const RE_CARD = new RegExp(
-  `${NB}(?:\\d{4}[ -]\\d{4}[ -]\\d{4}[ -]\\d{4}(?:[ -]\\d{3})?|\\d{4}[ -]\\d{6}[ -]\\d{5}|\\d{4}[ -]\\d{6}[ -]\\d{4}|\\d{13,19})${END}`,
+  `${NB}(?:\\d{4}[ -]\\d{4}[ -]\\d{4}[ -]\\d{4}(?:[ -]\\d{3})?|\\d{4}[ -]\\d{4}[ -]\\d{4}[ -]\\d{1,3}|\\d{4}[ -]\\d{6}[ -]\\d{5}|\\d{4}[ -]\\d{6}[ -]\\d{4}|\\d{13,19})${END}`,
   'g'
 )
 const RE_CEP = /(?:(?<=(?<![A-Za-z])cep[\s:.\-]{0,3})\d{5}-?\d{3}|(?<![A-Za-z0-9])(?<!\d[.,\-/])\d{5}-\d{3})(?!\d|[.,]\d)/gi
@@ -447,7 +451,7 @@ function detectTextKinds(p: Pass, out: Cand[]): void {
       while (lo > wa && (/[._+-]$/.test(p.words[lo - 1]!) || (lo === wAt && p.words[wAt]!.startsWith('@')))) lo--
       if (lo > wa) s = p.wordStart[lo]!
       let hi = wAt
-      while (hi < wb && (/[.-]$/.test(p.words[hi]!) || (hi === wAt && p.words[wAt]!.endsWith('@')))) hi++
+      while (hi < wb && (/[.-]$/.test(p.words[hi]!) || (hi === wAt && p.words[wAt]!.endsWith('@')) || p.words[hi + 1]!.startsWith('.'))) hi++
       if (hi < wb) e = p.wordStart[hi]! + p.words[hi]!.length
       const txt = t.slice(s, e)
       if (!RE_EMAIL_FULL.test(txt)) continue
