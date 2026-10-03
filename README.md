@@ -57,7 +57,15 @@ Editor multi-faixa dentro do app: **Histórico → Editar** (ou **Projetos → N
 - **Reenquadrar:** **Reenquadrar** na barra de cima converte o projeto para **9:16**, **1:1** ou **4:5**, em "Preencher" (com **pontos de foco**: clique no visualizador marca o ponto que fica no centro naquele instante; a câmera vai suave de um ponto ao outro e o ponto continua no centro durante um zoom do clipe) ou "Caber inteiro". O padrão é **Criar cópia** ("<nome> (Vertical)", numa pasta própria com os proxies, sem reprocessar a mídia) — o original fica intacto; "Este projeto" aplica em um passo de desfazer. PiP e textos mantêm o tamanho relativo; os efeitos de privacidade continuam sobre o mesmo conteúdo (ancorados ou ajustados ao novo quadro) e o painel lista o que precisa de conferência (efeito fora do novo quadro, buraco do "Borrar tudo menos…" fechado, anotações).
 - **Compatibilidade:** projetos salvos pela v1.4 continuam abrindo na v1.3, **exceto** os que usam recursos novos sem equivalente nela (keyframes em corte, ajustes, raio ou tamanho do texto; Ken Burns num PiP): esses só abrem na v1.4 — atualize todas as máquinas. Efeitos ancorados e as animações Girar/Quicar/Desfoque abrem na v1.3 de forma segura (região fixa que cobre todo o movimento — no "Borrar tudo menos…" ancorado, o quadro inteiro borrado; animação trocada por Fade/Deslizar).
 
-- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4)
+**Cursor e cliques (v1.6.0):**
+
+- **Trilha do cursor:** cada gravação de tela guarda, ao lado do vídeo, a posição do cursor (~60 vezes por segundo) e os cliques (`cursor.json`), sem atrasar o início da gravação e sem mexer no resto da sessão. Gravações antigas, sem a trilha, continuam abrindo normalmente (as opções abaixo só aparecem quando há trilha).
+- **Realce de cliques e cursor ampliado:** no inspetor do clipe de tela, seção **Cursor e cliques**: **Realçar cliques** desenha um anel que pulsa onde cada clique aconteceu (cor, tamanho e duração ajustáveis) e **Cursor ampliado** desenha uma seta maior, levemente suavizada, sobre o cursor (escala e suavização). Os dois vêm desligados, acompanham zoom, corte e reenquadrar e ficam **por baixo** dos efeitos de privacidade (um blur sobre o ponto esconde o anel também). O arquivo exportado é igual ao preview.
+- **Zoom automático nos cliques:** seção **Zoom automático nos cliques** no inspetor do clipe de tela: o editor aproxima a imagem em cada clique (ou grupo de cliques próximos), acompanha o cursor enquanto o zoom dura e volta ao normal, sempre sem bordas pretas. **Intensidade**, **Duração**, **Transição** e **Suavidade** ajustáveis; **Pré-visualizar** mostra o resultado sem gravar (Cancelar volta exatamente ao de antes) e **Aplicar** grava os keyframes num passo de desfazer — dá para editá-los depois como qualquer zoom.
+- **Seguir conteúdo:** no inspetor de um blur/pixelizar/tarja, ponha a região sobre o conteúdo no playhead e clique **Seguir conteúdo**: o editor acompanha o movimento até o fim do efeito e cria keyframes de posição e tamanho (progresso com **Cancelar**, um passo de desfazer). É estrito de propósito: se o conteúdo some (coberto por outra janela, rolado para fora), aparece repetido na tela ou o cursor passa por cima, o acompanhamento para ali e a região fica **ampliada até o fim** (no "Borrar tudo menos…", o quadro inteiro borrado) — o aviso diz o instante (**Ir para**) e uma faixa colorida no item mostra onde foi confiante, incerto ou perdido. Para continuar, vá a um quadro posterior, ajuste a região sobre o conteúdo e siga de novo dali (o que já foi acompanhado fica).
+- **Compatibilidade:** projetos com essas opções continuam abrindo nas versões 1.3, 1.4 e 1.5 (os zooms e as regiões acompanhadas são keyframes comuns); as versões antigas apenas ignoram os ajustes de cursor e de realce, que voltam ao padrão (desligados) se o projeto for salvo por elas.
+
+- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4; §23: da F6)
 - Checklist manual: [docs/qa-checklist.md](docs/qa-checklist.md) (seção Editor)
 
 QA automatizado via CDP (eventos sintéticos na página, sem mexer no mouse/teclado do Windows; tudo em `test-out/`), depois de `npm run build`:
@@ -88,9 +96,13 @@ node scripts/qa/editor-f4-reframe.mjs # Reenquadrar: painel, pontos de foco, est
 node scripts/qa/editor-f4-e2e.mjs     # F4 ponta a ponta: blur vinculado → zoom 2× → Ancorar → Pop/Desfoque → curva
                                       # personalizada → Alta 1080p → Reenquadrar 9:16 (cópia, foco) → Vertical 9:16;
                                       # ffmpeg confere tamanhos, durações, o foco no centro e o texto ilegível no zoom
+node scripts/qa/editor-f6-e2e.mjs     # F6 ponta a ponta: gravação sintética com cursor.json → Histórico → Editar →
+                                      # Realçar cliques + Cursor ampliado → zoom automático (prévia, cancelar, aplicar,
+                                      # desfazer/refazer) → blur + Seguir conteúdo (perda na oclusão, nova passada) →
+                                      # Original; ffmpeg confere o anel, bordas no zoom e o texto ilegível em todo quadro
 ```
 
-Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/` e `docs/qa/editor-f4/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
+Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/`, `docs/qa/editor-f4/` e `docs/qa/editor-f6/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
 
 ## Estrutura
 
