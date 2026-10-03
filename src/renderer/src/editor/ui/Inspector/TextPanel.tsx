@@ -13,6 +13,9 @@ import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { TransformSection } from './TransformSection'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs } from './common'
+import { isFontInstalled } from '../../engine/text/fontInstalled'
+import { replaceItemFont } from '../fontActions'
+import { MissingFontNotice } from '../MissingFontNotice'
 import { buildFontOptions, joinColor, loadSystemFonts, splitColor, weightOptions } from './textStyleEdit'
 
 // Inspetor do texto: conteúdo, fonte, tamanho (animável), peso, itálico, cor, fundo, contorno, sombra, alinhamento,
@@ -115,6 +118,7 @@ export function TextPanel({ item, locked }: { item: TextItem; locked: boolean })
         <FieldRow label="Fonte">
           <Select triggerClassName="h-7 rounded-md px-2 text-[11px]" value={s.font} options={buildFontOptions(s.font, system)} disabled={locked} onValueChange={(font) => style({ font })} />
         </FieldRow>
+        {!isFontInstalled(s.font) ? <MissingFontNotice family={s.font.replace(/["']/g, '').trim()} disabled={locked} onReplace={() => replaceItemFont(id)} className="flex flex-col gap-1.5 rounded-md border border-warn/30 bg-warn/10 px-2 py-1.5 text-[11px] text-warn" /> : null}
         {canQuery && system.length === 0 ? (
           <button type="button" disabled={locked} className="h-6 w-full rounded-md border border-border bg-bg-2 text-[10.5px] font-medium text-fg-2 hover:border-border-strong hover:text-fg disabled:opacity-40" onClick={loadFonts}>
             Carregar fontes do sistema

@@ -15,6 +15,10 @@ import { formatBytes, formatClock, formatTimecode } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { ipcErrorMessage } from '@/lib/ipcError'
 import { copyOutputFile, showOutputInFolder } from '@/screens/Review/outputActions'
+import { isFontInstalled } from '../engine/text/fontInstalled'
+import { missingFontFamilies } from '@shared/editor/fontMissing'
+import { replaceProjectFont } from './fontActions'
+import { MissingFontNotice } from './MissingFontNotice'
 import { ChaptersSection } from './ChaptersSection'
 import { useEditorStore } from '../state/editorStore'
 import { EditorExportCancelled, editorExportRunning, type EditorExportProgress, type EditorExportResult } from '../export/editorExport'
@@ -217,6 +221,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   }, [open, probeKey])
 
   if (!project || !exp || !s) return null
+  const missingFonts = format === 'audio' ? [] : missingFontFamilies(project, isFontInstalled)
   const canvas = project.canvas
   const hasAudio = planAudio(project).some((x) => x.mode !== 'mute')
   // redução de ruído/normalização ainda processando ou que falhou: a exportação sairia com o original nesses trechos
@@ -644,6 +649,10 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
                 </ul>
               </div>
             ) : null}
+
+            {missingFonts.map((f) => (
+              <MissingFontNotice key={f} family={f} onReplace={() => replaceProjectFont(f)} />
+            ))}
 
             {voiceIssues.failed.length ? (
               <div className="flex items-start gap-1.5 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2.5 text-[12px] text-warn" role="alert" data-audio-failed="">
