@@ -1,4 +1,4 @@
-import { produce } from 'immer'
+import { current, freeze, isDraft, produce } from 'immer'
 import { copyKeys, evalAnim, insertKeyExact, pasteKeys, removeKey, setEase, setKey, setValue, sliceKeys } from './anim'
 import { ANIM_PATHS, assignAnim, getAnim, mapItemAnims as mapAnims, mapVisualAnims as mapVisual, type AnimPath } from './animPaths'
 import { maintainAttachments } from './attachment'
@@ -2053,6 +2053,74 @@ export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { d
     fx.linkId = linkId
   })
   return { project: q, itemId: item.id }
+}
+
+/**
+ * Insere de uma vez efeitos novos já prontos (região, âncora, nome) — um projeto novo, um passo de desfazer. `linkTo[i]`:
+ * clipe de mídia a cujo grupo de vínculo o efeito i entra (o clipe ganha um grupo novo se não tem; quem chama garante
+ * que a faixa dele está desbloqueada nesse caso). Faixas: as de efeitos do bloco (acima de toda a mídia, abaixo de
+ * texto/legendas) visíveis, desbloqueadas e livres no intervalo; senão "Efeitos N" novas no topo do bloco. Guloso por
+ * início (escalonamento de intervalos, primeira faixa livre): as faixas novas são no máximo o número de efeitos novos
+ * simultâneos. Faixa de efeitos bloqueada nunca recebe nada (como no addEffect: o efeito vai para outra/uma nova).
+ */
+export function addEffectItems(p: Project, items: readonly EffectItem[], linkTo: readonly (string | undefined)[]): Project {
+  if (items.length === 0) return p
+  const ids = new Set<string>()
+  for (const it of items) {
+    if (it.durationUs < MIN_ITEM_US) throw new EditError('invalid', `Item ${it.id} menor que a duração mínima`)
+    if (it.startUs < 0) throw new EditError('bounds', `Item ${it.id} começa antes de 0`)
+    if (ids.has(it.id)) throw new EditError('invalid', 'Id de item repetido')
+    ids.add(it.id)
+  }
+  const order = items.map((_, i) => i).sort((a, b) => items[a].startUs - items[b].startUs || end(items[a]) - end(items[b]))
+  // faixas existentes que servem (itens ordenados e sem sobreposição: busca binária) e o fim do último efeito novo
+  const { lo, hi } = fxBlock(p)
+  const cands = p.tracks.flatMap((t, i) => (i > lo && i < hi && isFxTrack(t) && !t.locked && !t.hidden ? [{ id: t.id, items: t.items, last: -Infinity }] : []))
+  const freeOld = (its: Item[], s: Us, e: Us): boolean => {
+    let a = 0, b = its.length
+    while (a < b) { const m = (a + b) >> 1; if (end(its[m]) <= s) a = m + 1; else b = m }
+    return a >= its.length || its[a].startUs >= e
+  }
+  const fresh: { last: Us; items: EffectItem[] }[] = []
+  const toOld = new Map<string, EffectItem[]>()
+  for (const i of order) {
+    const it = items[i], s = it.startUs, e = end(it)
+    const c = cands.find((t) => t.last <= s && freeOld(t.items, s, e))
+    if (c) { c.last = e; (toOld.get(c.id) ?? toOld.set(c.id, []).get(c.id)!).push(it); continue }
+    const n = fresh.find((t) => t.last <= s)
+    if (n) { n.last = e; n.items.push(it) } else fresh.push({ last: e, items: [it] })
+  }
+  // grupos de vínculo: índices dos clipes lidos antes de criar faixas
+  const clipAt = new Map<string, { ti: number; ii: number }>()
+  p.tracks.forEach((t, ti) => t.items.forEach((x, ii) => { if (x.type === 'media') clipAt.set(x.id, { ti, ii }) }))
+  for (const id of linkTo) if (id !== undefined && !clipAt.has(id)) throw new EditError('notFound', `Item não encontrado: ${id}`)
+  // vínculo e cópias congeladas antes do rascunho: o immer não copia (current) nem congela de novo 600 efeitos novos
+  const groups = new Map<string, string>()
+  const newGroup = new Set<string>()
+  for (const id of linkTo) {
+    if (id === undefined || groups.has(id)) continue
+    const at = clipAt.get(id)!
+    const g = p.tracks[at.ti].items[at.ii].linkId
+    groups.set(id, g ?? newId('l_'))
+    if (!g) newGroup.add(id)
+  }
+  const ready = new Map(items.map((it, i) => {
+    const id = linkTo[i]
+    return [it, freeze(id === undefined ? { ...it } : { ...it, linkId: groups.get(id)! }, true)]
+  }))
+  return edit(p, (d) => {
+    for (const id of newGroup) {
+      const at = clipAt.get(id)!
+      d.tracks[at.ti].items[at.ii].linkId = groups.get(id)!
+    }
+    for (const [tid, its] of toOld) {
+      const t = mustTrack(d, tid)
+      // a faixa ganha um array novo (ordenar o do rascunho criaria um proxy por item)
+      t.items = [...(isDraft(t.items) ? current(t.items) : t.items), ...its.map((it) => ready.get(it)!)].sort((a, b) => a.startUs - b.startUs)
+    }
+    for (const f of fresh) mustTrack(d, createTrack(d, 'video', fxInsertIndex(d), nextFxName(d), 'effects')).items = f.items.map((it) => ready.get(it)!)
+    finalize(d)
+  })
 }
 
 // ---------------------------------------------------------------- transições
