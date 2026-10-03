@@ -203,6 +203,8 @@ interface Pass {
   /** Texto e início (em t) de cada palavra. */
   words: readonly string[]
   wordStart: readonly number[]
+  /** spaceOk[i]: vão entre a palavra i e i+1 é de espaço normal (0,3–1 × largura de caractere). */
+  spaceOk: readonly boolean[]
   /** Número da passada (1 = espaço único; 2 = vãos pequenos colados). */
   n: 1 | 2
 }
@@ -220,17 +222,28 @@ function fold(t: string): string {
   return out
 }
 
-const CONFUSABLE: Record<string, string> = {
+// Confusões "estreitas" (valem também em token só de confundíveis vizinho de dígito)
+const NARROW: Record<string, string> = {
   O: '0', o: '0', D: '0', Q: '0',
   l: '1', I: '1', i: '1', '|': '1', '!': '1',
   S: '5', s: '5',
   B: '8',
   Z: '2'
 }
+// Glifos "largos" do spike (zero do Consolas lido como ø e ê € @ θ; J≈1; $≈5): só em token com dígito real
+const WIDE: Record<string, string> = {
+  'ø': '0', 'Ø': '0', e: '0', 'ê': '0', 'é': '0', '€': '0', '@': '0', 'θ': '0',
+  J: '1', j: '1',
+  $: '5'
+}
+const CONFUSABLE: Record<string, string> = { ...NARROW, ...WIDE }
 const SEP_CHARS = ' .-–—/()'
 
 function isTokChar(c: number): boolean {
-  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 124 || c === 33
+  return (
+    (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 124 || c === 33 ||
+    c === 248 || c === 216 || c === 234 || c === 233 || c === 8364 || c === 952 || c === 36 || c === 64
+  )
 }
 
 /**
@@ -243,6 +256,7 @@ function mapDigits(t: string): string {
   const starts: number[] = []
   const ends: number[] = []
   const numLike: boolean[] = []
+  const narrowLike: boolean[] = []
   const hasDigit: boolean[] = []
   let i = 0
   while (i < n) {
@@ -252,19 +266,27 @@ function mapDigits(t: string): string {
     }
     const s = i
     let nl = true
+    let nn = true
     let hd = false
     while (i < n && isTokChar(t.charCodeAt(i))) {
       const ch = t[i]!
       const c = t.charCodeAt(i)
       if (c >= 48 && c <= 57) hd = true
-      else if (!(ch in CONFUSABLE)) nl = false
+      else {
+        if (!(ch in CONFUSABLE)) nl = false
+        if (!(ch in NARROW)) nn = false
+      }
       i++
     }
     // '|' ou '!' sozinhos entre separadores (ex.: barra do CNPJ lida como '|') não viram '1'
-    if (i - s === 1 && (t[s] === '|' || t[s] === '!')) nl = false
+    if (i - s === 1 && (t[s] === '|' || t[s] === '!')) {
+      nl = false
+      nn = false
+    }
     starts.push(s)
     ends.push(i)
     numLike.push(nl)
+    narrowLike.push(nn)
     hasDigit.push(hd)
   }
   const near = (a: number, b: number): boolean => {
@@ -279,7 +301,7 @@ function mapDigits(t: string): string {
   for (let pass = 0; pass < 2; pass++) {
     const order = pass === 0 ? [...starts.keys()] : [...starts.keys()].reverse()
     for (const k of order) {
-      if (!numLike[k] || mapped[k]) continue
+      if (!narrowLike[k] || mapped[k]) continue
       const prevOk = k > 0 && mapped[k - 1] && near(ends[k - 1]!, starts[k]!)
       const nextOk = k + 1 < starts.length && mapped[k + 1] && near(ends[k]!, starts[k + 1]!)
       if (prevOk || nextOk) {
@@ -308,7 +330,7 @@ function mapDigits(t: string): string {
   return out ? out.join('') : t
 }
 
-function buildPass(texts: readonly string[], join: readonly boolean[], n: 1 | 2): Pass {
+function buildPass(texts: readonly string[], join: readonly boolean[], n: 1 | 2, spaceOk: readonly boolean[]): Pass {
   // join[i] = true => sem separador entre a palavra i e i+1
   let t = ''
   const wo: number[] = []
@@ -327,7 +349,7 @@ function buildPass(texts: readonly string[], join: readonly boolean[], n: 1 | 2)
   const glued = new Int32Array(wordOf.length)
   let g = 0
   for (let i = 0; i < wordOf.length; i++) glued[i] = wordOf[i]! < 0 ? -1 : g++
-  return { t, f: fold(t), m: mapDigits(t), mAlt: t.includes('|') ? mapDigits(t.replace(/\|/g, '\\')) : null, wordOf, glued, words: texts, wordStart, n }
+  return { t, f: fold(t), m: mapDigits(t), mAlt: t.includes('|') ? mapDigits(t.replace(/\|/g, '\\')) : null, wordOf, glued, words: texts, wordStart, spaceOk, n }
 }
 
 // ───────────────────────── candidatos ─────────────────────────
@@ -377,6 +399,17 @@ const RE_CARD = new RegExp(
   `${NB}(?:\\d{4}[ -]\\d{4}[ -]\\d{4}[ -]\\d{4}(?:[ -]\\d{3})?|\\d{4}[ -]\\d{4}[ -]\\d{4}[ -]\\d{1,3}|\\d{4}[ -]\\d{6}[ -]\\d{5}|\\d{4}[ -]\\d{6}[ -]\\d{4}|\\d{13,19})${END}`,
   'g'
 )
+// Estruturados FORMATADOS (aceitos mesmo com checksum errado, como pattern): até UM separador pode
+// faltar (o OCR engole pontuação). s3 do CPF é só hífen: ponto/vírgula ali pegaria IP e dinheiro.
+function fmtRe(groups: readonly number[], seps: readonly string[]): RegExp {
+  const build = (missing: number): string =>
+    groups.map((g, i) => `\\d{${g}}` + (i < seps.length ? (i === missing ? '\\s?' : seps[i]!) : '')).join('')
+  const alts = [build(-1), ...seps.map((_, i) => build(i))]
+  return new RegExp(`${NB}(?:${alts.join('|')})${END}`, 'g')
+}
+const SEP_DOT = '\\s?[.,]\\s?'
+const RE_CPF_FMT = fmtRe([3, 3, 3, 2], [SEP_DOT, SEP_DOT, '\\s?[-–—]\\s?'])
+const RE_CNPJ_FMT = fmtRe([2, 3, 3, 4, 2], [SEP_DOT, SEP_DOT, '\\s?[/\\\\|]\\s?', '\\s?[-–—]\\s?'])
 const RE_CEP = /(?:(?<=(?<![A-Za-z])cep[\s:.\-]{0,3})\d{5}-?\d{3}|(?<![A-Za-z0-9])(?<!\d[.,\-/])\d{5}-\d{3})(?!\d|[.,]\d)/gi
 const RE_IP = /(?<![A-Za-z0-9.])(?<!\d[,\-/])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9]|\.\d)/g
 const RE_EMAIL =
@@ -398,8 +431,24 @@ const RE_TOKEN = new RegExp(
   ].join('|'),
   'g'
 )
-const RE_LABEL =
-  /(?<![a-z0-9])(chave pix|senha|password|passwd|pwd|token|conta|agencia|chave|secret|pin|cvv|codigo de seguranca|api[ _-]?key)[ \t]*([:=])/g
+// Rótulos: os "fortes" exigem [:=;] (":" lido como ";" é tolerado); os da lista fraca (RE_WEAK_LABEL)
+// também valem sem separador ou com "." mas só se o valor tiver dígito ou "@" (evita prosa).
+const LABEL_ALT = [
+  'authorization', 'bearer', 'numero do cartao', 'chave de api', 'chave pix', 'access key', 'secret key', 'client secret',
+  'api[ _-]?key', 'codigo de seguranca', 'senha', 'password', 'passwd', 'pwd', 'token', 'conta', 'agencia', 'chave', 'secret',
+  'pin', 'cvv', 'pix', 'cpf', 'cnpj', 'rg', 'cartao', 'validade', 'telefone', 'celular', 'e-?mail', 'endereco', 'cep'
+].join('|')
+const RE_LABEL = new RegExp(`(?<![a-z0-9])(${LABEL_ALT})(?![a-z0-9])[ \\t]*([:=;.])?`, 'g')
+const RE_WEAK_LABEL =
+  /^(?:authorization|bearer|numero do cartao|chave de api|chave pix|access key|secret key|client secret|api[ _-]?key|pix|cpf|cnpj|rg|cartao|validade|telefone|celular|e-?mail|endereco|cep)$/
+
+/** Todos os espaços entre palavras do trecho [s,e) têm vão de espaço normal (não de coluna de tabela). */
+function spacesTight(p: Pass, s: number, e: number): boolean {
+  for (let k = s + 1; k < e; k++) {
+    if (p.wordOf[k] === -1 && p.spaceOk[p.wordOf[k - 1]!] === false) return false
+  }
+  return true
+}
 
 function detectDigitKinds(p: Pass, out: Cand[]): void {
   const m = p.m
@@ -407,15 +456,29 @@ function detectDigitKinds(p: Pass, out: Cand[]): void {
     const d = digitsOnly(x[0])
     if (isValidCpf(d)) emit(out, p, 'cpf', d, 'validated', x.index, x.index + x[0].length)
   }
+  for (const x of m.matchAll(RE_CPF_FMT)) {
+    const d = digitsOnly(x[0])
+    if (d.length !== 11 || allSame(d)) continue
+    emit(out, p, 'cpf', d, isValidCpf(d) ? 'validated' : 'pattern', x.index, x.index + x[0].length)
+  }
   for (const mm of p.mAlt ? [m, p.mAlt] : [m]) {
     for (const x of mm.matchAll(RE_CNPJ)) {
       const d = digitsOnly(x[0])
       if (isValidCnpj(d)) emit(out, p, 'cnpj', d, 'validated', x.index, x.index + x[0].length)
     }
+    for (const x of mm.matchAll(RE_CNPJ_FMT)) {
+      const d = digitsOnly(x[0])
+      if (d.length !== 14 || allSame(d)) continue
+      emit(out, p, 'cnpj', d, isValidCnpj(d) ? 'validated' : 'pattern', x.index, x.index + x[0].length)
+    }
   }
   for (const x of m.matchAll(RE_CARD)) {
     const d = digitsOnly(x[0])
-    if (luhnValid(d) && !allSame(d) && d[0]! >= '2' && d[0]! <= '6') emit(out, p, 'card', d, 'validated', x.index, x.index + x[0].length)
+    if (allSame(d) || d[0]! < '2' || d[0]! > '6') continue
+    const e = x.index + x[0].length
+    if (luhnValid(d)) emit(out, p, 'card', d, 'validated', x.index, e)
+    // agrupado com Luhn errado: pattern, mas só com espaçamento de cartão (colunas largas = tabela)
+    else if (/\D/.test(x[0]) && spacesTight(p, x.index, e)) emit(out, p, 'card', d, 'pattern', x.index, e)
   }
   for (const x of m.matchAll(RE_PHONE)) {
     let d = digitsOnly(x[0])
@@ -432,6 +495,31 @@ function detectDigitKinds(p: Pass, out: Cand[]): void {
     if (parts.every((o) => Number(o) <= 255)) {
       emit(out, p, 'ip', parts.map(Number).join('.'), 'pattern', x.index, x.index + x[0].length)
     }
+  }
+}
+
+// Prefixos de token lidos "por palavra": o OCR erra o miolo (l/I/1, "_" vira espaço), então basta o prefixo
+// + 8 caracteres; a caixa é a palavra inteira (e a seguinte quando o "_" virou espaço).
+const TOKEN_PRE = /^(?:sk[-_]|gh[pousrPOUSR]_|github_pat_|xox[baprs]-|AKIA|AIza|ey[Jj3])/
+const TOKEN_NOSEP = /^(?:sk|gh[pousrPOUSR]|github_pat|xox[baprs])$/
+
+function detectTokenWords(p: Pass, out: Cand[]): void {
+  const w = p.words
+  for (let i = 0; i < w.length; i++) {
+    const word = w[i]!
+    const m = TOKEN_PRE.exec(word)
+    let j = -1
+    if (m) {
+      const rest = word.length - m[0].length
+      if (rest >= 8) j = i
+      else if (i + 1 < w.length && p.spaceOk[i] && /^[A-Za-z0-9]/.test(w[i + 1]!) && rest + w[i + 1]!.length >= 8) j = i + 1
+    } else if (TOKEN_NOSEP.test(word) && i + 1 < w.length && p.spaceOk[i]) {
+      // "ghp_" lido como "ghp " + resto: o resto precisa parecer um segredo (longo, letras e dígitos)
+      const nx = w[i + 1]!
+      if (nx.length >= 20 && /^[A-Za-z0-9_-]+$/.test(nx) && /\d/.test(nx) && /[A-Za-z]/.test(nx)) j = i + 1
+    }
+    if (j < 0) continue
+    emit(out, p, 'token', w.slice(i, j + 1).join(''), 'pattern', p.wordStart[i]!, p.wordStart[j]! + w[j]!.length)
   }
 }
 
@@ -472,23 +560,37 @@ function detectTextKinds(p: Pass, out: Cand[]): void {
   for (const x of t.matchAll(RE_TOKEN)) {
     emit(out, p, 'token', x[0], 'pattern', x.index, x.index + x[0].length)
   }
-  // rotulados: o valor vai até o próximo rótulo (ou o fim da linha)
-  if (p.f.includes(':') || p.f.includes('=')) {
-    const ms = [...p.f.matchAll(RE_LABEL)]
-    for (let i = 0; i < ms.length; i++) {
-      const x = ms[i]!
-      const start = x.index
-      const afterSep = start + x[0].length
-      let vs = afterSep
-      let ve = i + 1 < ms.length ? ms[i + 1]!.index : t.length
-      while (vs < ve && p.wordOf[vs]! < 0) vs++
-      while (ve > vs && p.wordOf[ve - 1]! < 0) ve--
-      const label = t.slice(start, start + x[1]!.length)
-      const sep = x[2]!
-      if (vs < ve) emit(out, p, 'labeled', `${label}${sep} ${t.slice(vs, ve)}`, 'pattern', vs, ve)
-      // valor vazio na linha: cobre o próprio rótulo para o usuário decidir
-      else emit(out, p, 'labeled', `${label}${sep}`, 'pattern', start, afterSep)
+  // rotulados: o valor vai até o próximo rótulo (ou o fim da linha); "Bearer" não corta "Authorization"
+  const labs: Array<{ start: number; afterSep: number; key: string; label: string; sep: string; strong: boolean }> = []
+  for (const x of p.f.matchAll(RE_LABEL)) {
+    const sepCh = x[2] ?? ''
+    const strong = sepCh === ':' || sepCh === '=' || sepCh === ';'
+    if (!strong && !RE_WEAK_LABEL.test(x[1]!)) continue
+    labs.push({
+      start: x.index,
+      afterSep: x.index + x[0].length,
+      key: x[1]!,
+      label: t.slice(x.index, x.index + x[1]!.length),
+      sep: sepCh === '=' ? '=' : ':',
+      strong
+    })
+  }
+  for (let i = 0; i < labs.length; i++) {
+    const L = labs[i]!
+    let ve = t.length
+    for (let k = i + 1; k < labs.length; k++) {
+      if (labs[k]!.key !== 'bearer') {
+        ve = labs[k]!.start
+        break
+      }
     }
+    let vs = L.afterSep
+    while (vs < ve && p.wordOf[vs]! < 0) vs++
+    while (ve > vs && p.wordOf[ve - 1]! < 0) ve--
+    if (!L.strong && !(/\d/.test(p.m.slice(vs, ve)) || t.slice(vs, ve).includes('@'))) continue
+    if (vs < ve) emit(out, p, 'labeled', `${L.label}${L.sep} ${t.slice(vs, ve)}`, 'pattern', vs, ve)
+    // valor vazio na linha: cobre o próprio rótulo para o usuário decidir
+    else emit(out, p, 'labeled', `${L.label}${L.sep}`, 'pattern', L.start, L.afterSep)
   }
 }
 
@@ -546,6 +648,8 @@ function resolve(all: Cand[]): Cand[] {
     let curEnd = -1
     for (const c of arr) {
       if (cur && c.gs < curEnd) {
+        // mesmo valor visto como validado e como pattern: vale o validado
+        const conf = c.value === cur.value && (c.conf === 'validated' || cur.conf === 'validated') ? 'validated' : null
         if (c.ge - c.gs > cur.ge - cur.gs) {
           cur = { ...c, wa: Math.min(c.wa, cur.wa), wb: Math.max(c.wb, cur.wb), gs: Math.min(c.gs, cur.gs), pass: Math.min(c.pass, cur.pass) as 1 | 2 }
         } else {
@@ -553,6 +657,7 @@ function resolve(all: Cand[]): Cand[] {
           cur.wb = Math.max(cur.wb, c.wb)
           cur.pass = Math.min(cur.pass, c.pass) as 1 | 2
         }
+        if (conf) cur.conf = conf
         curEnd = Math.max(curEnd, c.ge)
         cur.ge = Math.max(cur.ge, c.ge)
         merged[merged.length - 1] = cur
@@ -617,20 +722,28 @@ export function detectSensitive(lines: readonly OcrLine[], opts?: DetectOpts): D
     const texts = words.map((w) => w.text.trim())
     const cands: Cand[] = []
     const none = new Array<boolean>(Math.max(0, words.length - 1)).fill(false)
-    const p1 = buildPass(texts, none, 1)
+    // vão de "espaço normal" (< 1 × largura mediana de caractere): distingue cartão de coluna de tabela
+    const medW = median(words.map((w, i) => w.box.w / texts[i]!.length))
+    // faixa [0,3 ; 1,0) × largura: abaixo disso a passada 2 já cola as palavras (sem espaço de verdade)
+    const spaceOk = none.map((_, i) => {
+      const gap = words[i + 1]!.box.x - (words[i]!.box.x + words[i]!.box.w)
+      return gap >= 0.3 * medW && gap < medW
+    })
+    const p1 = buildPass(texts, none, 1, spaceOk)
+    detectTokenWords(p1, cands)
     detectDigitKinds(p1, cands)
     detectTextKinds(p1, cands)
     detectCustom(p1, terms, cands)
     if (words.length > 1) {
       // limiar no eixo x (x comparado com x): 0,3 × largura mediana de um caractere da linha
-      const thr = 0.3 * median(words.map((w, i) => w.box.w / texts[i]!.length))
+      const thr = 0.3 * medW
       const join = none.map((_, i) => {
         const a = words[i]!.box
         const b = words[i + 1]!.box
         return b.x - (a.x + a.w) < thr
       })
       if (join.some(Boolean)) {
-        const p2 = buildPass(texts, join, 2)
+        const p2 = buildPass(texts, join, 2, spaceOk)
         detectDigitKinds(p2, cands)
         detectTextKinds(p2, cands)
         detectCustom(p2, terms, cands)
