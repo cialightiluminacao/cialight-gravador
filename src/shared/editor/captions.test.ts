@@ -144,7 +144,7 @@ describe('importCaptions', () => {
   it('v1.3 lê o projeto com as legendas importadas; ida e volta pelo disco', () => {
     const r = ops.importCaptions(withClip(), [cue(1, 2, 'Olá'), cue(3, 4, 'Ação')], { mode: 'replace' })
     const disk = JSON.parse(JSON.stringify(toDiskProject(r.project)))
-    expect(() => parseProjectV13(disk)).not.toThrow()
+    expect(parseProjectV13(disk).success).toBe(true)
     expect(parseProject(disk)).toEqual(r.project)
   })
 })
