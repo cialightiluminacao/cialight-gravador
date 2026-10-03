@@ -71,7 +71,7 @@ try {
 }
 Send ('{"ready":true,"lang":"' + (Esc $chosen) + '","maxDim":' + [Windows.Media.Ocr.OcrEngine]::MaxImageDimension + ',"startMs":' + $t0.ElapsedMilliseconds + '}')
 
-$MAX_LEN = 10000 * 10000 * 4
+$MAX_LEN = 100000000  # 1e8 bytes = 10000x10000 gray8; bgra8 so cabe dentro disso
 $MAX_HDR = 4096
 $in = [Console]::OpenStandardInput()
 $hdr = New-Object System.IO.MemoryStream

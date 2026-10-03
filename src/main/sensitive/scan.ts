@@ -3,7 +3,10 @@ import { detectSensitive, type Detection, type OcrLine, type SensitiveKind } fro
 import {
   applyRefinement,
   carryDetections,
-  frameChanged,
+  frameChangeLevel,
+  mergeDetection,
+  regionChanged,
+  shouldOcr,
   groupOccurrences,
   helperLinesToOcr,
   OCR_UPSCALE,
@@ -63,12 +66,16 @@ export interface ScanDeps {
 }
 
 export interface ScanRunOpts {
+  /** Prefixo dos ids das ocorrências (únicos entre varreduras). */
+  scanId?: string
   signal?: AbortSignal
   onProgress?: (p: ScanProgress) => void
 }
 
 /** Sobreposição dos ladrilhos (px da imagem ampliada): mais que uma linha de texto ampliada. */
 const TILE_OVERLAP = 256
+/** Memória dos quadros lidos guardados para a retropropagação (≈ 8 quadros 3840×2160 em cinza). */
+const HISTORY_MAX_BYTES = 72 * 1024 * 1024
 /** Refinamento: mínimo de decodificação permitida e teto de tempo de parede (fração da amostragem, mínimo). */
 const REFINE_MIN_BUDGET_US = 2_000_000
 const REFINE_WALL_FRAC = 0.3
@@ -96,6 +103,7 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
   let framesSampled = 0
   let framesOcr = 0
   let lang = ''
+  let refineCapped = 0
   let occurrences: Occurrence[] = []
   const timings: ScanTimings = { startMs: 0, samplingMs: 0, ocrMs: 0, refineMs: 0 }
   const finish = (extra: { cancelled?: boolean; error?: ScanError } = {}): ScanResult => {
@@ -103,7 +111,8 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
     if (extra.cancelled) log.info(`sensitive: varredura cancelada (${framesSampled} quadros, ${framesOcr} lidos, ${ms} ms)`)
     else if (extra.error) log.warn(`sensitive: varredura com erro ${extra.error.code} (${framesSampled} quadros, ${framesOcr} lidos, ${ms} ms)`)
     else log.info(`sensitive: varredura concluída: ${framesSampled} quadros, ${framesOcr} lidos, ${occurrences.length} ocorrências (${countKinds(occurrences)}), ${ms} ms (partida ${timings.startMs}, amostragem ${timings.samplingMs}, OCR ${timings.ocrMs}, refinamento ${timings.refineMs}), idioma ${lang}`)
-    return { occurrences: extra.cancelled ? [] : occurrences, framesSampled, framesOcr, ms, lang, timings, ...extra }
+    // cancelada ou com erro: lista VAZIA (uma varredura parcial nunca pode parecer completa — ruling do controlador)
+    return { occurrences: extra.cancelled || extra.error ? [] : occurrences, framesSampled, framesOcr, ms, lang, timings, refineCapped, ...extra }
   }
   if (signal?.aborted) return finish({ cancelled: true })
 
@@ -150,8 +159,13 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
     stream = sampleFrames({ ffmpeg: deps.ffmpeg, file: req.filePath, fromUs, toUs, sourceW: W, sourceH: H, fps: SAMPLE_FPS, upscale: OCR_UPSCALE, onSpawn: (pid) => deps.onSpawn?.(pid, 'ffmpeg') })
 
     // cancelar durante a partida não espera o helper responder
-    const aborted = new Promise<'aborted'>((r) => signal?.addEventListener('abort', () => r('aborted')))
+    let onAbortStart: (() => void) | null = null
+    const aborted = new Promise<'aborted'>((r) => {
+      onAbortStart = () => r('aborted')
+      signal?.addEventListener('abort', onAbortStart, { once: true })
+    })
     const started = await Promise.race([helperP, aborted]).catch((e: unknown) => e)
+    if (onAbortStart) signal?.removeEventListener('abort', onAbortStart)
     if (started === 'aborted') return finish({ cancelled: true })
     if (!(started instanceof OcrHelper)) return finish({ error: { code: 'ocrUnavailable', message: started instanceof OcrUnavailableError ? started.message : OCR_UNAVAILABLE_MESSAGE } })
     helper = started
@@ -163,13 +177,18 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
     const samples: ScanSample[] = []
     const detectOpts = { kinds: req.kinds, customTerms: req.customTerms }
     let lastFrame: Uint8Array | null = null
+    let sinceOcr = 0
+    /** Quadros lidos recentes (até HISTORY_MAX_BYTES) e a 1ª amostra que cada um representa. */
+    const history: { frame: Uint8Array; fromIdx: number }[] = []
     let lastDets: Detection[] = []
     let ocrError: OcrUnavailableError | null = null
     const h = helper
     for await (const f of stream.frames) {
       if (signal?.aborted) break
       framesSampled++
-      if (!lastFrame || frameChanged(lastFrame, f.data, f.w, f.h)) {
+      sinceOcr++
+      // mudança forte relê já; mudança menor (pontuação, baixo contraste) relê no máximo a cada STALE_SAMPLES amostras
+      if (!lastFrame || shouldOcr(frameChangeLevel(lastFrame, f.data, f.w, f.h), sinceOcr)) {
         try {
           const tOcr = performance.now()
           const lines = await ocrFrame(h, f)
@@ -177,7 +196,21 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
           const fresh = detectSensitive(lines, detectOpts)
           // união entre leituras: o que o OCR deixou de ler sobre pixels que não mudaram continua valendo
           lastDets = lastFrame ? carryDetections(lastDets, fresh, lastFrame, f.data, f.w, f.h) : fresh
+          // retropropagação: uma leitura melhor (caixa maior ou dado novo) sobre pixels que não mudaram desde leituras
+          // anteriores também valia nelas — as amostras desde então ganham a caixa (cobertura nunca menor no passado)
+          const idx = samples.length
+          for (const d of lastDets) {
+            let from = idx
+            for (let k = history.length - 1; k >= 0; k--) {
+              if (regionChanged(history[k].frame, f.data, f.w, f.h, d.box)) break
+              from = history[k].fromIdx
+            }
+            for (let j = from; j < idx; j++) samples[j] = { tUs: samples[j].tUs, detections: mergeDetection(samples[j].detections, d) }
+          }
+          history.push({ frame: f.data, fromIdx: idx })
+          while (history.length > 1 && history.length * f.data.byteLength > HISTORY_MAX_BYTES) history.shift()
           lastFrame = f.data
+          sinceOcr = 0
           framesOcr++
         } catch (e) {
           if (signal?.aborted) break
@@ -192,15 +225,13 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
       progress({ phase: 'lendo', done: framesSampled, total })
     }
     if (signal?.aborted) return finish({ cancelled: true })
-    const groupCtx = { fromUs, toUs, sourceW: W, sourceH: H, intervalUs: SAMPLE_INTERVAL_US }
+    const groupCtx = { fromUs, toUs, sourceW: W, sourceH: H, intervalUs: SAMPLE_INTERVAL_US, idPrefix: opts.scanId ? `${opts.scanId}:` : '' }
     if (ocrError) {
       stream.kill()
-      occurrences = groupOccurrences(samples, groupCtx)
       return finish({ error: { code: 'ocrUnavailable', message: ocrError.message } })
     }
     const res = await stream.done
     if (res.code !== 0 && !res.killed) {
-      occurrences = groupOccurrences(samples, groupCtx)
       return finish({ error: { code: 'ffmpeg', message: SCAN_MESSAGES.ffmpeg } })
     }
     const samplingMs = performance.now() - t0
@@ -210,7 +241,9 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
 
     // ---- ocorrências + refinamento
     occurrences = groupOccurrences(samples, groupCtx)
-    occurrences = await refine(occurrences, { deps, file: req.filePath, W, H, rangeUs: toUs - fromUs, samplingMs, signal, progress, setSub: (s) => (live.sub = s) })
+    const refined = await refine(occurrences, { deps, file: req.filePath, W, H, rangeUs: toUs - fromUs, samplingMs, signal, progress, setSub: (s) => (live.sub = s) })
+    occurrences = refined.occurrences
+    refineCapped = refined.capped
     timings.refineMs = Math.round(performance.now() - t0 - samplingMs)
     if (signal?.aborted) return finish({ cancelled: true })
     return finish()
@@ -249,63 +282,81 @@ interface RefineCtx {
 }
 
 /** Janela de sub-quadros: um intervalo [fromUs, toUs] e os jobs (de várias ocorrências) que o usam. */
-interface Window { fromUs: Us; toUs: Us; jobs: RefineJob[]; prio: number }
+interface Window { fromUs: Us; toUs: Us; jobs: RefineJob[] }
+type Run = { fromUs: Us; toUs: Us; wins: Window[] }
 
-/**
- * Refinamento por NCC com teto (documentado): decodifica no máximo max(2 s, 0,3 × trecho) de sub-quadros (pré/pós-
- * rolagem antes dos intervalos com movimento) e para quando passa de max(3 s, 0,3 × tempo da amostragem); o que não
- * couber fica com a regra conservadora (pré/pós-rolagem: a caixa da ponta; movimento: a caixa que contém as duas
- * amostras). Janelas encostadas viram uma só decodificação ("corrida"); cada janela é rastreada quando seu último
- * sub-quadro chega (só ela fica em memória).
- */
-async function refine(occs: Occurrence[], c: RefineCtx): Promise<Occurrence[]> {
-  const byId = new Map(occs.map((o) => [o.id, o]))
+function windowsOf(jobs: RefineJob[]): Window[] {
   const wins = new Map<string, Window>()
-  for (const o of occs) {
-    for (const j of refinementJobs(o)) {
-      const key = `${j.fromUs}:${j.toUs}`
-      const w = wins.get(key) ?? { fromUs: j.fromUs, toUs: j.toUs, jobs: [], prio: 1 }
-      w.jobs.push(j)
-      if (j.kind !== 'move') w.prio = 0
-      wins.set(key, w)
-    }
+  for (const j of jobs) {
+    const key = `${j.fromUs}:${j.toUs}`
+    const w = wins.get(key) ?? { fromUs: j.fromUs, toUs: j.toUs, jobs: [] }
+    w.jobs.push(j)
+    wins.set(key, w)
   }
-  if (wins.size === 0) return occs
-  const budget = Math.max(REFINE_MIN_BUDGET_US, (c.deps.refineBudget ?? 0.3) * c.rangeUs)
-  const chosen: Window[] = []
-  let used = 0
-  for (const w of [...wins.values()].sort((a, b) => a.prio - b.prio || a.fromUs - b.fromUs)) {
-    const d = w.toUs - w.fromUs
-    if (used + d > budget) continue
-    used += d
-    chosen.push(w)
-  }
-  chosen.sort((a, b) => a.fromUs - b.fromUs || a.toUs - b.toUs)
-  // corridas: janelas que se tocam/sobrepõem são decodificadas juntas
-  const runs: { fromUs: Us; toUs: Us; wins: Window[] }[] = []
-  for (const w of chosen) {
+  return [...wins.values()].sort((a, b) => a.fromUs - b.fromUs || a.toUs - b.toUs)
+}
+
+/** Janelas que se tocam/sobrepõem são decodificadas juntas ("corrida"). */
+function runsOf(wins: Window[]): Run[] {
+  const runs: Run[] = []
+  for (const w of [...wins].sort((a, b) => a.fromUs - b.fromUs || a.toUs - b.toUs)) {
     const last = runs[runs.length - 1]
     if (last && w.fromUs <= last.toUs) {
       last.toUs = Math.max(last.toUs, w.toUs)
       last.wins.push(w)
     } else runs.push({ fromUs: w.fromUs, toUs: w.toUs, wins: [w] })
   }
+  return runs
+}
+
+/**
+ * Refinamento por NCC em duas fases (documentado):
+ * 1. pré/pós-rolagem: SEMPRE (sem teto — cada janela são ~6 sub-quadros e o conteúdo parado nem passa pelo NCC), porque
+ *    é o que dá a cobertura das pontas de um conteúdo em movimento; não pode depender da carga da máquina;
+ * 2. intervalos com movimento entre amostras: decodifica no máximo max(2 s, 0,3 × trecho) de sub-quadros e para quando
+ *    passa de max(3 s, 0,3 × tempo da amostragem), checado por sub-quadro. O que não couber fica com a regra
+ *    conservadora (a caixa que contém as duas amostras — cobre o movimento linear) e é contado em `refineCapped`.
+ * Cada janela é rastreada quando seu último sub-quadro chega (só ela fica em memória).
+ */
+async function refine(occs: Occurrence[], c: RefineCtx): Promise<{ occurrences: Occurrence[]; capped: number }> {
+  const byId = new Map(occs.map((o) => [o.id, o]))
+  const jobs = occs.flatMap((o) => refinementJobs(o))
+  const edgeRuns = runsOf(windowsOf(jobs.filter((j) => j.kind !== 'move')))
+  const moveWins = windowsOf(jobs.filter((j) => j.kind === 'move'))
+  const budget = Math.max(REFINE_MIN_BUDGET_US, (c.deps.refineBudget ?? 0.3) * c.rangeUs)
+  const chosen: Window[] = []
+  let used = 0
+  let capped = 0
+  for (const w of moveWins) {
+    const d = w.toUs - w.fromUs
+    if (used + d > budget) {
+      capped += w.jobs.length
+      continue
+    }
+    used += d
+    chosen.push(w)
+  }
+  const moveRuns = runsOf(chosen)
+  const total = edgeRuns.length + moveRuns.length
+  let done = 0
+  c.progress({ phase: 'analisando', done, total })
   const wallMax = Math.max(REFINE_WALL_MIN_MS, REFINE_WALL_FRAC * c.samplingMs)
-  const tStart = performance.now()
-  c.progress({ phase: 'analisando', done: 0, total: runs.length })
-  for (let ri = 0; ri < runs.length; ri++) {
-    if (c.signal?.aborted || performance.now() - tStart > wallMax) break
-    const run = runs[ri]
+  let tMove = 0
+
+  /** Uma corrida; com teto, devolve quantos jobs ficaram sem refinamento por causa dele. */
+  const runOne = async (run: Run, withCap: boolean): Promise<number> => {
     const boxes = run.wins.flatMap((w) => w.jobs.map((j) => j.anchorBox))
     const s = refineScale(c.W, c.H, boxes)
     const aw = Math.max(1, Math.round(c.W * s)), ah = Math.max(1, Math.round(c.H * s))
     const st = subFrames({ ffmpeg: c.deps.ffmpeg, file: c.file, fromUs: run.fromUs, toUs: run.toUs, w: aw, h: ah, fps: REFINE_FPS, onSpawn: (pid) => c.deps.onSpawn?.(pid, 'ffmpeg') })
     c.setSub(st)
     const buffers = new Map<Window, { tUs: Us; img: GrayImage }[]>()
+    const pending = new Set(run.wins)
     // a janela é rastreada no seu último sub-quadro (o da grade ≤ toUs) ou, se o vídeo acabar antes, no fim da corrida
     const flush = (w: Window): void => {
       const b = buffers.get(w)
       buffers.delete(w)
+      pending.delete(w)
       if (!b || b.length === 0) return
       for (const j of w.jobs) {
         const r = refineTrack(b, j, c.W, c.H)
@@ -313,11 +364,12 @@ async function refine(occs: Occurrence[], c: RefineCtx): Promise<Occurrence[]> {
         if (r && o) byId.set(j.occId, applyRefinement(o, r))
       }
     }
+    let hitCap = false
     try {
       for await (const f of st.frames) {
-        // teto de tempo também dentro da corrida: as janelas ainda incompletas ficam com a regra conservadora
-        if (c.signal?.aborted || performance.now() - tStart > wallMax) {
-          buffers.clear()
+        if (c.signal?.aborted) break
+        if (withCap && performance.now() - tMove > wallMax) {
+          hitCap = true
           break
         }
         const img: GrayImage = { width: f.w, height: f.h, data: Float32Array.from(f.data) }
@@ -329,13 +381,28 @@ async function refine(occs: Occurrence[], c: RefineCtx): Promise<Occurrence[]> {
           if (f.tUs + REFINE_STEP_US > w.toUs) flush(w)
         }
       }
-      if (!c.signal?.aborted) for (const w of [...buffers.keys()]) flush(w)
+      if (!c.signal?.aborted && !hitCap) for (const w of [...buffers.keys()]) flush(w)
     } finally {
       st.kill()
       c.setSub(null)
     }
     await st.done
-    c.progress({ phase: 'analisando', done: ri + 1, total: runs.length })
+    c.progress({ phase: 'analisando', done: ++done, total })
+    return hitCap ? [...pending].reduce((a, w) => a + w.jobs.length, 0) : 0
   }
-  return occs.map((o) => byId.get(o.id) ?? o)
+
+  for (const run of edgeRuns) {
+    if (c.signal?.aborted) break
+    await runOne(run, false)
+  }
+  tMove = performance.now()
+  for (let ri = 0; ri < moveRuns.length; ri++) {
+    if (c.signal?.aborted) break
+    if (performance.now() - tMove > wallMax) {
+      for (const r of moveRuns.slice(ri)) capped += r.wins.reduce((a, w) => a + w.jobs.length, 0)
+      break
+    }
+    capped += await runOne(moveRuns[ri], true)
+  }
+  return { occurrences: occs.map((o) => byId.get(o.id) ?? o), capped }
 }

@@ -332,7 +332,8 @@ export interface IpcApi {
      * "Procurar dados sensíveis" (G3) num arquivo de ORIGEM: o main lê quadros do trecho [fromUs, toUs] (µs da origem),
      * faz OCR e devolve ocorrências (caixas normalizadas ao quadro da origem ao longo do tempo). Uma por vez: com outra
      * rodando, `start` volta com `error.code === 'busy'` (pedido inválido: 'invalid'), e aí não há `onDone`. Senão o
-     * resultado chega UMA vez por `onDone` (cancelado: `result.cancelled`; falha: `result.error`). Privacidade: nada
+     * resultado chega UMA vez por `onDone` (cancelado: `result.cancelled`; falha: `result.error` — nos dois casos
+     * `occurrences` vem VAZIA: uma varredura parcial nunca pode parecer completa). Privacidade: nada
      * do texto lido nem os valores cruzam o IPC (só tipo, máscara, confiança, caixas e tempos); `customTerms` (até 50,
      * com até 100 caracteres) ficam só na memória do main durante a varredura.
      */

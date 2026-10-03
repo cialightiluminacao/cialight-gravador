@@ -193,7 +193,8 @@ beforeAll(async () => {
     const file = await gen.video('scroll', gen.filter([{ s: a, dy: 0 }, { s: b, dy: offB }], 'full', { items: { pxPerFrame: 4 }, normals: { pxPerFrame: 4 }, topChrome: true }), SECONDS)
     const dy = (_it: Item, n: number): number => -4 * n
     const visible = (it: Item, n: number): boolean => it.ink!.y - 4 * n >= PANEL_Y && it.ink!.y + it.ink!.h - 4 * n <= VH
-    scroll = { name: 'scroll', file, items, dy, visible, extendUs: 0 }
+    // ±meio segundo: a pré/pós-rolagem de conteúdo em movimento também é verificada (cruzada com a visibilidade)
+    scroll = { name: 'scroll', file, items, dy, visible, extendUs: 500_000 }
   }
   // 3) aparecer em 2,0 s e sumir em 5,0 s (quadros 60..149)
   {
@@ -246,10 +247,10 @@ describe('varredura real (ffmpeg + Windows.Media.Ocr)', () => {
     metrics.static_coverage = cov / req
     expect(cov).toBe(req)
   })
-  it('rolagem 120 px/s: recall (relatado) e cobertura ≥ 99 % dos quadros em [firstSeen, lastSeen]', async () => {
+  it('rolagem 120 px/s: recall (relatado) e cobertura ≥ 99 % dos quadros em [firstSeen − 0,5 s, lastSeen + 0,5 s]', async () => {
     const res = await runScan({ filePath: scroll.file, fromUs: 0, toUs: SECONDS * 1_000_000 }, deps())
     expect(res.error).toBeUndefined()
-    metrics.scroll = { framesSampled: res.framesSampled, framesOcr: res.framesOcr, ms: res.ms, timings: res.timings, ocrPerSec: res.framesOcr / (res.ms / 1000), ocrMsPerFrame: (res.timings?.ocrMs ?? 0) / res.framesOcr, samplingOcrPerSec: res.framesOcr / (((res.timings?.samplingMs ?? 0) - (res.timings?.startMs ?? 0)) / 1000), refinedOcc: res.occurrences.filter((o) => o.samples.some((x) => x.src === 'track')).length, lostOcc: res.occurrences.filter((o) => o.lostAt?.length).length }
+    metrics.scroll = { framesSampled: res.framesSampled, framesOcr: res.framesOcr, ms: res.ms, timings: res.timings, ocrPerSec: res.framesOcr / (res.ms / 1000), ocrMsPerFrame: (res.timings?.ocrMs ?? 0) / res.framesOcr, samplingOcrPerSec: res.framesOcr / (((res.timings?.samplingMs ?? 0) - (res.timings?.startMs ?? 0)) / 1000), refinedOcc: res.occurrences.filter((o) => o.samples.some((x) => x.src === 'track')).length, refineCapped: res.refineCapped, lostOcc: res.occurrences.filter((o) => o.lostAt?.length).length }
     // só itens que ficam inteiros na tela por ≥ 1 amostra contam no recall
     const es = evaluate(scroll, res).filter((e) => Array.from({ length: SECONDS * 2 }, (_, k) => k * 15).some((n) => scroll.visible(e.it, n)))
     const found = es.filter((e) => e.found)
@@ -258,7 +259,7 @@ describe('varredura real (ffmpeg + Windows.Media.Ocr)', () => {
     metrics.scroll_recall = recall(es)
     metrics.scroll_coverage = cov / req
     metrics.scroll_worstPx = worst
-    report.push(`## Rolagem (8 s, 4 px/quadro)\nAmostrados ${res.framesSampled}, lidos ${res.framesOcr}, ${res.ms} ms → ${(res.framesOcr / (res.ms / 1000)).toFixed(2)} quadros lidos/s de ponta a ponta, ${(metrics.scroll as { samplingOcrPerSec: number }).samplingOcrPerSec.toFixed(2)}/s na amostragem (OCR ${((res.timings?.ocrMs ?? 0) / res.framesOcr).toFixed(0)} ms/quadro; partida ${res.timings?.startMs} ms; refinamento ${res.timings?.refineMs} ms); ocorrências refinadas pelo NCC: ${(metrics.scroll as { refinedOcc: number }).refinedOcc}, com perda: ${(metrics.scroll as { lostOcc: number }).lostOcc}`, table('Rolagem', es))
+    report.push(`## Rolagem (8 s, 4 px/quadro)\nAmostrados ${res.framesSampled}, lidos ${res.framesOcr}, ${res.ms} ms → ${(res.framesOcr / (res.ms / 1000)).toFixed(2)} quadros lidos/s de ponta a ponta, ${(metrics.scroll as { samplingOcrPerSec: number }).samplingOcrPerSec.toFixed(2)}/s na amostragem (OCR ${((res.timings?.ocrMs ?? 0) / res.framesOcr).toFixed(0)} ms/quadro; partida ${res.timings?.startMs} ms; refinamento ${res.timings?.refineMs} ms); ocorrências refinadas pelo NCC: ${(metrics.scroll as { refinedOcc: number }).refinedOcc}, jobs no teto: ${res.refineCapped}, com perda: ${(metrics.scroll as { lostOcc: number }).lostOcc}`, table('Rolagem', es))
     expect(cov / req).toBeGreaterThanOrEqual(0.99)
   })
 

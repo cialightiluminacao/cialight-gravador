@@ -4,6 +4,10 @@ import {
   applyRefinement,
   boxContains,
   carryDetections,
+  frameChangeLevel,
+  mergeDetection,
+  shouldOcr,
+  STALE_SAMPLES,
   CHANGE_MIN_PIXELS,
   frameChanged,
   groupOccurrences,
@@ -67,6 +71,43 @@ describe('frameChanged / regionChanged / carryDetections', () => {
   })
   it('tamanho diferente = mudou', () => {
     expect(frameChanged(base, new Uint8Array(w * h * 2), w, h)).toBe(true)
+  })
+  it('mudança menor (ponto/hífen digitado, texto de baixo contraste) não relê na hora, mas relê em até STALE_SAMPLES amostras', () => {
+    // '.' a 2×: ~4×4 px escuros (16 pixels fortes < 30)
+    const dot = base.slice()
+    for (let y = 60; y < 64; y++) for (let x = 100; x < 104; x++) dot[y * w + x] = 20
+    expect(frameChangeLevel(base, dot, w, h)).toBe('minor')
+    // '-' a 2×: 10×2 px
+    const dash = base.slice()
+    for (let y = 60; y < 62; y++) for (let x = 100; x < 110; x++) dash[y * w + x] = 20
+    expect(frameChangeLevel(base, dash, w, h)).toBe('minor')
+    // palavra de baixo contraste: Δ = 24 (< CHANGE_LEVEL) numa área de texto
+    const faint = base.slice()
+    for (let y = 40; y < 52; y++) for (let x = 20; x < 120; x += 2) faint[y * w + x] = 176
+    expect(frameChangeLevel(base, faint, w, h)).toBe('minor')
+    expect(frameChangeLevel(base, base.slice(), w, h)).toBe('none')
+    // decisão por amostra: a tela com mudança menor desde a última leitura é relida no máximo STALE_SAMPLES depois
+    for (const cur of [dot, dash, faint]) {
+      let since = 0, readAt = -1
+      for (let k = 1; k <= 10 && readAt < 0; k++) {
+        since++
+        if (shouldOcr(frameChangeLevel(base, cur, w, h), since)) readAt = k
+      }
+      expect(readAt).toBe(STALE_SAMPLES)
+    }
+    expect(shouldOcr('major', 1)).toBe(true)
+    expect(shouldOcr('none', 100)).toBe(false)
+  })
+  it('mergeDetection: leitura melhor no mesmo lugar une as caixas; em outro lugar entra; contida não muda', () => {
+    const small = det(px(100, 100, 50, 14), 'v')
+    const big = det(px(100, 100, 300, 14), 'v2')
+    const m = mergeDetection([small], big)
+    expect(m).toHaveLength(1)
+    expect(m[0].value).toBe('v')
+    expect(boxContains(m[0].box, big.box)).toBe(true)
+    expect(mergeDetection([big], small)).toEqual([big])
+    const other = det(px(100, 300, 50, 14), 'v')
+    expect(mergeDetection([small], other)).toEqual([small, other])
   })
   it('regionChanged olha só a região (com margem); carryDetections mantém o que o OCR perdeu sobre pixels iguais', () => {
     const a = base.slice()
@@ -294,6 +335,23 @@ describe('occurrenceKeys / occurrenceRegionAt (oráculo denso, 1/240 s)', () => 
     // parado: nada muda (só a margem)
     const [st] = groupOccurrences([{ tUs: 1_000_000, detections: [det(px(100, 600, 150, 14))] }, { tUs: 1_500_000, detections: [det(px(100, 600, 150, 14))] }], ctx)
     expect(occurrenceRegionAt(st, 500_000)).toEqual(occurrenceRegionAt(st, 1_500_000))
+  })
+  it('ocorrência de uma amostra só numa tela rolando: as pontas seguem o movimento dominante da tela', () => {
+    // três valores sobem 60 px por amostra; um 4º ('x') só é lido na 2ª amostra
+    const samples: ScanSample[] = [
+      { tUs: 1_000_000, detections: [det(px(100, 600, 150, 14), 'a'), det(px(400, 600, 150, 14), 'b')] },
+      { tUs: 1_500_000, detections: [det(px(100, 540, 150, 14), 'a'), det(px(400, 540, 150, 14), 'b'), det(px(700, 540, 150, 14), 'x', 'email')] },
+      { tUs: 2_000_000, detections: [det(px(100, 480, 150, 14), 'a'), det(px(400, 480, 150, 14), 'b')] }
+    ]
+    const occ = groupOccurrences(samples, { ...ctx, idPrefix: 'scan1:' })
+    const x = occ.find((o) => o.kind === 'email')!
+    expect(x.samples).toHaveLength(1)
+    expect(x.motion?.pre?.y).toBeLessThan(0)
+    // antes (1,0 s) o conteúdo estava 60 px mais abaixo; depois (2,0 s), 60 px mais acima
+    expect(boxContains(occurrenceRegionAt(x, 1_000_000)!, px(700, 600, 150, 14))).toBe(true)
+    expect(boxContains(occurrenceRegionAt(x, 2_000_000)!, px(700, 480, 150, 14))).toBe(true)
+    expect(occ.every((o) => o.id.startsWith('scan1:o'))).toBe(true)
+    expect(new Set(occ.map((o) => o.id)).size).toBe(occ.length)
   })
   it('margem proporcional: 0,15 × altura quando passa de 2 px', () => {
     const b = px(500, 500, 300, 40)

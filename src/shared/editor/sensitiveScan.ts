@@ -67,6 +67,11 @@ export interface Occurrence {
   sourceH: number
   /** Perdas do refinamento (caixa segurada e ampliada dali até o fim do intervalo). */
   lostAt?: Us[]
+  /**
+   * Movimento dominante da tela (normalizado por µs) em volta da 1ª/última amostra: estende as pontas de uma
+   * ocorrência vista numa amostra só (sem movimento próprio) quando a tela rola.
+   */
+  motion?: { pre?: { x: number; y: number }; post?: { x: number; y: number } }
 }
 /** Tempos (ms) da varredura: partida do helper, amostragem (decodificação + OCR), só OCR, refinamento. */
 export interface ScanTimings { startMs: number; samplingMs: number; ocrMs: number; refineMs: number }
@@ -77,6 +82,8 @@ export interface ScanResult {
   ms: number
   lang: string
   timings?: ScanTimings
+  /** Jobs de refinamento de intervalos com movimento que ficaram com a regra conservadora pelo teto. */
+  refineCapped?: number
   cancelled?: boolean
   error?: ScanError
 }
@@ -126,7 +133,7 @@ export const CHANGE_BLOCK = 16
 export const CHANGE_MIN_PIXELS = 30
 
 /** Contagem de pixels mudados por bloco no retângulo [x0,x1)×[y0,y1) e o máximo numa janela 2×2 de blocos. */
-function maxWindowChange(prev: ArrayLike<number>, cur: ArrayLike<number>, w: number, x0: number, y0: number, x1: number, y1: number): number {
+function maxWindowChange(prev: ArrayLike<number>, cur: ArrayLike<number>, w: number, x0: number, y0: number, x1: number, y1: number, level = CHANGE_LEVEL): number {
   const B = CHANGE_BLOCK
   const bw = Math.ceil((x1 - x0) / B), bh = Math.ceil((y1 - y0) / B)
   const blk = new Uint32Array(bw * bh)
@@ -135,7 +142,7 @@ function maxWindowChange(prev: ArrayLike<number>, cur: ArrayLike<number>, w: num
     let i = y * w + x0
     for (let x = x0; x < x1; x++, i++) {
       const d = prev[i] - cur[i]
-      if (d > CHANGE_LEVEL || d < -CHANGE_LEVEL) blk[row + (((x - x0) / B) | 0)]++
+      if (d > level || d < -level) blk[row + (((x - x0) / B) | 0)]++
     }
   }
   let m = 0
@@ -157,6 +164,30 @@ export function frameChanged(prev: Uint8Array, cur: Uint8Array, w: number, h: nu
   return maxWindowChange(prev, cur, w, 0, 0, w, h) >= CHANGE_MIN_PIXELS
 }
 
+/**
+ * Mudança MENOR (pontuação digitada — `.`, `-`, `,` dão 6–63 pixels na janela —, texto de baixo contraste com
+ * |Δ| ≤ 32): ≥ CHANGE_MINOR_PIXELS pixels com |Δ| > CHANGE_MINOR_LEVEL numa janela. Não basta para reler na hora
+ * (o ruído de quadro-chave também passa disso), mas uma tela com mudança menor desde a última leitura é relida a cada
+ * STALE_SAMPLES amostras (2 s): detecção velha nunca vale indefinidamente.
+ */
+export const CHANGE_MINOR_LEVEL = 16
+export const CHANGE_MINOR_PIXELS = 8
+export const STALE_SAMPLES = 4
+
+export type FrameChange = 'none' | 'minor' | 'major'
+
+/** Nível de mudança de `cur` em relação a `prev` (o último quadro lido pelo OCR). */
+export function frameChangeLevel(prev: Uint8Array, cur: Uint8Array, w: number, h: number): FrameChange {
+  if (prev.length < w * h || prev.length !== cur.length) return 'major'
+  if (maxWindowChange(prev, cur, w, 0, 0, w, h) >= CHANGE_MIN_PIXELS) return 'major'
+  return maxWindowChange(prev, cur, w, 0, 0, w, h, CHANGE_MINOR_LEVEL) >= CHANGE_MINOR_PIXELS ? 'minor' : 'none'
+}
+
+/** Vai ao OCR? Mudança forte: sim; menor: quando a última leitura tem ≥ STALE_SAMPLES amostras; nenhuma: não. */
+export function shouldOcr(change: FrameChange, samplesSinceOcr: number): boolean {
+  return change === 'major' || (change === 'minor' && samplesSinceOcr >= STALE_SAMPLES)
+}
+
 /** A região `box` (normalizada, crescida pela margem do blur) mudou entre os dois quadros (w×h)? */
 export function regionChanged(prev: Uint8Array, cur: Uint8Array, w: number, h: number, box: OcrBox): boolean {
   if (prev.length < w * h || prev.length !== cur.length) return true
@@ -165,6 +196,28 @@ export function regionChanged(prev: Uint8Array, cur: Uint8Array, w: number, h: n
   const x1 = Math.min(w, Math.ceil((box.x + box.w) * w + m)), y1 = Math.min(h, Math.ceil((box.y + box.h) * h + m))
   if (x1 <= x0 || y1 <= y0) return false
   return maxWindowChange(prev, cur, w, x0, y0, x1, y1) >= CHANGE_MIN_PIXELS
+}
+
+/** Mesma detecção no mesmo lugar: mesmo tipo e ≥ 50 % da menor caixa em comum (o valor não conta). */
+export function samePlace(n: Detection, p: Detection): boolean {
+  if (n.kind !== p.kind) return false
+  const ix = Math.max(0, Math.min(n.box.x + n.box.w, p.box.x + p.box.w) - Math.max(n.box.x, p.box.x))
+  const iy = Math.max(0, Math.min(n.box.y + n.box.h, p.box.y + p.box.h) - Math.max(n.box.y, p.box.y))
+  const minArea = Math.min(n.box.w * n.box.h, p.box.w * p.box.h)
+  return minArea > 0 && ix * iy >= 0.5 * minArea
+}
+
+/**
+ * Retropropagação de uma leitura melhor (`d`) para uma amostra anterior cujos pixels na região de `d` eram os mesmos:
+ * a detecção no mesmo lugar ganha a união das caixas; sem ela, `d` entra. Nova lista (a original não muda).
+ */
+export function mergeDetection(dets: readonly Detection[], d: Detection): Detection[] {
+  const i = dets.findIndex((e) => samePlace(d, e))
+  if (i < 0) return [...dets, d]
+  if (boxContains(dets[i].box, d.box)) return dets as Detection[]
+  const out = [...dets]
+  out[i] = { ...dets[i], box: unionBox(dets[i].box, d.box) }
+  return out
 }
 
 /**
@@ -176,13 +229,7 @@ export function regionChanged(prev: Uint8Array, cur: Uint8Array, w: number, h: n
  * lugares diferentes são duas detecções.
  */
 export function carryDetections(prev: readonly Detection[], next: readonly Detection[], prevFrame: Uint8Array, curFrame: Uint8Array, w: number, h: number): Detection[] {
-  const same = (n: Detection, p: Detection): boolean => {
-    if (n.kind !== p.kind) return false
-    const ix = Math.max(0, Math.min(n.box.x + n.box.w, p.box.x + p.box.w) - Math.max(n.box.x, p.box.x))
-    const iy = Math.max(0, Math.min(n.box.y + n.box.h, p.box.y + p.box.h) - Math.max(n.box.y, p.box.y))
-    const minArea = Math.min(n.box.w * n.box.h, p.box.w * p.box.h)
-    return minArea > 0 && ix * iy >= 0.5 * minArea
-  }
+  const same = samePlace
   const unchanged = new Map<Detection, boolean>()
   const still = (p: Detection): boolean => {
     let u = unchanged.get(p)
@@ -263,7 +310,8 @@ export function helperLinesToOcr(lines: readonly HelperLine[], imgW: number, img
 
 // ---------------------------------------------------------------- agrupamento
 
-export interface GroupCtx { fromUs: Us; toUs: Us; sourceW: number; sourceH: number; intervalUs?: Us }
+/** idPrefix: ids únicos entre varreduras (`${idPrefix}o1`…); o main passa o scanId. */
+export interface GroupCtx { fromUs: Us; toUs: Us; sourceW: number; sourceH: number; intervalUs?: Us; idPrefix?: string }
 
 interface Run {
   kind: SensitiveKind
@@ -271,6 +319,7 @@ interface Run {
   masked: string
   confidence: 'validated' | 'pattern'
   samples: OccurrenceSample[]
+  firstIdx: number
   lastIdx: number
   lastBox: OcrBox
   /** Movimento do centro (normalizado por µs) entre as duas últimas detecções; null = só uma até agora. */
@@ -295,6 +344,8 @@ export function groupOccurrences(samples: readonly ScanSample[], ctx: GroupCtx):
   const interval = ctx.intervalUs ?? SAMPLE_INTERVAL_US
   const runs: Run[] = []
   let active: Run[] = []
+  /** Movimento dominante entre a amostra i−1 e a i (null = sem pares suficientes). */
+  const dominant: ({ x: number; y: number } | null)[] = []
   const shift = (b: OcrBox, v: { x: number; y: number }, dt: number): OcrBox => ({ ...b, x: b.x + v.x * dt, y: b.y + v.y * dt })
   const median = (xs: number[]): number => { const a = [...xs].sort((p, q) => p - q); return a[a.length >> 1] }
   for (let i = 0; i < samples.length; i++) {
@@ -311,6 +362,7 @@ export function groupOccurrences(samples: readonly ScanSample[], ctx: GroupCtx):
       if (dt > 0) { vx.push((b.x - a.x) / dt); vy.push((b.y - a.y) / dt) }
     }
     const global = vx.length >= 2 ? { x: median(vx), y: median(vy) } : null
+    dominant.push(global)
     const pairs: { r: Run; j: number; score: number; dist: number }[] = []
     for (const r of active) {
       const v = r.vel ?? global
@@ -342,14 +394,19 @@ export function groupOccurrences(samples: readonly ScanSample[], ctx: GroupCtx):
     for (let j = 0; j < dets.length; j++) {
       if (usedDet.has(j)) continue
       const d = dets[j]
-      const r: Run = { kind: d.kind, values: new Set([d.value]), masked: d.masked, confidence: d.confidence, samples: [{ tUs: s.tUs, box: d.box, src: 'ocr' }], lastIdx: i, lastBox: d.box, vel: null, firstSeen: s.tUs, lastSeen: s.tUs }
+      const r: Run = { kind: d.kind, values: new Set([d.value]), masked: d.masked, confidence: d.confidence, samples: [{ tUs: s.tUs, box: d.box, src: 'ocr' }], firstIdx: i, lastIdx: i, lastBox: d.box, vel: null, firstSeen: s.tUs, lastSeen: s.tUs }
       runs.push(r)
       active.push(r)
     }
   }
   runs.sort((a, b) => a.firstSeen - b.firstSeen)
+  const motionOf = (r: Run): Occurrence['motion'] => {
+    const pre = dominant[r.firstIdx] ?? dominant[r.firstIdx + 1] ?? undefined
+    const post = dominant[r.lastIdx + 1] ?? dominant[r.lastIdx] ?? undefined
+    return pre || post ? { ...(pre ? { pre } : {}), ...(post ? { post } : {}) } : undefined
+  }
   return runs.map((r, k) => ({
-    id: `o${k + 1}`,
+    id: `${ctx.idPrefix ?? ''}o${k + 1}`,
     kind: r.kind,
     masked: r.masked,
     confidence: r.confidence,
@@ -359,7 +416,8 @@ export function groupOccurrences(samples: readonly ScanSample[], ctx: GroupCtx):
     startUs: Math.max(ctx.fromUs, r.firstSeen - interval),
     endUs: Math.min(ctx.toUs, r.lastSeen + interval),
     sourceW: ctx.sourceW,
-    sourceH: ctx.sourceH
+    sourceH: ctx.sourceH,
+    ...(r.samples.length === 1 && motionOf(r) ? { motion: motionOf(r) } : {})
   }))
 }
 
@@ -383,6 +441,7 @@ function grownSpan(occ: Occurrence, a: OcrBox, b: OcrBox): OcrBox {
  * cada [s_i, s_{i+1}) a caixa que contém as duas, crescida pela margem; pós-rolagem [última, endUs] com a última.
  * Pontas sem refinamento de um conteúdo que se move: a caixa da ponta é unida à dela EXTRAPOLADA pelo movimento entre
  * as duas amostras da ponta até startUs/endUs (rolagem: o conteúdo estava/vai estar mais abaixo/acima) — só cresce.
+ * Com uma amostra só, o movimento é o dominante da tela naquela amostra (`motion`).
  */
 export function occurrenceKeys(occ: Occurrence): RegionKey[] {
   // amostras no mesmo instante (não deveria haver, mas a região nunca perde uma delas): uma só, com a união
@@ -401,16 +460,18 @@ export function occurrenceKeys(occ: Occurrence): RegionKey[] {
     const cf = centre(from.box), co = centre(other.box), dt = toUs - from.tUs
     return { ...from.box, x: from.box.x + ((cf.x - co.x) / span) * dt, y: from.box.y + ((cf.y - co.y) / span) * dt }
   }
+  const byMotion = (from: { tUs: Us; box: OcrBox }, v: { x: number; y: number } | undefined, toUs: Us): OcrBox =>
+    v ? { ...from.box, x: from.box.x + v.x * (toUs - from.tUs), y: from.box.y + v.y * (toUs - from.tUs) } : from.box
   const keys: RegionKey[] = []
   if (occ.startUs < s[0].tUs) {
-    const ext = n > 1 ? extrapolate(s[0], s[1], occ.startUs) : s[0].box
+    const ext = n > 1 ? extrapolate(s[0], s[1], occ.startUs) : byMotion(s[0], occ.motion?.pre, occ.startUs)
     keys.push({ tUs: occ.startUs, box: grownSpan(occ, s[0].box, ext) })
   }
   for (let i = 0; i < n; i++) {
     const next = s[i + 1]
     if (next) keys.push({ tUs: s[i].tUs, box: grownSpan(occ, s[i].box, next.box) })
     else {
-      const ext = n > 1 ? extrapolate(s[i], s[i - 1], occ.endUs) : s[i].box
+      const ext = n > 1 ? extrapolate(s[i], s[i - 1], occ.endUs) : byMotion(s[i], occ.motion?.post, occ.endUs)
       keys.push({ tUs: s[i].tUs, box: grownSpan(occ, s[i].box, ext) })
     }
   }

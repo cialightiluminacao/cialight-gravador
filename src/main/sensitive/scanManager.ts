@@ -66,7 +66,7 @@ export class SensitiveScans {
     const scanId = randomUUID()
     const ac = new AbortController()
     this.current = { scanId, ac }
-    void this.run(v.req, { signal: ac.signal, onProgress: (p) => sink.progress({ scanId, ...p }) })
+    void this.run(v.req, { scanId, signal: ac.signal, onProgress: (p) => sink.progress({ scanId, ...p }) })
       .catch((): ScanResult => ({ occurrences: [], framesSampled: 0, framesOcr: 0, ms: 0, lang: '', error: { code: 'ffmpeg', message: 'A busca de dados sensíveis falhou.' } }))
       .then((result) => {
         if (this.current?.scanId === scanId) this.current = null
