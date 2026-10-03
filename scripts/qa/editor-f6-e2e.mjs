@@ -16,8 +16,10 @@
 //
 // No app: inspetor do clipe de tela → liga "Realçar cliques" e "Cursor ampliado"; "Zoom automático nos cliques" →
 // Pré-visualizar, Cancelar (projeto igual), Pré-visualizar, Aplicar (um passo: Ctrl+Z volta, Ctrl+Shift+Z refaz).
-// Blur (B) sobre o CPF aos 4 s → "Seguir conteúdo" até o fim → perda na oclusão (toast com "Ir para", faixa de
-// confiança); de novo a partir de 8 s com a região reposicionada sobre o texto → os keys de antes ficam intactos.
+// Blur (B) sobre o CPF aos 4 s → "Seguir conteúdo" até o fim → perda na oclusão (toast com "Continuar daqui", faixa
+// de confiança) → "Continuar daqui" (playhead na perda, efeito selecionado, dica, botão "Continuar rastreamento") → a
+// região reposicionada sobre o texto a 8 s → "Continuar rastreamento" (G4) → os keys de antes ficam intactos, um passo
+// de desfazer (Ctrl+Z volta exatamente à região reposicionada; Ctrl+Shift+Z refaz).
 // Exporta "Original" pelo diálogo real. Com o ffmpeg: (a) pixels do anel (amarelo #ffd400) no quadro do clique e
 // nenhum antes/depois; seta branca do cursor ampliado; (b) bordas do quadro nunca no fundo preto do projeto durante
 // o zoom (e o zoom de fato amplia a caixa verde ~1,8×); (c) o CPF ilegível em TODO quadro em que aparece na fonte
@@ -467,23 +469,29 @@ async function main() {
     const loss = news.find((t) => t.includes('Rastreamento perdido em'))
     const m = loss?.match(/perdido em (\d+):(\d+),(\d)/)
     const lossS = m ? Number(m[1]) * 60 + Number(m[2]) + Number(m[3]) / 10 : null
-    check(`toast de perda na oclusão (${OCC.from} s) com "Ir para": ${loss}`, !!loss && lossS !== null && lossS >= OCC.from - 0.15 && lossS <= OCC.from + 0.25 && loss.includes('Ir para'), { news, lossS })
+    check(`toast de perda na oclusão (${OCC.from} s) com "Continuar daqui": ${loss}`, !!loss && lossS !== null && lossS >= OCC.from - 0.15 && lossS <= OCC.from + 0.25 && loss.includes('Continuar daqui'), { news, lossS })
     const k = await ev(`const f = T.item('${fx}'); const r = f.region; const at = (a, tl) => { const t = tl - f.startUs; const ks = a.keys; if (!ks?.length) return a.value; let best = ks[0]; for (const x of ks) if (x.tUs <= t) best = x; return best.value } // keys no tempo LOCAL do efeito
       return { nx: r.x.keys?.length ?? 0, ny: r.y.keys?.length ?? 0, nw: r.w.keys?.length ?? 0, nh: r.h.keys?.length ?? 0, w45: at(r.w, 4.5e6), w9: at(r.w, 9e6), h45: at(r.h, 4.5e6), h9: at(r.h, 9e6), x45: at(r.x, 4.5e6), x65: at(r.x, 6.5e6),
         strip: document.querySelector('[data-item-id="${fx}"] [data-track-strip]')?.getAttribute('aria-label') ?? null, past: T.past() }`)
     const expectKeys = NFRAMES - Math.round(FOLLOW_AT / S * FPS) // um key por quadro analisado (+1 em início−1 µs)
     check(`keys de região por quadro (${k.nx} ≥ ${expectKeys}) em x, y, w e h`, k.nx >= expectKeys && k.ny === k.nx && k.nw === k.nx && k.nh === k.nx, k)
     check('a região acompanhou o texto antes da perda (x aos 6,5 s à direita do de 4,5 s: parado até 5 s, depois 120 px/s × 1,5 s = 180 px)', near((k.x65 - k.x45) * W, 180, 12), { dxPx: (k.x65 - k.x45) * W })
-    check('depois da perda a região fica ampliada até o fim (R21: sem recuperação automática)', k.w9 > k.w45 * 1.5 && k.h9 > k.h45 * 1.5, k)
+    check('depois da perda a região fica ampliada até o fim (oclusão sem reencontro: a redetecção da G4 não acha o texto com confiança ≥ 0,93)', k.w9 > k.w45 * 1.5 && k.h9 > k.h45 * 1.5, k)
     check('faixa de confiança no item (perdido em …)', !!k.strip && k.strip.includes('perdido em'), k.strip)
     result.follow1 = { news, lossS, k }
     await shot('e2e-f6-06-perda.png')
-    const go = await ev(`const t = [...document.querySelectorAll('[data-sonner-toast]')].find((x) => x.textContent.includes('Rastreamento perdido')); const b = t && [...t.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Ir para')
-      if (!b) return null; await T.click(b); await T.wait(300); return T.st().playheadUs`)
-    check('"Ir para" leva o playhead ao instante da perda', go !== null && lossS !== null && near(go / S, lossS, 0.1), { go, lossS })
+    // "Continuar daqui" (G4): sem seleção antes, para conferir que o efeito é selecionado
+    const go = await ev(`T.st().select([]); await T.settle(); const t = [...document.querySelectorAll('[data-sonner-toast]')].find((x) => x.textContent.includes('Rastreamento perdido')); const b = t && [...t.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Continuar daqui')
+      if (!b) return null; await T.click(b); await T.wait(400)
+      return { playhead: T.st().playheadUs, sel: T.st().selection, hint: T.toasts().some((x) => x.includes('Ajuste a região sobre o conteúdo e clique em “Continuar rastreamento”.')), resume: !!document.querySelector('[data-follow-resume]'), from: !!document.querySelector('[data-follow-continue-from]'), panelLoss: document.querySelector('[data-follow-loss]')?.textContent ?? null }`)
+    check('"Continuar daqui" leva o playhead ao instante da perda, seleciona o efeito, mostra a dica e o botão "Continuar rastreamento"', !!go && lossS !== null && near(go.playhead / S, lossS, 0.1) && go.sel.length === 1 && go.sel[0] === fx && go.hint && go.resume && go.from && !!go.panelLoss && go.panelLoss.includes('Rastreamento perdido em'), { go, lossS })
+    await shot('e2e-f6-06b-continuar-daqui.png')
+    // antes da perda o botão "Continuar rastreamento" some (só na perda ou depois)
+    const pre = await ev(`await T.seek(${FOLLOW_AT} + 500000); return { resume: !!document.querySelector('[data-follow-resume]'), from: !!document.querySelector('[data-follow-continue-from]') }`)
+    check('antes da perda: "Continuar daqui" fica, "Continuar rastreamento" não aparece', pre.from && !pre.resume, pre)
   }
 
-  console.log('de novo a partir de 8 s, com a região reposicionada sobre o texto')
+  console.log('"Continuar rastreamento" a partir de 8 s, com a região reposicionada sobre o texto (G4)')
   {
     const b240 = textBox(frames(rec, `select=eq(n\\,240),crop=${W}:${ROW.h}:0:${ROW.y}`, W, ROW.h)[0], W, ROW.h)
     const t2 = { x0: b240.x0 - 12, y0: b240.y0 + ROW.y - 12, x1: b240.x1 + 12, y1: b240.y1 + ROW.y + 12 }
@@ -491,14 +499,20 @@ async function main() {
     await ev(`await T.setField('Posição X', ${(((t2.x0 + t2.x1) / 2 / W) * 100).toFixed(2)}); await T.setField('Posição Y', ${(((t2.y0 + t2.y1) / 2 / H) * 100).toFixed(2)})
       await T.setField('Largura', ${(((t2.x1 - t2.x0) / W) * 100).toFixed(2)}); await T.setField('Altura', ${(((t2.y1 - t2.y0) / H) * 100).toFixed(2)}); return 1`)
     await ev(`await T.seek(${RERUN_AT}); return 1`)
+    // a região reposicionada (edições normais, cada uma com o seu passo) — o estado que um Ctrl+Z tem de restaurar
+    const adj = await ev(`return { json: JSON.stringify(T.item('${fx}').region), past: T.past(), resume: !!document.querySelector('[data-follow-resume]') }`)
+    check('com o playhead depois da perda, o inspetor mostra "Continuar rastreamento"', adj.resume, adj.resume)
     const before = await ev(`return T.toasts()`)
-    await ev(`await T.click(T.el('[data-follow-content]')); return 1`)
+    await ev(`await T.click(T.el('[data-follow-resume]')); return 1`)
     const news = await waitFollow(before)
-    console.log(`  segunda passada: toasts ${JSON.stringify(news)}`)
+    console.log(`  continuar rastreamento: toasts ${JSON.stringify(news)}`)
+    const un = await ev(`const after = JSON.stringify(T.item('${fx}').region); const past = T.past(); await T.key('z', { ctrlKey: true }); await T.wait(300); const undone = JSON.stringify(T.item('${fx}').region); const pastU = T.past()
+      await T.key('z', { ctrlKey: true, shiftKey: true }); await T.wait(300); return { past, pastU, undoneSame: undone === ${JSON.stringify(adj.json)}, undone, redoSame: JSON.stringify(T.item('${fx}').region) === after, pastR: T.past() }`)
+    check('"Continuar rastreamento" é UM passo de desfazer: Ctrl+Z volta exatamente à região reposicionada, Ctrl+Shift+Z refaz', un.past === adj.past + 1 && un.pastU === adj.past && un.undoneSame && un.redoSame && un.pastR === un.past, { ...un, undone: undefined })
     const cmp = await ev(`const old = JSON.parse(${JSON.stringify(snap)}); const cur = T.item('${fx}').region; const f = T.item('${fx}'); const cut = ${RERUN_AT} - f.startUs - 1; const out = {}
       for (const ch of ['x', 'y', 'w', 'h']) { const a = (old[ch].keys || []).filter((k) => k.tUs < cut); const b = (cur[ch].keys || []).filter((k) => k.tUs < cut); out[ch] = { n: a.length, same: JSON.stringify(a) === JSON.stringify(b), after: (cur[ch].keys || []).filter((k) => k.tUs >= cut + 1).length } }
       return out`)
-    check('segunda passada: "Conteúdo seguido" (sem perda de 8 s ao fim)', news.some((t) => t.includes('Conteúdo seguido')) && !news.some((t) => t.includes('perdido')), news)
+    check('continuar rastreamento: "Conteúdo seguido" (sem perda de 8 s ao fim)', news.some((t) => t.includes('Conteúdo seguido')) && !news.some((t) => t.includes('perdido')), news)
     check('os keys de antes de 8 s ficam intactos (x, y, w, h) e há keys novos de 8 s em diante', Object.values(cmp).every((c) => c.same && c.n > 100 && c.after >= 59), cmp)
     result.follow2 = { news, cmp, t2 }
     await ev(`await T.seek(8.8e6); return 1`)

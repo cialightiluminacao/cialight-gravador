@@ -8,7 +8,15 @@ import { useEditorStore } from './editorStore'
 // O item mostra a faixa só se a região dele ainda é ESSE objeto (imutável): editar a região, desfazer o rastreamento
 // ou rastrear de novo a esconde; refazer a traz de volta (o histórico guarda o mesmo objeto).
 
-export interface TrackStrip { region: EffectRegion; samples: TrackSample[] }
+export interface TrackStrip {
+  region: EffectRegion
+  samples: TrackSample[]
+  /**
+   * Instante (absoluto) da perda NÃO recuperada do último rastreamento (G4: "Continuar daqui" / "Continuar
+   * rastreamento"); null/ausente = terminou confiante. Vale mesmo depois que o usuário reposiciona a região.
+   */
+  lossUs?: Us | null
+}
 
 interface State {
   strips: Record<string, TrackStrip>
@@ -37,4 +45,12 @@ export function stripRuns(samples: readonly TrackSample[], durationUs: Us): { fr
     else if (toUs > s.tUs) out.push({ fromUs: s.tUs, toUs, state: s.state })
   })
   return out
+}
+
+/**
+ * Faixa de "Continuar rastreamento" (G4): as amostras de antes do ponto de partida (tempo local) ficam; dali em diante,
+ * as da nova passada — como os keys da região (trackToKeys).
+ */
+export function mergeStripSamples(prev: readonly TrackSample[], fresh: readonly TrackSample[], fromLocalUs: Us): TrackSample[] {
+  return [...prev.filter((s) => s.tUs < fromLocalUs), ...fresh]
 }

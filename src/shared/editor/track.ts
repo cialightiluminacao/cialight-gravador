@@ -20,10 +20,15 @@
 //   parado — nenhuma translação única cobre os dois).
 // Senão o rastreamento confiante ACABA (ruling R21): desse quadro até o fim do trecho a posição fica segurada (a
 // última 'ok' — nunca inventada), a cobertura (reach) cresce `growth`× por quadro até o quadro inteiro (normal) e o
-// buraco do invertido é o nulo. Não há recuperação automática: um conteúdo idêntico (cópia, fantasma de arrasto) que
-// aparece enquanto o alvo está escondido seria indistinguível dele. Para continuar, o usuário reposiciona a região num
-// quadro posterior e roda "Seguir conteúdo" de novo dali (a mescla mantém os keys de antes). O 1º quadro da perda é
-// 'weak' (âmbar) quando havia um pico plausível perto da previsão, senão 'lost'; o resto é 'lost'.
+// buraco do invertido é o nulo. Redetecção limitada (G4, ruling R3; `redetect`, ligada por padrão): por até 1 s depois
+// da perda o molde é procurado numa janela de 3× searchPx em volta da última posição confiante; volta só com 3
+// quadros seguidos de confiança ≥ 0,93, o 2º pico ≥ 0,15 abaixo, rígidos e coerentes com o movimento (um conteúdo
+// idêntico — cópia, fantasma de arrasto — que aparece longe da previsão enquanto o alvo está escondido seria
+// indistinguível dele: recusado pela coerência, REDETECT_DRIFT_PX). Os quadros entre a perda e o reencontro ficam
+// segurados e ampliados (invertido: buraco nulo). Sem reencontro, perdido até o fim; para continuar, o usuário
+// reposiciona a região num quadro posterior e usa "Continuar rastreamento" / "Seguir conteúdo" dali (a mescla mantém
+// os keys de antes). O 1º quadro da perda é 'weak' (âmbar) quando havia um pico plausível perto da previsão, senão
+// 'lost'; o resto é 'lost'.
 // Escala (R20) sempre estimada: passos de scaleStep (3 %) a partir da atual enquanto o NCC melhora ≥ 0,003
 // (histerese: sem deriva); as sondas vizinhas que não se separam da escolhida são incerteza não resolvida, [scaleLo,
 // scaleHi] — a região normal usa a maior e o buraco do invertido a menor, mais meio passo de folga.
@@ -33,13 +38,15 @@
 // conteúdo, com FOLGA D (px do quadro):
 // - 'ok': 1 px da análise (erro do subpixel) + o maior movimento de borda até os vizinhos 'ok' (centro + mudança de
 //   escala: a interpolação linear entre keys nunca fica atrás do conteúdo, R4b) + meio passo de escala (scaleTol);
-// - 'weak'/'lost': a cobertura alcançada (reach·√2: o centro pode estar em qualquer ponto do quadrado ±reach) + 1 px.
+// - 'weak'/'lost': a cobertura alcançada (reach·√2: o centro pode estar em qualquer ponto do quadrado ±reach) + 1 px;
+//   perda recuperada (G4): pelo menos o deslocamento até o quadro do reencontro (a região segurada o contém).
 // Normal: a região CRESCE pela folga (retângulo: meias-larguras + D; elipse: × (1 + D/menor semieixo), que contém a
 // elipse somada a um disco de raio D). Invertido (a região é o buraco nítido): ENCOLHE pela folga e, perdido ou sem
 // tamanho, vira o buraco nulo (NO_HOLE, a convenção de conservativeRegion) — nunca maior.
 // Transições em degrau (keys a 1 µs — também quando os quadros estão a só 2 µs; nenhum instante inteiro fica entre o
 // último seguro e o degrau): normal, ao perder a região ampliada vale logo
-// depois do último quadro confiante (e não encolhe mais: R21). Invertido: o buraco fecha/abre em degrau
+// depois do último quadro confiante (e não encolhe enquanto perdido: R21); no reencontro (G4) ela vale até t − 1 e só
+// encolhe no quadro confiante. Invertido: o buraco fecha/abre em degrau (abre só num quadro confiante)
 // (interpolar até NO_HOLE moveria o buraco para o canto, fora do conteúdo).
 // Mescla: keys antigos ANTES do início ficam (com um key exato 1 µs antes do início: a curva anterior não muda); do
 // início ao fim do efeito, só os novos (o rastreamento vai sempre até o fim; cancelar não aplica nada).
@@ -76,9 +83,21 @@ export interface TrackOpts {
   gateMinPx: number
   /** Desvio-padrão mínimo do molde (níveis de cinza): abaixo disso a região é lisa demais para seguir. */
   minStd: number
+  /** Redetecção automática depois de uma perda (G4, ruling R3); null = desligada (o comportamento da F6: perdido até o fim). */
+  redetect?: RedetectOpts | null
 }
 
-export const DEFAULT_TRACK_OPTS: TrackOpts = { searchPx: 40, growth: 2, scaleStep: 0.03, lostBelow: 0.7, okAbove: 0.85, ambiguityMargin: 0.1, gateMinPx: 4, minStd: 3 }
+/**
+ * Redetecção (G4, R3): depois da perda, por até `maxUs` (pelo tUs dos quadros, contado do 1º quadro perdido), procura o
+ * molde numa janela de raio radiusMul·searchPx em volta da última posição confiante, na última escala confiante ± os
+ * passos de escala. Reencontra só com `confirmFrames` quadros seguidos com confiança ≥ minConf, o 2º pico fora da
+ * vizinhança ≥ minMargin abaixo do melhor, rígidos e com a posição coerente (portão de movimento).
+ */
+export interface RedetectOpts { maxUs: Us; radiusMul: number; minConf: number; minMargin: number; confirmFrames: number }
+
+export const DEFAULT_REDETECT: RedetectOpts = { maxUs: 1_000_000, radiusMul: 3, minConf: 0.93, minMargin: 0.15, confirmFrames: 3 }
+
+export const DEFAULT_TRACK_OPTS: TrackOpts = { searchPx: 40, growth: 2, scaleStep: 0.03, lostBelow: 0.7, okAbove: 0.85, ambiguityMargin: 0.1, gateMinPx: 4, minStd: 3, redetect: DEFAULT_REDETECT }
 
 export type TrackState = 'ok' | 'weak' | 'lost'
 
@@ -87,7 +106,18 @@ export type TrackState = 'ok' | 'weak' | 'lost'
  * estimada relativa ao molde e o intervalo das escalas empatadas [scaleLo, scaleHi], confiança (NCC, 0–1), estado e,
  * perdido, o raio da cobertura alcançada (o centro do conteúdo pode estar em qualquer ponto do quadrado ±reach).
  */
-export interface TrackResult { tUs: Us; x: number; y: number; w: number; h: number; scale: number; scaleLo: number; scaleHi: number; confidence: number; state: TrackState; reach: number }
+export interface TrackResult {
+  tUs: Us; x: number; y: number; w: number; h: number; scale: number; scaleLo: number; scaleHi: number; confidence: number; state: TrackState; reach: number
+  /**
+   * Redetecção (G4): quadro perdido que é candidato a reencontro — a pose achada (px da análise). Enquanto não confirmado,
+   * o quadro continua perdido (posição segurada); resolveRedetections o promove a 'ok' quando a confirmação chega.
+   */
+  cand?: { x: number; y: number; w: number; h: number; scale: number; scaleLo: number; scaleHi: number; confidence: number }
+  /** Quadro 'ok' que confirma o reencontro: quantos candidatos imediatamente antes dele são promovidos a 'ok'. */
+  confirms?: number
+  /** 1º quadro 'ok' depois de uma perda (reencontro confirmado; já resolvido por resolveRedetections). */
+  reacquired?: boolean
+}
 
 // ---------------------------------------------------------------- imagem
 
@@ -268,10 +298,21 @@ export interface Tracker {
   readonly scale: number
   /** Movimento por quadro entre os dois últimos quadros 'ok' seguidos (px da análise); null = desconhecido. */
   readonly v: { x: number; y: number } | null
-  /** Perdido (R21: até o fim do trecho) e o alcance da cobertura (raio, px da análise) do último quadro. */
+  /** Perdido (sem redetecção, até o fim do trecho — R21) e o alcance da cobertura (raio, px da análise) do último quadro. */
   readonly lost: boolean
   readonly reach: number
+  /** Redetecção (G4): tUs do 1º quadro da perda atual (null = não perdido). */
+  readonly lostAtUs?: Us | null
+  /** Quadros desde o último 'ok' (0 = o último quadro foi 'ok'). */
+  readonly sinceOk?: number
+  /** A janela da redetecção já acabou nesta perda (perdido até o fim). */
+  readonly gaveUp?: boolean
+  /** Candidatos seguidos ao reencontro (os quadros imediatamente anteriores). */
+  readonly cands?: readonly Cand[]
 }
+
+/** Candidato ao reencontro: centro relatado (px da análise), escala e o molde nela. */
+interface Cand { x: number; y: number; scale: number; lo: number; hi: number; score: number; set: TplSet }
 
 /** Pico de NCC refinado no nível 0: canto (u, v) inteiro e centro na imagem (px da análise). */
 interface Peak { u: number; v: number; ix: number; iy: number; s: number }
@@ -520,8 +561,9 @@ export function startTracker(first: GrayImage, box: TrackBox, tUs: Us, opts: Par
 
 /**
  * Um quadro (rulings R19/R20/R21; ver o topo do arquivo): 'ok' só com confiança alta, sem ambiguidade, dentro do portão
- * de movimento e rígido. O primeiro quadro que não passa encerra o rastreamento confiante: dali até o fim do trecho a
- * posição fica segurada e a cobertura cresce (normal) / buraco nulo (invertido), sem recuperação automática.
+ * de movimento e rígido. O primeiro quadro que não passa encerra o rastreamento confiante: dali em diante a
+ * posição fica segurada e a cobertura cresce (normal) / buraco nulo (invertido), até o fim do trecho ou até um reencontro da
+ * redetecção (G4, redetectStep).
  */
 export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Tracker; result: TrackResult } {
   const o = tr.opts
@@ -530,13 +572,21 @@ export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Trac
   const vx = tr.v?.x ?? 0, vy = tr.v?.y ?? 0, vlen = Math.hypot(vx, vy)
   const res = (x: number, y: number, scale: number, lo: number, hi: number, state: TrackState, reach: number, confidence: number): TrackResult => ({ tUs, x, y, w: tr.box.w * scale, h: tr.box.h * scale, scale, scaleLo: lo, scaleHi: hi, confidence, state, reach })
   const lose = (reach: number, conf: number, state: TrackState): { tracker: Tracker; result: TrackResult } => ({
-    tracker: { ...tr, lost: true, reach },
+    tracker: { ...tr, lost: true, reach, lostAtUs: tUs, sinceOk: 1, gaveUp: false, cands: [] },
     result: res(tr.pos.x, tr.pos.y, tr.scale, tr.scale, tr.scale, state, reach, conf)
   })
 
-  // R21: perdido é até o fim do trecho — sem busca, sem recuperação; só a cobertura continua crescendo em volta da
-  // última posição 'ok' (o conteúdo escondido pode estar andando)
-  if (tr.lost) return lose(Math.min(maxR, tr.reach * o.growth), 0, 'lost')
+  // perdido: a cobertura continua crescendo em volta da última posição 'ok' (o conteúdo escondido pode estar andando).
+  // Sem redetecção (ou passada a janela dela) é até o fim do trecho (R21); com ela (G4, R3), a busca restrita abaixo
+  if (tr.lost) {
+    const reach = Math.min(maxR, tr.reach * o.growth)
+    const rd = o.redetect
+    const lostAt = tr.lostAtUs ?? tUs
+    if (!rd || tr.gaveUp || tUs - lostAt > rd.maxUs) {
+      return { tracker: { ...tr, reach, gaveUp: true, cands: [], sinceOk: (tr.sinceOk ?? 0) + 1 }, result: res(tr.pos.x, tr.pos.y, tr.scale, tr.scale, tr.scale, 'lost', reach, 0) }
+    }
+    return redetectStep(tr, img, tUs, rd, reach)
+  }
 
   const px = tr.pos.x + vx, py = tr.pos.y + vy
   const { peaks, L0 } = findPeaks(tr.set, img, px + offX, py + offY, o.searchPx)
@@ -553,10 +603,95 @@ export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Trac
     const x = f.ix - offX, y = f.iy - offY
     // movimento recente: entre dois quadros 'ok' seguidos (sem perda no meio: R21)
     const v = { x: x - tr.pos.x, y: y - tr.pos.y }
-    return { tracker: { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v }, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
+    return { tracker: { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v, sinceOk: 0 }, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
   }
   // o 1º quadro da perda: âmbar se havia um pico plausível perto da previsão (abaixo do 'ok'), senão vermelho
   return lose(reach0, conf, !ambiguous && d <= o.gateMinPx && conf >= o.lostBelow ? 'weak' : 'lost')
+}
+
+/**
+ * Deriva admitida (px da análise por quadro) entre a posição prevista pelo movimento de antes da perda e o 1º candidato
+ * ao reencontro. Salvaguarda a mais da G4 (só recusa): um sósia IDÊNTICO que aparece na janela enquanto o alvo está
+ * coberto tem confiança ≈ 1 e nenhum 2º pico (o alvo está escondido) — a margem não o separa. Ele só é aceito se estiver
+ * onde o alvo poderia estar pelo movimento de antes (a ±(2·gateMinPx + 2·|v| + k·REDETECT_DRIFT_PX) da previsão).
+ */
+const REDETECT_DRIFT_PX = 0.5
+
+/**
+ * Um quadro perdido dentro da janela da redetecção (G4, R3; ver RedetectOpts): procura o molde (última escala confiante
+ * ± os passos) na janela de radiusMul·searchPx em volta da última posição confiante (presa ao quadro). Um quadro é
+ * candidato com confiança ≥ minConf, o 2º pico fora da vizinhança ≥ minMargin abaixo, rígido e coerente: o 1º perto da
+ * previsão do movimento de antes (REDETECT_DRIFT_PX), os seguintes dentro do portão de movimento normal a partir do
+ * candidato anterior. Com confirmFrames candidatos seguidos o rastreamento volta ('ok', confirms = os anteriores, que
+ * resolveRedetections promove). Até lá o quadro é perdido (posição segurada, cobertura crescendo) — o candidato vai em
+ * `cand`, sem efeito na região se não for confirmado.
+ */
+function redetectStep(tr: Tracker, img: GrayImage, tUs: Us, rd: RedetectOpts, reach: number): { tracker: Tracker; result: TrackResult } {
+  const o = tr.opts
+  const offX = tr.c0x - tr.box.x, offY = tr.c0y - tr.box.y
+  const sinceOk = (tr.sinceOk ?? 0) + 1
+  const prev = tr.cands ?? []
+  const held = (cands: readonly Cand[], c?: Cand): { tracker: Tracker; result: TrackResult } => ({
+    tracker: { ...tr, reach, sinceOk, cands },
+    result: {
+      tUs, x: tr.pos.x, y: tr.pos.y, w: tr.box.w * tr.scale, h: tr.box.h * tr.scale, scale: tr.scale, scaleLo: tr.scale, scaleHi: tr.scale, confidence: c ? Math.max(0, Math.min(1, c.score)) : 0, state: 'lost', reach,
+      ...(c ? { cand: { x: c.x, y: c.y, w: tr.box.w * c.scale, h: tr.box.h * c.scale, scale: c.scale, scaleLo: c.lo, scaleHi: c.hi, confidence: Math.max(0, Math.min(1, c.score)) } } : {})
+    }
+  })
+  const cx = Math.min(img.width, Math.max(0, tr.pos.x + offX)), cy = Math.min(img.height, Math.max(0, tr.pos.y + offY))
+  const { peaks, L0 } = findPeaks(tr.set, img, cx, cy, rd.radiusMul * o.searchPx)
+  const best = peaks[0]
+  if (!best || !L0) return held([])
+  if (peaks.length > 1 && peaks[1].s > best.s - rd.minMargin) return held([])
+  const f = refinePeak(tr, L0, best)
+  if (!(f.score >= rd.minConf) || !rigid(L0, f)) return held([])
+  const c: Cand = { x: f.ix - offX, y: f.iy - offY, scale: f.scale, lo: f.lo, hi: f.hi, score: f.score, set: f.set }
+  const vx = tr.v?.x ?? 0, vy = tr.v?.y ?? 0, vlen = Math.hypot(vx, vy)
+  // continua a sequência: dentro do portão normal a partir do candidato anterior (movimento entre os dois últimos)
+  let seq: Cand[] = []
+  if (prev.length) {
+    const p = prev[prev.length - 1], pp = prev.length > 1 ? prev[prev.length - 2] : null
+    const v = pp ? { x: p.x - pp.x, y: p.y - pp.y } : { x: vx, y: vy }
+    if (Math.hypot(c.x - p.x - v.x, c.y - p.y - v.y) <= 2 * o.gateMinPx + 2 * Math.hypot(v.x, v.y)) seq = [...prev, c]
+  }
+  // ou começa uma: perto da previsão pelo movimento de antes da perda
+  if (!seq.length && Math.hypot(c.x - tr.pos.x - vx * sinceOk, c.y - tr.pos.y - vy * sinceOk) <= 2 * o.gateMinPx + 2 * vlen + REDETECT_DRIFT_PX * sinceOk) seq = [c]
+  if (!seq.length) return held([])
+  if (seq.length < rd.confirmFrames) return held(seq, c)
+  const p = seq.length > 1 ? seq[seq.length - 2] : null
+  const v = p ? { x: c.x - p.x, y: c.y - p.y } : tr.v
+  return {
+    tracker: { ...tr, set: c.set, pos: { x: c.x, y: c.y }, scale: c.scale, v, lost: false, reach: 0, lostAtUs: null, sinceOk: 0, gaveUp: false, cands: [] },
+    result: { tUs, x: c.x, y: c.y, w: tr.box.w * c.scale, h: tr.box.h * c.scale, scale: c.scale, scaleLo: c.lo, scaleHi: c.hi, confidence: Math.max(0, Math.min(1, c.score)), state: 'ok', reach: 0, confirms: seq.length - 1 }
+  }
+}
+
+/**
+ * Resolve os reencontros da redetecção (G4): cada quadro 'ok' com `confirms` = n promove os n candidatos logo antes
+ * dele a 'ok' (pose do candidato; o 1º leva `reacquired`). Sem os n candidatos (entrada truncada ou alterada), o quadro
+ * fica sem `reacquired` — e trackToKeys o trata como perda (R21). `cand`/`confirms` saem. Idempotente.
+ */
+export function resolveRedetections(input: readonly TrackResult[]): TrackResult[] {
+  const strip = (r: TrackResult): TrackResult => {
+    if (r.cand === undefined && r.confirms === undefined) return r
+    const { cand: _c, confirms: _n, ...rest } = r
+    return rest
+  }
+  const out = input.map(strip)
+  for (let i = 0; i < input.length; i++) {
+    const n = input[i].confirms
+    if (input[i].state !== 'ok' || n === undefined) continue
+    const from = i - n
+    let ok = from >= 1 && input[from - 1].state !== 'ok'
+    for (let j = from; ok && j < i; j++) ok = input[j].state !== 'ok' && !!input[j].cand
+    if (!ok) continue
+    for (let j = from; j <= i; j++) {
+      const c = input[j].cand
+      const base: TrackResult = j === i ? out[j] : { ...out[j], ...c!, state: 'ok', reach: 0 }
+      out[j] = j === from ? { ...base, reacquired: true } : base
+    }
+  }
+  return out
 }
 
 /** Rastreia uma sequência de quadros (o 1º define o molde). */
@@ -570,7 +705,7 @@ export function trackFrames(frames: readonly { tUs: Us; img: GrayImage }[], box:
     tr = n.tracker
     out.push(n.result)
   }
-  return out
+  return resolveRedetections(out)
 }
 
 // ---------------------------------------------------------------- geometria da análise
@@ -672,8 +807,10 @@ export interface TrackSample { tUs: Us; confidence: number; state: TrackState }
 
 export interface TrackKeysResult {
   region: EffectRegion
-  /** Primeiro instante (absoluto) de cada perda. */
+  /** Primeiro instante (absoluto) da perda NÃO recuperada (vale até o fim do trecho; no máximo uma). */
   lost: { tUs: Us }[]
+  /** Perdas recuperadas pela redetecção (G4): [1º quadro perdido, 1º quadro reencontrado), instantes absolutos. */
+  recovered: { fromUs: Us; toUs: Us }[]
   samples: TrackSample[]
 }
 
@@ -761,15 +898,31 @@ export function ellipseInEllipse(cx: number, cy: number, ex: number, ey: number,
 /** Resultado do rastreamento → região com keys (ver o topo do arquivo: R4, R4b, degraus e mescla). */
 export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: TrackGeometry, o: TrackKeysOpts = {}): TrackKeysResult {
   if (fx.attach) throw new EditError('invalid', TRACK_ATTACHED_MESSAGE)
-  if (input.length === 0) return { region: fx.region, lost: [], samples: [] }
-  // R21: a partir do primeiro quadro que não é 'ok', tudo é perda até o fim, mesmo se a entrada disser outra coisa —
-  // posição e escala do primeiro quadro perdido (a última 'ok', segurada) e cobertura que nunca diminui
-  let firstBad = input.findIndex((r) => r.state !== 'ok')
-  if (firstBad < 0) firstBad = input.length
-  const results: TrackResult[] = input.slice(0, firstBad + 1)
-  for (let i = firstBad + 1; i < input.length; i++) {
-    const held = results[firstBad], prev = results[i - 1]
-    results.push({ ...held, tUs: input[i].tUs, confidence: input[i].confidence, state: 'lost', reach: Math.max(input[i].reach, prev.reach) })
+  if (input.length === 0) return { region: fx.region, lost: [], recovered: [], samples: [] }
+  // R21: a partir do primeiro quadro que não é 'ok', tudo é perda — posição e escala do primeiro quadro perdido (a
+  // última 'ok', segurada) e cobertura que nunca diminui — até o fim, mesmo se a entrada disser outra coisa, ou até um
+  // reencontro CONFIRMADO da redetecção (G4: 'ok' com `reacquired`, resolvido por resolveRedetections)
+  const resolved = resolveRedetections(input)
+  const results: TrackResult[] = []
+  /** Trechos perdidos [g0, g1] e o índice do reencontro depois deles (−1 = até o fim). */
+  const gaps: { g0: number; g1: number; re: number }[] = []
+  let held = -1
+  for (let i = 0; i < resolved.length; i++) {
+    const r = resolved[i]
+    if (held < 0) {
+      results.push(r)
+      if (r.state !== 'ok') {
+        held = i
+        gaps.push({ g0: i, g1: i, re: -1 })
+      }
+    } else if (r.state === 'ok' && r.reacquired) {
+      results.push(r)
+      gaps[gaps.length - 1].re = i
+      held = -1
+    } else {
+      results.push({ ...results[held], tUs: r.tUs, confidence: r.confidence, state: 'lost', reach: Math.max(r.reach, results[i - 1].reach) })
+      gaps[gaps.length - 1].g1 = i
+    }
   }
   const W = g.canvasW, H = g.canvasH
   const kx = W / g.analysisW, ky = H / g.analysisH
@@ -780,13 +933,18 @@ export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: Tr
   const R0 = valuesAt(fx.region, a)
   const r0 = results[0]
   const n = results.length
-  const conf = (i: number): boolean => i >= 0 && i < n && i < firstBad
+  const conf = (i: number): boolean => i >= 0 && i < n && results[i].state === 'ok'
   // escala do tamanho: a maior das empatadas (normal, cobre mais) / a menor (invertido, buraco menor) — R20
   const sz = (r: TrackResult): number => (fx.invert ? (r.scaleLo ?? r.scale) : (r.scaleHi ?? r.scale))
   const placed = (r: TrackResult): RegionValues => ({ x: R0.x + (r.x - r0.x) / g.analysisW, y: R0.y + (r.y - r0.y) / g.analysisH, w: R0.w * sz(r), h: R0.h * sz(r), rotation: R0.rotation })
   const halfMax = (v: RegionValues): number => Math.max(Math.abs(v.w) * W, Math.abs(v.h) * H) / 2
   // movimento da borda entre dois quadros: o do centro + o da mudança de escala
   const disp = (p: TrackResult, q: TrackResult): number => Math.hypot((p.x - q.x) * kx, (p.y - q.y) * ky) + Math.abs(sz(p) - sz(q)) * halfMax(R0)
+  // perda recuperada (G4): a região segurada do trecho perdido também contém o conteúdo onde ele foi reencontrado (o
+  // deslocamento até lá + a mudança de escala + meio passo), constante no trecho (não diminui) — com o degrau em t − 1
+  // abaixo, todo instante entre o último quadro perdido e o reencontro fica coberto
+  const gapOf = new Map<number, { re: number }>()
+  for (const g of gaps) for (let i = g.g0; i <= g.g1; i++) gapOf.set(i, g)
   const D: number[] = []
   const vals: RegionValues[] = []
   for (let i = 0; i < n; i++) {
@@ -796,7 +954,12 @@ export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: Tr
     if (conf(i)) {
       const neigh = Math.max(conf(i - 1) ? disp(r, results[i - 1]) : 0, conf(i + 1) ? disp(r, results[i + 1]) : 0)
       d = unit + neigh + scaleTol * halfMax(base)
-    } else d = unit + r.reach * Math.hypot(kx, ky) + scaleTol * halfMax(base)
+    } else {
+      const re = gapOf.get(i)?.re ?? -1
+      const toRe = re >= 0 ? disp(r, results[re]) : 0
+      const half = re >= 0 ? Math.max(halfMax(base), halfMax(placed(results[re]))) : halfMax(base)
+      d = unit + Math.max(r.reach * Math.hypot(kx, ky), toRe) + scaleTol * half
+    }
     D.push(d)
     vals.push(fx.invert ? (conf(i) ? (inflate(base, shape, -d, W, H) ?? NO_HOLE) : NO_HOLE) : inflate(base, shape, d, W, H)!)
   }
@@ -811,7 +974,8 @@ export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: Tr
       if (t - tp >= 2) {
         if (fx.invert) samples.push(kind(i) === 'closed' ? { t: tp + 1, v: NO_HOLE } : { t: t - 1, v: NO_HOLE })
         else if (kind(i) === 'grown') samples.push({ t: tp + 1, v: vals[i] })
-        // (perda → 'ok' não acontece: R21, perdido até o fim)
+        // reencontro (G4): a região ampliada do trecho perdido vale até t − 1 (só encolhe no quadro confiante)
+        else samples.push({ t: t - 1, v: vals[i - 1] })
       }
     }
     samples.push({ t, v: vals[i] })
@@ -825,9 +989,9 @@ export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: Tr
   // único key, o de a − 1 com o degrau — o buraco nulo do invertido —, valeria desde o início)
   const at = (an: Anim<number>): Anim<number> => (!edge ? an : an.keys?.length ? insertKeyExact(an, edge.kPrev) : { ...an, keys: [{ tUs: edge.kPrev, value: an.value, ease: 'linear' }] })
   const region: EffectRegion = { shape, x: merged(at(r.x), a, keysOf('x'), edge?.v.x), y: merged(at(r.y), a, keysOf('y'), edge?.v.y), w: merged(at(r.w), a, keysOf('w'), edge?.v.w), h: merged(at(r.h), a, keysOf('h'), edge?.v.h), rotation }
-  const lost: { tUs: Us }[] = []
-  for (let i = 0; i < n; i++) if (!conf(i) && conf(i - 1)) lost.push({ tUs: results[i].tUs })
-  return { region, lost, samples: results.map((x) => ({ tUs: x.tUs - fx.startUs, confidence: x.confidence, state: x.state })) }
+  const lost = gaps.filter((g) => g.re < 0).map((g) => ({ tUs: results[g.g0].tUs }))
+  const recovered = gaps.filter((g) => g.re >= 0).map((g) => ({ fromUs: results[g.g0].tUs, toUs: results[g.re].tUs }))
+  return { region, lost, recovered, samples: results.map((x) => ({ tUs: x.tUs - fx.startUs, confidence: x.confidence, state: x.state })) }
 }
 
 // ---------------------------------------------------------------- textos

@@ -14,6 +14,7 @@ import {
   grayFromRgba,
   layersBelowEffect,
   lossMessage,
+  resolveRedetections,
   templateBox,
   trackFrames,
   trackFrameTimes,
@@ -359,7 +360,9 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
     const sc: Scene = { path: occludedPath, pw: 60, ph: 40, occluder: OCCLUDER }
     for (const invert of [true, false]) {
       for (const t2 of [1.7, 1.71, 1.75, 1.8]) {
-        const first = run(sc, 0, 2, { invert })
+        // 1ª passada sem a redetecção (G4): a oclusão passa de 1 s e o resultado é o mesmo (oclusão > 1 s em
+        // track.adversarial), mas a busca da janela de 1 s em 8 passadas estoura o tempo do teste com a máquina carregada
+        const first = run(sc, 0, 2, { invert }, { redetect: null })
         const firstLost = first.results.find((r) => r.state !== 'ok')!.tUs / 1e6
         const a = usOf(t2), c = sc.path(t2)
         const box = { x: c.x / AW, y: c.y / AH, w: sc.pw / AW, h: sc.ph / AH }
@@ -467,6 +470,49 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
     for (const t of [3, 4, 5, 6]) expect(evalAnim(rn.w, t)).toBeGreaterThanOrEqual(evalAnim(rn.w, 2))
     expect(out.lost).toEqual([{ tUs: 2 }])
     expect(out.samples.map((x) => x.state)).toEqual(['ok', 'lost', 'lost', 'lost'])
+  })
+  it('redetecção (G4): resolveRedetections promove os candidatos confirmados; sem eles, nada volta (R21)', () => {
+    const base = (tUs: number, state: 'ok' | 'lost', extra: Partial<TrackResult> = {}): TrackResult => ({ tUs, x: 120, y: 90, w: 60, h: 40, scale: 1, scaleLo: 1, scaleHi: 1, confidence: state === 'ok' ? 1 : 0, state, reach: state === 'ok' ? 0 : 40, ...extra })
+    const cand = (x: number): TrackResult['cand'] => ({ x, y: 90, w: 60, h: 40, scale: 1, scaleLo: 1, scaleHi: 1, confidence: 0.97 })
+    const raw = [base(0, 'ok'), base(10, 'lost'), base(20, 'lost', { cand: cand(150) }), base(30, 'lost', { cand: cand(151) }), base(40, 'ok', { x: 152, confirms: 2 }), base(50, 'ok', { x: 153 })]
+    const out = resolveRedetections(raw)
+    expect(out.map((r) => [r.state, r.x, !!r.reacquired])).toEqual([['ok', 120, false], ['lost', 120, false], ['ok', 150, true], ['ok', 151, false], ['ok', 152, false], ['ok', 153, false]])
+    expect(out.some((r) => r.cand !== undefined || r.confirms !== undefined)).toBe(false)
+    expect(resolveRedetections(out)).toEqual(out) // idempotente
+    // candidato faltando (entrada truncada/alterada): o 'ok' não vira reencontro e trackToKeys o trata como perda
+    const broken = resolveRedetections([raw[0], raw[1], raw[2], base(30, 'lost'), raw[4], raw[5]])
+    expect(broken.some((r) => r.reacquired)).toBe(false)
+    const fx = effectOn({ path: linear, pw: 60, ph: 40 }, 0, 1)
+    const k = trackToKeys(fx, [raw[0], raw[1], raw[2], base(30, 'lost'), raw[4], raw[5]], GEO)
+    expect(k.samples.map((x) => x.state)).toEqual(['ok', 'lost', 'lost', 'lost', 'lost', 'lost'])
+    expect(k.recovered).toEqual([])
+    expect(k.lost).toEqual([{ tUs: 10 }])
+  })
+  it('redetecção (G4): a região segurada do trecho perdido contém o conteúdo onde ele foi reencontrado, até t − 1 (oráculo denso)', () => {
+    // perda curta com cobertura pequena (reach 2 px) e reencontro 30 px adiante — a folga do trecho tem de ir até lá
+    const sc: Scene = { path: (t) => ({ x: 120 + 900 * t, y: 90 }), pw: 60, ph: 40 }
+    const fx = effectOn(sc, 0, 1)
+    const fr = (n: number, state: 'ok' | 'lost', reacquired = false): TrackResult => {
+      const tUs = Math.round((n * 1e6) / FPS), c = sc.path(tUs / 1e6)
+      return state === 'ok'
+        ? { tUs, x: c.x, y: c.y, w: 60, h: 40, scale: 1, scaleLo: 1, scaleHi: 1, confidence: 0.99, state, reach: 0, ...(reacquired ? { reacquired: true } : {}) }
+        : { tUs, x: sc.path(1 / FPS).x, y: 90, w: 60, h: 40, scale: 1, scaleLo: 1, scaleHi: 1, confidence: 0, state, reach: 2 }
+    }
+    const input = [fr(0, 'ok'), fr(1, 'ok'), fr(2, 'lost'), fr(3, 'ok', true), fr(4, 'ok'), fr(5, 'ok')]
+    const out = trackToKeys(fx, input, GEO)
+    expect(out.recovered).toEqual([{ fromUs: input[2].tUs, toUs: input[3].tUs }])
+    expect(out.lost).toEqual([])
+    const fx1 = { ...fx, region: out.region }
+    // de 2/30 s a 3/30 s (inclusive t − 1): a região ⊇ o conteúdo reencontrado em 3/30 s e a do 1º perdido
+    const t2 = input[2].tUs, t3 = input[3].tUs
+    for (const t of [t2, t2 + 1, Math.round((t2 + t3) / 2), t3 - 2, t3 - 1]) {
+      const v = region(fx1, t)
+      for (const ref of [input[3], input[2]]) {
+        for (const [cx, cy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) expect(inside(v, 'rect', (ref.x + (cx * 60) / 2) * (CW / AW), (ref.y + (cy * 40) / 2) * (CH / AH)), `t=${t}`).toBe(true)
+      }
+    }
+    // a partir do reencontro, a região do quadro confiante (justa: encolhe só aí)
+    expect(region(fx1, t3).w).toBeLessThan(region(fx1, t3 - 1).w)
   })
   it('formato do toast da perda', () => {
     expect(formatTrackTime(2_216_667)).toBe('00:02,2')

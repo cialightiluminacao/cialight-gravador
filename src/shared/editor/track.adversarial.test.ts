@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { evalAnim } from './anim'
 import { createEffectItem } from './factory'
 import type { EffectItem, Us } from './project'
-import { trackFrames, trackFrameTimes, trackToKeys, type GrayImage, type TrackResult } from './track'
+import { trackFrames, trackFrameTimes, trackToKeys, type GrayImage, type TrackKeysResult, type TrackOpts, type TrackResult } from './track'
 
 // Oráculo de privacidade ADVERSARIAL do "Seguir conteúdo" (revisão da Task 5, rulings R19/R20): conteúdo repetido e
 // parecido (linhas de tabela rolando), cópia idêntica do valor em outro lugar, oclusão parcial de uma linha, região
@@ -98,15 +98,20 @@ const corners = (r: V): [number, number][] => {
   return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => [r.x * CW + a * hx, r.y * CH + b * hy])
 }
 
-function oracle(sc: Adv, fx0: EffectItem, fx1: EffectItem, t0: number, t1: number): { fails: number; worst: string } {
+function oracle(sc: Adv, fx0: EffectItem, fx1: EffectItem, t0: number, t1: number, extraUs: Us[] = []): { fails: number; worst: string } {
   let fails = 0, worst = '', worstPx = 0
   const z0 = sc.target.zoom?.(t0) ?? 1
   const R0 = at(fx0, usOf(t0))
   const p0 = sc.target.path(t0)
+  const times: Us[] = [...extraUs]
   for (let k = 0; ; k++) {
     const t = t0 + k / 240
     if (t >= t1) break
-    const r = at(fx1, usOf(t) - fx1.startUs)
+    times.push(usOf(t))
+  }
+  for (const tu of times) {
+    const t = tu / 1e6
+    const r = at(fx1, tu - fx1.startUs)
     const c = sc.target.path(t), z = sc.target.zoom?.(t) ?? 1
     if (!fx0.invert) {
       // a caixa do conteúdo (não a região do usuário) tem de estar coberta
@@ -129,13 +134,14 @@ function oracle(sc: Adv, fx0: EffectItem, fx1: EffectItem, t0: number, t1: numbe
   return { fails, worst }
 }
 
-function run(sc: Adv, t0: number, t1: number, invert: boolean): { fails: number; worst: string; results: TrackResult[] } {
+function run(sc: Adv, t0: number, t1: number, invert: boolean, opts: Partial<TrackOpts> = {}): { fails: number; worst: string; results: TrackResult[]; fx0: EffectItem; fx1: EffectItem; out: TrackKeysResult } {
   const b = userBox(sc, t0)
   const fx0: EffectItem = { ...createEffectItem('blurText', 0, usOf(t1), { x: b.x / AW, y: b.y / AH, w: b.w / AW, h: b.h / AH }), id: 'fx', invert }
   const frames = trackFrameTimes(usOf(t0), usOf(t1), FPS).map((tUs) => ({ tUs, img: render(sc, tUs / 1e6) }))
-  const results = trackFrames(frames, b)
-  const fx1 = { ...fx0, region: trackToKeys(fx0, results, GEO).region }
-  return { ...oracle(sc, fx0, fx1, t0, t1), results }
+  const results = trackFrames(frames, b, opts)
+  const out = trackToKeys(fx0, results, GEO)
+  const fx1 = { ...fx0, region: out.region }
+  return { ...oracle(sc, fx0, fx1, t0, t1), results, fx0, fx1, out }
 }
 
 // ---------------------------------------------------------------- cenas (sementes: as da revisão)
@@ -276,4 +282,172 @@ describe('fronteira da nova passada com canais de keys em instantes diferentes (
     }
   }
   }
+})
+
+// ---------------------------------------------------------------- G4 (ruling R3): redetecção automática limitada
+
+// Depois da perda, por até 1 s, o molde é procurado numa janela de 3× searchPx em volta da última posição confiante;
+// reencontro só com 3 quadros seguidos de confiança ≥ 0,93, 2º pico ≥ 0,15 abaixo, rígidos e coerentes. Oráculo de
+// cobertura denso (1/240 s) no efeito inteiro + os instantes da fronteira (t − 2, t − 1, t, t + 1 do reencontro, o meio
+// do intervalo antes dele, e 1º quadro perdido ± 1 µs).
+
+/** Cursor (caixa opaca 12×18) atravessando a linha y em [t0, t1) de x0 a x1. */
+const cursorAcross = (y: number, t0: number, t1: number, x0: number, x1: number) => (t: number): Box[] => {
+  if (t < t0 || t >= t1) return []
+  const x = x0 + ((x1 - x0) * (t - t0)) / (t1 - t0)
+  return [{ x0: x - 6, y0: y - 9, x1: x + 6, y1: y + 9 }]
+}
+const CURSOR: Adv = { bg: softBg, target: TGT, occl: cursorAcross(100, 0.4, 0.8, 140, 260) }
+const CURSOR_MOVING: Adv = { bg: softBg, target: { ...TGT, path: (t) => ({ x: 170 + 30 * t, y: 120 }) }, occl: cursorAcross(120, 0.4, 0.8, 150, 270) }
+/** Oclusão longa (> 1 s): a faixa cobre o alvo de 0,4 s a 1,6 s. */
+const LONG: Adv = { bg: softBg, target: TGT, occl: (t) => (t >= 0.4 && t < 1.6 ? [{ x0: 150, y0: 80, x1: 250, y1: 120 }] : []) }
+/** Rolagem contínua (45 px/s para cima) passando por baixo de uma caixa parada que cobre o alvo de 0,4 s a 0,8 s. */
+const SCROLL: Adv = {
+  bg: flatBg(40), ...withTarget(table((t) => 60 - 45 * t, 18, 26, 8), 3),
+  occl: (t) => (t >= 0.4 && t < 0.8 ? [{ x0: 170, y0: 60 + 3 * 26 - 45 * 0.8 - 14, x1: 310, y1: 60 + 3 * 26 - 45 * 0.4 + 14 }] : [])
+}
+/** Rolagem rápida (150 px/s: 60 px enquanto coberto, metade da janela de 120 px). */
+const SCROLL_FAST: Adv = {
+  bg: flatBg(40), ...withTarget(table((t) => 120 - 150 * t, 18, 26, 8), 3),
+  occl: (t) => (t >= 0.4 && t < 0.8 ? [{ x0: 170, y0: 120 + 3 * 26 - 150 * 0.8 - 14, x1: 310, y1: 120 + 3 * 26 - 150 * 0.4 + 14 }] : [])
+}
+/** Rolagem que COMEÇA enquanto o alvo está coberto (parado antes): fora da coerência com o movimento de antes. */
+const SCROLL_STARTS_HIDDEN: Adv = {
+  bg: flatBg(40), ...withTarget(table((t) => (t < 0.5 ? 100 : 100 - 100 * (t - 0.5)), 18, 26, 8), 3),
+  occl: (t) => (t >= 0.4 && t < 0.8 ? [{ x0: 170, y0: 100 + 3 * 26 - 30 - 14, x1: 310, y1: 100 + 3 * 26 + 14 }] : [])
+}
+/** Rolagem que começa quando o alvo reaparece (parado enquanto coberto). */
+const SCROLL_AFTER: Adv = {
+  bg: flatBg(40), ...withTarget(table((t) => (t < 0.8 ? 60 : 60 - 60 * (t - 0.8)), 18, 26, 8), 3),
+  occl: (t) => (t >= 0.4 && t < 0.8 ? [{ x0: 170, y0: 60 + 3 * 26 - 14, x1: 310, y1: 60 + 3 * 26 + 14 }] : [])
+}
+/** Sósia idêntico a 30 px que aparece enquanto o alvo está coberto (0,45 s) e fica depois que ele reaparece (0,9 s). */
+const LOOKALIKE_STAYS: Adv = {
+  bg: flatBg(40), target: TGT,
+  others: [{ path: () => ({ x: 200, y: 130 }), pw: 60, ph: 20, tex: TEXT, on: (t) => t >= 0.45 }],
+  occl: (t) => (t >= 0.4 && t < 0.9 ? [{ x0: 160, y0: 80, x1: 240, y1: 115 }] : [])
+}
+/** O mesmo sósia, mas ele some quando o alvo reaparece (dentro da janela de 1 s). */
+const LOOKALIKE_GOES: Adv = { ...LOOKALIKE_STAYS, others: [{ ...LOOKALIKE_STAYS.others![0], on: (t) => t >= 0.45 && t < 0.9 }] }
+/** Linhas parecidas (não idênticas) na janela enquanto a linha-alvo está coberta. */
+const SIMILAR_ROWS: Adv = { bg: flatBg(40), ...withTarget(table(() => 40), 4), occl: (t) => (t >= 0.4 && t < 0.8 ? [{ x0: 170, y0: 40 + 4 * 22 - 12, x1: 310, y1: 40 + 4 * 22 + 12 }] : []) }
+
+const states = (rs: TrackResult[]): string => rs.map((x) => (x.reacquired ? 'R' : x.state[0])).join('')
+
+/** Instantes da fronteira de cada perda (recuperada ou não), µs absolutos. */
+function boundaryUs(out: TrackKeysResult, results: TrackResult[]): Us[] {
+  const ts: Us[] = []
+  for (const g of out.recovered) {
+    ts.push(g.toUs - 2, g.toUs - 1, g.toUs, g.toUs + 1, g.fromUs - 1, g.fromUs + 1)
+    const i = results.findIndex((r) => r.tUs === g.toUs)
+    if (i > 0) ts.push(Math.round((results[i - 1].tUs + g.toUs) / 2))
+  }
+  for (const l of out.lost) ts.push(l.tUs - 1, l.tUs + 1)
+  return ts.filter((t) => t >= 0)
+}
+
+describe('redetecção automática (G4, R3)', () => {
+  const recovers: [string, Adv, number][] = [
+    ['cursor passando sobre o conteúdo parado (< 1 s)', CURSOR, 1.6],
+    ['cursor passando sobre o conteúdo andando (< 1 s)', CURSOR_MOVING, 1.6],
+    ['rolagem contínua por baixo de uma caixa (reencontrado no lugar certo)', SCROLL, 1.6],
+    ['rolagem rápida (60 px enquanto coberto)', SCROLL_FAST, 1.2],
+    ['rolagem que começa quando o alvo reaparece', SCROLL_AFTER, 1.6],
+    ['sósia idêntico na janela só enquanto o alvo está coberto', LOOKALIKE_GOES, 1.6],
+    ['linhas parecidas na janela enquanto a linha-alvo está coberta', SIMILAR_ROWS, 1.6]
+  ]
+  for (const [name, sc, t1] of recovers) {
+    for (const invert of [false, true]) {
+      it(`${name}${invert ? ' — invertido' : ''}: reencontra e o oráculo vale em todo instante`, () => {
+        const r = run(sc, 0, t1, invert)
+        const tag = `estados ${states(r.results)}`
+        expect(r.out.recovered.length, tag).toBeGreaterThanOrEqual(1)
+        expect(r.out.lost, tag).toEqual([])
+        const o2 = oracle(sc, r.fx0, r.fx1, 0, t1, boundaryUs(r.out, r.results))
+        expect(o2.fails, `${o2.worst} | ${tag}`).toBe(0)
+        const R0 = at(r.fx0, 0)
+        for (const g of r.out.recovered) {
+          // reencontro (os 3 quadros de confirmação) dentro de 1 s da perda
+          expect(g.toUs - g.fromUs, tag).toBeLessThanOrEqual(1_000_000)
+          const i = r.results.findIndex((x) => x.tUs === g.toUs)
+          expect(r.results[i].reacquired, tag).toBe(true)
+          // no lugar certo: o centro relatado bate com o caminho real do alvo (± 1 px da análise)
+          for (let j = i; j < Math.min(r.results.length, i + 3); j++) {
+            const c = sc.target.path(r.results[j].tUs / 1e6)
+            expect(Math.hypot(r.results[j].x - c.x, r.results[j].y - c.y), `${tag} quadro ${j}`).toBeLessThanOrEqual(1)
+          }
+          // trecho perdido (exclusivo do reencontro): região ampliada (invertido: buraco nulo)
+          for (const x of r.results) {
+            if (x.tUs < g.fromUs || x.tUs >= g.toUs) continue
+            expect(x.state, tag).not.toBe('ok')
+            const v = at(r.fx1, x.tUs)
+            if (invert) expect([v.w, v.h], tag).toEqual([0, 0])
+            else expect(v.w > R0.w && v.h > R0.h, tag).toBe(true)
+          }
+          if (invert) {
+            // o buraco só abre no quadro confiante: fechado até t − 1
+            for (const t of [g.toUs - 1, g.toUs - 2, Math.round((g.fromUs + g.toUs) / 2)]) expect(evalAnim(r.fx1.region.w, t), tag).toBe(0)
+            expect(evalAnim(r.fx1.region.w, g.toUs), tag).toBeGreaterThan(0)
+          } else {
+            // a região não encolhe antes do quadro confiante (em t − 1 ainda é a do último quadro perdido)
+            const last = r.results[i - 1].tUs
+            for (const c of ['x', 'y', 'w', 'h'] as const) expect(evalAnim(r.fx1.region[c], g.toUs - 1), `${tag} ${c}`).toBe(evalAnim(r.fx1.region[c], last))
+          }
+        }
+        // keys estritamente crescentes (sem tUs repetido)
+        for (const c of ['x', 'y', 'w', 'h'] as const) {
+          const ks = r.fx1.region[c].keys!.map((k) => k.tUs)
+          for (let k = 1; k < ks.length; k++) expect(ks[k]).toBeGreaterThan(ks[k - 1])
+        }
+      })
+    }
+  }
+
+  for (const invert of [false, true]) {
+    it(`oclusão > 1 s${invert ? ' — invertido' : ''}: exatamente como sem a redetecção (segurada e ampliada até o fim)`, () => {
+      const on = run(LONG, 0, 2, invert)
+      const off = run(LONG, 0, 2, invert, { redetect: null })
+      expect(on.out.recovered).toEqual([])
+      expect(on.out.lost).toHaveLength(1)
+      expect(on.fx1.region).toEqual(off.fx1.region)
+      expect(on.out.lost).toEqual(off.out.lost)
+      expect(on.out.samples).toEqual(off.out.samples)
+      const first = on.results.findIndex((x) => x.state !== 'ok')
+      expect(on.results.slice(first + 1).every((x) => x.state === 'lost'), states(on.results)).toBe(true)
+      expect(on.fails, on.worst).toBe(0)
+    })
+  }
+
+  for (const invert of [false, true]) {
+    it(`sósia idêntico que fica depois que o alvo reaparece${invert ? ' — invertido' : ''}: nunca travado, oráculo vale`, () => {
+      const r = run(LOOKALIKE_STAYS, 0, 1.6, invert)
+      const tag = `estados ${states(r.results)}`
+      const first = r.results.findIndex((x) => x.state !== 'ok')
+      expect(first, tag).toBeGreaterThan(0)
+      // nenhum quadro confiante sobre o sósia (y 130) depois da perda
+      for (const x of r.results.slice(first)) if (x.state === 'ok') expect(Math.abs(x.y - 130), tag).toBeGreaterThan(10)
+      expect(r.out.recovered, tag).toEqual([])
+      const o2 = oracle(LOOKALIKE_STAYS, r.fx0, r.fx1, 0, 1.6, boundaryUs(r.out, r.results))
+      expect(o2.fails, `${o2.worst} | ${tag}`).toBe(0)
+    })
+  }
+
+  for (const invert of [false, true]) {
+    it(`rolagem que começa com o alvo coberto${invert ? ' — invertido' : ''}: não reencontra (mais blur, nunca menos), oráculo vale`, () => {
+      // 30 px de deslocamento sem movimento antes: fora da coerência (8 px + 0,5 px/quadro) — o mesmo caso de um sósia
+      const r = run(SCROLL_STARTS_HIDDEN, 0, 1.4, invert)
+      expect(r.out.recovered, states(r.results)).toEqual([])
+      expect(r.out.lost).toHaveLength(1)
+      expect(r.fails, r.worst).toBe(0)
+    })
+  }
+
+  it('com a redetecção desligada (redetect: null) nada volta: o comportamento da F6 (R21)', () => {
+    const r = run(CURSOR, 0, 1.6, false, { redetect: null })
+    expect(r.out.recovered).toEqual([])
+    expect(r.out.lost).toHaveLength(1)
+    const first = r.results.findIndex((x) => x.state !== 'ok')
+    expect(r.results.slice(first + 1).every((x) => x.state === 'lost')).toBe(true)
+    expect(r.fails, r.worst).toBe(0)
+  })
 })

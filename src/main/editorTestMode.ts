@@ -830,7 +830,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   // R21: sem recuperação automática — confiante até a oclusão, perdido dali até o fim (mesmo com o texto de volta)
   const lostAt5i = tl5.search(/[wl]/)
   const before5 = lostAt5i < 0 ? tl5 : tl5.slice(0, lostAt5i), after5 = lostAt5i < 0 ? '' : tl5.slice(lostAt5i + 1)
-  check(lostAt5i === Math.round(TRACK_SCENE.occludeFrom * fps5) && /^o+$/.test(before5) && /^l+$/.test(after5), `seguir conteúdo: confiante até a oclusão e perdido dali até o fim, sem recuperação (R21) (${tl5})`, failures)
+  check(lostAt5i === Math.round(TRACK_SCENE.occludeFrom * fps5) && /^o+$/.test(before5) && /^l+$/.test(after5), `seguir conteúdo: confiante até a oclusão e perdido dali até o fim (G4: a linha parecida "-01" na janela da redetecção e o texto fino a 480 px abaixo de 0,93 impedem o reencontro — o caminho conservador) (${tl5})`, failures)
   check((sc5?.keys ?? 0) >= TRACK_SCENE.durationS * fps5, `seguir conteúdo: um key por quadro analisado (${sc5?.keys})`, failures)
   const unreadableL = (l?: Legib): boolean => !!l && l.c < 0.15 && l.lap < 0.2
   for (const pv of sc5?.preview ?? []) check(unreadableL(pv.tracked), `seguir conteúdo (preview, quadro ${pv.frame}): texto ilegível sob o blur rastreado (contraste ${pv.tracked.c}, laplaciano ${pv.tracked.lap})`, failures)

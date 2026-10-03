@@ -8,12 +8,12 @@ vi.mock('../engine/contentTracking', () => {
 
 import { toast } from 'sonner'
 import { createEffectItem, createEmptyProject } from '@shared/editor/factory'
-import { addMarker, findItem } from '@shared/editor/ops'
+import { addMarker, applyTrackedRegion, findItem } from '@shared/editor/ops'
 import type { EffectItem, EffectRegion, Project } from '@shared/editor/project'
 import { runContentTracking, TrackingCancelled, type ContentTrackingResult } from '../engine/contentTracking'
 import { useEditorStore } from '../state/editorStore'
-import { stripRuns, useTrackStrips } from '../state/trackStrips'
-import { followContent, useTrackJobs } from './followContent'
+import { mergeStripSamples, stripRuns, useTrackStrips } from '../state/trackStrips'
+import { CONTINUE_HINT, followContent, useTrackJobs } from './followContent'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
 
@@ -34,6 +34,7 @@ const tracked: EffectRegion = {
 const out = (lost: { tUs: number }[] = []): ContentTrackingResult => ({
   region: tracked,
   lost,
+  recovered: [],
   samples: [{ tUs: 0, confidence: 1, state: 'ok' }, { tUs: 1_000_000, confidence: lost.length ? 0.2 : 0.9, state: lost.length ? 'lost' : 'ok' }],
   results: [],
   geometry: { analysisW: 480, analysisH: 270, canvasW: 1920, canvasH: 1080 },
@@ -107,6 +108,71 @@ describe('followContent', () => {
     st().open(locked)
     await followContent('fx')
     expect(runContentTracking).not.toHaveBeenCalled()
+  })
+})
+
+describe('Continuar daqui / Continuar rastreamento (G4)', () => {
+  const tracked2: EffectRegion = {
+    shape: 'rect',
+    x: { value: 0.3, keys: [{ tUs: 0, value: 0.3, ease: 'linear' }, { tUs: 1_200_000, value: 0.6, ease: 'linear' }, { tUs: 2_000_000, value: 0.7, ease: 'linear' }] },
+    y: { value: 0.3 },
+    w: { value: 0.22 },
+    h: { value: 0.12 },
+    rotation: { value: 0 }
+  }
+
+  it('o toast da perda leva a "Continuar daqui": playhead na perda, efeito selecionado e a dica', async () => {
+    st().open(base())
+    st().select([])
+    vi.mocked(runContentTracking).mockResolvedValue(out([{ tUs: 1_250_000 }]))
+    await followContent('fx')
+    const opts = vi.mocked(toast.warning).mock.calls[0][1] as { action: { label: string; onClick: () => void } }
+    expect(opts.action.label).toBe('Continuar daqui')
+    expect(useTrackStrips.getState().strips.fx.lossUs).toBe(1_250_000)
+    opts.action.onClick()
+    expect(st().playheadUs).toBe(1_250_000)
+    expect(st().selection).toEqual(['fx'])
+    expect(toast.info).toHaveBeenCalledWith(CONTINUE_HINT)
+    expect(CONTINUE_HINT).toBe('Ajuste a região sobre o conteúdo e clique em “Continuar rastreamento”.')
+  })
+
+  it('"Continuar rastreamento": UM passo de desfazer; Ctrl+Z volta exatamente à região ajustada antes; a faixa junta as amostras', async () => {
+    st().open(base())
+    vi.mocked(runContentTracking).mockResolvedValue(out([{ tUs: 1_000_000 }]))
+    await followContent('fx')
+    // o usuário reposiciona a região no instante da perda (edição normal, o seu próprio passo)
+    st().setPlayhead(1_200_000)
+    const adjusted: EffectRegion = { ...tracked, x: { value: 0.3, keys: [...tracked.x.keys!, { tUs: 1_200_000, value: 0.6, ease: 'linear' }] } }
+    expect(st().apply((p) => applyTrackedRegion(p, 'fx', adjusted))).toBeTruthy()
+    const before = st().project!
+    const pastBefore = st().history.past.length
+    vi.mocked(runContentTracking).mockResolvedValue({ ...out(), region: tracked2, samples: [{ tUs: 1_200_000, confidence: 0.95, state: 'ok' }, { tUs: 1_600_000, confidence: 0.96, state: 'ok' }], fromUs: 1_200_000, recovered: [] })
+    await followContent('fx', { resume: true })
+    expect(vi.mocked(runContentTracking).mock.calls.at(-1)![0].fromUs).toBe(1_200_000)
+    expect(st().history.past.length).toBe(pastBefore + 1)
+    expect((findItem(st().project!, 'fx')!.item as EffectItem).region).toEqual(tracked2)
+    const strip = useTrackStrips.getState().strips.fx
+    expect(strip.samples.map((x) => x.tUs)).toEqual([0, 1_000_000, 1_200_000, 1_600_000])
+    expect(strip.lossUs).toBeNull()
+    expect(toast.success).toHaveBeenCalled()
+    st().undo()
+    expect(st().project).toEqual(before)
+    expect((findItem(st().project!, 'fx')!.item as EffectItem).region).toEqual(adjusted)
+  })
+
+  it('perda breve recuperada: sem toast de perda, o sucesso cita o trecho recuperado', async () => {
+    st().open(base())
+    vi.mocked(runContentTracking).mockResolvedValue({ ...out(), recovered: [{ fromUs: 500_000, toUs: 733_333 }] })
+    await followContent('fx')
+    expect(toast.warning).not.toHaveBeenCalled()
+    const desc = (vi.mocked(toast.success).mock.calls[0][1] as { description: string }).description
+    expect(desc).toContain('Uma perda breve foi recuperada automaticamente (00:00,5)')
+  })
+
+  it('mergeStripSamples: antes do ponto de partida ficam, dali em diante as novas', () => {
+    const a = [{ tUs: 0, confidence: 1, state: 'ok' as const }, { tUs: 100, confidence: 0.1, state: 'lost' as const }, { tUs: 200, confidence: 0.1, state: 'lost' as const }]
+    const b = [{ tUs: 150, confidence: 0.9, state: 'ok' as const }, { tUs: 250, confidence: 0.9, state: 'ok' as const }]
+    expect(mergeStripSamples(a, b, 150)).toEqual([a[0], a[1], ...b])
   })
 })
 

@@ -12,6 +12,7 @@ import {
   analysisSize,
   DEFAULT_TRACK_OPTS,
   regionExtentPx,
+  resolveRedetections,
   templateBox,
   trackingBlocker,
   trackingProject,
@@ -100,7 +101,9 @@ export async function runContentTracking(req: ContentTrackingRequest, o: { onPro
     })
     // escala sempre estimada (R20): a folga de meio passo das sondas é a de trackToKeys
     const scaleTol = (req.opts?.scaleStep ?? DEFAULT_TRACK_OPTS.scaleStep) / 2
-    return { ...trackToKeys(fx, results, geometry, { scaleTol }), results, geometry, fromUs }
+    // redetecção (G4): os candidatos confirmados viram 'ok' (o worker manda os quadros como saíram, um a um)
+    const resolved = resolveRedetections(results)
+    return { ...trackToKeys(fx, resolved, geometry, { scaleTol }), results: resolved, geometry, fromUs }
   } finally {
     render.dispose()
   }
