@@ -821,8 +821,9 @@ export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: Tr
   const rotation = (r.rotation.keys ?? []).some((k) => k.tUs >= a) ? merged(r.rotation, a, [{ tUs: a, value: R0.rotation, ease: 'linear' }]) : r.rotation
   const edge = conservativeEdge(fx, a, W, H)
   // com degrau: cada canal cortado exatamente em kPrev (a curva antiga não muda até lá; [kPrev, a − 1] = o estado de
-  // kPrev, o que a conferência de conservativeEdge viu)
-  const at = (an: Anim<number>): Anim<number> => (edge && an.keys?.length ? insertKeyExact(an, edge.kPrev) : an)
+  // kPrev, o que a conferência de conservativeEdge viu); canal sem keys ganha um key em kPrev com o valor dele (senão o
+  // único key, o de a − 1 com o degrau — o buraco nulo do invertido —, valeria desde o início)
+  const at = (an: Anim<number>): Anim<number> => (!edge ? an : an.keys?.length ? insertKeyExact(an, edge.kPrev) : { ...an, keys: [{ tUs: edge.kPrev, value: an.value, ease: 'linear' }] })
   const region: EffectRegion = { shape, x: merged(at(r.x), a, keysOf('x'), edge?.v.x), y: merged(at(r.y), a, keysOf('y'), edge?.v.y), w: merged(at(r.w), a, keysOf('w'), edge?.v.w), h: merged(at(r.h), a, keysOf('h'), edge?.v.h), rotation }
   const lost: { tUs: Us }[] = []
   for (let i = 0; i < n; i++) if (!conf(i) && conf(i - 1)) lost.push({ tUs: results[i].tUs })

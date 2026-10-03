@@ -220,16 +220,21 @@ describe('fronteira da nova passada com canais de keys em instantes diferentes (
   // w e h {3 s, 8 s}. kPrev = 3 s (o último key antes de a − 1 em qualquer canal), mas y não tem key em 3 s: o key de
   // a − 1 com o valor de kPrev mudava a curva de y desde 2 s — antes de kPrev, fora do que a conferência "cabe" vê.
   // Oráculo denso (1/240 s, mais a − 1): em [0, a − 1] a região de depois da nova passada ⊇ a de antes (invertido: o
-  // buraco de depois ⊆ o de antes, ou nulo).
+  // buraco de depois ⊆ o de antes, ou nulo). Segundo layout (re-revisão): canais SEM keys (x, y, h) e w {1 s, 3 s} —
+  // invertido com w = 0 em kPrev: o degrau é o buraco nulo e o canal sem keys ia a 0 desde o início (o buraco aberto
+  // de 0 a 3 s pulava de y 0,5 para y 0); o gêmeo normal (w 0,3 → 0,6) segura a região de kPrev.
   const key = (tS: number, value: number): { tUs: Us; value: number; ease: 'linear' } => ({ tUs: usOf(tS), value, ease: 'linear' })
+  for (const layout of ['instantes diferentes', 'canais sem keys'] as const) {
   for (const invert of [false, true]) {
     for (const shape of ['rect', 'ellipse'] as const) {
-      it(`${shape}${invert ? ' — invertido' : ''}: a curva antes da nova passada não muda até kPrev e a cobertura não diminui`, () => {
+      it(`${layout}, ${shape}${invert ? ' — invertido' : ''}: a curva antes da nova passada não muda até kPrev e a cobertura não diminui`, () => {
         const base = createEffectItem('blur', 0, usOf(10), { x: 0.5, y: 0.5, w: 0.5, h: 0.5 })
         const fx: EffectItem = {
           ...base,
           invert,
-          region: invert
+          region: layout === 'canais sem keys'
+            ? { ...base.region, shape, x: { value: 0.5 }, y: { value: 0.5 }, w: { value: 0.3, keys: [key(1, 0.3), key(3, invert ? 0 : 0.6)] }, h: { value: 0.3 } }
+            : invert
             ? { ...base.region, shape, x: { value: 0.5, keys: [key(1, 0.5), key(3, 0.5)] }, y: { value: 0.45, keys: [key(2, 0.45), key(8, 0.55)] }, w: { value: 0.3, keys: [key(3, 0.3), key(8, 0.9)] }, h: { value: 0.3, keys: [key(3, 0.3), key(8, 0.9)] } }
             : { ...base.region, shape, x: { value: 0.5, keys: [key(1, 0.5), key(3, 0.5)] }, y: { value: 0.45, keys: [key(2, 0.45), key(8, 0.55)] }, w: { value: 0.9, keys: [key(3, 0.9), key(8, 0.3)] }, h: { value: 0.9, keys: [key(3, 0.9), key(8, 0.3)] } }
         }
@@ -269,5 +274,6 @@ describe('fronteira da nova passada com canais de keys em instantes diferentes (
         expect(fails.slice(0, 5), `${fails.length} falhas`).toEqual([])
       })
     }
+  }
   }
 })
