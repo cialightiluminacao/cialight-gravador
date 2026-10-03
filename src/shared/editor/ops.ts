@@ -1236,7 +1236,7 @@ export function detachAudio(p: Project, itemId: string): Project {
   if (!it.audio.enabled || !asset?.audio) throw new EditError('invalid', 'O item não tem áudio para separar')
   assertUnlocked(f.track)
   const linkId = it.linkId ?? newId('l_')
-  const audioItem: MediaItem = { ...omit(it, 'visual', 'transitionIn'), id: newId('i_'), linkId, audio: { ...it.audio, enabled: true } }
+  const audioItem: MediaItem = { ...omit(it, 'visual', 'transitionIn', 'cursorFx'), id: newId('i_'), linkId, audio: { ...it.audio, enabled: true } }
   return edit(p, (d) => {
     const target = d.tracks.find((t) => t.kind === 'audio' && !t.locked && isFree(t, it.startUs, end(it)))
     const trackId = target ? target.id : createTrack(d, 'audio')
@@ -1744,7 +1744,22 @@ export function toggleKeyframes(p: Project, itemId: string, paths: AnimPath[], t
 
 /** Instantes locais (µs) com key em qualquer propriedade do item, ordenados; keys a ±1 µs contam uma vez. */
 export function keyframeTimesUs(item: Item): Us[] {
-  const all = ANIM_PATHS.flatMap((pt) => (getAnim(item, pt)?.keys ?? []).map((k) => k.tUs)).sort((a, b) => a - b)
+  // fusão das listas de cada propriedade (já ordenadas): O(n · propriedades), sem ordenar tudo de novo (curvas densas
+  // do "Seguir conteúdo": um key por quadro em x/y/w/h)
+  let all: Us[] = []
+  for (const pt of ANIM_PATHS) {
+    const ks = getAnim(item, pt)?.keys
+    if (!ks?.length) continue
+    const merged: Us[] = []
+    let i = 0, j = 0
+    while (i < all.length || j < ks.length) {
+      if (j >= ks.length || (i < all.length && all[i] <= ks[j].tUs)) merged.push(all[i++])
+      else merged.push(ks[j++].tUs)
+    }
+    all = merged
+  }
+  // como antes da fusão: um instante entra se estiver a mais de 1 µs do ANTERIOR da lista (não do último mantido) — uma
+  // cadeia t, t+1, t+2 (degraus de 1 µs do "Seguir conteúdo") é um losango só, em t
   return all.filter((t, i) => i === 0 || t - all[i - 1] > 1)
 }
 
@@ -1892,6 +1907,29 @@ export function pasteKeyframes(p: Project, itemId: string, clip: KeyframeClipboa
   return edit(p, (d) => {
     const it = d.tracks[f.trackIndex].items[f.itemIndex]
     for (const [pt, a] of changes) assignAnim(it, pt, a)
+  })
+}
+
+/** Recusa do "Seguir conteúdo" num efeito ancorado (ruling R10): a âncora já leva a região pelo clipe. */
+export const TRACK_ATTACHED_MESSAGE = 'O efeito já está ancorado ao clipe; desancore para seguir o conteúdo'
+
+/**
+ * Grava a região calculada pelo "Seguir conteúdo" (track.trackToKeys) no efeito — um passo de desfazer. Só a região
+ * muda (vínculo, escopo, alvo, tempo e o resto ficam). Recusa: faixa bloqueada, item que não é efeito, efeito ancorado
+ * (TRACK_ATTACHED_MESSAGE) e keys fora de ordem/repetidos ou fora de [0, duração].
+ */
+export function applyTrackedRegion(p: Project, itemId: string, region: EffectItem['region']): Project {
+  const f = mustFind(p, itemId)
+  if (f.item.type !== 'effect') throw new EditError('invalid', 'Só efeitos de privacidade podem seguir o conteúdo')
+  assertUnlocked(f.track)
+  if (f.item.attach) throw new EditError('invalid', TRACK_ATTACHED_MESSAGE)
+  const dur = f.item.durationUs
+  for (const a of [region.x, region.y, region.w, region.h, region.rotation]) {
+    const k = a.keys ?? []
+    if (k.some((x, i) => x.tUs < 0 || x.tUs > dur || (i > 0 && x.tUs <= k[i - 1].tUs))) throw new EditError('invalid', 'Keys da região fora de ordem ou fora do efeito')
+  }
+  return edit(p, (d) => {
+    ;(d.tracks[f.trackIndex].items[f.itemIndex] as EffectItem).region = region
   })
 }
 

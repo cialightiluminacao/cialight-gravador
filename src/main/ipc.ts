@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { basename, dirname, extname, join } from 'path'
 import { existsSync, promises as fsp, renameSync, rmSync, statSync } from 'fs'
-import { IPC, type GeneratedExt, type GeneratedMeta, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
+import { IPC, type GeneratedExt, type GeneratedMeta, type BarState, type CursorBeginInfo, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
 import { getSettings, outputDir, rawDir, setSettings } from './settings/settingsStore'
 import { listDisplays, listSources, sourceThumbnail } from './capture/sources'
@@ -40,6 +40,8 @@ import { check as updateCheck, download as updateDownload, getUpdateStatus, inst
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
 import { ExportQueueStates, setExportCountsSource } from './quitGuard'
+import { cursorBegin, cursorDiscard, cursorPause, cursorResume, cursorStop } from './cursor/cursorCapture'
+import { readSessionCursorTrack, sessionCursorRef, sessionDirFor } from './cursor/cursorTrackFile'
 
 const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'ts']
 const AUDIO_EXT = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
@@ -84,9 +86,15 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       }
     }
   }
+  /** `asset.cursor` da tela da gravação (cursor.json válido na pasta dela) ou null. */
+  const cursorRefOf = (sessionId: string): string | null => {
+    const dir = sessionDirFor((id) => store.dirOf(id), sessionId)
+    return dir ? sessionCursorRef(dir) : null
+  }
   const ingest = new IngestQueue({
     projectFile: (projectId, rel) => projects.filePath(projectId, rel),
     resolveInput: resolveIngestInput,
+    sessionCursorRef: cursorRefOf,
     // só lê o cache do probe de encoders (o probe grava settings.json); sem cache → libx264
     encoders: () => encoderFallbackChain(cachedEncoderProbe()),
     rnnoiseDir,
@@ -202,6 +210,24 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ipcMain.handle(IPC.session.unfinished, () => store.findUnfinished())
   ipcMain.handle(IPC.session.filePath, (_e, id: string, name: string) => store.filePath(id, name))
 
+  // ---- trilha do cursor (F6): <sessão>/cursor.json, nunca campo no session.json ----
+  ipcMain.on(IPC.cursor.begin, (e, info: CursorBeginInfo) => {
+    try {
+      cursorBegin(info, store.dirOf(info.sessionId), e.sender)
+    } catch (err) {
+      log.warn('cursor: início recusado', err)
+    }
+  })
+  ipcMain.on(IPC.cursor.pause, () => cursorPause())
+  ipcMain.on(IPC.cursor.resume, () => cursorResume())
+  ipcMain.handle(IPC.cursor.stop, (_e, sessionId: string) => cursorStop(sessionId))
+  ipcMain.on(IPC.cursor.discard, (_e, sessionId: string) => cursorDiscard(sessionId))
+  // editor: só a pasta da sessão (dirOf recusa ids com separadores/..); nada de caminho vindo do renderer
+  ipcMain.handle(IPC.cursor.readTrack, (_e, sessionId: unknown) => {
+    const dir = sessionDirFor((id) => store.dirOf(id), sessionId)
+    return dir ? readSessionCursorTrack(dir) : null
+  })
+
   // ---- project (editor) ----
   ipcMain.handle(IPC.project.list, () => projects.list())
   // parseProject lança "Projeto inválido: …" — nada inválido chega ao disco
@@ -221,7 +247,7 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     const p2 = (n: number): string => String(n).padStart(2, '0')
     const name = `Gravação ${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}`
     const fade = getSettings().annotations.autoFadeSec
-    const project = projectFromSession(session, { projectId: newProjectId(now), name, now: now.toISOString(), annotationsAutoFadeMs: fade ? fade * 1000 : null })
+    const project = projectFromSession(session, { projectId: newProjectId(now), name, now: now.toISOString(), annotationsAutoFadeMs: fade ? fade * 1000 : null, hasCursor: cursorRefOf(sessionId) !== null })
     projects.create(project)
     return project
   })

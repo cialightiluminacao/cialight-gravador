@@ -235,3 +235,33 @@ describe('pastablePaths', () => {
     expect(ops.pastablePaths(byId(solid.project, solid.itemId), fxClip)).toEqual(['region.x'])
   })
 })
+
+describe('keyframeTimesUs com curvas densas (invariante 6)', () => {
+  it('1 h com um key por quadro em x/y/w/h (efeito rastreado): fusão ordenada sem repetidos (±1 µs) em poucos ms', () => {
+    const H = 108_000
+    const mk = (off: number): Anim<number> => ({ value: 0, keys: Array.from({ length: H }, (_, i) => ({ tUs: Math.round((i * S) / 30) + off, value: i, ease: 'linear' as const })) })
+    const fx = { id: 'fx', type: 'effect', effect: 'blur', startUs: 0, durationUs: 3600 * S, strength: { value: 80, keys: [{ tUs: 5, value: 1, ease: 'linear' as const }] }, feather: 0, color: '#000', invert: false, scope: 'below', region: { shape: 'rect', x: mk(0), y: mk(0), w: mk(1), h: mk(0), rotation: { value: 0 } } } as unknown as Item
+    let best = Infinity
+    let out: number[] = []
+    for (let r = 0; r < 3; r++) {
+      const t0 = performance.now()
+      out = ops.keyframeTimesUs(fx)
+      best = Math.min(best, performance.now() - t0)
+    }
+    // w a +1 µs conta como o mesmo instante; o key de intensidade em 5 µs entra entre os dois primeiros
+    expect(out.slice(0, 3)).toEqual([0, 5, 33_333])
+    expect(out).toHaveLength(H + 1)
+    for (let i = 1; i < out.length; i++) expect(out[i]).toBeGreaterThan(out[i - 1])
+    expect(best).toBeLessThan(80)
+  })
+})
+
+describe('keyframeTimesUs: ±1 µs contra o key ANTERIOR (semântica de antes da fusão)', () => {
+  it('cadeia t, t+1, t+2 vira um instante só (t); t, t+2 são dois', () => {
+    const at = (ts: number[]): Anim<number> => ({ value: 0, keys: ts.map((tUs) => ({ tUs, value: 0, ease: 'linear' as const })) })
+    const fx = (x: number[], w: number[]): Item => ({ id: 'fx', type: 'effect', effect: 'blur', startUs: 0, durationUs: 10 * S, strength: { value: 80 }, feather: 0, color: '#000', invert: false, scope: 'below', region: { shape: 'rect', x: at(x), y: { value: 0 }, w: at(w), h: { value: 0 }, rotation: { value: 0 } } }) as unknown as Item
+    expect(ops.keyframeTimesUs(fx([100, 102], [101]))).toEqual([100])
+    expect(ops.keyframeTimesUs(fx([100, 102], []))).toEqual([100, 102])
+    expect(ops.keyframeTimesUs(fx([100, 101, 102, 500], [499]))).toEqual([100, 499])
+  })
+})

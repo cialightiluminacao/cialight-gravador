@@ -34,6 +34,11 @@ export function greenBlob(d: Uint8Array, w: number, h: number, stride = 4): RedB
   return colorBlob(d, w, h, (r, g, b) => g > 90 && g - r > 40 && g - b > 30, stride)
 }
 
+/** Pixels magenta (o anel do realce de cliques nos testes, também semitransparente sobre o fundo escuro): R e B > G + 70, R ≈ B. */
+export function magentaBlob(d: Uint8Array, w: number, h: number, stride = 4): RedBlob | null {
+  return colorBlob(d, w, h, (r, g, b) => r - g > 70 && b - g > 70 && Math.abs(r - b) < 70, stride)
+}
+
 /**
  * Energia de detalhe (métrica do blur do F2): média de ΔL² entre vizinhos (horizontal + vertical) em [x0,x1)×[y0,y1)
  * de uma imagem de largura `w`. O blur espalha as bordas e derruba essa energia (~1/raio).

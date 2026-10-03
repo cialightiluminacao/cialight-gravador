@@ -8,9 +8,11 @@
 //  - PNG: composeAt no instante pedido → canvas.convertToBlob → writeStill (atômico).
 // Contrapressão de ponta a ponta: cada pipeWrite é esperado antes de liberar o próximo (≤ 2 em voo). Cancelar
 // apaga parcial e temporários (main). Uma exportação por vez (exportLock).
+import type { CursorTrackV1 } from '@shared/cursor'
 import type { Project, Us } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
+import { cursorTracks, loadCursorTracks } from '../engine/cursorTracks'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { FramesJobSpec, RenderOut } from '../engine/protocol'
 import { missingFontWarnings, missingMediaWarnings } from './exportPlan'
@@ -126,6 +128,16 @@ async function withPipe<T>(open: () => Promise<{ jobId: string }>, signal: Abort
 }
 
 /**
+ * Trilhas do cursor (F6) dos clipes com realce de cliques/cursor ampliado, as mesmas do preview (entrada lateral do
+ * resolveFrame): preview = exportação também no GIF e no PNG. A que não carregar vira aviso (o efeito sai sem cursor).
+ */
+export async function exportCursorTracks(project: Project): Promise<{ tracks: Map<string, CursorTrackV1>; warnings: string[] }> {
+  const { tracks, failed } = await loadCursorTracks(project, cursorTracks)
+  const warnings = failed.map((id) => `A trilha do cursor de “${project.assets.find((a) => a.id === id)?.name ?? id}” não pôde ser lida: o realce de cliques e o cursor ampliado saíram sem efeito.`)
+  return { tracks, warnings }
+}
+
+/**
  * pipeWrite em voo ao mesmo tempo por job (= PIPE_MAX_INFLIGHT do main): com 2, o renderer serializa o quadro
  * seguinte enquanto o main recebe o atual — a cópia de ~8 MB por quadro (1080p) pelo IPC é o gargalo do caminho.
  */
@@ -138,7 +150,7 @@ const PIPE_WRITES_IN_FLIGHT = 2
  * Resolve com o total de quadros e os avisos de mídia indisponível.
  */
 export function pipeFrames(
-  req: { project: Project; width: number; height: number; fps: number; fromUs: Us; toUs: Us },
+  req: { project: Project; width: number; height: number; fps: number; fromUs: Us; toUs: Us; cursorTracks?: ReadonlyMap<string, CursorTrackV1> },
   jobId: string,
   signal: AbortSignal,
   onFrame?: (frame: number, total: number, speed: number | null, etaS: number | null) => void
@@ -146,6 +158,7 @@ export function pipeFrames(
   const api = window.api.editorExport
   const render = new RenderClient(new OffscreenCanvas(req.width, req.height), { width: req.width, height: req.height, dpr: 1 })
   render.setProject(req.project, mediaUrlsFor(req.project, 'export'), false)
+  if (req.cursorTracks?.size) render.setCursorTracks(req.cursorTracks)
   const job: FramesJobSpec = { jobId, width: req.width, height: req.height, fps: req.fps, fromUs: req.fromUs, toUs: req.toUs }
   return new Promise((resolve, reject) => {
     let settled = false
@@ -234,16 +247,17 @@ export function runGifExport(req: GifExportRequest, opts: RunOpts = {}): Promise
   return withExportLock(async () => {
     const signal = opts.signal ?? new AbortController().signal
     const api = window.api.editorExport
+    const cursors = await exportCursorTracks(req.project)
     const { jobId, value } = await withPipe(
       () => api.openPipe(req.outputDir, req.fileName, gifPipeSpec(req.width, req.height, req.fps), { estimateBytes: req.estimateBytes }),
       signal,
       (id) =>
-        pipeFrames(req, id, signal, (frame, total, speed, etaS) =>
+        pipeFrames({ ...req, cursorTracks: cursors.tracks }, id, signal, (frame, total, speed, etaS) =>
           opts.onProgress?.({ stage: 'render', frame, total, percent: (frame / total) * GIF_RENDER_SHARE, speed, etaS })
         )
     )
     const out = await finishPipe(jobId, signal, value.frames, GIF_RENDER_SHARE, opts.onProgress)
-    return { kind: 'gif', path: out.path, size: out.size, width: req.width, height: req.height, frames: value.frames, fps: req.fps, warnings: [...value.warnings, ...(out.warning ? [out.warning] : [])] }
+    return { kind: 'gif', path: out.path, size: out.size, width: req.width, height: req.height, frames: value.frames, fps: req.fps, warnings: [...cursors.warnings, ...value.warnings, ...(out.warning ? [out.warning] : [])] }
   })
 }
 
@@ -324,6 +338,8 @@ export function runAudioExport(req: AudioExportRequest, opts: RunOpts = {}): Pro
 export interface StillClient {
   readonly ready: Promise<void>
   setProject(project: Project, mediaUrls: ReturnType<typeof mediaUrlsFor>, useProxy: boolean): void
+  /** Trilhas do cursor (F6); opcional nos clientes falsos dos testes. */
+  setCursorTracks?(tracks: ReadonlyMap<string, CursorTrackV1>): void
   exportStill(tUs: Us): Promise<Extract<RenderOut, { t: 'still' }>>
   dispose(): void
 }
@@ -356,16 +372,20 @@ export async function renderStill(project: Project, tUs: Us, opts: StillOpts = {
   const timeoutMs = opts.timeoutMs ?? STILL_TIMEOUT_MS
   const { width, height } = project.canvas
   const render = (opts.client ?? defaultStillClient)(width, height)
+  let cursorWarnings: string[] = []
   const work = async (): Promise<Extract<RenderOut, { t: 'still' }>> => {
+    const cursors = await exportCursorTracks(project)
+    cursorWarnings = cursors.warnings
     await render.ready
     render.setProject(project, mediaUrlsFor(project, 'export'), false)
+    if (cursors.tracks.size) render.setCursorTracks?.(cursors.tracks)
     return render.exportStill(tUs)
   }
   try {
     const r = await abortable(withTimeout(work(), timeoutMs, `O quadro não ficou pronto em ${Math.max(1, Math.round(timeoutMs / 1000))} s (o render parou de responder). Tente de novo.`), signal)
     if (!r.png) throw new Error(`Não foi possível gerar o quadro (${r.error ?? 'erro desconhecido'}).`)
     const ann = r.missingAnnotations.length ? ['As anotações não puderam ser lidas e ficaram de fora.'] : []
-    return { png: new Uint8Array(r.png), warnings: [...missingMediaWarnings(project, r.missing.map((assetId) => ({ assetId, frames: 1 }))), ...ann, ...missingFontWarnings(r.missingFonts)] }
+    return { png: new Uint8Array(r.png), warnings: [...cursorWarnings, ...missingMediaWarnings(project, r.missing.map((assetId) => ({ assetId, frames: 1 }))), ...ann, ...missingFontWarnings(r.missingFonts)] }
   } finally {
     render.dispose()
   }

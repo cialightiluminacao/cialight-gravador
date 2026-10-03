@@ -42,6 +42,11 @@ export interface IngestDeps {
   encoders: () => HwEncoder[]
   /** Pasta do modelo RNNoise (resources/models/rnnoise) para a redução de ruído. */
   rnnoiseDir?: () => string
+  /**
+   * Trilha do cursor da gravação (F6): valor de `asset.cursor` (CURSOR_FILE) se a pasta da sessão tem um cursor.json
+   * válido; null se não. Só consultado para o asset da TELA de uma gravação. Ausente = não confere.
+   */
+  sessionCursorRef?: (sessionId: string) => string | null
   log?: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void }
 }
 
@@ -303,6 +308,15 @@ export class IngestQueue {
     ]
   }
 
+  /** Asset da tela de uma gravação: `cursor` presente só com trilha válida (sem ela, um valor antigo sai). */
+  private cursorPatch(asset: Asset, patch: Partial<Asset>): void {
+    const ref = this.deps.sessionCursorRef
+    if (!ref || asset.source.type !== 'session' || asset.source.stream !== 'screen') return
+    const c = ref(asset.source.sessionId)
+    if (c) patch.cursor = c
+    else if (asset.cursor !== undefined) patch.cursor = undefined
+  }
+
   /** Modo `analyzeAudio`: só as análises de áudio de um asset que já está pronto. */
   private async runAudioAnalysis(projectId: string, asset: Asset, signal: AbortSignal): Promise<Partial<Asset>> {
     const hasAudio = asset.kind === 'audio' || !!asset.audio
@@ -428,6 +442,7 @@ export class IngestQueue {
     if (rejected) throw rejected.reason
     if (asset.video) patch.video = { ...asset.video }
     if (asset.audio) patch.audio = { ...asset.audio }
+    this.cursorPatch(asset, patch)
     if (errors.length) return { ...patch, status: 'error', error: errors.join('; ') }
     return { ...patch, status: 'ready', error: undefined }
   }

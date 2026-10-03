@@ -7,7 +7,7 @@
 // keys lineares — nenhuma amostra se afasta mais que FIT_TOL do quadro (FIT_TOL_DEG na rotação).
 import { insertKeyExact } from './anim'
 import { anchoredUnion, regionTouchesOver } from './attachment'
-import { screenToContent, type ClipFrame, type RegionValues } from './contentPose'
+import { clipMoves, contentPose, followCheckTimes, poseError, screenToContent, type ClipFrame, type ContentPose, type RegionValues } from './contentPose'
 import { EditError, findItem, linkItems, updateItem } from './ops'
 import type { Anim, Ease, EffectItem, EffectRegion, Keyframe, MediaItem, Project, Us } from './project'
 import { attachedMedia, clipFrameAt, effectRegionAt } from './resolve'
@@ -20,6 +20,17 @@ export const FIT_TOL_DEG = 0.5
 const HOLE_TOL_DIV = 4
 /** Amostragem mínima do assar: 60 amostras por segundo (exportar a 60 fps não cai entre amostras). */
 const MIN_SAMPLE_FPS = 60
+
+/**
+ * Ancorar com keys num trecho em que o clipe já se move (revisão final da F6, C1): só aceita se a região já acompanha o
+ * conteúdo do clipe ali — a mesma tolerância dos avisos (privacy: 1 % do maior lado do quadro e 1°). Abaixo de
+ * POSE_EPS_PX / POSE_EPS_DEG a pose do clipe conta como parada.
+ */
+const KEYED_FOLLOW_TOL = 0.01
+const KEYED_FOLLOW_TOL_DEG = 1
+const POSE_EPS_PX = 0.5
+const POSE_EPS_DEG = 0.05
+export const ATTACH_KEYED_OVER_MOTION_MESSAGE = 'A região deste efeito tem keyframes num trecho em que o clipe já se move (zoom, pan ou animação) e não acompanha o conteúdo: ancorar agora não saberia onde o conteúdo estava. Desfaça o movimento (Ctrl+Z), ancore e refaça o movimento — ou ajuste a região e use “Seguir conteúdo” de novo.'
 
 type Channel = keyof RegionValues
 const CHANNELS: readonly Channel[] = ['x', 'y', 'w', 'h', 'rotation']
@@ -80,10 +91,53 @@ export function toContentRegion(p: Project, fx: EffectItem, m: MediaItem): Effec
 }
 
 /**
+ * A região tem keys num trecho em que a pose do clipe muda e NÃO acompanha o conteúdo dele ali? Cada key seria
+ * convertido com a pose do próprio instante, mas keys feitos antes do movimento (rastreados no clipe parado, keyframes
+ * do F4) foram medidos noutra pose: a região ancorada ficaria onde o key do quadro estava enquanto o conteúdo anda, e o
+ * aviso de "não acompanha" sumiria (ancorado = acompanha por construção). Sem como saber a pose em que os keys foram
+ * feitos, ancorar recusa (EditError) — a menos que a região já acompanhe o clipe (keys feitos com o movimento: a
+ * conversão é a certa). Amostras: followCheckTimes no trecho dos keys ∩ clipe ∩ efeito.
+ */
+function keyedOverMotion(p: Project, fx: EffectItem, m: MediaItem): boolean {
+  const r = fx.region
+  let k0 = Infinity, k1 = -Infinity
+  for (const c of CHANNELS) for (const k of r[c].keys ?? []) {
+    k0 = Math.min(k0, fx.startUs + k.tUs)
+    k1 = Math.max(k1, fx.startUs + k.tUs)
+  }
+  if (k0 > k1 || !clipMoves(m)) return false
+  const lo = Math.max(m.startUs, fx.startUs, k0), hi = Math.min(itemEndUs(m), itemEndUs(fx), k1 + 1)
+  if (lo >= hi) return false
+  const tol = KEYED_FOLLOW_TOL * Math.max(p.canvas.width, p.canvas.height)
+  // pose do clipe = a de uma região fixa do quadro levada ao conteúdo (muda se e só se a geometria do clipe muda)
+  const probe: RegionValues = { x: 0.5, y: 0.5, w: 0.25, h: 0.25, rotation: 0 }
+  let clipRef: ContentPose | null = null, fxRef: ContentPose | null = null
+  let moves = false, follows = true
+  for (const t of followCheckTimes(fx, m, lo, hi)) {
+    const cf = clipFrameAt(p, m, t)
+    if (!cf) continue // conteúdo invisível neste instante
+    const c = contentPose(cf, probe), f = contentPose(cf, effectRegionAt(p, fx, t))
+    if (!clipRef || !fxRef) {
+      clipRef = c
+      fxRef = f
+      continue
+    }
+    const ec = poseError(clipRef, c)
+    if (ec.px > POSE_EPS_PX || ec.deg > POSE_EPS_DEG) moves = true
+    const ef = poseError(fxRef, f)
+    if (ef.px > tol || ef.deg > KEYED_FOLLOW_TOL_DEG) follows = false
+    if (moves && !follows) return true
+  }
+  return false
+}
+
+/**
  * "Ancorar ao clipe" / "Vincular e ancorar": os efeitos passam a acompanhar o clipe (attach + região no espaço do
  * conteúdo). Efeito fora do grupo de vínculo do clipe entra nele (a âncora segue o grupo nas edições — dividir,
  * duplicar, mover…), sem tirar o clipe do grupo dele; clipe sem vínculo → grupo novo com ele e os efeitos. Um passo
- * de desfazer. Já ancorado a este clipe → igual. Faixa do efeito bloqueada → EditError.
+ * de desfazer. Já ancorado a este clipe → igual. Faixa do efeito bloqueada → EditError. Região com keys num trecho em
+ * que o clipe já se move e que não o acompanha (keyedOverMotion) → EditError (ATTACH_KEYED_OVER_MOTION_MESSAGE): depois
+ * de um movimento recém-aplicado, quem oferece "Ancorar" usa anchorBeforeMotion.
  */
 export function attachEffects(p: Project, mediaItemId: string, effectIds: readonly string[]): Project {
   let m = mustMedia(p, mediaItemId)
@@ -101,6 +155,7 @@ export function attachEffects(p: Project, mediaItemId: string, effectIds: readon
   }
   for (const id of todo) {
     const fx = mustEffect(q, id)
+    if (keyedOverMotion(q, fx, m)) throw new EditError('invalid', ATTACH_KEYED_OVER_MOTION_MESSAGE)
     const region = toContentRegion(q, fx, m)
     // a caixa de reserva já nasce com a âncora (edições transitórias adiam o recálculo; o resolve nunca fica sem ela)
     const fallback = anchoredUnion(q, { ...fx, region, attach: { mediaItemId: m.id } }, m)
@@ -110,6 +165,16 @@ export function attachEffects(p: Project, mediaItemId: string, effectIds: readon
     })
   }
   return q
+}
+
+/**
+ * "Ancorar" oferecido logo depois de um movimento (zoom da ferramenta, Ken Burns, zoom automático): as keys da região
+ * foram feitas sobre o clipe de ANTES do movimento, então a âncora é calculada no projeto de antes (`before`, onde
+ * aquela pose é a do clipe) e o movimento é refeito (`redo`) sobre o projeto ancorado — maintainAttachments leva a
+ * âncora junto. Quem chama troca o passo do movimento por este: um passo de desfazer para os dois.
+ */
+export function anchorBeforeMotion(before: Project, mediaItemId: string, effectIds: readonly string[], redo: (p: Project) => Project): Project {
+  return redo(attachEffects(before, mediaItemId, effectIds))
 }
 
 /**

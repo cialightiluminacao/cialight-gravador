@@ -5,8 +5,9 @@ import { join } from 'path'
 import type { Asset, MediaItem, Project, Track } from '@shared/editor/project'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
-import { laplacianVar, localContrast, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
+import { laplacianVar, localContrast, magentaBlob, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
 import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShots'
+import { occludedFrame, TEXT_X_EXPR, textX, TRACK_SCENE } from '@shared/testing/trackingScene'
 import { meanDiffPerChannel, paritySample, type TransitionReport } from '@shared/testing/transitionOracle'
 import type { PxBounds, TextReport } from '@shared/testing/textReport'
 import type { ProjectStore } from './project/projectStore'
@@ -32,10 +33,19 @@ const SPEED_PROJECT_ID = 'p-editor-speed-test'
 const SPEED_SD_PROJECT_ID = 'p-editor-speed-sd-test'
 // zoom/pan (F4): PNG escuro com um quadrado vermelho de 12 px em (1300, 350); o harness aplica o zoom (zoomHarness.ts)
 const ZOOM_PROJECT_ID = 'p-editor-zoom-test'
+// zoom automático nos cliques (F6): vídeo de 6 s do mesmo alvo do zoom; o harness monta a trilha do cursor em memória
+// (autoZoomHarness.ts)
+const AUTO_ZOOM_PROJECT_ID = 'p-editor-autozoom-test'
 // reenquadrar (F4): PNG com quadrado vermelho de 24 px em (1500, 540) e o texto "Senha 4821" perto; o harness grava a
 // cópia 9:16 pelo IPC project.duplicate (reframeHarness.ts)
 const REFRAME_PROJECT_ID = 'p-editor-reframe-test'
 const REFRAME_COPY_ID = 'p-editor-reframe-copia'
+// realce de cliques e cursor ampliado (F6): o mesmo vídeo do zoom automático; trilha sintética em memória
+// (cursorFxHarness.ts)
+const CURSOR_FX_PROJECT_ID = 'p-editor-cursorfx-test'
+// "Seguir conteúdo" (F6): o texto "CPF…" andando com pausa e oclusão (trackingScene.ts); o harness rastreia e exporta
+// (trackingHarness.ts) e aqui cada quadro exportado é medido
+const TRACKING_PROJECT_ID = 'p-editor-tracking-test'
 // memória do compositor (F7): 12 imagens 1920×1080 distintas em sequência + 4 vídeos 1080p (memoryHarness.ts)
 const MEMORY_PROJECT_ID = 'p-editor-memory-test'
 // transições (F5): vermelho e azul puros, com e sem quadrado branco, 2 s cada; o harness monta as cenas (transitionHarness.ts)
@@ -61,9 +71,12 @@ interface HarnessReport {
   stretch?: StretchReport
   speed?: SpeedReport
   zoom?: ZoomReport
+  autoZoom?: AutoZoomReport
   follow?: FollowReport
   anim?: AnimReport
   reframe?: ReframeReport
+  cursorFx?: CursorFxReport
+  tracking?: TrackingReport
   memory?: MemoryReport
   transition?: TransitionReport
   text?: TextReport
@@ -112,6 +125,9 @@ interface SpeedReport {
 interface Parity { maxDiff: number; meanDiff: number; neighborMeanDiff: number; markers: number[]; error?: string }
 interface ZoomScenario { before: RedBlob | null; after: RedBlob | null; mid: RedBlob | null; error?: string }
 interface ZoomReport { error?: string; full?: ZoomScenario; cropped?: ZoomScenario; exportPath?: string; exportError?: string }
+interface AutoZoomShot { tUs: number; scale: number; x: number; y: number; red: RedBlob | null; expected: { x: number; y: number } | null; borderBg: number; borderMin: number; gapRight: number; gapBottom: number }
+interface AutoZoomScenario { error?: string; segments?: number; inUs?: number; fullUs?: number; outStartUs?: number; outUs?: number; before?: AutoZoomShot; full?: AutoZoomShot; after?: AutoZoomShot; during?: AutoZoomShot[] }
+interface AutoZoomReport { error?: string; centered?: AutoZoomScenario; follow?: AutoZoomScenario; control?: AutoZoomShot; engine?: { error?: string; plainW?: number; previewW?: number; afterEditW?: number; previewCleared?: boolean; zoomKeysInHistory?: boolean; historyLen?: number } }
 type Legib = { c: number; lap: number }
 interface FollowInstant { frame: number; tUs: number; box: PxBox; ref: Legib; preview: Legib; unadjusted?: Legib; exported?: Legib }
 interface FollowRun { instants: FollowInstant[]; exportPath?: string; exportError?: string }
@@ -121,6 +137,20 @@ interface ReframeReport {
   error?: string; before?: { red: RedBlob | null; text: PxBox | null }; copy?: { name: string; width: number; height: number; anchored: string[]; warnings: string[] }
   red?: RedBlob | null; textBox?: PxBox; ref?: Legib; preview?: Legib; control?: Legib; exportPath?: string; exportError?: string
   exported?: { width: number; height: number; red: RedBlob | null; legib?: Legib }
+}
+interface RingShot { tUs: number; ring: RedBlob | null; expected: { x: number; y: number } | null }
+interface CursorFxReport {
+  error?: string; identity?: RingShot; zoom?: RingShot; reframed?: RingShot & { width: number; height: number }; afterDuration?: number
+  privacy?: { plain: number; blurred: number }
+  sprite?: { tip: { x: number; y: number } | null; expected: { x: number; y: number } | null; whiteH: number; dark: number }
+  spritePrivacy?: { plainWhite: number; blurredWhite: number; plainDark: number; blurredDark: number }
+  exportPath?: string; exportError?: string
+}
+interface TrackingReport {
+  error?: string; box0?: PxBox; frames?: number; states?: { ok: number; weak: number; lost: number }; timeline?: string; lost?: number[]; lossMessage?: string; keys?: number
+  analysis?: { width: number; height: number }; trackMs?: number; preview?: { frame: number; tracked: Legib; untracked: Legib }[]; exportPath?: string; exportError?: string
+  /** Medido aqui: legibilidade de cada quadro exportado (÷ o mesmo quadro da fonte) na caixa do texto. */
+  exported?: { frames: number; measured: number; occluded: number; srcMinC: number; worst: { frame: number; c: number; lap: number } | null; legible: { frame: number; c: number; lap: number }[]; error?: string }
 }
 interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>>; pip?: PipBlurReport }
 type PxRect4 = { x0: number; y0: number; x1: number; y1: number }
@@ -289,6 +319,25 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const zoomProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Zoom', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: ZOOM_PROJECT_ID }, aZoom), aZoom.id, 0).project
   rmSync(projects.dirOf(ZOOM_PROJECT_ID), { recursive: true, force: true })
   projects.create(zoomProject)
+  // zoom automático: o mesmo alvo como vídeo de 6 s (o zoom automático só vale para clipes de vídeo)
+  const autoZoomMp4 = join(dir, 'zoom-alvo.mp4')
+  await gen(['-loop', '1', '-i', zoomPng, '-t', '6', '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', autoZoomMp4], 'editor: alvo do zoom automático')
+  const aAutoZoom: Asset = { ...assetFromInfo('a_autozoom', autoZoomMp4, statSync(autoZoomMp4), await probe(autoZoomMp4)), status: 'ready' }
+  const autoZoomProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Zoom automático', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: AUTO_ZOOM_PROJECT_ID }, aAutoZoom), aAutoZoom.id, 0).project
+  rmSync(projects.dirOf(AUTO_ZOOM_PROJECT_ID), { recursive: true, force: true })
+  projects.create(autoZoomProject)
+  const aCursorFx: Asset = { ...assetFromInfo('a_cursorfx', autoZoomMp4, statSync(autoZoomMp4), await probe(autoZoomMp4)), status: 'ready' }
+  const cursorFxProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Realce de cliques', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: CURSOR_FX_PROJECT_ID }, aCursorFx), aCursorFx.id, 0).project
+  rmSync(projects.dirOf(CURSOR_FX_PROJECT_ID), { recursive: true, force: true })
+  projects.create(cursorFxProject)
+  // "Seguir conteúdo": o texto andando (x pela mesma conta de trackingScene.textX), com a faixa cinza da oclusão por cima
+  const trackMp4 = join(dir, 'seguir-conteudo-fonte.mp4')
+  const S = TRACK_SCENE
+  await gen(['-f', 'lavfi', '-i', `color=c=0x1e293b:s=${S.width}x${S.height}:r=${S.fps}`, '-t', String(S.durationS), '-vf', `drawtext=${font}:text='${S.text}':fontsize=${S.fontSize}:fontcolor=white:x='${TEXT_X_EXPR}':y=${S.textY},drawtext=${font}:text='${S.lookAlike.text}':fontsize=${S.fontSize}:fontcolor=white:x=${S.lookAlike.x}:y=${S.lookAlike.y},drawbox=x=0:y=${S.occluder.y}:w=${S.width}:h=${S.occluder.h}:color=0x808080:t=fill:enable='between(t,${S.occludeFrom},${S.occludeTo})'`, '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', trackMp4], 'editor: texto andando com oclusão')
+  const aTrack: Asset = { ...assetFromInfo('a_track', trackMp4, statSync(trackMp4), await probe(trackMp4)), status: 'ready' }
+  const trackProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Seguir conteúdo', { width: S.width, height: S.height, fps: S.fps, background: '#000000' }), id: TRACKING_PROJECT_ID }, aTrack), aTrack.id, 0).project
+  rmSync(projects.dirOf(TRACKING_PROJECT_ID), { recursive: true, force: true })
+  projects.create(trackProject)
   // reenquadrar: fundo escuro, quadrado vermelho 24×24 centrado em (1500, 540) e o texto "Senha 4821" (Consolas 72)
   const reframePng = join(dir, 'reenquadrar.png')
   await gen(['-f', 'lavfi', '-i', 'color=c=0x1e293b:s=1920x1080', '-vf', `drawbox=x=1488:y=528:w=24:h=24:color=red:t=fill,${line('Senha 4821', 1320, 760)}`, '-frames:v', '1', '-update', '1', reframePng], 'editor: reenquadrar')
@@ -346,7 +395,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const win = new BrowserWindow({ width: 800, height: 600, show: false, focusable: false, skipTaskbar: true, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
   win.showInactive()
   const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 300 s'] } }), 300_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 420 s'] } }), 420_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
       clearTimeout(timer)
       resolve(r)
@@ -416,6 +465,58 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       if (rf.textBox && rf.ref && w === 1080 && h === 1920) rf.exported.legib = { c: r4(localContrast(d, w, h, rf.textBox, 4, 3) / rf.ref.c), lap: r4(laplacianVar(d, w, h, rf.textBox, 4, 3) / rf.ref.lap) }
     } catch (e) {
       rf.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
+  // realce de cliques: o anel no quadro de 1,0 s (o do clique) da exportação
+  let ringExported: RedBlob | null = null
+  const cfx = result.report.cursorFx
+  if (cfx?.exportPath) {
+    try {
+      const raw = join(dir, 'realce-cliques.rgb')
+      await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', (29.5 / 30).toFixed(4), '-i', cfx.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do realce de cliques' })
+      ringExported = magentaBlob(new Uint8Array(readFileSync(raw)), 1920, 1080, 3)
+    } catch (e) {
+      cfx.exportError = e instanceof Error ? e.message : String(e)
+    }
+  }
+  // "Seguir conteúdo": TODOS os quadros exportados, na faixa da linha do texto, × os mesmos quadros da fonte
+  const seg5 = result.report.tracking
+  if (seg5?.exportPath && seg5.box0) {
+    try {
+      const S2 = TRACK_SCENE
+      const band = async (file: string, tag: string): Promise<Uint8Array> => {
+        const raw = join(dir, `seguir-${tag}.rgb`)
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-vf', `crop=${S2.width}:${S2.band.h}:0:${S2.band.y}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: `teste: faixa do texto (${tag})` })
+        const d = new Uint8Array(readFileSync(raw))
+        rmSync(raw, { force: true })
+        return d
+      }
+      const src = await band(trackMp4, 'fonte')
+      const exp = await band(seg5.exportPath, 'exportado')
+      const fsz = S2.width * S2.band.h * 3
+      const frames = Math.min(src.length, exp.length) / fsz
+      const out: NonNullable<TrackingReport['exported']> = { frames: exp.length / fsz, measured: 0, occluded: 0, srcMinC: Infinity, worst: null, legible: [] }
+      for (let n = 0; n < frames; n++) {
+        // a oclusão (e as bordas dela, meio quadro) cobre o texto na própria fonte: não há o que ler
+        if (occludedFrame(n) !== 'no') {
+          out.occluded++
+          continue
+        }
+        const dx = Math.round(textX(n / S2.fps) - textX(0))
+        const box: PxBox = { x0: seg5.box0.x0 + dx, y0: seg5.box0.y0 - S2.band.y, x1: seg5.box0.x1 + dx, y1: seg5.box0.y1 - S2.band.y }
+        const s0 = src.subarray(n * fsz, (n + 1) * fsz), e0 = exp.subarray(n * fsz, (n + 1) * fsz)
+        // a caixa tem de estar sobre o texto nítido da fonte (senão a razão mediria fundo liso)
+        const srcC = localContrast(s0, S2.width, S2.band.h, box, 4, 3)
+        out.srcMinC = Math.min(out.srcMinC, Math.round(srcC))
+        const c = localContrast(e0, S2.width, S2.band.h, box, 4, 3) / srcC
+        const lap = laplacianVar(e0, S2.width, S2.band.h, box, 4, 3) / laplacianVar(s0, S2.width, S2.band.h, box, 4, 3)
+        out.measured++
+        if (!out.worst || c > out.worst.c) out.worst = { frame: n, c: Math.round(c * 1e4) / 1e4, lap: Math.round(lap * 1e4) / 1e4 }
+        if (!(c < 0.15 && lap < 0.2)) out.legible.push({ frame: n, c: Math.round(c * 1e4) / 1e4, lap: Math.round(lap * 1e4) / 1e4 })
+      }
+      seg5.exported = out
+    } catch (e) {
+      seg5.exported = { frames: 0, measured: 0, occluded: 0, srcMinC: 0, worst: null, legible: [], error: e instanceof Error ? e.message : String(e) }
     }
   }
   // transições: paridade preview × exportação nos mesmos quadros (amostra a cada 4 px); a amostra do preview sai do relatório
@@ -601,6 +702,31 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const ex = zoomExported
   check(!!ex && !!pv && Math.abs(ex.cx - 960) <= 2 && Math.abs(ex.cy - 540) <= 2 && Math.abs(ex.cx - pv.cx) <= 2 && Math.abs(ex.cy - pv.cy) <= 2 && Math.abs(Math.sqrt(ex.n / pv.n) - 1) <= 0.15, `zoom: exportação = preview — quadro final exportado: centro do alvo ${at(ex)}, ${ex?.w}×${ex?.h} px (preview ${at(pv)}, ${pv?.w}×${pv?.h}) ±2 px ${zr?.exportError ?? ''}`, failures)
 
+  const az = r.autoZoom
+  console.log(`zoom automático: ${JSON.stringify(az)}`)
+  check(!!az && !az.error, `zoom automático: harness sem erro (${az?.error ?? ''})`, failures)
+  for (const [tag, sc] of [['centrado, 2×', az?.centered], ['seguindo o cursor até o canto, 3×', az?.follow]] as const) {
+    check(!!sc && !sc.error && sc.segments === 1, `zoom automático (${tag}): um trecho de zoom (${sc?.segments}; ida ${sc?.inUs}–${sc?.fullUs} µs, volta ${sc?.outStartUs}–${sc?.outUs} µs) ${sc?.error ?? ''}`, failures)
+    const shots = [sc?.before, sc?.full, ...(sc?.during ?? []), sc?.after].filter((x): x is AutoZoomShot => !!x)
+    check(shots.length === 14 && shots.every((x) => x.borderBg === 0), `zoom automático (${tag}): nenhum pixel da borda do quadro é o fundo preto em ${shots.length} instantes (pixels de fundo ${shots.map((x) => x.borderBg).join(' ')}; menor canal máx. ${Math.min(...shots.map((x) => x.borderMin))})`, failures)
+    const f = sc?.full
+    const d = f?.red && f.expected ? Math.hypot(f.red.cx - f.expected.x, f.red.cy - f.expected.y) : Infinity
+    check(d <= 8 && (f?.scale ?? 0) > 1.9, `zoom automático (${tag}): no zoom cheio (escala ${f?.scale}) o ponto clicado está onde a pose (com o clamp) diz — vermelho ${at(f?.red)} × esperado (${f?.expected?.x.toFixed(2)}, ${f?.expected?.y.toFixed(2)}): ${d.toFixed(2)} px ≤ 8`, failures)
+    for (const [when, x] of [['antes', sc?.before], ['depois', sc?.after]] as const) {
+      check(!!x && x.scale === 1 && !!x.red && Math.abs(x.red.cx - 1300) <= 1.5 && Math.abs(x.red.cy - 350) <= 1.5 && x.red.w <= 14, `zoom automático (${tag}) ${when} do trecho: escala ${x?.scale} = 1 e vermelho no lugar ${at(x?.red)} (${x?.red?.w} px)`, failures)
+    }
+  }
+  const cz = az?.centered?.full
+  check(!!cz?.red && Math.abs(cz.red.cx - 960) <= 3 && Math.abs(cz.red.cy - 540) <= 3, `zoom automático (centrado): o vermelho clicado vai ao centro do quadro ${at(cz?.red)} ±3 px`, failures)
+  check((az?.control?.borderBg ?? 0) > 1000, `zoom automático (controle): o mesmo canto sem o clamp deixa ${az?.control?.borderBg} pixels de borda no fundo preto (> 1000 — a medida da borda não é vazia)`, failures)
+  const fz = az?.follow?.full?.red
+  check(!!fz && Math.abs(fz.cx - 960) <= 3 && Math.abs(fz.cy - 540) <= 3, `zoom automático (seguindo): no 1º clique (3×, sem clamp ali) o vermelho clicado vai ao centro ${at(fz)} ±3 px`, failures)
+  const ze = az?.engine
+  check(!!ze && !ze.error && Math.abs((ze.plainW ?? 0) - 12) <= 1 && Math.abs((ze.previewW ?? 0) - 24) <= 2, `zoom automático (motor do editor): a prévia fora do histórico aparece no visualizador — vermelho ${ze?.plainW} px → ${ze?.previewW} px (2×) ${ze?.error ?? ''}`, failures)
+  check(!!ze && ze.previewCleared === true && Math.abs((ze.afterEditW ?? 0) - 12) <= 1 && ze.zoomKeysInHistory === false && ze.historyLen === 1, `zoom automático (motor do editor): uma edição comum com a prévia aberta a descarta (vermelho ${ze?.afterEditW} px) e o histórico (${ze?.historyLen} passo) não tem os keys do zoom (${ze?.zoomKeysInHistory})`, failures)
+  const end = az?.follow?.during?.[az.follow.during.length - 1]
+  check(!!end && end.gapRight >= -0.5 && end.gapRight <= 2 && end.gapBottom >= -0.5 && end.gapBottom <= 2, `zoom automático (seguindo): o pan chega ao canto preso pelo clamp — folga da camada à direita ${end?.gapRight.toFixed(2)} px e embaixo ${end?.gapBottom.toFixed(2)} px (0–2)`, failures)
+
   const fl = r.follow
   console.log(`efeito ancorado: ${JSON.stringify(fl)}`)
   check(!!fl && !fl.error && (fl.attached?.instants.length ?? 0) >= 5 && (fl.later?.instants.length ?? 0) >= 5, `efeito ancorado: harness sem erro (${fl?.error ?? ''})`, failures)
@@ -667,6 +793,52 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!re?.red && Math.abs(re.red.cx - 540) <= 3 && Math.abs(re.red.cy - 960) <= 3, `reenquadrar (exportação): foco no centro — ${at(re?.red ?? null)} ±3 px`, failures)
   check(unreadable(re?.legib), `reenquadrar (exportação): texto sob o blur ilegível (${fmt([re?.legib])})`, failures)
 
+  const cf = r.cursorFx
+  console.log(`realce de cliques / cursor ampliado: ${JSON.stringify(cf)}`)
+  check(!!cf && !cf.error, `realce de cliques: harness sem erro (${cf?.error ?? ''})`, failures)
+  const ringOk = (s: RingShot | undefined): string => {
+    const d = s?.ring && s.expected ? Math.hypot(s.ring.cx - s.expected.x, s.ring.cy - s.expected.y) : Infinity
+    return `${d <= 2 ? '' : 'X '}anel ${at(s?.ring ?? null)} (${s?.ring?.w}×${s?.ring?.h} px, ${s?.ring?.n} px) × esperado (${s?.expected?.x.toFixed(2)}, ${s?.expected?.y.toFixed(2)}): ${d.toFixed(2)} px ≤ 2`
+  }
+  for (const [tag, s] of [['identidade', cf?.identity], ['zoom 2× deslocado', cf?.zoom], ['reenquadrado 9:16', cf?.reframed]] as const) {
+    const msg = ringOk(s)
+    check(!msg.startsWith('X '), `realce de cliques (${tag}): o centro do anel fica no ponto clicado levado pela geometria do clipe — ${msg}`, failures)
+  }
+  check(cf?.reframed?.width === 1080 && cf.reframed.height === 1920, `realce de cliques: o cenário reenquadrado é 1080×1920 (${cf?.reframed?.width}×${cf?.reframed?.height})`, failures)
+  const zr2 = cf?.zoom?.ring, id2 = cf?.identity?.ring
+  check(!!zr2 && !!id2 && Math.abs(zr2.w / id2.w - 2) <= 0.15, `realce de cliques: o anel escala com a camada (zoom 2×: ${id2?.w} → ${zr2?.w} px)`, failures)
+  check(cf?.afterDuration === 0, `realce de cliques: depois de durationMs o anel sumiu (${cf?.afterDuration} pixels magenta)`, failures)
+  check(!!cf?.privacy && cf.privacy.plain > 200 && cf.privacy.blurred <= cf.privacy.plain * 0.02, `realce de cliques (privacidade): um blur sobre o ponto deixa o anel irreconhecível — pixels magenta ${cf?.privacy?.plain} → ${cf?.privacy?.blurred} (≤ 2 %)`, failures)
+  const arrow = cf?.sprite
+  check(!!arrow?.tip && !!arrow.expected && Math.abs(arrow.tip.x - arrow.expected.x) <= 3 && Math.abs(arrow.tip.y - arrow.expected.y) <= 4 && arrow.whiteH >= 22 && arrow.whiteH <= 40 && arrow.dark > 20, `cursor ampliado: ponta da seta em (${arrow?.tip?.x}, ${arrow?.tip?.y}) × ponto do cursor (${arrow?.expected?.x.toFixed(2)}, ${arrow?.expected?.y.toFixed(2)}) (±3/±4 px), seta branca de ${arrow?.whiteH} px de altura (22–40 com escala 1,8), ${arrow?.dark} px de contorno preto`, failures)
+  const spr = cf?.spritePrivacy
+  check(!!spr && spr.plainWhite > 100 && spr.plainDark > 20 && spr.blurredWhite <= spr.plainWhite * 0.02 && spr.blurredDark <= spr.plainDark * 0.02, `cursor ampliado (privacidade): um blur sobre o ponto deixa a seta irreconhecível — pixels brancos ${spr?.plainWhite} → ${spr?.blurredWhite}, contorno preto ${spr?.plainDark} → ${spr?.blurredDark} (≤ 2 %)`, failures)
+  const ip = cf?.identity?.ring
+  check(!!ringExported && !!ip && Math.hypot(ringExported.cx - ip.cx, ringExported.cy - ip.cy) <= 1.5 && Math.abs(ringExported.w - ip.w) <= 3, `realce de cliques: exportação = preview no quadro do clique — anel exportado ${at(ringExported)} (${ringExported?.w} px; preview ${at(ip ?? null)}, ${ip?.w} px) ±1,5 px ${cf?.exportError ?? ''}`, failures)
+
+  // "Seguir conteúdo" (F6): legível = contraste local ≥ 0,15 ou laplaciano ≥ 0,2 do mesmo quadro sem efeito (limiares do
+  // F2, calibrados no texto de 47 px; aqui 48 px). Ilegível exige os dois abaixo.
+  const sc5 = r.tracking
+  console.log(`seguir conteúdo: ${JSON.stringify({ ...sc5, exported: sc5?.exported ? { ...sc5.exported, legible: sc5.exported.legible.slice(0, 10) } : undefined })}`)
+  check(!!sc5 && !sc5.error, `seguir conteúdo: harness sem erro (${sc5?.error ?? ''})`, failures)
+  const fps5 = TRACK_SCENE.fps
+  check(sc5?.frames === TRACK_SCENE.durationS * fps5, `seguir conteúdo: o worker real analisou todos os quadros do 0 ao fim (${sc5?.frames}, ${sc5?.analysis?.width}×${sc5?.analysis?.height}, ${sc5?.trackMs} ms)`, failures)
+  const lostAt5 = sc5?.lost ?? []
+  check(lostAt5.length === 1 && lostAt5[0] >= TRACK_SCENE.occludeFrom * 1e6 - 1 && lostAt5[0] <= TRACK_SCENE.occludeFrom * 1e6 + 2e6 / fps5, `seguir conteúdo: uma perda, no início da oclusão (${TRACK_SCENE.occludeFrom} s): ${JSON.stringify(lostAt5)}`, failures)
+  check(!!sc5?.lossMessage && sc5.lossMessage === 'Rastreamento perdido em 00:02,2 — a região foi ampliada até o fim; reposicione e use “Seguir conteúdo” de novo a partir daí', `seguir conteúdo: toast da perda "${sc5?.lossMessage}"`, failures)
+  const tl5 = sc5?.timeline ?? ''
+  // R21: sem recuperação automática — confiante até a oclusão, perdido dali até o fim (mesmo com o texto de volta)
+  const lostAt5i = tl5.search(/[wl]/)
+  const before5 = lostAt5i < 0 ? tl5 : tl5.slice(0, lostAt5i), after5 = lostAt5i < 0 ? '' : tl5.slice(lostAt5i + 1)
+  check(lostAt5i === Math.round(TRACK_SCENE.occludeFrom * fps5) && /^o+$/.test(before5) && /^l+$/.test(after5), `seguir conteúdo: confiante até a oclusão e perdido dali até o fim, sem recuperação (R21) (${tl5})`, failures)
+  check((sc5?.keys ?? 0) >= TRACK_SCENE.durationS * fps5, `seguir conteúdo: um key por quadro analisado (${sc5?.keys})`, failures)
+  const unreadableL = (l?: Legib): boolean => !!l && l.c < 0.15 && l.lap < 0.2
+  for (const pv of sc5?.preview ?? []) check(unreadableL(pv.tracked), `seguir conteúdo (preview, quadro ${pv.frame}): texto ilegível sob o blur rastreado (contraste ${pv.tracked.c}, laplaciano ${pv.tracked.lap})`, failures)
+  const ctl5 = sc5?.preview?.find((x) => x.frame === 105)
+  check(!!ctl5 && ctl5.untracked.c >= 0.5, `seguir conteúdo (controle): sem rastrear, o texto sai de baixo da região parada e fica legível no quadro 105 (contraste ${ctl5?.untracked.c})`, failures)
+  const ex5 = sc5?.exported
+  check(!!ex5 && !ex5.error && ex5.frames === TRACK_SCENE.durationS * fps5 && ex5.measured > 90 && ex5.srcMinC >= 120, `seguir conteúdo (exportação): ${ex5?.frames} quadros, ${ex5?.measured} medidos (texto nítido na fonte em todos: contraste ≥ ${ex5?.srcMinC} ≥ 120) + ${ex5?.occluded} na oclusão ${ex5?.error ?? sc5?.exportError ?? ''}`, failures)
+  check(!!ex5 && ex5.legible.length === 0, `seguir conteúdo (exportação): o texto é ilegível em TODO quadro exportado — pior ${JSON.stringify(ex5?.worst)}; legíveis ${JSON.stringify(ex5?.legible.slice(0, 5))}`, failures)
   const mem = r.memory
   console.log(`memória do compositor: ${JSON.stringify(mem)}`)
   const MiB = 2 ** 20

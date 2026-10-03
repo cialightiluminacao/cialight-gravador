@@ -1,12 +1,15 @@
 // Resolve o estado do quadro em um instante da timeline: lista de camadas (fundo → topo)
 // consumida pelo compositor (preview e export). Pura, sem DOM/Electron.
 import { easeValue, evalAnim } from './anim'
+import { cursorOverlayAt, type CursorOverlay, type CursorTracks } from './cursorOverlay'
 import { ATTACH_PAD_PX, conservativeRegion, contentToScreen, type ClipFrame, type RegionValues } from './contentPose'
 import { defaultVisual } from './factory'
 import { layerBase } from './layerGeometry'
-import { textContentAt, type Anim, type AnimPreset, type Asset, type EffectItem, type Item, type MediaItem, type PresetAnim, type PresetEase, type Project, type ShapeItem, type TextStyle, type Track, type TransitionKind, type Us, type VisualProps } from './project'
-import { frameDurUs } from './time'
+import { textContentAt, type Anim, type AnimPreset, type EffectItem, type Item, type MediaItem, type PresetAnim, type PresetEase, type Project, type ShapeItem, type TextStyle, type Track, type TransitionKind, type Us, type VisualProps } from './project'
+import { sourceTimeUs } from './sourceTime'
 import { frozenTimes, pairActive, transitionAt, windowProgress, type TransitionWindow } from './transitions'
+
+export { sourceTimeUs }
 
 export interface Rect { cx: number; cy: number; scale: number; rotation: number }
 /** Corte e ajuste já avaliados no instante (o modelo guarda Anim). */
@@ -25,6 +28,11 @@ export interface MediaLayer {
   crop: CropValues; fit: VisualProps['fit']
   shape: 'rect' | 'rounded' | 'circle'; radius: number
   border?: { width: number; color: string }; adjust?: AdjustValues; mirror: boolean
+  /**
+   * Realce de cliques e cursor ampliado (F6, cursorOverlay.ts): desenhados pelo compositor no espaço do conteúdo da
+   * camada, junto com ela (abaixo dos efeitos que a afetam). Ausente = nada.
+   */
+  cursor?: CursorOverlay
 }
 export interface AnnotationsLayer { kind: 'annotations'; itemId: string; trackId: string; sessionId: string; sessionMs: number; autoFadeMs: number | null }
 export interface EffectLayer {
@@ -64,25 +72,6 @@ export interface TransitionLayer {
 export type Layer = MediaLayer | AnnotationsLayer | EffectLayer | TextLayer | ShapeLayer | TransitionLayer
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
-
-/**
- * Tempo na fonte (µs) para o instante tUs da timeline. Sempre dentro do trecho aparado [inUs, inUs + ⌈dur·speed⌉ − 1]
- * (congelado: o próprio freeze.atUs): o que foi cortado pode ser sigiloso. Até a v1.4 o reverso lia, no fim do clipe,
- * até um quadro ANTES de inUs (− 1 quadro da fórmula) — um quadro do trecho cortado aparecia; a trava corrige isso (F5).
- */
-export function sourceTimeUs(item: MediaItem, asset: Asset, tUs: Us): Us {
-  const local = tUs - item.startUs
-  let src: number
-  if (item.freeze) src = item.freeze.atUs
-  else {
-    src = item.reverse
-      ? item.inUs + (item.durationUs - local) * item.speed - frameDurUs(asset.video?.fps || 30)
-      : item.inUs + local * item.speed
-    src = clamp(Math.round(src), item.inUs, item.inUs + Math.max(0, Math.ceil(item.durationUs * item.speed) - 1))
-  }
-  const max = asset.durationUs != null ? Math.max(0, asset.durationUs - 1) : Infinity
-  return Math.round(clamp(src, 0, max))
-}
 
 /** Item ativo em [start, end) de cada faixa (inclui faixas ocultas; resolveFrame filtra). */
 export function activeItemsAt(p: Project, tUs: Us): { track: Track; item: Item }[] {
@@ -287,7 +276,7 @@ export function visualTrackBelow(p: Project, trackId: string): string | null {
 }
 
 /** Camada normal do item ativo na faixa (sem transição), ou null se não desenha nada. */
-function itemLayer(p: Project, track: Track, item: Item, tUs: Us): Layer | null {
+function itemLayer(p: Project, track: Track, item: Item, tUs: Us, cursors?: CursorTracks): Layer | null {
   const local = tUs - item.startUs
   switch (item.type) {
     case 'media': {
@@ -296,13 +285,15 @@ function itemLayer(p: Project, track: Track, item: Item, tUs: Us): Layer | null 
       if (!asset) return null
       const v = item.visual ?? defaultVisual()
       const s = visualStateAt(v, item.durationUs, local)
+      const cursorTrack = item.cursorFx ? cursors?.get(asset.id) : undefined
+      const cursor = cursorTrack ? cursorOverlayAt(p, item, asset, cursorTrack, tUs) : null
       return {
         kind: 'media', itemId: item.id, trackId: track.id, assetId: asset.id,
         srcUs: asset.kind === 'image' ? null : sourceTimeUs(item, asset, tUs),
         rect: s.rect, opacity: s.opacity, crop: cropAt(v.crop, local), fit: v.fit,
         shape: v.shape ?? 'rect', radius: v.radius ? Math.max(0, ev(v.radius, local)) : 0,
         ...(v.border ? { border: v.border } : {}), ...(v.adjust ? { adjust: adjustAt(v.adjust, local) } : {}),
-        mirror: v.mirror ?? false, ...(s.blur > 0 ? { blur: s.blur } : {})
+        mirror: v.mirror ?? false, ...(s.blur > 0 ? { blur: s.blur } : {}), ...(cursor ? { cursor } : {})
       }
     }
     case 'annotations':
@@ -327,13 +318,13 @@ function itemLayer(p: Project, track: Track, item: Item, tUs: Us): Layer | null 
 
 /**
  * Pilha do instante tUs. `transitions`: camada que substitui a da faixa (por id da faixa); ausente = resolve sem
- * transições (o que os lados A/B de uma transição usam).
+ * transições (o que os lados A/B de uma transição usam). `cursors`: ver resolveFrame.
  */
-function stackAt(p: Project, tUs: Us, transitions?: ReadonlyMap<string, TransitionLayer>): Layer[] {
+function stackAt(p: Project, tUs: Us, transitions?: ReadonlyMap<string, TransitionLayer>, cursors?: CursorTracks): Layer[] {
   const layers: Layer[] = []
   for (const { track, item } of activeItemsAt(p, tUs)) {
     if (track.hidden || item.enabled === false) continue
-    const l = transitions?.get(track.id) ?? itemLayer(p, track, item, tUs)
+    const l = transitions?.get(track.id) ?? itemLayer(p, track, item, tUs, cursors)
     if (l) layers.push(l)
   }
   // escopo `track`: o efeito vai para logo depois da camada da faixa-alvo (e dos outros efeitos dela), seja qual for a
@@ -354,8 +345,8 @@ function stackAt(p: Project, tUs: Us, transitions?: ReadonlyMap<string, Transiti
  * Um lado da transição: a camada do item em `at` (resolve sem transições) seguida dos efeitos que agem sobre a faixa
  * dele ali — `below` acima dela e `track` ligados a ela (effectBound) —, na ordem de pilha. Item sem camada: [].
  */
-function transitionSide(p: Project, itemId: string, trackId: string, at: Us): Layer[] {
-  const stack = stackAt(p, at)
+function transitionSide(p: Project, itemId: string, trackId: string, at: Us, cursors?: CursorTracks): Layer[] {
+  const stack = stackAt(p, at, undefined, cursors)
   const i = stack.findIndex((l) => l.kind !== 'effect' && l.itemId === itemId)
   if (i < 0) return []
   // srcUs já vem preso ao trecho aparado (sourceTimeUs): congelar o último quadro de um reverso por d/2 não mostra
@@ -369,30 +360,31 @@ function transitionSide(p: Project, itemId: string, trackId: string, at: Us): La
 }
 
 /** Camada da transição `w` no instante tUs (dentro da janela). */
-function transitionLayer(p: Project, w: TransitionWindow, tUs: Us): TransitionLayer {
+function transitionLayer(p: Project, w: TransitionWindow, tUs: Us, cursors?: CursorTracks): TransitionLayer {
   const frozen = frozenTimes(w)
   const linear = windowProgress(w, tUs)
   return {
     kind: 'transition', itemId: w.toId, fromId: w.fromId, toId: w.toId, trackId: w.trackId, transition: w.kind,
     progress: easeValue('inOut', linear), linear,
-    from: transitionSide(p, w.fromId, w.trackId, Math.min(tUs, frozen.fromUs)),
-    to: transitionSide(p, w.toId, w.trackId, Math.max(tUs, frozen.toUs))
+    from: transitionSide(p, w.fromId, w.trackId, Math.min(tUs, frozen.fromUs), cursors),
+    to: transitionSide(p, w.toId, w.trackId, Math.max(tUs, frozen.toUs), cursors)
   }
 }
 
 /**
  * Camadas visíveis no instante tUs, da mais ao fundo (faixa 0) à mais ao topo. Faixa de vídeo visível dentro da janela
  * de uma transição ativa (pairActive): uma TransitionLayer no lugar da camada normal. Fora das janelas o custo extra é
- * só transitionAt (O(log n)) por faixa de vídeo.
+ * só transitionAt (O(log n)) por faixa de vídeo. `cursors`: trilhas do cursor por id do asset (entrada lateral, fora
+ * do projeto) — com ela, o clipe com cursorFx ligado ganha a sobreposição do cursor (também nos lados de uma transição).
  */
-export function resolveFrame(p: Project, tUs: Us): Layer[] {
+export function resolveFrame(p: Project, tUs: Us, cursors?: CursorTracks): Layer[] {
   let transitions: Map<string, TransitionLayer> | undefined
   for (const track of p.tracks) {
     if (track.hidden || track.kind !== 'video') continue
     const w = transitionAt(track, tUs)
     if (!w || !pairActive(track, w)) continue
     if (!transitions) transitions = new Map()
-    transitions.set(track.id, transitionLayer(p, w, tUs))
+    transitions.set(track.id, transitionLayer(p, w, tUs, cursors))
   }
-  return stackAt(p, tUs, transitions)
+  return stackAt(p, tUs, transitions, cursors)
 }

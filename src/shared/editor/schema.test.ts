@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { parseProject, toDiskProject, validateProject } from './schema'
 import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
 import { createEffectItem, createEmptyProject, createMediaItem, patchTextStyle, SHAPE_PRESETS, TEXT_PRESETS, type ShapePresetId, type TextPresetId } from './factory'
-import type { Asset, EffectItem, Item, MediaItem, PresetAnim, Project, ShapeItem, TextItem, Track } from './project'
+import { DEFAULT_CURSOR_FX } from './project'
+import type { Asset, CursorFx, EffectItem, Item, MediaItem, PresetAnim, Project, ShapeItem, TextItem, Track } from './project'
 import * as ops from './ops'
 import { applyTemplate, templateFromSelection, type BrandTemplate } from './brand'
 import { transitionWindows } from './transitions'
@@ -249,6 +250,78 @@ describe('animações de entrada/saída (F4): presets novos e curva', () => {
     expect(td.tracks[2].items[0].visual.animIn).toEqual({ preset: 'slideD', presetV14: 'bounce', durationUs: 500_000 })
     expect(parseProjectV13(td).success).toBe(true)
     expect(parseProject(td)).toEqual(t)
+  })
+})
+
+describe('cursorFx e asset.cursor (F6)', () => {
+  const screen: Asset = { ...asset, id: 'scr', source: { type: 'session', sessionId: 's1', stream: 'screen' }, cursor: 'cursor.json' }
+  const withFx = (fx: CursorFx = DEFAULT_CURSOR_FX): Project => {
+    const p = createEmptyProject('x')
+    p.assets = [screen]
+    p.tracks[0].items = [{ ...createMediaItem(screen, 0, 'video'), durationUs: 1_000_000, cursorFx: fx }]
+    return p
+  }
+  const diskOf = (p: Project) => JSON.parse(JSON.stringify(toDiskProject(p)))
+  /** O mesmo projeto com outro cursorFx no clipe da tela. */
+  const swapFx = (p: Project, fx: CursorFx): Project => ({ ...p, tracks: [{ ...p.tracks[0], items: [{ ...(p.tracks[0].items[0] as MediaItem), cursorFx: fx }] }, ...p.tracks.slice(1)] })
+  const fxWith = (h: Partial<CursorFx['highlight']>, c: Partial<CursorFx['cursor']> = {}): CursorFx => ({
+    highlight: { ...DEFAULT_CURSOR_FX.highlight, ...h }, cursor: { ...DEFAULT_CURSOR_FX.cursor, ...c }
+  })
+
+  it('padrões: tudo desligado (opt-in) e nos valores da especificação', () => {
+    expect(DEFAULT_CURSOR_FX).toEqual({ highlight: { enabled: false, color: '#ffd400', sizePx: 28, durationMs: 450 }, cursor: { enabled: false, scale: 1.8, smoothing: 0.5 } })
+  })
+  it('a v1.3 lê o disco (descarta os campos novos) e o parse novo volta ao mesmo projeto', () => {
+    const p = withFx(fxWith({ enabled: true, color: '#00aaff', sizePx: 120, durationMs: 150 }, { enabled: true, scale: 4, smoothing: 0 }))
+    const disk = diskOf(p)
+    expect(disk.tracks[0].items[0].cursorFx).toEqual(p.tracks[0].items[0].type === 'media' && p.tracks[0].items[0].cursorFx)
+    expect(disk.assets[0].cursor).toBe('cursor.json')
+    const v = parseProjectV13(disk)
+    expect(v.success).toBe(true)
+    expect(parseProject(disk)).toEqual(p)
+    expect(validateProject(p)).toEqual([])
+  })
+  // ruling R14: ler do disco nunca recusa o projeto por causa do cursorFx (load cairia numa versão antiga e perderia
+  // trabalho); o parse prende ou volta ao padrão campo a campo e só descarta o cursorFx de estrutura quebrada.
+  // validateProject continua estrito (ops/inspetor recusam).
+  it.each([
+    ['cor sem #rrggbb', fxWith({ color: 'red' }), fxWith({ color: DEFAULT_CURSOR_FX.highlight.color })],
+    ['tamanho < 8', fxWith({ sizePx: 7 }), fxWith({ sizePx: 8 })],
+    ['tamanho > 120', fxWith({ sizePx: 121 }), fxWith({ sizePx: 120 })],
+    ['duração < 150', fxWith({ durationMs: 149 }), fxWith({ durationMs: 150 })],
+    ['duração > 1500', fxWith({ durationMs: 1501 }), fxWith({ durationMs: 1500 })],
+    ['escala < 1', fxWith({}, { scale: 0.9 }), fxWith({}, { scale: 1 })],
+    ['escala > 4 (ex.: versão futura com faixa maior)', fxWith({}, { scale: 6 }), fxWith({}, { scale: 4 })],
+    ['suavização < 0', fxWith({}, { smoothing: -0.1 }), fxWith({}, { smoothing: 0 })],
+    ['suavização > 1', fxWith({}, { smoothing: 1.1 }), fxWith({}, { smoothing: 1 })]
+  ])('valor fora da faixa no disco: %s → preso/padrão no parse; validateProject avisa', (_label, fx, fixed) => {
+    const p = withFx(fx)
+    expect(validateProject(p).some((m) => m.includes('cursor'))).toBe(true)
+    const back = parseProject(diskOf(p))
+    expect(back).toEqual(swapFx(p, fixed))
+    expect(validateProject(back)).toEqual([])
+  })
+  it('folha com tipo errado volta ao padrão dela; o resto do cursorFx fica', () => {
+    const p = withFx(fxWith({ enabled: true, sizePx: 50 }, { scale: 3 }))
+    const disk = diskOf(p)
+    Object.assign(disk.tracks[0].items[0].cursorFx.highlight, { color: 42, durationMs: 'x' })
+    disk.tracks[0].items[0].cursorFx.cursor.enabled = 'sim'
+    expect(parseProject(disk)).toEqual(swapFx(p, fxWith({ enabled: true, sizePx: 50 }, { scale: 3, enabled: false })))
+  })
+  it.each([
+    ['sem `cursor`', (fx: Record<string, unknown>): void => void delete fx.cursor],
+    ['`highlight` não é objeto', (fx: Record<string, unknown>): void => void (fx.highlight = 'x')],
+    ['cursorFx é número', null]
+  ] as [string, ((fx: Record<string, unknown>) => void) | null][])('estrutura quebrada (%s): o cursorFx sai e o resto do projeto carrega igual', (_l, mutate) => {
+    const p = withFx()
+    const disk = diskOf(p)
+    if (mutate) mutate(disk.tracks[0].items[0].cursorFx)
+    else disk.tracks[0].items[0].cursorFx = 7
+    const back = parseProject(disk)
+    const { cursorFx: _drop, ...rest } = p.tracks[0].items[0] as MediaItem
+    expect('cursorFx' in back.tracks[0].items[0]).toBe(false)
+    expect(back).toEqual({ ...p, tracks: [{ ...p.tracks[0], items: [rest] }, ...p.tracks.slice(1)] })
+    expect(parseProjectV13(diskOf(back)).success).toBe(true)
   })
 })
 

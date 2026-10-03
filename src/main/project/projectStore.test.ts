@@ -42,6 +42,25 @@ describe('ProjectStore', () => {
     expect(store.load('p-a').name).toBe('Novo')
   })
 
+  it('cursorFx fora da faixa no project.json (versão futura, edição manual) não derruba o load para uma versão antiga', () => {
+    const p = mk('p-fx', '2026-10-01T10:00:00.000Z')
+    const a: Asset = { id: 'scr', name: 'Tela', kind: 'video', durationUs: 5_000_000, status: 'ready', source: { type: 'session', sessionId: 's', stream: 'screen' }, cursor: 'cursor.json' }
+    const item: MediaItem = { ...createMediaItem(a, 0, 'video'), id: 'i1', durationUs: 1_000_000, cursorFx: { highlight: { enabled: true, color: '#00ff00', sizePx: 30, durationMs: 400 }, cursor: { enabled: true, scale: 2, smoothing: 0.5 } } }
+    store.create({ ...p, assets: [a], tracks: [{ ...p.tracks[0], items: [item] }, ...p.tracks.slice(1)] })
+    // uma versão antiga em versions/ (seria a recuperada se o parse falhasse)
+    writeFileSync(join(root, 'p-fx', 'versions', '001.json'), JSON.stringify({ ...p, name: 'Versão antiga' }), 'utf8')
+    const file = join(root, 'p-fx', 'project.json')
+    const disk = JSON.parse(readFileSync(file, 'utf8'))
+    disk.name = 'Atual'
+    disk.tracks[0].items[0].cursorFx.cursor.scale = 6
+    disk.tracks[0].items[0].cursorFx.highlight.color = '#00ff0080'
+    writeFileSync(file, JSON.stringify(disk), 'utf8')
+    store = new ProjectStore({ projectsRoot: () => root, trash: async () => {} }) // sem cache
+    const loaded = store.load('p-fx')
+    expect(loaded.name).toBe('Atual')
+    expect((loaded.tracks[0].items[0] as MediaItem).cursorFx).toEqual({ highlight: { enabled: true, color: '#ffd400', sizePx: 30, durationMs: 400 }, cursor: { enabled: true, scale: 4, smoothing: 0.5 } })
+  })
+
   it('versions: só grava nova versão após 60 s e mantém 20', () => {
     const p = mk('p-a', '2026-10-01T10:00:00.000Z')
     store.create(p)
@@ -156,6 +175,37 @@ describe('ProjectStore', () => {
     const r = s2.withMediaStatus(p)
     expect(r.assets.map((a) => a.processedAudio)).toEqual([{ 'dn-sh': fp }, undefined])
     expect(s2.withMediaStatus(r)).toBe(r)
+  })
+
+  it('withMediaStatus restaura `cursor` do asset da tela de gravação com cursor.json (a v1.3 o descarta ao regravar)', () => {
+    const asked: string[] = []
+    const s2 = new ProjectStore({
+      projectsRoot: () => root, trash: async () => {}, sessionMediaExists: (id) => id !== 'apagada',
+      sessionCursorRef: (id) => (asked.push(id), id === 'com' || id === 'apagada' ? 'cursor.json' : null)
+    })
+    const base = { name: 'x', kind: 'video' as const, durationUs: 1, status: 'ready' as const }
+    const p: Project = {
+      ...mk('p-c', '2026-10-01T10:00:00.000Z'),
+      assets: [
+        { ...base, id: 'tela', source: { type: 'session', sessionId: 'com', stream: 'screen' } },
+        { ...base, id: 'cam', source: { type: 'session', sessionId: 'com', stream: 'webcam' } },
+        { ...base, id: 'semTrilha', source: { type: 'session', sessionId: 'sem', stream: 'screen' } },
+        { ...base, id: 'jaTem', source: { type: 'session', sessionId: 'com2', stream: 'screen' }, cursor: 'cursor.json' },
+        { ...base, id: 'sumiu', source: { type: 'session', sessionId: 'apagada', stream: 'screen' } },
+        { ...base, id: 'arq', source: { type: 'file', path: join(root, 'x.mp4'), size: 1, mtimeMs: 1 } }
+      ]
+    }
+    const r = s2.withMediaStatus(p)
+    expect(r.assets.map((a) => [a.id, a.cursor])).toEqual([['tela', 'cursor.json'], ['cam', undefined], ['semTrilha', undefined], ['jaTem', 'cursor.json'], ['sumiu', undefined], ['arq', undefined]])
+    expect('cursor' in r.assets[2]).toBe(false)
+    // só lê a trilha de quem precisa (tela sem o campo, gravação presente): nada de ler 1 h de cursor a cada abertura
+    expect(asked.sort()).toEqual(['com', 'sem'])
+    asked.length = 0
+    const again = s2.withMediaStatus(r)
+    expect(again.assets.map((a) => a.cursor)).toEqual(r.assets.map((a) => a.cursor))
+    // sem a dependência (testes antigos, outros chamadores): nada muda
+    const sessionOnly = { ...p, assets: p.assets.filter((a) => a.source.type === 'session') }
+    expect(new ProjectStore({ projectsRoot: () => root, trash: async () => {} }).withMediaStatus(sessionOnly)).toBe(sessionOnly)
   })
 
   it('removeProcessedAudio apaga só os arquivos do asset, um a um (falha num não impede os outros)', () => {

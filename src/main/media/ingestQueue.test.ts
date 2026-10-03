@@ -226,6 +226,41 @@ describe('IngestQueue', () => {
     expect(done[0].patch).toEqual({})
   })
 
+  describe('trilha do cursor (F6): asset da tela de uma gravação', () => {
+    const screen = (over: Partial<Asset> = {}): Asset => ({
+      ...asset('scr'), source: { type: 'session', sessionId: over.id ?? 's1', stream: 'screen' }, audio: undefined, ...over
+    })
+    const withRefs = (refs: Record<string, string | null>): InstanceType<typeof IngestQueue> => {
+      const q = new IngestQueue({
+        projectFile: (pid, rel) => join(dir, pid, rel),
+        resolveInput: () => ({ path: 'C:/s/rec.mp4', analyzeOnly: true, videoMap: '0:v:0' }),
+        encoders: () => ['libx264'],
+        sessionCursorRef: (sid) => refs[sid] ?? null
+      })
+      q.on('done', (_pid, assetId, patch) => done.push({ assetId, patch }))
+      return q
+    }
+    it('com cursor.json válido o patch traz `cursor`; sem ele, nenhum campo (e um `cursor` antigo sai)', async () => {
+      queue = withRefs({ s1: 'cursor.json', s2: null })
+      queue.enqueue('p', screen({ id: 'a1', source: { type: 'session', sessionId: 's1', stream: 'screen' } }))
+      queue.enqueue('p', screen({ id: 'a2', source: { type: 'session', sessionId: 's2', stream: 'screen' } }))
+      queue.enqueue('p', screen({ id: 'a3', source: { type: 'session', sessionId: 's2', stream: 'screen' }, cursor: 'cursor.json' }))
+      await drain()
+      const by = (id: string): Partial<Asset> => done.find((d) => d.assetId === id)!.patch
+      expect(by('a1')).toMatchObject({ status: 'ready', cursor: 'cursor.json' })
+      expect('cursor' in by('a2')).toBe(false)
+      expect(by('a3').status).toBe('ready')
+      expect('cursor' in by('a3') && by('a3').cursor === undefined).toBe(true)
+    })
+    it('webcam da gravação e arquivos importados nunca ganham `cursor`', async () => {
+      queue = withRefs({ s1: 'cursor.json' })
+      queue.enqueue('p', screen({ id: 'w', source: { type: 'session', sessionId: 's1', stream: 'webcam' } }))
+      queue.enqueue('p', { ...asset('f'), audio: undefined })
+      await drain()
+      expect(done.every((d) => !('cursor' in d.patch))).toBe(true)
+    })
+  })
+
   describe('processAudio (redução de ruído/normalização em cache)', () => {
     const jobs: IngestJob[] = []
     let srcFile: string

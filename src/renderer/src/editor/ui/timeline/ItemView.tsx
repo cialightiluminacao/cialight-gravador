@@ -7,6 +7,7 @@ import { ITEM_TYPE_LABEL } from '../itemLabel'
 import { FadeHandles } from './FadeHandles'
 import { KeyframeLanes } from './KeyframeLanes'
 import { KeyframeMarks } from './KeyframeMarks'
+import { TrackStripView } from './TrackStripView'
 import { filmstripSlots } from './itemMedia'
 import { filmstripBytes, useFilmstripAdmission } from './filmstripBudget'
 import { usePeaks } from './peaks'
@@ -154,6 +155,7 @@ export const ItemView = memo(function ItemView({ item, asset, projectId, kind, r
         {broken ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(255,92,92,0.22)_0_6px,transparent_6px_12px)]" /> : null}
         {locked ? <span className="absolute inset-0 block bg-[repeating-linear-gradient(135deg,rgba(0,0,0,0.28)_0_4px,transparent_4px_9px)]" /> : null}
         {fades ? <FadeHandles fadeInUs={fades.in} fadeOutUs={fades.out} pxPerSec={pxPerSec} w={w} clipFrom={clipFrom} visW={visR - visL} h={h} editable={fadeEditable} selected={selected} /> : null}
+        {item.type === 'effect' ? <TrackStripView item={item} pxPerSec={pxPerSec} clipFrom={clipFrom} visW={visR - visL} /> : null}
         <KeyframeMarks item={item} pxPerSec={pxPerSec} clipFrom={clipFrom} visW={visR - visL} h={h} locked={locked} />
         {/* desativado: o ícone aparece mesmo em item estreito (no rótulo quando cabe, senão no início) */}
         {disabled && narrow ? (

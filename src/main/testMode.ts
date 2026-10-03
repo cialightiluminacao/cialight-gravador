@@ -29,6 +29,12 @@ import { rnnoiseDir } from './export/ffmpegPath'
 import { DENOISE_DELAY_SAMPLES, processAudioFile } from './media/audioProcess'
 import { DENOISE_MODEL } from '@shared/editor/audioProcess'
 import { tmpdir } from 'os'
+import { SessionSchema, parseSession } from '@shared/schemas'
+import { sessionCursorRef, sessionDirFor } from './cursor/cursorTrackFile'
+import { CURSOR_FILE, type CursorTrackV1 } from '@shared/cursor'
+import { parseProject, toDiskProject } from '@shared/editor/schema'
+import { parseProjectV13 } from '@shared/__fixtures__/projectSchemaV13'
+import { checkCursorAfterRecording, checkCursorRealSourceAndOverhead, installCursorTest } from './cursor/cursorTestChecks'
 
 // Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render|editor-export|models). Roda no Electron
 // real com o ffmpeg embutido; escreve um relatório JSON em test-out/ e sai com
@@ -167,6 +173,13 @@ async function testCapture(store: SessionStore): Promise<number> {
   mkdirSync(outDir, { recursive: true })
   const failures: string[] = []
   const win = new BrowserWindow({ width: 1000, height: 700, show: true, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
+  // trilha do cursor (F6): primeiro a fonte real (binding nativo, custo de CPU), depois a sintética para a gravação
+  const okc = (cond: boolean, msg: string): void => ok(cond, msg, failures)
+  const cursorReport: Record<string, unknown> = {}
+  cursorReport.real = await checkCursorRealSourceAndOverhead(win, outDir, okc)
+  const cursorSt = installCursorTest(ipcMain)
+  // a janela do teste fica por cima: o "flash" dela mede o alinhamento relógio × PTS no vídeo do monitor principal
+  win.setAlwaysOnTop(true)
   const result = await new Promise<{ ok: boolean; report: Record<string, unknown> }>((resolve) => {
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: Record<string, unknown> }) => resolve(r))
     setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 90 s'] } }), 90_000)
@@ -195,10 +208,36 @@ async function testCapture(store: SessionStore): Promise<number> {
     ok(session.state === 'stopped', `estado stopped (${session.state})`, failures)
     const j = JSON.parse(readFileSync(join(store.dirOf(session.id), 'session.json'), 'utf8')) as Session
     ok(j.state === 'stopped' && j.durationMs === session.durationMs, 'session.json persistido', failures)
+    // F6: a trilha do cursor fica em cursor.json; o session.json continua com o mesmo esquema e as mesmas chaves
+    let parsedOk = true
+    try {
+      parseSession(j)
+    } catch {
+      parsedOk = false
+    }
+    ok(parsedOk && SessionSchema.strict().safeParse(j).success, 'session.json passa no SessionSchema inalterado (sem chaves desconhecidas)', failures)
+    const expectedKeys = ['version', 'id', 'createdAt', 'state', 'source', 'video', 'systemAudio', 'tracks', 'pauses', 'pip', 'strokes', 'clearEvents', 'markers', 'engine', 'files', 'durationMs', 'bytes', ...(session.webcam ? ['webcam'] : []), ...(session.mic ? ['mic'] : [])].sort()
+    ok(JSON.stringify(Object.keys(j).sort()) === JSON.stringify(expectedKeys), `session.json com as mesmas chaves de antes (${Object.keys(j).sort().join(',')})`, failures)
+    const sv = videos[0]
+    cursorReport.recording = await checkCursorAfterRecording(
+      {
+        st: cursorSt,
+        sessionDir: store.dirOf(session.id),
+        rec,
+        video: { width: sv?.width ?? 0, height: sv?.height ?? 0, durationMs: sv?.durationMs ?? p.durationMs, fps: sv?.fps ?? session.video.fps },
+        rendererClicks: (result.report.cursorClicks as { x: number; y: number; rendererMediaMs: number; mainMediaMs: number | null }[] | undefined) ?? [],
+        flashes: (result.report.flashes as { mediaMs: number; color: 'green' | 'black'; wallMs: number }[] | undefined) ?? [],
+        flashPaints: (result.report.flashPaints as { id: string; renderTime: number }[] | undefined) ?? [],
+        clockVsPts: (result.report.clockVsPts as { clockStartMs: number | null; firstMediaMs: number | null } | undefined) ?? null,
+        win
+      },
+      okc
+    )
+    ok(((result.report.cursorClicks as unknown[] | undefined) ?? []).length === 1, 'cursor: renderer injetou 1 clique sintético', failures)
     // E2E do editor (scripts/qa/editor-e2e.mjs) reaproveita a gravação: CIALIGHT_CAPTURE_KEEP=1 não apaga
     if (!process.env.CIALIGHT_CAPTURE_KEEP) await store.delete(session.id).catch(() => {})
   }
-  writeFileSync(join(outDir, 'capture-report.json'), JSON.stringify({ result, failures }, null, 2))
+  writeFileSync(join(outDir, 'capture-report.json'), JSON.stringify({ result, cursor: cursorReport, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE CAPTURA PASSOU')
   return failures.length ? 1 : 0
 }
@@ -370,6 +409,92 @@ async function testVoiceProcessing(queue: IngestQueue, mk: MkAsset, gen: (args: 
 
   const parts = readdirSync(join(pdir, 'generated')).filter((n) => n.includes('.part'))
   ok(parts.length === 0, `processar áudio: sem .part em generated/ (${parts.join(', ')})`, failures)
+}
+
+// ---- trilha do cursor na ingestão (F6, parte do CIALIGHT_TEST=ingest) ----
+/**
+ * Gravações sintéticas em <brutos>/ingest-cursor-* (rec.mp4 pequeno; com cursor.json válido, sem ele e com um
+ * inválido): a fila (com as mesmas dependências do main: sessionDirFor + sessionCursorRef) dá `asset.cursor` só à
+ * com trilha; abrir o projeto (withMediaStatus) devolve o campo que a v1.3 descartou ao regravar; e o IPC real
+ * (preload → main, janela oculta) devolve a trilha validada, null sem ela e null para '..'. Chamar DEPOIS de
+ * decodeInRenderer (a página usada aqui é a do harness de decodificação, que responde 'test:result' vazio).
+ */
+async function testCursorIngest(store: SessionStore, gen: (args: string[], label: string) => Promise<unknown>, projects: ProjectStore, projectId: string, failures: string[]): Promise<void> {
+  const ids = { com: 'ingest-cursor-com', sem: 'ingest-cursor-sem', ruim: 'ingest-cursor-ruim' }
+  const track: CursorTrackV1 = {
+    version: 1, width: 320, height: 180,
+    samples: [{ tMs: 0, x: 0.1, y: 0.2 }, { tMs: 16, x: 0.15, y: 0.25 }, { tMs: 33, x: 0.2, y: 0.3 }, { tMs: 1900, x: 0.9, y: 0.8 }],
+    clicks: [{ tMs: 20, x: 0.15, y: 0.25, button: 'left' }, { tMs: 1000, x: 0.5, y: 0.5, button: 'right' }]
+  }
+  for (const sid of Object.values(ids)) {
+    const sdir = store.dirOf(sid)
+    rmSync(sdir, { recursive: true, force: true })
+    mkdirSync(sdir, { recursive: true })
+  }
+  const rec0 = join(store.dirOf(ids.com), 'rec.mp4')
+  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-t', '2', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', rec0], 'ingest: gravação com cursor')
+  copyFileSync(rec0, join(store.dirOf(ids.sem), 'rec.mp4'))
+  copyFileSync(rec0, join(store.dirOf(ids.ruim), 'rec.mp4'))
+  writeFileSync(join(store.dirOf(ids.com), CURSOR_FILE), JSON.stringify(track))
+  writeFileSync(join(store.dirOf(ids.ruim), CURSOR_FILE), JSON.stringify({ ...track, version: 9 }))
+
+  const refOf = (sid: string): string | null => {
+    const d = sessionDirFor((x) => store.dirOf(x), sid)
+    return d ? sessionCursorRef(d) : null
+  }
+  const queue = new IngestQueue({
+    projectFile: (pid, rel) => projects.filePath(pid, rel),
+    resolveInput: (_pid, a) => ({ path: a.source.type === 'session' ? store.filePath(a.source.sessionId, 'rec.mp4') : '', analyzeOnly: true, videoMap: '0:v:0' }),
+    encoders: () => ['libx264'],
+    sessionCursorRef: refOf,
+    log
+  })
+  const screenAsset = (key: keyof typeof ids): Asset => ({
+    id: `a_cursor_${key}`, name: key, kind: 'video', source: { type: 'session', sessionId: ids[key], stream: 'screen' }, durationUs: 2_000_000,
+    video: { width: 320, height: 180, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: 1_000_000 }, videoTrackIndex: 0, status: 'processing'
+  })
+  const keys = ['com', 'sem', 'ruim'] as const
+  const waits = keys.map((k) => waitDone(queue, projectId, `a_cursor_${k}`))
+  for (const k of keys) queue.enqueue(projectId, screenAsset(k))
+  const [pCom, pSem, pRuim] = await Promise.all(waits)
+  ok(pCom.status === 'ready' && pCom.cursor === CURSOR_FILE && !!pCom.filmstrip, `cursor: gravação com cursor.json → asset.cursor (${JSON.stringify(pCom)})`, failures)
+  ok(pSem.status === 'ready' && !('cursor' in pSem), `cursor: gravação sem cursor.json → sem campo (${JSON.stringify(pSem)})`, failures)
+  ok(pRuim.status === 'ready' && !('cursor' in pRuim), `cursor: cursor.json inválido → sem campo, sem erro (${JSON.stringify(pRuim)})`, failures)
+
+  // v1.3 abre e regrava (descarta asset.cursor e cursorFx); ao abrir de novo, o build novo devolve o asset.cursor
+  const withCursor: Asset = { ...screenAsset('com'), ...pCom, status: 'ready' }
+  const base = { ...createEmptyProject('Cursor'), id: 'p-cursor-test' }
+  const proj = { ...base, assets: [withCursor, { ...screenAsset('sem'), status: 'ready' as const }] }
+  const v13 = parseProjectV13(JSON.parse(JSON.stringify(toDiskProject(proj))))
+  ok(v13.success, 'cursor: projeto com asset.cursor legível pela v1.3', failures)
+  const resaved = parseProject(JSON.parse(JSON.stringify(v13.success ? v13.data : {})))
+  ok(resaved.assets.every((a) => a.cursor === undefined), 'cursor: a v1.3 descarta asset.cursor ao regravar', failures)
+  const opener = new ProjectStore({
+    projectsRoot: () => join(outDir, 'ingest', 'Projetos'), trash: async () => {}, log,
+    sessionMediaExists: (sid) => existsSync(store.filePath(sid, 'rec.mp4')),
+    sessionCursorRef: refOf
+  })
+  const reopened = opener.withMediaStatus(resaved)
+  ok(reopened.assets.map((a) => a.cursor ?? null).join(',') === `${CURSOR_FILE},`, `cursor: abrir o projeto restaura asset.cursor só onde há trilha (${reopened.assets.map((a) => a.cursor ?? '-').join(',')})`, failures)
+
+  // IPC real: janela oculta com o preload; o handler é o registrado por registerIpc
+  const win = new BrowserWindow({ width: 200, height: 150, show: false, webPreferences: { preload: preloadPath(), sandbox: false, additionalArguments: ['--cialight-window=recorder'] } })
+  try {
+    await new Promise<void>((resolve) => {
+      win.webContents.once('did-finish-load', () => resolve())
+      loadPage(win, `index.html#decode-test/${encodeURIComponent(JSON.stringify({ items: [] }))}`)
+    })
+    const call = (sid: string): Promise<unknown> => win.webContents.executeJavaScript(`window.api.cursor.readCursorTrack(${JSON.stringify(sid)})`)
+    const got = await call(ids.com)
+    ok(JSON.stringify(got) === JSON.stringify(track), `cursor: IPC readCursorTrack devolve a trilha validada (${JSON.stringify(got).slice(0, 120)})`, failures)
+    const none = await Promise.all([call(ids.sem), call(ids.ruim), call('..'), call('../x'), call('nao-existe')])
+    ok(none.every((r) => r === null), `cursor: IPC devolve null sem trilha, inválida ou fora das gravações (${JSON.stringify(none)})`, failures)
+  } catch (e) {
+    ok(false, `cursor: IPC falhou (${e instanceof Error ? e.message : String(e)})`, failures)
+  } finally {
+    win.destroy()
+  }
+  for (const sid of Object.values(ids)) rmSync(store.dirOf(sid), { recursive: true, force: true })
 }
 
 async function testIngest(store: SessionStore): Promise<number> {
@@ -592,6 +717,7 @@ async function testIngest(store: SessionStore): Promise<number> {
   ok(await cancelled && !readdirSync(dir).some((n) => n.includes('cancelada')), 'análise de fala cancelada: sem resultado nem .part', failures)
 
   await testVoiceProcessing(queue, mk, gen, dir, pdir, project.id, failures)
+  await testCursorIngest(store, gen, projects, project.id, failures)
 
   // proxy com cada encoder do cache de probe (somente leitura; nada é gravado nas configurações)
   for (const enc of cached?.available ?? []) {

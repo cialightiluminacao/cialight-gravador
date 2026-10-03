@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { ipcErrorMessage } from '@/lib/ipcError'
-import type { Asset } from '@shared/editor/project'
+import type { Asset, MediaItem } from '@shared/editor/project'
+import { toScreen } from '@shared/editor/contentPose'
+import { findItem } from '@shared/editor/ops'
+import { clipFrameAt } from '@shared/editor/resolve'
 import { useAppStore } from '@/app/store'
 import { flushAutosave, startAutosave, useEditorStore } from '../state/editorStore'
 import { CURVE_EDITOR_ACTIONS, shortcutFor, TRANSPORT_ACTIONS } from '../shortcuts'
@@ -40,7 +43,7 @@ import { viewerGestureActive } from './viewer/viewerGesture'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; reframe: typeof useReframe; narration: typeof useNarration; expanded: typeof useExpandedItems; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; queue: typeof exportQueue; memStats: () => ReturnType<EditorEngine['render']['memStats']>; filmstrips: () => FilmstripStats; exportDir?: string; narrationFailWritesAfter?: number }
+    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; reframe: typeof useReframe; narration: typeof useNarration; expanded: typeof useExpandedItems; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; queue: typeof exportQueue; memStats: () => ReturnType<EditorEngine['render']['memStats']>; filmstrips: () => FilmstripStats; exportDir?: string; narrationFailWritesAfter?: number; clipPoint: (itemId: string, tUs: number, x: number, y: number) => { x: number; y: number } | null }
   }
 }
 
@@ -61,6 +64,15 @@ function readTimelineHeight(): number {
 
 /** Teclas que pertencem a controles focados (listas, sliders, abas, diálogos) e não viram atalho. */
 const OWN_KEYS = ['listbox', 'option', 'menu', 'menuitem', 'dialog', 'slider', 'tab', 'tablist', 'group', 'radiogroup', 'switch', 'combobox'].map((r) => `[role="${r}"]`).join(',')
+
+/** QA (fora do pacote): ponto da fonte do clipe (0–1) → px do quadro em tUs, pela geometria do resolve; null = invisível. */
+function qaClipPoint(itemId: string, tUs: number, x: number, y: number): { x: number; y: number } | null {
+  const p = useEditorStore.getState().project
+  const m = p ? findItem(p, itemId)?.item : undefined
+  if (!p || m?.type !== 'media') return null
+  const cf = clipFrameAt(p, m as MediaItem, tUs)
+  return cf ? toScreen(cf, x * cf.g.dw, y * cf.g.dh) : null
+}
 
 export function EditorScreen({ projectId }: { projectId: string }): React.JSX.Element {
   const [engine, setEngine] = useState<EditorEngine | null>(null)
@@ -88,7 +100,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     setEngine(eng)
     const stopAutosave = startAutosave((p) => api.project.save(p))
     // QA (fora do pacote): store e motor acessíveis por CDP
-    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, reframe: useReframe, narration: useNarration, expanded: useExpandedItems, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths), queue: exportQueue, memStats: () => eng.render.memStats(), filmstrips: () => filmstripBudget.stats() }
+    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, reframe: useReframe, narration: useNarration, expanded: useExpandedItems, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths), queue: exportQueue, memStats: () => eng.render.memStats(), filmstrips: () => filmstripBudget.stats(), clipPoint: qaClipPoint }
     const offProgress = api.media.onProgress((j) => {
       if (j.projectId.toLowerCase() !== projectId.toLowerCase()) return
       const st = useEditorStore.getState()

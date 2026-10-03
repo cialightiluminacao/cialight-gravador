@@ -57,6 +57,14 @@ Editor multi-faixa dentro do app: **Histórico → Editar** (ou **Projetos → N
 - **Reenquadrar:** **Reenquadrar** na barra de cima converte o projeto para **9:16**, **1:1** ou **4:5**, em "Preencher" (com **pontos de foco**: clique no visualizador marca o ponto que fica no centro naquele instante; a câmera vai suave de um ponto ao outro; durante um zoom que o clipe já tem, o alvo do zoom fica no centro e o detalhe ampliado continua no quadro) ou "Caber inteiro". O padrão é **Criar cópia** ("<nome> (Vertical)", numa pasta própria com os proxies, sem reprocessar a mídia) — o original fica intacto; "Este projeto" aplica em um passo de desfazer. PiP e textos mantêm o tamanho relativo; os efeitos de privacidade continuam sobre o mesmo conteúdo (ancorados ou ajustados ao novo quadro) e o painel lista o que precisa de conferência (efeito fora do novo quadro, buraco do "Borrar tudo menos…" fechado, anotações).
 - **Compatibilidade:** projetos salvos pela v1.4 continuam abrindo na v1.3, **exceto** os que usam recursos novos sem equivalente nela (keyframes em corte, ajustes, raio ou tamanho do texto; Ken Burns num PiP): esses só abrem na v1.4 — atualize todas as máquinas. Efeitos ancorados e as animações Girar/Quicar/Desfoque abrem na v1.3 de forma segura (região fixa que cobre todo o movimento — no "Borrar tudo menos…" ancorado, o quadro inteiro borrado; animação trocada por Fade/Deslizar).
 
+**Cursor e cliques (v1.7.0):**
+
+- **Trilha do cursor:** cada gravação de tela guarda, ao lado do vídeo, a posição do cursor (~60 vezes por segundo) e os cliques (`cursor.json`), sem atrasar o início da gravação e sem mexer no resto da sessão. Gravações antigas, sem a trilha, continuam abrindo normalmente (as opções abaixo só aparecem quando há trilha).
+- **Realce de cliques e cursor ampliado:** no inspetor do clipe de tela, seção **Cursor e cliques**: **Realçar cliques** desenha um anel que pulsa onde cada clique aconteceu (cor, tamanho e duração ajustáveis) e **Cursor ampliado** desenha uma seta maior, levemente suavizada, sobre o cursor (escala e suavização). Os dois vêm desligados, acompanham zoom, corte e reenquadrar e ficam **por baixo** dos efeitos de privacidade (um blur sobre o ponto esconde o anel também). O arquivo exportado é igual ao preview.
+- **Zoom automático nos cliques:** seção **Zoom automático nos cliques** no inspetor do clipe de tela: o editor aproxima a imagem em cada clique (ou grupo de cliques próximos), acompanha o cursor enquanto o zoom dura e volta ao normal, sempre sem bordas pretas. **Intensidade**, **Duração**, **Transição** e **Suavidade** ajustáveis; **Pré-visualizar** mostra o resultado sem gravar (Cancelar volta exatamente ao de antes) e **Aplicar** grava os keyframes num passo de desfazer — dá para editá-los depois como qualquer zoom.
+- **Seguir conteúdo:** no inspetor de um blur/pixelizar/tarja, ponha a região sobre o conteúdo no playhead e clique **Seguir conteúdo**: o editor acompanha o movimento até o fim do efeito e cria keyframes de posição e tamanho (progresso com **Cancelar**, um passo de desfazer). É estrito de propósito: se o conteúdo some (coberto por outra janela, rolado para fora), aparece repetido na tela ou o cursor passa por cima, o acompanhamento para ali e a região fica **ampliada até o fim** (no "Borrar tudo menos…", o quadro inteiro borrado) — o aviso diz o instante (**Ir para**) e uma faixa colorida no item mostra onde foi confiante, incerto ou perdido. Para continuar, vá a um quadro posterior, ajuste a região sobre o conteúdo e siga de novo dali (o que já foi acompanhado fica).
+- **Compatibilidade:** projetos com essas opções continuam abrindo nas versões 1.3 a 1.6 (os zooms e as regiões acompanhadas são keyframes comuns); as versões antigas apenas ignoram os ajustes de cursor e de realce, que voltam ao padrão (desligados) se o projeto for salvo por elas.
+
 **Textos, transições e legendas (v1.6.0):**
 
 - **Transições:** aba **Transições** da biblioteca com 11 tipos (Dissolver, Mergulho no preto/branco, Deslizar ←→↑↓, Cortina ←/→, Zoom, Desfoque). Arraste o cartão até o corte entre dois clipes encostados (o corte fica realçado) ou use `Ctrl+T` (Dissolver no corte mais próximo do playhead — com clipes selecionados, na faixa deles; sem seleção, ignora a faixa de Legendas e cortes só entre textos). O ícone no corte tem a largura da transição: arraste as bordas para mudar a duração (mínimo 0,1 s, máximo metade do clipe mais curto), clique para abrir o inspetor (tipo, duração, remover), botão direito para o menu e `Delete` para remover. A transição fica **centrada no corte** e usa só o que está na timeline: o último quadro de A e o primeiro de B ficam parados durante a mistura, então nenhum trecho cortado aparece (os efeitos de privacidade de A e B continuam valendo dentro dela). O som acompanha: A some e B entra com fade de potência constante. Se um aparar, mover ou apagar separar os dois clipes, a transição sai com o aviso "Transição removida porque os clipes não estão mais encostados" (`Ctrl+Z` desfaz).
@@ -76,7 +84,7 @@ Editor multi-faixa dentro do app: **Histórico → Editar** (ou **Projetos → N
 - **Codificador de reserva:** se o codificador de vídeo do Windows falhar (hardware e software), a exportação continua com o libx264 do ffmpeg (mesma imagem e mesmos efeitos de privacidade).
 - **Memória e mídia movida:** texturas e miniaturas da linha do tempo têm teto de memória (512 MB / 200 MB) em projetos grandes. Se uma pasta de mídia foi movida ou renomeada, ao abrir o projeto o editor procura os arquivos (mesmo nome e tamanho) e propõe reapontar — você confere o caminho antigo → novo e confirma.
 
-- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4; §22: da F5; §24: da F7)
+- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4; §22: da F5; §23: da F6; §24: da F7)
 - Checklist manual: [docs/qa-checklist.md](docs/qa-checklist.md) (seção Editor)
 
 QA automatizado via CDP (eventos sintéticos na página, sem mexer no mouse/teclado do Windows; tudo em `test-out/`), depois de `npm run build`:
@@ -122,11 +130,15 @@ node scripts/qa/editor-f7-export.mjs  # exportação completa: presets, HEVC, ta
 node scripts/qa/editor-f7-relink.mjs  # relink: pasta de mídia movida → "Mídia encontrada em outro local" → reapontar
 node scripts/qa/editor-f7-e2e.mjs     # F7 ponta a ponta: tarja + blur + marcadores → fila (YouTube 1080p, GIF 480, MP3)
                                       # → PNG (Ctrl+Shift+E) → capítulos → ffprobe e privacidade nos pixels → relink → memória
+node scripts/qa/editor-f6-e2e.mjs     # F6 ponta a ponta: gravação sintética com cursor.json → Histórico → Editar →
+                                      # Realçar cliques + Cursor ampliado → zoom automático (prévia, cancelar, aplicar,
+                                      # desfazer/refazer) → blur + Seguir conteúdo (perda na oclusão, nova passada) →
+                                      # Original; ffmpeg confere o anel, bordas no zoom e o texto ilegível em todo quadro
 ```
 
 Testes reais dos formatos (GIF, PNG, só áudio, fila e codificador de reserva): `npm run test:editor-formats`.
 
-Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/`, `docs/qa/editor-f4/`, `docs/qa/editor-f5/` e `docs/qa/editor-f7/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
+Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/`, `docs/qa/editor-f4/`, `docs/qa/editor-f5/`, `docs/qa/editor-f6/` e `docs/qa/editor-f7/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
 
 ## Estrutura
 

@@ -60,6 +60,7 @@ interface LaneProps { item: Item; path: AnimPath; anim: Anim<number>; index: num
 const Lane = memo(function Lane({ item, path, anim, index, pxPerSec, clipFrom, visW, sel, locked }: LaneProps): React.JSX.Element {
   const segs = useMemo(() => curveSegments(anim, item.durationUs, pxPerSec, clipFrom, visW, LANE_H), [anim, item.durationUs, pxPerSec, clipFrom, visW])
   const keys = anim.keys ?? []
+  const times = useMemo(() => keys.map((k) => k.tUs), [keys])
   const label = PATH_LABEL[path]
   return (
     <div data-lane-path={path} className="absolute inset-x-0 border-b border-white/[0.06]" style={{ top: index * LANE_H, height: LANE_H }}>
@@ -69,8 +70,8 @@ const Lane = memo(function Lane({ item, path, anim, index, pxPerSec, clipFrom, v
         ))}
       </svg>
       <span className="pointer-events-none absolute left-1 top-[3px] z-[1] max-w-[45%] truncate rounded bg-black/60 px-1 text-[9px] font-semibold leading-[14px] text-white/85">{label}</span>
-      {keyframeMarkLefts(keys.map((k) => k.tUs), pxPerSec, clipFrom, visW, HIT).map(({ tUs, left }, j) => {
-        const k = keys.find((x) => x.tUs === tUs) ?? keys[j]
+      {keyframeMarkLefts(times, pxPerSec, clipFrom, visW, HIT, sel ? (t) => isKeySelected(sel, item.id, path, t) : undefined).map(({ tUs, left, i }) => {
+        const k = keys[i]
         const kind = easeKind(k.ease)
         const selected = isKeySelected(sel, item.id, path, tUs)
         return (

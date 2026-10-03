@@ -136,6 +136,14 @@ const api: IpcApi = {
     onCommand: (cb) => on(IPC.recording.command, cb),
     onRecover: (cb) => on(IPC.recording.recover, cb)
   },
+  cursor: {
+    begin: (info) => ipcRenderer.send(IPC.cursor.begin, info),
+    pause: () => ipcRenderer.send(IPC.cursor.pause),
+    resume: () => ipcRenderer.send(IPC.cursor.resume),
+    stop: (sessionId) => ipcRenderer.invoke(IPC.cursor.stop, sessionId),
+    discard: (sessionId) => ipcRenderer.send(IPC.cursor.discard, sessionId),
+    readCursorTrack: (sessionId) => ipcRenderer.invoke(IPC.cursor.readTrack, sessionId)
+  },
   overlay: {
     setMode: (payload) => ipcRenderer.invoke(IPC.overlay.setMode, payload),
     onMode: (cb) => on(IPC.overlay.mode, cb),
@@ -205,4 +213,6 @@ contextBridge.exposeInMainWorld('spikeApi', spike)
 // canal do teste de integração de captura (só quando CIALIGHT_TEST está definido)
 if (process.env.CIALIGHT_TEST) {
   contextBridge.exposeInMainWorld('__captureTestSend', (r: unknown) => ipcRenderer.send('test:result', r))
+  // clique sintético da trilha do cursor (F6): entra no mesmo pipeline do main, sem input do SO
+  contextBridge.exposeInMainWorld('__captureTestCursorClick', (r: unknown) => ipcRenderer.invoke('test:cursorClick', r))
 }

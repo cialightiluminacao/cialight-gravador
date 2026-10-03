@@ -1,9 +1,12 @@
 // Motor do editor montado pela tela: canvas (transferido uma única vez ao render worker), áudio e
 // reprodução, mais a sincronização store → workers (projeto, seleção, quadro parado).
 import { toast } from 'sonner'
+import type { CursorTrackV1 } from '@shared/cursor'
+import type { Project } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
 import { PlaybackController } from '../engine/PlaybackController'
+import { cursorTrackNeeds, cursorTracks } from '../engine/cursorTracks'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import { RENDER_STALL_MS, RenderWatchdog } from '../engine/renderWatchdog'
 import { useEditorStore } from '../state/editorStore'
@@ -79,18 +82,58 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
     if (watchdog.check(useEditorStore.getState().playing, render.pendingFrames > 0)) restartRender()
   }, Math.min(1000, Math.max(100, Math.round((opts.stallMs ?? RENDER_STALL_MS) / 5))))
 
+  // trilhas do cursor (F6) dos clipes com realce/cursor ampliado ligado no projeto desenhado: as já carregadas vão
+  // ao worker; as outras são lidas (IPC, uma vez por gravação) e, ao chegar, entram e o quadro parado é redesenhado.
+  // Trilha que não carregou: um aviso por gravação, sem nova tentativa enquanto o editor estiver aberto.
+  let disposed = false
+  const cursorFailed = new Set<string>()
+  const syncCursors = (p: Project): void => {
+    const ready = new Map<string, CursorTrackV1>()
+    for (const [assetId, sessionId] of cursorTrackNeeds(p)) {
+      const t = cursorTracks.peek(sessionId)
+      if (t) {
+        ready.set(assetId, t)
+        continue
+      }
+      if (cursorFailed.has(sessionId)) continue
+      void cursorTracks.load(sessionId).then((loaded) => {
+        if (disposed) return
+        if (!loaded) {
+          if (cursorFailed.has(sessionId)) return
+          cursorFailed.add(sessionId)
+          const name = p.assets.find((a) => a.id === assetId)?.name
+          toast.error(`Não foi possível ler a trilha do cursor${name ? ` de “${name}”` : ''}`, { description: 'O realce de cliques e o cursor ampliado não aparecem neste clipe.' })
+          return
+        }
+        const s = useEditorStore.getState()
+        const shown = s.preview ?? s.project
+        if (!shown) return
+        syncCursors(shown)
+        if (!s.playing) void render.requestFrame(s.playheadUs, false)
+      })
+    }
+    render.setCursorTracks(ready)
+  }
+
   // store → workers, no máximo uma vez por quadro de tela
   let raf = 0
   let lastProject: unknown = null
+  let lastShown: unknown = null
   let lastBypass = false
   let lastSelection: unknown = null
   const flush = (): void => {
     raf = 0
     const s = useEditorStore.getState()
     if (!s.project) return
+    // o visualizador desenha a prévia fora do histórico, se houver (zoom automático); o áudio é sempre o do projeto
+    const shown = s.preview ?? s.project
+    if (shown !== lastShown) {
+      render.setProject(shown, mediaUrlsFor(shown, 'preview'), true)
+      syncCursors(shown)
+      lastShown = shown
+    }
     if (s.project !== lastProject || s.audioBypass !== lastBypass) {
       const urls = mediaUrlsFor(s.project, 'preview')
-      if (s.project !== lastProject) render.setProject(s.project, urls, true)
       // comparar A/B (botão segurado no inspetor de áudio): toca o original sem ruído/normalização
       audio.setProject(s.project, urls, true, s.audioBypass)
       lastProject = s.project
@@ -108,7 +151,7 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
   }
   const unsub = useEditorStore.subscribe((s, prev) => {
     if (prev.playing && !s.playing) render.idle()
-    if (s.project !== prev.project || s.audioBypass !== prev.audioBypass || s.selection !== prev.selection || (!s.playing && s.playheadUs !== prev.playheadUs)) schedule()
+    if (s.project !== prev.project || s.preview !== prev.preview || s.audioBypass !== prev.audioBypass || s.selection !== prev.selection || (!s.playing && s.playheadUs !== prev.playheadUs)) schedule()
   })
   schedule()
 
@@ -120,6 +163,7 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
     audio,
     playback,
     dispose() {
+      disposed = true
       unsub()
       offError()
       offSpeech()

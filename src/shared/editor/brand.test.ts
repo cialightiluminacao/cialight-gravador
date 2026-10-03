@@ -323,7 +323,7 @@ const layerKey = (l: Layer): string => ('itemId' in l ? l.itemId : '?')
 function privacyScene(): Project {
   let p = ops.addAsset(ops.addAsset(createEmptyProject('priv'), file('a', 'video', 20 * S)), file('b', 'video', 20 * S))
   const a = ops.addMediaFromAsset(p, 'a', 0)
-  p = ops.updateItem<MediaItem>(a.project, a.itemIds[0], (d) => { d.durationUs = 5 * S; d.visual!.transform.scale = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'inOut' }, { tUs: 4 * S, value: 1.6, ease: 'linear' }] } })
+  p = ops.updateItem<MediaItem>(a.project, a.itemIds[0], (d) => { d.durationUs = 5 * S })
   p = ops.updateItem<MediaItem>(p, a.itemIds[1], (d) => { d.durationUs = 5 * S })
   const b = ops.addMediaFromAsset(p, 'b', 5 * S, { videoTrackId: ops.findItem(p, a.itemIds[0])!.track.id })
   p = ops.addTransition(b.project, b.itemIds[0], 'crossfade', 800_000)
@@ -340,6 +340,8 @@ function privacyScene(): Project {
   const f2 = ops.addEffect(p, 'pixelate', 1 * S, { durationUs: 3 * S, region: { x: 0.6, y: 0.4, w: 0.15, h: 0.1 } })
   p = ops.updateItem<EffectItem>(f2.project, f2.itemId, (d) => { d.region.x = { value: 0.6, keys: [{ tUs: 0, value: 0.6, ease: 'linear' }, { tUs: 2 * S, value: 0.4, ease: 'linear' }] } })
   p = attachEffects(p, a.itemIds[0], [f2.itemId])
+  // zoom do clipe A depois de ancorar (a F6 recusa ancorar keys de região sobre um clipe que já se move)
+  p = ops.updateItem<MediaItem>(p, a.itemIds[0], (d) => { d.visual!.transform.scale = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'inOut' }, { tUs: 4 * S, value: 1.6, ease: 'linear' }] } })
   // invertido sobre B
   const f3 = ops.addEffect(p, 'blurAllExcept', 6 * S, { durationUs: 3 * S })
   p = f3.project

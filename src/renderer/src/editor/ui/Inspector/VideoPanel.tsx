@@ -3,9 +3,12 @@ import { defaultVisual } from '@shared/editor/factory'
 import type { MediaItem, VisualProps } from '@shared/editor/project'
 import { applyKenBurns, type ZoomCorner } from '@shared/editor/zoom'
 import { Segmented, Tip, Toggle } from '@/components/ui/primitives'
+import { useEditorStore } from '../../state/editorStore'
 import { usePausedPlayhead } from '../../state/pausedPlayhead'
 import { runZoomEdit } from '../viewer/ZoomTool'
 import { AnimPanel } from './AnimPanel'
+import { AutoZoomPanel } from './AutoZoomPanel'
+import { CursorFxPanel } from './CursorFxPanel'
 import { KeyframeButton } from './KeyframeButton'
 import { NumberField } from './NumberField'
 import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient, localUs, sec2ToUs, usToSec2, withValue } from './common'
@@ -13,7 +16,8 @@ import { ColorInput, FieldRow, PanelSection, animAt, editItem, editItemTransient
 // Inspetor de vídeo do item de mídia: transformação (animável: ◇ liga o keyframe no playhead; com keys,
 // editar grava no key do playhead; corte e raio também são animáveis — editados no playhead), Ken Burns (preset de
 // zoom lento 1 → 1,15 com pan diagonal ao longo do clipe — posição/escala, ou o corte num clipe menor que o quadro), corte, ajuste,
-// forma/borda (PiP), espelhar, fades e animações de entrada/saída (AnimPanel).
+// zoom automático nos cliques (AutoZoomPanel) e realce de cliques/cursor ampliado (CursorFxPanel), só com a trilha do
+// cursor gravada, forma/borda (PiP), espelhar, fades e animações de entrada/saída (AnimPanel).
 
 type TKey = keyof VisualProps['transform']
 type V = MediaItem & { visual: VisualProps }
@@ -52,6 +56,7 @@ export function VideoPanel({ item, locked }: { item: V; locked?: boolean }): Rea
   const setCrop = (side: keyof VisualProps['crop'], pct: number): void => editItemTransient<V>(id, (d) => { d.visual.crop[side] = withValue(d.visual.crop[side], local, pct / 100) })
   const halfSec = usToSec2(item.durationUs / 2)
   const shape = v.shape ?? 'rect'
+  const hasCursor = useEditorStore((s) => !!s.project?.assets.find((a) => a.id === item.assetId)?.cursor)
 
   return (
     <>
@@ -85,6 +90,9 @@ export function VideoPanel({ item, locked }: { item: V; locked?: boolean }): Rea
           </div>
         </FieldRow>
       </PanelSection>
+
+      {hasCursor ? <AutoZoomPanel key={id} item={item} locked={locked} /> : null}
+      {hasCursor ? <CursorFxPanel item={item} locked={locked} /> : null}
 
       <PanelSection title="Corte">
         <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">

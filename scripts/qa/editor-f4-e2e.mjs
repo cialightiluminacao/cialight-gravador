@@ -395,8 +395,10 @@ async function main() {
     check('aviso de privacidade com "Ancorar efeito ao clipe"', !!z.toast && z.toast.includes('não acompanha') && z.anchor, z)
     await shot('e2e-f4-01-zoom-aviso.png')
     const a = await ev(`const p0 = T.past(); await T.click(T.el('[data-follow-toast="anchor"]')); await T.wait(400); await T.key('z')
-      const f = T.item('${fx}'); return { p0, past: T.past(), attach: f.attach?.mediaItemId ?? null, zoom: document.querySelector('[data-viewer-toolbar] button[aria-label^="Zoom"]')?.getAttribute('aria-pressed') }`)
-    check('ancorado ao vídeo em um passo; ferramenta Zoom desligada', a.attach === v && a.past === a.p0 + 1 && a.zoom === 'false', a)
+      const f = T.item('${fx}'); return { p0, past: T.past(), canRedo: T.st().canRedo, attach: f.attach?.mediaItemId ?? null, zoom: document.querySelector('[data-viewer-toolbar] button[aria-label^="Zoom"]')?.getAttribute('aria-pressed') }`)
+    // F6 (C1): ancorar pelo toast do zoom ancora na pose de antes do zoom e refaz o zoom, no lugar do passo do zoom —
+    // zoom + âncora = um passo de desfazer (o histórico não cresce)
+    check('ancorado ao vídeo (zoom + âncora num passo só, no lugar do passo do zoom); ferramenta Zoom desligada', a.attach === v && a.past === a.p0 && !a.canRedo && a.zoom === 'false', a)
     await ev(`await T.seek(3e6); return 1`)
     await shot('e2e-f4-02-ancorado-no-zoom.png')
   }

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
-import { ANIM_PRESETS, DEFAULT_TEXT_SHADOW, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, AnimPreset, Asset, EffectItem, EffectRegion, Item, MediaItem, PresetAnim, Project, ShapeItem, TextItem, Track, VisualProps } from './project'
+import { ANIM_PRESETS, CURSOR_FX_LIMITS, DEFAULT_CURSOR_FX, DEFAULT_TEXT_SHADOW, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
+import type { Anim, AnimPreset, Asset, CursorFx, EffectItem, EffectRegion, Item, MediaItem, PresetAnim, Project, ShapeItem, TextItem, Track, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
 import { conservativeRegion } from './contentPose'
@@ -65,6 +65,29 @@ const transition = z.object({
   kind: z.enum(['crossfade', 'dipBlack', 'dipWhite', 'slideL', 'slideR', 'slideU', 'slideD', 'wipeL', 'wipeR', 'zoomIn', 'blur']),
   durationUs: us
 })
+// F6: efeitos de cursor do clipe da tela (ruling R2: campo da mídia; a v1.3 o descarta ao ler).
+// Ruling R14: ler do disco NUNCA recusa o projeto por causa dele (load cairia numa versão antiga de versions/ e o
+// trabalho se perderia — ex.: versão futura com faixa maior, arquivo editado à mão). Cada folha com tipo errado volta
+// ao padrão (DEFAULT_CURSOR_FX) e números fora da faixa são presos a CURSOR_FX_LIMITS; estrutura quebrada (sem
+// highlight/cursor, não-objeto) descarta o cursorFx inteiro (fromDiskCursorFx). validateProject continua estrito.
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
+const L = CURSOR_FX_LIMITS
+const D = DEFAULT_CURSOR_FX
+const fxNumber = (k: keyof typeof CURSOR_FX_LIMITS, def: number) =>
+  z.number().catch(def).transform((v) => Math.min(L[k].max, Math.max(L[k].min, v)))
+const cursorFx = z.object({
+  highlight: z.object({
+    enabled: z.boolean().catch(D.highlight.enabled),
+    color: z.string().regex(HEX_COLOR).catch(D.highlight.color),
+    sizePx: fxNumber('sizePx', D.highlight.sizePx),
+    durationMs: fxNumber('durationMs', D.highlight.durationMs)
+  }),
+  cursor: z.object({
+    enabled: z.boolean().catch(D.cursor.enabled),
+    scale: fxNumber('scale', D.cursor.scale),
+    smoothing: fxNumber('smoothing', D.cursor.smoothing)
+  })
+})
 const itemBase = { id: z.string().min(1), startUs: us, durationUs: us, name: z.string().optional(), linkId: z.string().optional(), enabled: z.boolean().optional() }
 
 const mediaItem = z.object({
@@ -77,7 +100,8 @@ const mediaItem = z.object({
   freeze: z.object({ atUs: us }).optional(),
   audio,
   visual: visual.optional(),
-  transitionIn: transition.optional()
+  transitionIn: transition.optional(),
+  cursorFx: cursorFx.optional().catch(undefined)
 })
 // F5 (v1.5): itálico, largura máxima, fundo com margem/cantos e sombra com parâmetros — opcionais, a v1.3 os descarta.
 // `shadow` (boolean da v1.3) e `shadowStyle` ficam coerentes: projeto antigo com `shadow: true` ganha a sombra padrão.
@@ -183,6 +207,7 @@ const asset = z.object({
   speech: z.string().optional(),
   loudness: z.object({ integrated: z.number(), truePeak: z.number(), lra: z.number() }).optional(),
   processedAudio: z.record(z.string(), z.string()).optional(),
+  cursor: z.string().optional(),
   status: z.enum(['ready', 'processing', 'missing', 'error']),
   error: z.string().optional()
 })
@@ -248,7 +273,24 @@ export function parseProject(json: unknown): Project {
     const msg = r.error.issues.map((i) => `${i.path.join('.') || '(raiz)'}: ${i.message}`).join('; ')
     throw new Error(`Projeto inválido: ${msg}`)
   }
-  return fromDiskAnchors(r.data as Project)
+  return fromDiskCursorFx(fromDiskAnchors(r.data as Project))
+}
+
+/** cursorFx de estrutura quebrada vira `undefined` no schema (.catch): tira a chave (o item fica como sem o efeito). */
+function fromDiskCursorFx(p: Project): Project {
+  const broken = (it: Item): boolean => it.type === 'media' && 'cursorFx' in it && it.cursorFx === undefined
+  if (!p.tracks.some((t) => t.items.some(broken))) return p
+  return {
+    ...p,
+    tracks: p.tracks.map((t) => ({
+      ...t,
+      items: t.items.map((it) => {
+        if (!broken(it)) return it
+        const { cursorFx: _drop, ...rest } = it as MediaItem
+        return rest
+      })
+    }))
+  }
 }
 
 /** Efeito ancorado lido do disco: a região do conteúdo (attach.region) volta a `region` (o modelo em memória). */
@@ -396,6 +438,21 @@ export function toDiskProject(p: Project): unknown {
 /** Nome da propriedade nas mensagens (os de antes da F4 mantidos: volume, x, strength…). */
 const animLabel = (pt: AnimPath): string => (pt === 'audio.volume' ? 'volume' : /^(transform|region)\./.test(pt) ? pt.split('.')[1] : pt)
 
+/** Valores de CursorFx fora dos limites (CURSOR_FX_LIMITS) ou cor que não é #rrggbb. */
+function cursorFxErrors(fx: CursorFx): string[] {
+  const out: string[] = []
+  const range = (v: number, k: keyof typeof CURSOR_FX_LIMITS, label: string): void => {
+    const { min, max } = CURSOR_FX_LIMITS[k]
+    if (!(v >= min && v <= max)) out.push(`efeito de cursor: ${label} fora do intervalo ${min}–${max}`)
+  }
+  if (!HEX_COLOR.test(fx.highlight.color)) out.push('efeito de cursor: cor do realce inválida (use #rrggbb)')
+  range(fx.highlight.sizePx, 'sizePx', 'tamanho do realce')
+  range(fx.highlight.durationMs, 'durationMs', 'duração do realce')
+  range(fx.cursor.scale, 'scale', 'escala do cursor')
+  range(fx.cursor.smoothing, 'smoothing', 'suavização do cursor')
+  return out
+}
+
 /** Invariantes semânticas; devolve mensagens em português (vazio = válido). */
 export function validateProject(p: Project): string[] {
   const errs: string[] = []
@@ -437,6 +494,7 @@ export function validateProject(p: Project): string[] {
           errs.push(`${tag}: trecho de origem excede a duração do asset`)
         }
         if (it.visual && tr.kind !== 'video') errs.push(`${tag}: item visual só pode ficar em faixa de vídeo`)
+        if (it.cursorFx) errs.push(...cursorFxErrors(it.cursorFx).map((m) => `${tag}: ${m}`))
       } else if (tr.kind !== 'video') {
         errs.push(`${tag}: item visual só pode ficar em faixa de vídeo`)
       }

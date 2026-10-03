@@ -10,9 +10,12 @@ import { effectsCheck } from './effectsHarness'
 import { stretchCheck } from './stretchHarness'
 import { speedCheck } from './speedHarness'
 import { zoomCheck } from './zoomHarness'
+import { autoZoomCheck } from './autoZoomHarness'
 import { followCheck } from './followHarness'
 import { animCheck } from './animHarness'
 import { reframeCheck } from './reframeHarness'
+import { cursorFxCheck } from './cursorFxHarness'
+import { trackingCheck } from './trackingHarness'
 import { memoryCheck } from './memoryHarness'
 import { transitionCheck } from './transitionHarness'
 import { textCheck } from './textHarness'
@@ -94,9 +97,12 @@ export async function runRenderHarness(projectId: string, outDir: string | null 
     report.watchdog = await watchdogCheck(project)
     report.effects = await effectsCheck()
     report.zoom = await zoomCheck(outDir)
+    report.autoZoom = await autoZoomCheck()
     report.follow = await followCheck(outDir)
     report.anim = await animCheck(outDir)
     report.reframe = await reframeCheck(outDir)
+    report.cursorFx = await cursorFxCheck(outDir)
+    report.tracking = await trackingCheck(outDir)
     report.memory = await memoryCheck()
     report.transition = await transitionCheck(outDir)
     report.text = await textCheck(outDir)
