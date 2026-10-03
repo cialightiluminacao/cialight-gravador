@@ -1198,3 +1198,30 @@ describe('Task 2b fix round 1', () => {
     })
   })
 })
+
+describe('Task 2b fix round 2: palavras de enchimento depois do rótulo', () => {
+  const lab = (t: string, gap = 0.03): Detection[] => only(detectSensitive([line(t, gap)]), 'labeled')
+  it('rótulo + até 2 enchimentos + valor com dígito/@ dispara e cobre do 1º enchimento ao fim', () => {
+    for (const t of ['Senha atual hunter2', 'RG numero 123456', 'Cartao final 1234', 'RG número 123456', 'Telefone fixo 11 3456-7890', 'RG nº 12.345.678-9',
+      'Email do cliente joao@x.com', 'Cartão do titular 4111', 'Senha nova atual abc123']) {
+      const l = line(t)
+      const ds = lab(t)
+      expect(ds.length, t).toBeGreaterThanOrEqual(1)
+      const first = l.words[1]!.box
+      const last = l.words[l.words.length - 1]!.box
+      expect(Math.min(...ds.map((d) => d.box.x)), t).toBeLessThanOrEqual(first.x + 1e-9)
+      expect(Math.max(...ds.map((d) => d.box.x + d.box.w)), t).toBeGreaterThanOrEqual(last.x + last.w - 1e-9)
+    }
+  })
+  it('prosa e mais de 2 enchimentos continuam silenciosos', () => {
+    for (const t of ['Validade de 12 meses', 'Enviar email para 3 pessoas', 'Pagamento via PIX em 2 dias', 'RG final do titular 123456',
+      'Senha atual forte', 'Validade da 2 vez']) {
+      expect(lab(t), t).toHaveLength(0)
+    }
+  })
+  it('"Validade" não aceita de/do/da/dos/das como enchimento (senão "Validade de 12 meses" dispararia)', () => {
+    expect(lab('Validade de 12 meses')).toHaveLength(0)
+    expect(lab('Validade atual 12/2030').length).toBeGreaterThanOrEqual(1)
+    expect(lab('Telefone do cliente 11987654321').length).toBeGreaterThanOrEqual(1)
+  })
+})

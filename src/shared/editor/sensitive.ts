@@ -538,6 +538,23 @@ function detectDigitKinds(p: Pass, out: Cand[]): void {
 const TOKEN_PRE = /^(?:sk[-_]|gh[pousrPOUSR]_|github_pat_|xox[baprs]-|AKIA|AIza|ey[Jj3])/
 const TOKEN_NOSEP = /^(?:sk|gh[pousrPOUSR]|github_pat|xox[baprs])$/
 
+const FILLER = new Set(['numero', 'no', 'final', 'fixo', 'atual', 'nova', 'novo', 'do', 'da', 'de', 'dos', 'das', 'titular', 'cliente', 'principal', 'cadastrado', 'cadastrada'])
+const FILLER_ARTICLES = new Set(['do', 'da', 'de', 'dos', 'das'])
+
+/** Palavra de enchimento entre rótulo e valor (sem acento/caixa, sem pontuação); "nº"/"n." contam. */
+function isFiller(word: string, key: string): boolean {
+  const w = fold(word).replace(/[.,;:]+$/, '')
+  if (/^n[oº°]?$/.test(w)) return true
+  // "Validade de 12 meses" é prosa: com "de/do/da" como enchimento dispararia; só "Validade" exclui
+  if (key === 'validade' && FILLER_ARTICLES.has(w)) return false
+  return FILLER.has(w)
+}
+
+function wordHasDigitOrAt(p: Pass, w: number): boolean {
+  const ws = p.wordStart[w]!
+  return /\d/.test(p.m.slice(ws, ws + p.words[w]!.length)) || p.words[w]!.includes('@')
+}
+
 function detectTokenWords(p: Pass, out: Cand[]): void {
   const w = p.words
   for (let i = 0; i < w.length; i++) {
@@ -633,13 +650,16 @@ function detectTextKinds(p: Pass, out: Cand[]): void {
     if (!L.strong) {
       if (vs >= ve) continue
       const wa = p.wordOf[vs]!
-      // 1ª palavra do valor ("nº" não conta: olha também a seguinte); "Endereço" olha 6 palavras
-      const nWords = L.key === 'endereco' ? 6 : /^n[oº°.]*$/i.test(p.words[wa]!) ? 2 : 1
-      const wz = Math.min(p.wordOf[ve - 1]!, wa + nWords - 1)
+      // 1ª palavra do valor com dígito/@; pula até 2 palavras de enchimento ("Senha atual hunter2");
+      // "Endereço" olha 6 palavras. A cobertura continua indo da 1ª palavra após o rótulo ao fim da linha.
+      const wLast = p.wordOf[ve - 1]!
       let ok = false
-      for (let w = wa; w <= wz && !ok; w++) {
-        const ws = p.wordStart[w]!
-        ok = /\d/.test(p.m.slice(ws, ws + p.words[w]!.length)) || p.words[w]!.includes('@')
+      if (L.key === 'endereco') {
+        for (let w = wa; w <= Math.min(wLast, wa + 5) && !ok; w++) ok = wordHasDigitOrAt(p, w)
+      } else {
+        let w = wa
+        for (let skipped = 0; skipped < 2 && w < wLast && isFiller(p.words[w]!, L.key); skipped++) w++
+        ok = wordHasDigitOrAt(p, w)
       }
       if (!ok) continue
     }
