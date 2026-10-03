@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Detection, OcrBox } from './sensitive'
+import { detectSensitive, type Detection, type OcrBox } from './sensitive'
 import {
   applyRefinement,
   boxContains,
@@ -22,6 +22,7 @@ import {
   refineTrack,
   SAMPLE_INTERVAL_US,
   tilePlan,
+  type HelperLine,
   type Occurrence,
   type ScanSample
 } from './sensitiveScan'
@@ -493,5 +494,57 @@ describe('refinamento (NCC)', () => {
     ], { fromUs: t0, toUs: t1, sourceW: AW, sourceH: AH })
     const job = refinementJobs(o).find((j) => j.kind === 'move')!
     expect(refineTrack(frames, job, AW, AH)).toBeNull()
+  })
+})
+
+describe('Task 3b: e-mail rolando com o "_" engolido na 1ª leitura (rente à borda de baixo)', () => {
+  // Geometria e tempos da falha real (rolagem a 4 px/quadro, 30 qps; valores sintéticos trocados): o e-mail entra por
+  // baixo; em 5,0 s (a 6 px da borda) o OCR leu a parte local partida no "_" ("xxxxxx" + "yyyyy@…", vão de 12,5 px) e o
+  // detector cobria só a 2ª palavra (61 px a menos à esquerda); a pré-rolagem (e a perda do NCC) partia dessa caixa e o
+  // quadro 149 (4,967 s, o único visível antes de 5,0 s) ficava 28,9 px fora. Em 5,5 s e 6,0 s a leitura é inteira.
+  const line = (y: number, partial: boolean): HelperLine => ({
+    t: '',
+    w: (partial
+      ? [['marina', 1156.5, 48.5, 16], ['costa@teste-exemplo.io', 1217.5, 202, 19.5]] as const
+      : [['marina_costa@teste-exemplo.io', 1156.5, 263, 20]] as const
+    ).map(([t, x, w, h]) => [t, 2 * x, 2 * (y - 0.5), 2 * w, 2 * h] as [string, number, number, number, number])
+  })
+  // vizinhos na mesma linha (CPF e telefone, lidos inteiros): dão o movimento dominante da tela, como na rolagem real
+  const others = (y: number): HelperLine[] => [
+    { t: '', w: [['529.982.247-25', 2 * 280.5, 2 * (y - 0.5), 2 * 139, 2 * 16]] },
+    { t: '', w: [['(21)', 2 * 1552, 2 * (y - 0.5), 2 * 34, 2 * 20], ['98765-4321', 2 * 1592.5, 2 * (y - 0.5), 2 * 106, 2 * 16]] }
+  ]
+  const read = (y: number, partial: boolean): ScanSample['detections'] => detectSensitive(helperLinesToOcr([line(y, partial), ...others(y)], 2 * W, 2 * H))
+  const samplesAt = (): ScanSample[] => [
+    { tUs: 4_500_000, detections: [] },
+    { tUs: 5_000_000, detections: read(1054, true) },
+    { tUs: 5_500_000, detections: read(994, false) },
+    { tUs: 6_000_000, detections: read(934, false) },
+    { tUs: 6_500_000, detections: [] },
+    { tUs: 7_000_000, detections: [] }
+  ]
+  /** Tinta no quadro n (30 qps): x 1157..1419, 20 px de altura, y = 1054 em n = 150, subindo 4 px por quadro. */
+  const inkAt = (n: number): OcrBox => px(1157, 1054 + 4 * (150 - n), 262, 20)
+
+  it('a 1ª amostra cobre a largura inteira e todo quadro visível de [startUs, endUs] fica dentro da região', () => {
+    const occ = groupOccurrences(samplesAt(), ctx).filter((o) => o.kind === 'email')
+    expect(occ).toHaveLength(1)
+    const o = occ[0]
+    const first = o.samples.find((s) => s.tUs === 5_000_000)!
+    expect(first.box.x * W).toBeLessThanOrEqual(1157)
+    // a pré-rolagem do NCC parte (e, na perda, cresce) desta caixa
+    const pre = refinementJobs(o).find((j) => j.kind === 'pre')!
+    expect(pre.anchorBox.x * W).toBeLessThanOrEqual(1157)
+    let checked = 0
+    for (let n = 0; n < 240; n++) {
+      const t = Math.round((n * 1_000_000) / 30)
+      const ink = inkAt(n)
+      const visible = ink.y * H >= 0 && (ink.y + ink.h) * H <= H + 1e-6
+      if (!visible || t < o.startUs || t > o.endUs) continue
+      const r = occurrenceRegionAt(o, t)
+      expect(r && boxContains(r, ink), `quadro ${n}`).toBe(true)
+      checked++
+    }
+    expect(checked).toBeGreaterThan(30)
   })
 })

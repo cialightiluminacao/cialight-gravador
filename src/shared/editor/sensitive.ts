@@ -688,6 +688,9 @@ function detectUuidTolerant(p: Pass, out: Cand[]): void {
   }
 }
 
+/** Palavra que pode ser um pedaço da parte local de um e-mail (sem "@"). */
+const EMAIL_LOCAL_WORD = /^[A-Za-z0-9._%+-]+$/
+
 function detectEmail(p: Pass, out: Cand[]): void {
   const t = p.t
   if (t.includes('@')) {
@@ -1059,11 +1062,22 @@ function detectWords(words: readonly OcrWord[], enabled: ReadonlySet<SensitiveKi
         value += nx
       }
     }
+    let wa = c.wa
+    if (c.kind === 'email') {
+      // "_" (ou outro caractere) da parte local engolido pelo OCR (Task 3b, medido: e-mail Arial 20 px rente à borda de
+      // baixo lido "xxxxxx" + "yyyyy@…", 12,5 px de vão): a palavra anterior colada, só com caracteres de parte local, com vão MAIOR que
+      // um espaço normal (≥ 1 caractere; o espaço de fonte proporcional dá ~0,7) e ≤ 2 caracteres, entra na CAIXA
+      // (privacidade: cobrir a mais é aceitável, a menos não). O valor fica o lido (não se adivinha o caractere perdido).
+      // Monoespaçada: o espaço normal também tem ~1,3 caractere — a prosa antes do e-mail pode ser coberta junto.
+      const w0 = texts[wa]!.toLowerCase()
+      const startsAtWord = value.startsWith(w0) || w0.startsWith(value.slice(0, value.indexOf('@') + 1))
+      while (startsAtWord && wa > 0 && EMAIL_LOCAL_WORD.test(texts[wa - 1]!) && gaps[wa - 1]! >= medW && near[wa - 1]!) wa--
+    }
     out.push({
       kind: c.kind,
       value,
       masked: maskSensitive(c.kind, value),
-      box: unionBox(words, c.wa, wb),
+      box: unionBox(words, wa, wb),
       confidence: c.conf
     })
   }

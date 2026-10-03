@@ -1420,6 +1420,27 @@ describe('Task 2c: leituras reais do OCR (recall de ponta a ponta)', () => {
       const ds = detectSensitive([ocr([['E-mail:', 200, 250], ['pedro.', 256, 294], ['lima411@empresa.net', 298, 420]], 500, 16)])
       expect(covers(ds, 'email', 256, 420)).toBe(true)
     })
+    it('"_" da parte local engolido pelo OCR: a caixa estende à palavra anterior (Arial 20 px rente à borda, Task 3b)', () => {
+      // geometria medida na rolagem real (valores sintéticos trocados): "xxxxxx" + "yyyyy@…" com 12,5 px de vão
+      // (≈ 1,4 caractere; o espaço normal da mesma linha dá 6,5 px ≈ 0,7)
+      const ds = detectSensitive([ocr([['marina', 1156.5, 1205], ['costa@teste-exemplo.io', 1217.5, 1419.5]], 1054, 20)])
+      expect(covers(ds, 'email', 1157, 1419)).toBe(true)
+      // dois "_" engolidos
+      const d2 = detectSensitive([ocr([['ana', 1000, 1024], ['maria', 1036, 1076], ['costa@teste.io', 1088, 1210]], 1054, 20)])
+      expect(covers(d2, 'email', 1000, 1210)).toBe(true)
+    })
+    it('espaço normal antes do e-mail não estende (prosa), nem palavra com ":" ou "@"', () => {
+      for (const prev of ['contato', 'para']) {
+        const x1 = 1100 + prev.length * 8
+        const ds = detectSensitive([ocr([[prev, 1100, x1], ['joao@exemplo.com', x1 + 6.5, x1 + 6.5 + 144]], 1054, 20)])
+        expect(left(only(ds, 'email')[0]!.box), prev).toBe(Math.round(x1 + 6.5))
+      }
+      const lab = detectSensitive([ocr([['E-mail:', 1100, 1156], ['joao@exemplo.com', 1168, 1312]], 1054, 20)])
+      expect(left(only(lab, 'email')[0]!.box)).toBe(1168)
+      // e-mail que começa no meio da palavra ("mailto:") não estende
+      const mt = detectSensitive([ocr([['abc', 1000, 1024], ['mailto:joao@exemplo.com', 1036, 1220]], 1054, 20)])
+      expect(left(only(mt, 'email')[0]!.box)).toBeGreaterThanOrEqual(1036)
+    })
   })
 
   describe('5: placa e CEP', () => {

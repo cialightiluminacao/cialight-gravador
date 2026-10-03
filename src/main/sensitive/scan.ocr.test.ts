@@ -45,6 +45,10 @@ function overflowPx(r: { x: number; y: number; w: number; h: number }, b: { x: n
   return Math.max(0, (r.x - b.x) * W, (b.x + b.w - r.x - r.w) * W, (r.y - b.y) * H, (b.y + b.h - r.y - r.h) * H)
 }
 
+/** Caixa normalizada → "x0..x1,y0..y1" em px (diagnóstico G3_DEBUG). */
+const pxBox = (b: { x: number; y: number; w: number; h: number } | null, W: number, H: number): string =>
+  b ? `x${(b.x * W).toFixed(1)}..${((b.x + b.w) * W).toFixed(1)},y${(b.y * H).toFixed(1)}..${((b.y + b.h) * H).toFixed(1)}` : 'null'
+
 function evaluate(v: Video, res: ScanResult): ItemEval[] {
   const W = 1920, H = VH
   const out: ItemEval[] = []
@@ -99,7 +103,7 @@ function evaluate(v: Video, res: ScanResult): ItemEval[] {
       if (best === 0) covered++
       else {
         worst = Math.max(worst, best === Infinity ? 9999 : best)
-        if (process.env.G3_DEBUG) dbgLines.push(`${v.name} ${it.kind}/${it.size}/${it.font} n=${n} excesso ${best.toFixed(1)} px ink=${JSON.stringify(inkAt(n))} occs=${mine.map((o) => `[${o.id} ${o.kind} ${o.startUs}-${o.endUs} ${o.samples.map((x) => `${x.src}@${x.tUs}:${Math.round(x.box.y * H)}+${Math.round(x.box.h * H)}`).join(',')}]`).join(' ')}`)
+        if (process.env.G3_DEBUG) dbgLines.push(`${v.name} ${it.kind}/${it.size}/${it.font} n=${n} excesso ${best.toFixed(1)} px ink=${pxBox(inkAt(n), W, H)} occs=${mine.map((o) => `[${o.id} ${o.kind} ${o.startUs}-${o.endUs} região=${pxBox(occurrenceRegionAt(o, t), W, H)} ${o.samples.map((x) => `${x.src}@${x.tUs}:x${Math.round(x.box.x * W)}+${Math.round(x.box.w * W)},y${Math.round(x.box.y * H)}+${Math.round(x.box.h * H)}`).join(',')}]`).join(' ')}`)
       }
     }
     out.push({ it, found: true, required, covered, worstPx: worst, partial: 1 })
@@ -247,7 +251,7 @@ describe('varredura real (ffmpeg + Windows.Media.Ocr)', () => {
     metrics.static_coverage = cov / req
     expect(cov).toBe(req)
   })
-  it('rolagem 120 px/s: recall (relatado) e cobertura ≥ 99 % dos quadros em [firstSeen − 0,5 s, lastSeen + 0,5 s]', async () => {
+  it('rolagem 120 px/s: recall (relatado) e cobertura 100 % dos quadros em [firstSeen − 0,5 s, lastSeen + 0,5 s] (invariante 2)', async () => {
     const res = await runScan({ filePath: scroll.file, fromUs: 0, toUs: SECONDS * 1_000_000 }, deps())
     expect(res.error).toBeUndefined()
     metrics.scroll = { framesSampled: res.framesSampled, framesOcr: res.framesOcr, ms: res.ms, timings: res.timings, ocrPerSec: res.framesOcr / (res.ms / 1000), ocrMsPerFrame: (res.timings?.ocrMs ?? 0) / res.framesOcr, samplingOcrPerSec: res.framesOcr / (((res.timings?.samplingMs ?? 0) - (res.timings?.startMs ?? 0)) / 1000), refinedOcc: res.occurrences.filter((o) => o.samples.some((x) => x.src === 'track')).length, refineCapped: res.refineCapped, lostOcc: res.occurrences.filter((o) => o.lostAt?.length).length }
@@ -260,7 +264,8 @@ describe('varredura real (ffmpeg + Windows.Media.Ocr)', () => {
     metrics.scroll_coverage = cov / req
     metrics.scroll_worstPx = worst
     report.push(`## Rolagem (8 s, 4 px/quadro)\nAmostrados ${res.framesSampled}, lidos ${res.framesOcr}, ${res.ms} ms → ${(res.framesOcr / (res.ms / 1000)).toFixed(2)} quadros lidos/s de ponta a ponta, ${(metrics.scroll as { samplingOcrPerSec: number }).samplingOcrPerSec.toFixed(2)}/s na amostragem (OCR ${((res.timings?.ocrMs ?? 0) / res.framesOcr).toFixed(0)} ms/quadro; partida ${res.timings?.startMs} ms; refinamento ${res.timings?.refineMs} ms); ocorrências refinadas pelo NCC: ${(metrics.scroll as { refinedOcc: number }).refinedOcc}, jobs no teto: ${res.refineCapped}, com perda: ${(metrics.scroll as { lostOcc: number }).lostOcc}`, table('Rolagem', es))
-    expect(cov / req).toBeGreaterThanOrEqual(0.99)
+    // invariante 2 (privacidade): a tinta de um item achado fica dentro da região em TODO quadro visível (Task 3b)
+    expect(cov).toBe(req)
   })
 
   it('aparece em 2,0 s e some em 5,0 s: recall e cobertura 100 % (com um intervalo de amostra antes/depois)', async () => {
