@@ -12,7 +12,7 @@ const TILE_OVERLAP = 256
 
 export interface Ocr {
   /** Valores detectados (com o valor: só no processo do QA, nunca gravados) num quadro cinza w×h. */
-  detect(data: Uint8Array, w: number, h: number): Promise<{ kind: string; value: string }[]>
+  detect(data: Uint8Array, w: number, h: number): Promise<{ kind: string; value: string; box: { x: number; y: number; w: number; h: number } }[]>
   lang: string
   close(): Promise<void>
 }
@@ -31,7 +31,7 @@ export async function startOcr(script: string, onSpawn?: (pid: number) => void):
         for (let y = 0; y < t.h; y++) buf.set(data.subarray((t.y + y) * w + t.x, (t.y + y) * w + t.x + t.w), y * t.w)
         lines.push(...helperLinesToOcr(await h.recognize(buf, t.w, t.h), w, h2, t))
       }
-      return detectSensitive(lines).map((d) => ({ kind: d.kind, value: d.value }))
+      return detectSensitive(lines).map((d) => ({ kind: d.kind, value: d.value, box: d.box }))
     },
     close: () => h.close()
   }

@@ -11,10 +11,12 @@
 // um passo). Varredura REAL pelo IPC (editor.sensitive.start no rec.mp4, Windows.Media.Ocr) → hideOccurrences pelo store
 // (um passo de desfazer; Ctrl+Z / Ctrl+Shift+Z conferidos) → exporta "Original" (1080p) pelo diálogo real.
 // Conferência com o ffmpeg em TODO quadro exportado: para cada valor visível (tinta levada ao quadro pela conta do
-// renderer: sourceTimeUs → quadro da fonte → window.__qaEditor.clipPoint), a métrica de legibilidade do F2/F6 diz
-// ilegível (contraste local p99−p1 < 0,15 × o da fonte, variância do laplaciano < 0,2 ×, fonte nítida ≥ 120). E o OCR do
-// Windows (helper e detector do app, empacotados por esbuild de editor-g3-lib.ts) em 1 de cada 10 quadros exportados
-// (ampliados 2× como a varredura) não acha NENHUM dos valores verdadeiros — controle positivo: ele os acha na fonte.
+// renderer: sourceTimeUs → quadro da fonte → window.__qaEditor.clipPoint), a estrutura de caractere some (variância do
+// laplaciano < 0,2 × a da fonte nítida ≥ 120 — limite do F2/F6; ruling R22: o contraste local p99−p1 é só medido e
+// relatado, com e sem a folga de 4 px, porque o blur de texto escuro sobre claro deixa uma mancha que revela o comprimento,
+// não o conteúdo). E o OCR do Windows (helper e detector do app, empacotados por esbuild de editor-g3-lib.ts) em TODO
+// quadro exportado (ampliado 2× como a varredura) não acha NENHUM valor verdadeiro nem detecção dentro da tinta deles —
+// controle positivo: ele os acha na fonte.
 //
 // uso (depois de `npm run build`, sob o lock):  node C:/Users/Eduardo/projetos/_locks/run-locked.mjs "node scripts/qa/editor-g3-privacy.mjs"
 // Tudo em test-out/e2e-g3 (CIALIGHT_RAW_DIR=test-out/e2e-g3/raw). Screenshots (sintéticos) em docs/qa/editor-g3/e2e-g3-*.png.
@@ -470,33 +472,44 @@ async function main() {
       })
     })
     check(`quadros decodificados = ${nOut}`, decoded === nOut, { decoded, nOut })
-    const bad = rows.filter((r) => r.error || !(r.c < LEG.contrast && r.lap < LEG.lap && r.cSrc >= LEG.minSrcContrast))
+    // Ruling R22: o oráculo de ilegibilidade por valor × quadro é a ESTRUTURA DE CARACTERE (variância do laplaciano < 0,2
+    // × a da fonte nítida, limite do F2/F6) + o OCR do Windows em TODO quadro exportado (abaixo). O contraste local
+    // continua medido e relatado, mas não é afirmado para texto escuro sobre claro: o blur de texto escuro sobre branco
+    // deixa uma mancha cinza lisa que revela o COMPRIMENTO do texto, não o conteúdo (a borda dura do retângulo
+    // desfocado ainda cai na folga de 4 px). Medido com e sem a folga.
+    const bad = rows.filter((r) => r.error || !(r.lap < LEG.lap && r.cSrc >= LEG.minSrcContrast))
     const ok = rows.filter((r) => !r.error)
     const worst = ok.reduce((a, r) => (!a || r.c > a.c ? r : a), null)
+    const worstIn = ok.reduce((a, r) => (!a || r.cIn > a.cIn ? r : a), null)
     const worstLap = ok.reduce((a, r) => (!a || r.lap > a.lap ? r : a), null)
     const frames = new Set(ok.map((r) => r.n)).size
     const perClip = Object.fromEntries(['A', 'B', 'C'].map((c) => [c, ok.filter((r) => r.clip === c).length]))
-    console.log(`  ${ok.length} medidas (valor × quadro) em ${frames} quadros (${JSON.stringify(perClip)}); ${offscreen} fora do quadro (zoom); pior contraste ${JSON.stringify(worst)}; pior laplaciano ${JSON.stringify(worstLap)}`)
-    check(`TODOS os valores ilegíveis em todos os quadros exportados (contraste < ${LEG.contrast}, laplaciano < ${LEG.lap}, fonte ≥ ${LEG.minSrcContrast})`, bad.length === 0 && frames === nOut && ok.length > nOut * 7, bad.slice(0, 12).map((r) => ({ ...r, item: items[r.i]?.kind })))
-    // só informativo (não muda o critério): reprovações por valor × clipe e o contraste medido só DENTRO da tinta (sem a folga de 4 px, que pega a borda dura do retângulo desfocado)
+    const overPad = ok.filter((r) => r.c >= LEG.contrast), overIn = ok.filter((r) => r.cIn >= LEG.contrast)
     const byItem = {}
-    for (const r of bad) { const k = `${r.i}:${items[r.i]?.kind}${items[r.i]?.scroll ? '↑' : ''}/${r.clip}`; byItem[k] = (byItem[k] ?? 0) + 1 }
-    const worstIn = ok.reduce((a, r) => (!a || r.cIn > a.cIn ? r : a), null)
-    console.log(`  reprovações por valor/clipe: ${JSON.stringify(byItem)}; pior contraste só dentro da tinta: ${JSON.stringify(worstIn)}`)
-    result.legibility = { byItem, worstInside: worstIn && { ...worstIn, item: items[worstIn.i].kind }, frames, measured: ok.length, perClip, offscreen, worst: worst && { ...worst, item: items[worst.i].kind }, worstLap: worstLap && { ...worstLap, item: items[worstLap.i].kind }, bad: bad.length }
+    for (const r of overPad) { const k = `${r.i}:${items[r.i]?.kind}${items[r.i]?.scroll ? '↑' : ''}/${r.clip}`; byItem[k] = (byItem[k] ?? 0) + 1 }
+    console.log(`  ${ok.length} medidas (valor × quadro) em ${frames} quadros (${JSON.stringify(perClip)}); ${offscreen} fora do quadro (zoom); pior laplaciano ${JSON.stringify(worstLap)}`)
+    console.log(`  contraste (só relatado): pior com folga 4 px ${JSON.stringify(worst)}, ${overPad.length} ≥ ${LEG.contrast} ${JSON.stringify(byItem)}; pior só dentro da tinta ${JSON.stringify(worstIn)}, ${overIn.length} ≥ ${LEG.contrast}`)
+    check(`estrutura de caractere apagada em TODOS os valores × quadros exportados (laplaciano < ${LEG.lap}, fonte nítida ≥ ${LEG.minSrcContrast})`, bad.length === 0 && frames === nOut && ok.length > nOut * 7, bad.slice(0, 12).map((r) => ({ ...r, item: items[r.i]?.kind })))
+    result.legibility = { frames, measured: ok.length, perClip, offscreen, worstLap: worstLap && { ...worstLap, item: items[worstLap.i].kind }, bad: bad.length,
+      contrastReported: { worstPad4: worst && { ...worst, item: items[worst.i].kind }, overPad4: overPad.length, overPad4ByItem: byItem, worstInside: worstIn && { ...worstIn, item: items[worstIn.i].kind }, overInside: overIn.length } }
 
-    console.log('OCR do Windows em 1 de cada 10 quadros exportados (ampliados 2×)')
+    console.log('OCR do Windows em TODO quadro exportado (ampliado 2× como a varredura)')
     let ocrN = 0
-    await eachFrame(out, `select='not(mod(n\\,10))',scale=${W * 2}:${H * 2}:flags=lanczos`, W * 2, H * 2, async (i, g) => {
+    await eachFrame(out, `scale=${W * 2}:${H * 2}:flags=lanczos`, W * 2, H * 2, async (n, g) => {
       const det = await ocr.detect(g, W * 2, H * 2)
       ocrN++
+      if (ocrN % 100 === 0) console.log(`  … ${ocrN} quadros no OCR`)
       const leaks = items.filter((it) => det.some((d) => sameValue(d.value, it.value))).map((it) => it.kind)
-      ocrFrames.push({ n: i * 10, detections: det.length, kinds: det.map((d) => d.kind), leaks })
+      // qualquer detecção cuja caixa cruza a tinta de um valor verdadeiro neste quadro
+      const rects = (mapped[n] ?? []).filter(Boolean).map((m) => ({ x0: m.x0 / W, y0: m.y0 / H, x1: m.x1 / W, y1: m.y1 / H }))
+      const inside = det.filter((d) => rects.some((r) => d.box.x < r.x1 && d.box.x + d.box.w > r.x0 && d.box.y < r.y1 && d.box.y + d.box.h > r.y0)).map((d) => d.kind)
+      ocrFrames.push({ n, detections: det.length, kinds: det.map((d) => d.kind), leaks, inside })
     })
-    const leaky = ocrFrames.filter((f) => f.leaks.length)
-    console.log(`  ${ocrN} quadros no OCR; detecções (qualquer coisa) ${ocrFrames.reduce((a, f) => a + f.detections, 0)}; quadros com valor verdadeiro: ${leaky.length}`)
-    check(`o OCR não acha NENHUM valor verdadeiro nos ${ocrN} quadros exportados`, leaky.length === 0 && ocrN >= Math.floor(nOut / 10), leaky.slice(0, 10))
-    result.ocrExport = { frames: ocrN, detections: ocrFrames.reduce((a, f) => a + f.detections, 0), leakyFrames: leaky.length, detectedKinds: [...new Set(ocrFrames.flatMap((f) => f.kinds))] }
+    const leaky = ocrFrames.filter((f) => f.leaks.length || f.inside.length)
+    const nDet = ocrFrames.reduce((a, f) => a + f.detections, 0)
+    console.log(`  ${ocrN} quadros no OCR; detecções (qualquer coisa) ${nDet}; quadros com valor verdadeiro ou detecção na tinta: ${leaky.length}`)
+    check(`o OCR não acha NENHUM valor verdadeiro nem detecção dentro da tinta em TODOS os ${ocrN} quadros exportados`, leaky.length === 0 && ocrN === nOut, leaky.slice(0, 10))
+    result.ocrExport = { frames: ocrN, detections: nDet, leakyFrames: leaky.length, insideTruth: ocrFrames.reduce((a, f) => a + f.inside.length, 0), detectedKinds: [...new Set(ocrFrames.flatMap((f) => f.kinds))] }
 
     for (const [name, t] of [['e2e-g3-02-exportado-plano.png', 6 * S], ['e2e-g3-03-exportado-zoom.png', clips.B.startUs + 3.5 * S]]) {
       execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', out, '-vf', `select=eq(n\\,${Math.round((t * FPS) / S)}),scale=-2:540`, '-frames:v', '1', '-update', '1', join(SHOTS, name)])
