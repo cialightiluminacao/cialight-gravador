@@ -24,7 +24,8 @@
 import { spawn, execFileSync } from 'child_process'
 import { createHash } from 'crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
-import { dirname, join, resolve } from 'path'
+import { basename, dirname, join, resolve } from 'path'
+import { homedir } from 'os'
 import electronPath from 'electron'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
@@ -110,8 +111,20 @@ async function ev(body) {
   return r.result?.result?.value
 }
 let shotN = 0
+// repo público: nenhuma captura mostra caminho local (com o usuário). Antes de cada uma, o texto visível troca o
+// prefixo até "test-out" por "…" (só a exibição; os caminhos de verdade — title, store — ficam) e confere que o
+// nome da pasta do usuário não aparece mais em lugar nenhum da tela.
+const PATH_PREFIX = String.raw`[^\s"'(]*[\\/]test-out(?=[\\/])`
+const USER_DIR = basename(homedir()).toLowerCase()
 async function shot(name) {
   const file = `e2e-${String(++shotN).padStart(2, '0')}-${name}.png`
+  const leak = await ev(`
+    const re = new RegExp(${JSON.stringify(PATH_PREFIX)}, 'g')
+    const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+    for (let n = w.nextNode(); n; n = w.nextNode()) if (n.nodeValue.includes('test-out')) n.nodeValue = n.nodeValue.replace(re, ${JSON.stringify('…\\test-out')})
+    const text = document.body.innerText.toLowerCase()
+    return [${JSON.stringify(`\\${USER_DIR}\\`)}, ${JSON.stringify(`/${USER_DIR}/`)}].some((s) => text.includes(s))`)
+  check(`captura ${file} sem caminho local do usuário`, leak === false, { leak })
   const r = await send('Page.captureScreenshot', { format: 'png' })
   writeFileSync(join(SHOTS, file), Buffer.from(r.result.data, 'base64'))
   console.log(`  📷 docs/qa/editor-f7/${file}`)
