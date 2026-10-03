@@ -3,6 +3,8 @@
 
 export interface YuvCase {
   name: string
+  /** 'yuv': tem de passar pelo caminho YUV (I420); 'fallback': marcado como CPU, mas fica no antigo (R4: NV12/I420A). */
+  expect?: 'yuv' | 'fallback'
   /** Formato/cor do VideoFrame medido (diagnóstico). */
   format?: string | null
   colorSpace?: { matrix?: string | null; fullRange?: boolean | null; primaries?: string | null; transfer?: string | null }
@@ -12,6 +14,20 @@ export interface YuvCase {
   p99?: number
   /** Valores (por canal RGB) com diferença acima de 2. */
   over?: number
+  /** Diferença contra o envio PARCIAL (texSubImage2D) do caminho antigo, no quadro inteiro, sem exceção. */
+  subMax?: number
+  subP99?: number
+  /**
+   * Última linha visível medida à parte (as estatísticas contra o envio completo ficam sem ela): diferenças entre os
+   * desenhos nela e cada um contra a conta pelos planos visíveis (e, no quadro real, contra o croma com ¼ da linha
+   * codificada abaixo do visível — a hipótese do vazamento).
+   */
+  lastRow?: {
+    oldVsNew?: number; oldSubVsNew?: number; oldFullVsSub?: number
+    newRef?: number; oldRef?: number; oldSubRef?: number; oldLeakRef?: number; newLeakRef?: number
+    /** Pixels da última linha com referência (croma constante na horizontal). */
+    refPx?: number
+  }
   /** Diferença máxima fora dos pixels a 1 px de uma borda de cor (colorEdgeMask) e quantos pixels são borda. */
   maxOffEdge?: number
   edgePx?: number
@@ -73,8 +89,10 @@ export function rgbDiffStats(a: Uint8Array, b: Uint8Array, limit: number, mask?:
 }
 
 /**
- * Pixels a 1 px de uma borda de cor (exceção da paridade: amostragem do croma subamostrado nas bordas): 1 onde o pixel
- * ou um vizinho (4-vizinhança) difere do outro por mais de `jump` em algum canal RGB, em `a` ou em `b`.
+ * Pixels a 1 px de uma borda de cor da FONTE (exceção da paridade: amostragem do croma subamostrado nas bordas): 1 nos
+ * dois pixels de cada par vizinho (4-vizinhança) que difere por mais de `jump` em algum canal RGB nas DUAS imagens.
+ * Uma borda real aparece nas duas; um erro de uma delas (linha a mais, lixo, deslocamento) cria a própria borda só
+ * nela e por isso NÃO é mascarado.
  */
 export function colorEdgeMask(a: Uint8Array, b: Uint8Array, w: number, h: number, jump: number): Uint8Array {
   const mask = new Uint8Array(w * h)
@@ -84,7 +102,7 @@ export function colorEdgeMask(a: Uint8Array, b: Uint8Array, w: number, h: number
     for (let x = 0; x < w; x++) {
       const p = y * w + x
       for (const q of [x + 1 < w ? p + 1 : -1, y + 1 < h ? p + w : -1]) {
-        if (q >= 0 && (differs(a, p, q) || differs(b, p, q))) {
+        if (q >= 0 && differs(a, p, q) && differs(b, p, q)) {
           mask[p] = 1
           mask[q] = 1
         }

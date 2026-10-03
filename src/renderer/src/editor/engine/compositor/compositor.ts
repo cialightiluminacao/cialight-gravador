@@ -39,8 +39,8 @@ export interface DrawExtra {
   meta?: Map<string, SourceMeta>
   /**
    * G1: ids (mesmas chaves do mapa de fontes) cujo VideoFrame está em memória de CPU (decoder em software). Com
-   * `prepareCpuFrames(sources, cpuFrames)` chamado antes deste draw, os de formato I420/I420A/NV12 vão pelo caminho
-   * YUV; o resto (ou se a cópia falhou) segue o caminho antigo. Nunca marcar quadro de decoder de hardware (na GPU).
+   * `prepareCpuFrames(sources, cpuFrames)` chamado antes deste draw, os I420 vão pelo caminho YUV (R4: NV12/I420A
+   * não); o resto (ou se a cópia falhou) segue o caminho antigo. Nunca marcar quadro de decoder de hardware (na GPU).
    */
   cpuFrames?: ReadonlySet<string>
 }
@@ -150,7 +150,8 @@ export class Compositor {
    * G1: copia para a CPU (copyTo do visibleRect, num buffer reaproveitado por camada) os planos dos quadros de
    * `cpuFrames` que vão pelo caminho YUV; o draw seguinte (com o mesmo `cpuFrames` em DrawExtra) só sobe e converte.
    * Assíncrono porque o copyTo é; o VideoFrame continua do chamador (fechado por ele depois do draw). Falha num quadro
-   * = caminho antigo nele. Uso: `await comp.prepareCpuFrames(sources, cpu); comp.draw(..., { cpuFrames: cpu })`.
+   * = caminho antigo nele. Uso: `await comp.prepareCpuFrames(sources, cpu); comp.draw(..., { cpuFrames: cpu })` — o
+   * draw tem de vir logo depois (ele esquece os preparados; sem ele, ficam até o próximo prepare/dispose).
    */
   async prepareCpuFrames(sources: Map<string, TexImageSource | VideoFrame | null>, cpuFrames: ReadonlySet<string>): Promise<void> {
     this.staged.clear()
@@ -163,14 +164,15 @@ export class Compositor {
         try {
           const vr = frame.visibleRect
           const color = resolveYuvColor(frame.colorSpace, frame.codedWidth, frame.codedHeight)
-          if (!vr || !color) return
+          // pixel não quadrado (exibido ≠ visível): não medido contra o caminho antigo — fica nele
+          if (!vr || !color || frame.displayWidth !== vr.width || frame.displayHeight !== vr.height) return
           // só o visível: coded 1920×1088 com visível 1080 não vaza a faixa de baixo
           const rect = { x: vr.x, y: vr.y, width: vr.width, height: vr.height }
           const size = frame.allocationSize({ rect })
           let buf = this.textures.peekExtra(`m:${id}`)?.buf ?? null
           if (!buf || buf.byteLength < size) buf = new Uint8Array(size) // realocado só quando cresce
           const layout = await frame.copyTo(buf, { rect })
-          this.staged.set(id, new StagedYuv(frame, format, rect.width, rect.height, frame.displayWidth, frame.displayHeight, buf, layout, color))
+          this.staged.set(id, new StagedYuv(frame, format, rect.width, rect.height, buf, layout, color))
         } catch {
           // copyTo/allocationSize falhou (quadro fechado, formato inesperado…): caminho antigo neste quadro
         }
@@ -589,7 +591,7 @@ export class Compositor {
         if (!cpuFrames.has(id) || sources.get(id) !== st.frame) continue
         const key = `m:${id}`
         try {
-          this.yuvReady.set(key, this.textures.use(key, st, st.dw, st.dh, false))
+          this.yuvReady.set(key, this.textures.use(key, st, st.w, st.h, false))
           this.yuvCount++
         } catch {
           // caminho antigo no bindSource

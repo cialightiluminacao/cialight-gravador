@@ -134,12 +134,14 @@ describe('yuvFormatFor (decisão do caminho, R1)', () => {
   }
   afterEach(() => vi.unstubAllGlobals())
 
-  it('id no conjunto + VideoFrame I420/I420A/NV12 → YUV; fora do conjunto, outro formato ou outra fonte → caminho antigo', () => {
+  it('id no conjunto + VideoFrame I420 → YUV; NV12/I420A (R4), fora do conjunto, outro formato ou outra fonte → caminho antigo', () => {
     vi.stubGlobal('VideoFrame', FakeVideoFrame)
     const cpu = new Set(['a'])
     expect(yuvFormatFor('a', new FakeVideoFrame('I420'), cpu)).toBe('I420')
-    expect(yuvFormatFor('a', new FakeVideoFrame('I420A'), cpu)).toBe('I420A')
-    expect(yuvFormatFor('a', new FakeVideoFrame('NV12'), cpu)).toBe('NV12')
+    // R4: NV12/I420A de CPU — o caminho antigo do Chromium (conversão em software) difere da conta da matriz em até 12
+    // níveis; para não mudar a imagem, eles seguem no caminho antigo mesmo marcados
+    expect(yuvFormatFor('a', new FakeVideoFrame('I420A'), cpu)).toBeNull()
+    expect(yuvFormatFor('a', new FakeVideoFrame('NV12'), cpu)).toBeNull()
     expect(yuvFormatFor('b', new FakeVideoFrame('NV12'), cpu)).toBeNull() // NV12 de GPU tem o mesmo formato: só com opt-in
     expect(yuvFormatFor('a', new FakeVideoFrame('I420P10'), cpu)).toBeNull()
     expect(yuvFormatFor('a', new FakeVideoFrame('RGBA'), cpu)).toBeNull()

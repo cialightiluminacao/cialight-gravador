@@ -917,23 +917,36 @@ function boundsRgb(d: Uint8Array, W: number, H: number, pred: (r: number, g: num
 }
 
 /**
- * Caminho de upload YUV (G1, yuvHarness): para cada quadro, o desenho pelo caminho YUV (planos + conversão na GPU) passou
- * mesmo por ele e difere do caminho antigo (texImage2D do VideoFrame) no máximo 2 níveis por canal em todos os pixels.
- * Casos informativos (marcação fora do que o app produz) só aparecem no log. Custo por quadro 1080p: só reportado.
+ * Caminho de upload YUV (G1, yuvHarness; R4: só I420). O caminho antigo é medido nos dois modos de envio do Chromium:
+ * completo (texImage2D, 1º quadro de um item) e parcial (texSubImage2D, quadros seguintes). I420 marcado como CPU: o
+ * desenho passou mesmo pelo caminho YUV; contra o envio parcial, ≤ 2 em TODOS os pixels; contra o completo, ≤ 2 (ou
+ * a exceção do brief: 1 px nas bordas de cor presentes nas duas imagens, com p99 ≤ 1). Única linha medida à parte: a
+ * última visível do SD real, onde o envio completo do Chromium difere do parcial do mesmo quadro — lá o novo tem de
+ * bater com a conta pelos planos visíveis (≤ 2) e com o envio parcial (medido: o envio completo do Chromium interpola o
+ * croma da última linha com a linha codificada abaixo do visibleRect). NV12/I420A marcados: caem no caminho antigo
+ * (idêntico ao envio parcial). Casos informativos só no log.
  */
 function checkYuv(y: YuvReport | undefined, failures: string[]): void {
   check(!!y && !y.error, `YUV: harness sem erro (${y?.error ?? ''})`, failures)
-  check((y?.cases.filter((c) => !c.informative).length ?? 0) === 12, `YUV: 12 casos de paridade medidos (${y?.cases.length})`, failures)
+  check((y?.cases.filter((c) => !c.informative).length ?? 0) === 13, `YUV: 13 casos medidos (${y?.cases.filter((c) => !c.informative).length})`, failures)
   for (const c of y?.cases ?? []) {
-    // paridade: ≤ 2 em todo pixel, ou (exceção do brief) ≤ 2 fora de 1 px das bordas de cor com p99 ≤ 1
+    const lr = c.lastRow
+    const lrMsg = lr ? ` [última linha à parte: × envio completo ${lr.oldVsNew}, × envio parcial ${lr.oldSubVsNew}, completo × parcial ${lr.oldFullVsSub}; × conta pelos planos visíveis (${lr.refPx} px): novo ${lr.newRef}, completo ${lr.oldRef}, parcial ${lr.oldSubRef}${lr.oldLeakRef !== undefined ? `; × croma com ¼ da linha codificada abaixo do visível: completo ${lr.oldLeakRef}, novo ${lr.newLeakRef}` : ''}]` : ''
+    const msg = `YUV ${c.name} [${c.format} ${JSON.stringify(c.colorSpace)}] esperado ${c.expect}: caminho YUV usado ${c.yuv}; × envio completo máx. ${c.max} / p99 ${c.p99} (${c.over} valores > 2), fora das bordas máx. ${c.maxOffEdge} (${c.edgePx} px de borda); × envio parcial máx. ${c.subMax} / p99 ${c.subP99}${lrMsg}; × conta de referência: antigo ${c.refOld ?? '-'}, novo ${c.refNew ?? '-'}; média do quadro ${c.mean} ${c.error ?? ''}`
     const parity = c.max !== undefined && (c.max <= 2 || (c.maxOffEdge !== undefined && c.maxOffEdge <= 2 && (c.p99 ?? 99) <= 1))
-    // quadros construídos em que o PRÓPRIO caminho antigo se afasta da conta da matriz (> 2 fora das bordas; medido:
-    // NV12/I420A de CPU no Chromium) — o caminho YUV tem de bater com a conta (≤ 2) e ficar mais perto dela que o antigo
-    const reference = c.refNew !== undefined && c.refOld !== undefined && c.refNew <= 2 && c.refOld > 2
-    const msg = `YUV ${c.name} [${c.format} ${JSON.stringify(c.colorSpace)}]: caminho YUV usado ${c.yuv}; diferença × caminho antigo máx. ${c.max} / p99 ${c.p99} (${c.over} valores > 2), fora das bordas máx. ${c.maxOffEdge} (${c.edgePx} px de borda); × conta de referência: antigo ${c.refOld ?? '-'}, novo ${c.refNew ?? '-'}${reference && !parity ? ' — oráculo: conta de referência (o caminho antigo diverge dela)' : ''}; média do quadro ${c.mean} ${c.error ?? ''}`
-    if (!parity) console.log(`YUV diagnóstico ${c.name}: pior ${JSON.stringify(c.worst)} caixa > 2 ${JSON.stringify(c.box)}`)
+    let ok: boolean
+    // fallback: o 3º desenho (marcado como CPU) é o caminho antigo no mesmo modo de envio do 2º (parcial): idêntico.
+    // (Contra o envio completo, o próprio Chromium difere no NV12/I420A — medido: até 12 níveis por dentro e 138 nas
+    // bordas de croma — por isso a comparação é no mesmo modo.)
+    if (c.expect === 'fallback') ok = !c.error && c.yuv === false && c.subMax === 0 && (c.mean ?? 0) > 10
+    else {
+      ok = !c.error && c.yuv === true && parity && c.subMax !== undefined && c.subMax <= 2 && (c.mean ?? 0) > 10
+      if (c.refNew !== undefined) ok &&= c.refNew <= 2
+      if (lr) ok &&= lr.newRef !== undefined && lr.newRef <= 2 && (lr.refPx ?? 0) >= 100 && lr.oldSubVsNew !== undefined && lr.oldSubVsNew <= 2
+    }
+    if (!parity && c.expect !== 'fallback') console.log(`YUV diagnóstico ${c.name}: pior ${JSON.stringify(c.worst)} caixa > 2 ${JSON.stringify(c.box)}`)
     if (c.informative) console.log(`(informativo) ${msg}`)
-    else check(!c.error && c.yuv === true && (parity || reference) && (c.refNew ?? 0) <= 2 && (c.mean ?? 0) > 10, msg, failures)
+    else check(ok, msg, failures)
   }
   const t = y?.timing
   console.log(`YUV — custo por quadro 1080p I420 (decoder em software, com gl.finish): caminho antigo ${t?.oldMs} ms × novo ${t?.newMs} ms (copyTo ${t?.copyMs} + upload/conversão/desenho ${t?.drawMs}) em ${t?.frames} quadros`)

@@ -1,9 +1,15 @@
 // Caminho de upload YUV do compositor (G1): contas puras — matriz/faixa de cor, planos/layout e a decisão do caminho.
-// O quadro em memória de CPU (I420/I420A/NV12) sobe plano a plano (R8/RG8) e um shader converte para RGBA na textura
-// da camada; só a matriz (sem conversão de primárias/transferência), como o Chromium faz no caminho antigo.
+// O quadro I420 em memória de CPU sobe plano a plano (R8) e um shader converte para RGBA na textura da camada; só a
+// matriz (sem conversão de primárias/transferência), como o Chromium faz no caminho antigo.
+// R4 (decisão do controlador, medida no teste real): só I420. NV12/I420A de CPU seguem no caminho antigo — a conversão
+// do Chromium para eles (em software) difere da conta da matriz em até 12 níveis, e o caminho novo não pode mudar a
+// imagem. planeSpecs/tightLayout continuam descrevendo os três layouts (quadros de teste construídos).
 import { untaggedFamily } from '@shared/editor/sourceColor'
 
-export type YuvFormat = 'I420' | 'I420A' | 'NV12'
+/** Formato do caminho YUV (R4: só I420). */
+export type YuvFormat = 'I420'
+/** Layouts de plano 4:2:0 que planeSpecs/tightLayout descrevem. */
+export type PlanarFormat = 'I420' | 'I420A' | 'NV12'
 export type YuvMatrix = 'bt709' | 'bt601' | 'bt2020'
 export interface YuvColor { matrix: YuvMatrix; fullRange: boolean }
 
@@ -14,7 +20,7 @@ const KRB: Record<YuvMatrix, { kr: number; kb: number }> = {
   bt2020: { kr: 0.2627, kb: 0.0593 }
 }
 
-const FORMATS: ReadonlySet<string> = new Set<YuvFormat>(['I420', 'I420A', 'NV12'])
+const FORMATS: ReadonlySet<string> = new Set<YuvFormat>(['I420'])
 
 /**
  * Cor do quadro: `matrix`/`fullRange` do VideoFrame.colorSpace; matriz nula → regra das fontes sem marcação
@@ -81,7 +87,7 @@ export function yuvCoeffs(c: YuvColor): { m: number[]; off: [number, number, num
 export interface PlaneSpec { width: number; height: number; channels: 1 | 2 }
 
 /** Planos de um quadro w×h: Y, croma 4:2:0 (arredondado para cima) como U+V (I420) ou UV entrelaçado (NV12), e A (I420A). */
-export function planeSpecs(format: YuvFormat, w: number, h: number): PlaneSpec[] {
+export function planeSpecs(format: PlanarFormat, w: number, h: number): PlaneSpec[] {
   const cw = Math.ceil(w / 2)
   const ch = Math.ceil(h / 2)
   const y: PlaneSpec = { width: w, height: h, channels: 1 }
@@ -91,7 +97,7 @@ export function planeSpecs(format: YuvFormat, w: number, h: number): PlaneSpec[]
 }
 
 /** Layout justo (planos em sequência, stride = largura × canais), como o copyTo devolve sem layout pedido. */
-export function tightLayout(format: YuvFormat, w: number, h: number): { planes: { offset: number; stride: number }[]; size: number } {
+export function tightLayout(format: PlanarFormat, w: number, h: number): { planes: { offset: number; stride: number }[]; size: number } {
   let offset = 0
   const planes = planeSpecs(format, w, h).map((p) => {
     const stride = p.width * p.channels
@@ -104,7 +110,7 @@ export function tightLayout(format: YuvFormat, w: number, h: number): { planes: 
 
 /**
  * Decisão do caminho (R1): só o VideoFrame que o chamador declarou em memória de CPU (`cpuFrames`, mesmas chaves do
- * mapa de fontes) e de formato coberto vai pelo caminho YUV. Nunca pelo formato sozinho: o NV12 do decoder de hardware
+ * mapa de fontes) e de formato coberto (I420, R4) vai pelo caminho YUV. Nunca pelo formato sozinho: o NV12 do decoder de hardware
  * (na GPU) tem o mesmo `format`, e o copyTo dele é um readback caro. null = caminho antigo.
  */
 export function yuvFormatFor(id: string, src: unknown, cpuFrames: ReadonlySet<string> | undefined): YuvFormat | null {
