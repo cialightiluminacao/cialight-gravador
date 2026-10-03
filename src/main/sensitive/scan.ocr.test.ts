@@ -139,16 +139,16 @@ function table(title: string, es: ItemEval[]): string {
 }
 
 /**
- * Meta de recall do ruling R15 (≥ 95 %). MEDIDA E RELATADA, não afirmada por padrão: os itens perdidos são todos do
- * detector (src/shared/editor/sensitive.ts) — chave PIX/UUID com O↔0 ou hífen/espaço trocados, JWT e tokens que o OCR
- * parte em duas palavras (a caixa cobre só a 1ª parte) — e não da varredura (as palavras chegam com caixa no lugar).
- * Precisa de decisão do controlador: afirmar quando o detector chegar lá, ou aceitar o valor medido. Com
- * G3_STRICT_RECALL=1 a meta vira asserção. A cobertura (quadro a quadro) é sempre afirmada.
+ * Meta de recall do ruling R15 (≥ 95 %): Segoe/Arial a ≥ 14 px, estruturados a 14 px e aparece/some ≥ 16 px. AFIRMADA
+ * por padrão desde a Task 2c (detector com tokens/linhas partidos e UUID tolerante: 96,2 % a 14 px, 98,1 % a 16/20 px,
+ * 100 % nos estruturados e no aparece/some, medidos sob a trava). G3_STRICT_RECALL=0 volta a só relatar (diagnóstico).
+ * Os perdidos que restam são do próprio OCR (JWT longo em Arial/Consolas que o Windows.Media.Ocr não devolve). A
+ * cobertura (quadro a quadro) é sempre afirmada.
  */
 const goalMisses: string[] = []
 function recallGoal(value: number, label: string): void {
   if (value < 0.95) goalMisses.push(`${label}: ${(100 * value).toFixed(1)} %`)
-  if (process.env.G3_STRICT_RECALL) expect.soft(value, label).toBeGreaterThanOrEqual(0.95)
+  if (process.env.G3_STRICT_RECALL !== '0') expect.soft(value, label).toBeGreaterThanOrEqual(0.95)
 }
 const report: string[] = []
 const dbgLines: string[] = []
@@ -219,7 +219,7 @@ afterAll(() => {
 
 describe('varredura real (ffmpeg + Windows.Media.Ocr)', () => {
   const staticEvals: ItemEval[] = []
-  it('estáticas: recall ≥ 95 % a ≥ 16 px (Segoe/Arial) e estruturados a 14 px Segoe/Arial; cobertura 100 %', async () => {
+  it('estáticas: recall ≥ 95 % a ≥ 14 px (Segoe/Arial) e estruturados a 14 px Segoe/Arial; cobertura 100 %', async () => {
     let sampled = 0, ocr = 0, ms = 0
     const tm = { startMs: 0, samplingMs: 0, ocrMs: 0, refineMs: 0 }
     for (const v of statics) {
@@ -234,7 +234,7 @@ describe('varredura real (ffmpeg + Windows.Media.Ocr)', () => {
     metrics.static = { framesSampled: sampled, framesOcr: ocr, ms, timings: tm, sampledPerSec: sampled / (ms / 1000), sampledPerSecExclStart: sampled / ((tm.samplingMs - tm.startMs) / 1000), ocrMsPerFrame: tm.ocrMs / ocr, decodeAndCompareMsPerFrame: decodeMs / sampled }
     report.push(`## Estáticas (6 vídeos de 8 s)\nAmostrados ${sampled} quadros, lidos ${ocr}, ${ms} ms no total → ${(sampled / (ms / 1000)).toFixed(1)} quadros amostrados/s de ponta a ponta; ${(sampled / ((tm.samplingMs - tm.startMs) / 1000)).toFixed(1)}/s sem a partida do helper (${(tm.startMs / statics.length).toFixed(0)} ms por varredura); OCR ${(tm.ocrMs / ocr).toFixed(0)} ms/quadro lido; decodificação + comparação ${(decodeMs / sampled).toFixed(0)} ms/quadro; refinamento ${tm.refineMs} ms no total`, table('Estáticas', staticEvals))
     const sa = staticEvals.filter((e) => e.it.font !== 'consolas')
-    for (const size of [16, 20]) {
+    for (const size of [14, 16, 20]) {
       const g = sa.filter((e) => e.it.size === size)
       metrics[`static_recall_${size}_SA`] = recall(g)
       recallGoal(recall(g), `recall ${size} px Segoe/Arial`)
