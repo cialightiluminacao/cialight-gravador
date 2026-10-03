@@ -24,7 +24,7 @@ export interface HideOpts {
   clipIds?: string[]
 }
 
-export type HideSkipReason = 'notInClip' | 'locked' | 'disabled'
+export type HideSkipReason = 'notInClip' | 'locked'
 export interface HideResult {
   project: Project
   itemIds: string[]
@@ -123,13 +123,13 @@ export const occurrenceEffectName = (occ: Occurrence): string => `${SENSITIVE_KI
 /**
  * Esconde as ocorrências `occs` do asset: um efeito por (ocorrência × clipe que mostra o trecho), ancorado e vinculado
  * ao clipe, nas faixas de efeitos (addEffectItems: reaproveita as livres, cria as que faltam). Um projeto novo = um
- * passo de desfazer. Clipes: os de mídia visuais (faixas de vídeo, inclusive ocultas — mostrar a faixa depois não pode
- * revelar o dado) do asset, ou só `opts.clipIds`. Pulados (o efeito NÃO é criado; quem chama avisa):
- * - 'disabled': clipe desativado que mostraria a ocorrência;
+ * passo de desfazer. Clipes: os de mídia visuais (faixas de vídeo, inclusive ocultas e clipes desativados — mostrar a
+ * faixa ou reativar o clipe depois não pode revelar o dado; ruling R25) do asset, ou só `opts.clipIds`.
+ * Pulados (o efeito NÃO é criado; quem chama avisa):
  * - 'locked': clipe numa faixa bloqueada e sem grupo de vínculo — vincular exigiria editar a faixa bloqueada, e um
  *   efeito ancorado sem vínculo ficaria para trás se o clipe fosse movido depois (perda silenciosa). Com grupo, o
  *   efeito entra nele sem tocar no clipe;
- * - 'notInClip': nenhum clipe (ativo ou não) mostra a ocorrência.
+ * - 'notInClip': nenhum clipe mostra a ocorrência.
  * Faixa de efeitos bloqueada: não é usada (como no addEffect) — o efeito vai para outra ou para uma faixa nova.
  */
 export function hideOccurrences(p: Project, assetId: string, occs: readonly Occurrence[], opts: HideOpts): HideResult {
@@ -154,7 +154,6 @@ export function hideOccurrences(p: Project, assetId: string, occs: readonly Occu
     for (const c of clips) {
       const spans = occurrenceSpans(p, c.m, asset, occ)
       if (spans.length === 0) continue
-      if (c.m.enabled === false) { reasons.add('disabled'); continue }
       if (c.locked) { reasons.add('locked'); continue }
       let a = spans[0].a, b = spans[spans.length - 1].b
       // nenhum item menor que MIN_ITEM_US: alarga para dentro do clipe (a última caixa segue valendo)

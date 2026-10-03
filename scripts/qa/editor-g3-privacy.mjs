@@ -509,6 +509,8 @@ async function main() {
     const nDet = ocrFrames.reduce((a, f) => a + f.detections, 0)
     console.log(`  ${ocrN} quadros no OCR; detecções (qualquer coisa) ${nDet}; quadros com valor verdadeiro ou detecção na tinta: ${leaky.length}`)
     check(`o OCR não acha NENHUM valor verdadeiro nem detecção dentro da tinta em TODOS os ${ocrN} quadros exportados`, leaky.length === 0 && ocrN === nOut, leaky.slice(0, 10))
+    // R22: zero detecções de QUALQUER tipo (uma leitura parcial fora da tinta estimada também não pode passar)
+    check(`o OCR não acha nenhuma detecção de qualquer tipo em todos os ${ocrN} quadros (${nDet})`, nDet === 0 && ocrN === nOut, ocrFrames.filter((x) => x.detections > 0).slice(0, 10).map((x) => ({ n: x.n, kinds: x.kinds })))
     result.ocrExport = { frames: ocrN, detections: nDet, leakyFrames: leaky.length, insideTruth: ocrFrames.reduce((a, f) => a + f.inside.length, 0), detectedKinds: [...new Set(ocrFrames.flatMap((f) => f.kinds))] }
 
     for (const [name, t] of [['e2e-g3-02-exportado-plano.png', 6 * S], ['e2e-g3-03-exportado-zoom.png', clips.B.startUs + 3.5 * S]]) {

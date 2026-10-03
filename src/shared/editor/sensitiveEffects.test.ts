@@ -5,6 +5,7 @@ import { createEmptyProject, createMediaItem } from './factory'
 import { deleteItems, findItem, moveItems, setItemEnabled, setReverse, setSpeed, splitAt, trimItem, updateItem } from './ops'
 import { privacyWarnings, WEAK_BLUR } from './privacy'
 import type { Anim, Asset, EffectItem, MediaItem, Project, Track, Us } from './project'
+import { withDeferredFallbacks } from './attachment'
 import { clipFrameAt, resolveFrame, type EffectLayer } from './resolve'
 import { parseProject, toDiskProject } from './schema'
 import { hideOccurrences, occurrenceSpans } from './sensitiveEffects'
@@ -22,9 +23,9 @@ const vtrack = (id: string, items: MediaItem[], extra: Partial<Track> = {}): Tra
 function clip(id: string, startUs: Us, durationUs: Us, extra: Partial<MediaItem> = {}): MediaItem {
   return { ...createMediaItem(vid, startUs, 'video'), id, durationUs, ...extra }
 }
-function project(clips: MediaItem[], fps = 30): Project {
+function project(clips: MediaItem[], fps = 30, asset: Asset = vid): Project {
   const p = createEmptyProject('t', { fps })
-  p.assets = [vid]
+  p.assets = [asset]
   p.tracks = [vtrack('tv', clips)]
   return p
 }
@@ -116,7 +117,11 @@ const effects = (p: Project): EffectItem[] => p.tracks.flatMap((t) => t.items.fi
 
 // ---------------------------------------------------------------- casos
 
-const clipCases: [string, () => MediaItem][] = [
+/** Asset girado 90° (vídeo de celular): a fonte exibida é 1080×1920; as caixas da varredura são frações dela. */
+const rot90: Asset = { ...vid, video: { ...vid.video!, rotation: 90 } }
+const clipCases: [string, () => MediaItem, Asset?][] = [
+  ['espelhado', () => { const m = clip('c', 1 * S, 12 * S); m.visual!.mirror = true; m.visual!.transform.scale = anim(1, 1.8, 0, 6 * S); return m }],
+  ['asset girado 90° (caixas em frações da fonte girada)', () => { const m = clip('c', 0, 12 * S, { speed: 1.25 }); m.visual!.transform.scale = anim(1, 1.5, 0, 6 * S); return m }, rot90],
   ['simples', () => clip('c', 1 * S, 12 * S)],
   ['velocidade 2×', () => clip('c', 1 * S, 6 * S, { speed: 2 })],
   ['velocidade 0,5×', () => clip('c', 0, 20 * S, { speed: 0.5 })],
@@ -137,11 +142,11 @@ const clipCases: [string, () => MediaItem][] = [
 ]
 
 describe('hideOccurrences — cobertura densa (oráculo: resolveFrame + sourceTimeUs)', () => {
-  for (const [name, make] of clipCases) {
+  for (const [name, make, asset] of clipCases) {
     for (const fps of [30, 60]) {
       it(`${name} @${fps} fps: o dado nunca fica fora do efeito`, () => {
         const occs = [still(), scrolling()]
-        const p0 = project([make()], fps)
+        const p0 = project([make()], fps, asset)
         const r = hideOccurrences(p0, 'v', occs, { style: 'blur' })
         expect(r.skipped).toEqual([])
         expect(r.itemIds.length).toBe(2)
@@ -225,9 +230,15 @@ describe('hideOccurrences — cobertura densa (oráculo: resolveFrame + sourceTi
     expect(misses(r.project, occs).misses).toEqual([])
   })
 
-  it('clipe desativado → disabled; faixa do clipe bloqueada sem vínculo → locked; com vínculo, entra no grupo', () => {
+  it('clipe desativado também ganha efeito (R25: protege se for reativado); faixa bloqueada sem vínculo → locked; com vínculo, entra no grupo', () => {
     const p0 = project([clip('c', 0, 10 * S, { enabled: false })])
-    expect(hideOccurrences(p0, 'v', [still()], { style: 'blur' }).skipped).toEqual([{ occurrenceId: 'o1', reason: 'disabled' }])
+    const r0 = hideOccurrences(p0, 'v', [still()], { style: 'blur' })
+    expect(r0.skipped).toEqual([])
+    expect(r0.itemIds.length).toBe(1)
+    const on = setItemEnabled(r0.project, ['c'], true)
+    const o0 = misses(on, [still()])
+    expect(o0.checked).toBeGreaterThan(200)
+    expect(o0.misses).toEqual([])
     const p1 = project([clip('c', 0, 10 * S)])
     p1.tracks[0].locked = true
     const r1 = hideOccurrences(p1, 'v', [still()], { style: 'blur' })
@@ -319,7 +330,11 @@ describe('hideOccurrences — desempenho', () => {
     // melhor medida (padrão do attachPerf), repetindo por até 6 s enquanto passar do alvo: a suíte inteira em paralelo
     // (16 workers) deixa uma medida isolada ~6× mais lenta; a 1ª chamada aquece o JIT. Sozinho (esta máquina): ~20 ms
     // (node) / ~40 ms (vitest).
+    hideOccurrences(p0, 'v', occs, { style: 'blur' }) // aquecimento
+    // 1ª chamada já aquecida, sem repetição: ≤ 3 × o alvo (pega uma regressão lenta e constante que o melhor-de-N esconderia)
+    const tw = performance.now()
     let r = hideOccurrences(p0, 'v', occs, { style: 'blur' })
+    const first = performance.now() - tw
     let ms = Infinity
     const until = performance.now() + 6000
     while (ms >= 50 && performance.now() < until) {
@@ -327,8 +342,38 @@ describe('hideOccurrences — desempenho', () => {
       r = hideOccurrences(p0, 'v', occs, { style: 'blur' })
       ms = Math.min(ms, performance.now() - t0)
     }
-    console.log(`hideOccurrences 200×3: ${ms.toFixed(1)} ms, ${r.itemIds.length} efeitos, ${r.project.tracks.filter((t) => t.role === 'effects').length} faixas`)
+    console.log(`hideOccurrences 200×3: melhor ${ms.toFixed(1)} ms, 1ª aquecida ${first.toFixed(1)} ms, ${r.itemIds.length} efeitos, ${r.project.tracks.filter((t) => t.role === 'effects').length} faixas`)
     expect(r.itemIds.length).toBe(600)
     expect(ms).toBeLessThan(50)
+    expect(first).toBeLessThanOrEqual(150)
+  }, 30_000)
+
+  it('arrastar o clipe com 600 efeitos vinculados: < 8 ms por passo (transitório, caixas de reserva adiadas)', () => {
+    const occs = Array.from({ length: 600 }, (_, i) => occurrence(`o${i}`, ((i * 37) % 15) * S + 500_000, ((i * 37) % 15) * S + 2_500_000, () => ({ x: (i % 12) / 13, y: ((i * 7) % 30) / 31, w: 0.06, h: 0.03 })))
+    const p0 = hideOccurrences(project([clip('a', 0, 20 * S, { linkId: 'L' })]), 'v', occs, { style: 'blur' }).project
+    expect(effects(p0).filter((f) => f.linkId === 'L').length).toBe(600)
+    // passos de arraste como o store os aplica: cada um sobre o anterior, em withDeferredFallbacks (transação transitória)
+    const steps = (n: number): number[] => {
+      let p = p0
+      const out: number[] = []
+      for (let k = 1; k <= n; k++) {
+        const t0 = performance.now()
+        p = withDeferredFallbacks(() => moveItems(p, ['a'], 33_333))
+        out.push(performance.now() - t0)
+      }
+      expect(findItem(p, 'a')!.item.startUs).toBe(n * 33_333)
+      return out
+    }
+    steps(5) // aquecimento
+    // mediana de 30 passos; a menor mediana de rodadas repetidas por até 6 s (a suíte em paralelo deixa medidas lentas)
+    let best = Infinity, median = Infinity
+    const until = performance.now() + 6000
+    while (median >= 8 && performance.now() < until) {
+      const ts = steps(30).sort((x, y) => x - y)
+      median = Math.min(median, ts[15])
+      best = Math.min(best, ts[0])
+    }
+    console.log(`arraste com 600 efeitos vinculados: mediana ${median.toFixed(2)} ms/passo (melhor ${best.toFixed(2)} ms)`)
+    expect(median).toBeLessThan(8)
   }, 30_000)
 })
