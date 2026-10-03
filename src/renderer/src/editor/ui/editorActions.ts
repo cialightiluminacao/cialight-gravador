@@ -231,7 +231,7 @@ export function removeSelectedTransition(): boolean {
     s.selectTransition(null)
     return false
   }
-  const ok = s.apply((p) => removeTransition(p, id))
+  const ok = s.apply((p) => removeTransition(p, id), { quietTransitions: true })
   if (ok) s.selectTransition(null)
   return true
 }

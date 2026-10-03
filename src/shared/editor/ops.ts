@@ -10,7 +10,7 @@ import { newId } from './ids'
 import { frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
 import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, ShapeItem, TextItem, TextStyle, Track, TrackKind, TransitionKind, Us } from './project'
-import { canTransition, DEFAULT_TRANSITION_US, maxTransitionUs, MIN_TRANSITION_US, transitionPairOk } from './transitions'
+import { canTransition, DEFAULT_TRANSITION_US, maxTransitionUs, MIN_TRANSITION_US, transitionInOf, transitionPairOk } from './transitions'
 import type { Cue } from './srt'
 
 export { getAnim, type AnimPath } from './animPaths'
@@ -103,11 +103,12 @@ function normalizeTransitions(prev: Project, next: Project): Project {
     if (t.locked || before.get(t.id) === t) return
     for (let ii = 0; ii < t.items.length; ii++) {
       const b = t.items[ii]
-      if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) continue
+      const tr = transitionInOf(b)
+      if (!tr) continue
       const a = ii > 0 ? t.items[ii - 1] : undefined
       const max = transitionPairOk(t, a, b) ? maxTransitionUs(a, b) : -1
       if (max < MIN_TRANSITION_US) fixes.push({ ti, ii, d: null })
-      else if (b.transitionIn.durationUs > max) fixes.push({ ti, ii, d: max })
+      else if (tr.durationUs > max) fixes.push({ ti, ii, d: max })
     }
   })
   if (!fixes.length) return next
@@ -2045,7 +2046,7 @@ export function addTransition(p: Project, rightItemId: string, kind: TransitionK
 /** Remove a transição de entrada de B (nada a fazer = o mesmo projeto). */
 export function removeTransition(p: Project, rightItemId: string): Project {
   const { b } = transitionPair(p, rightItemId)
-  if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) return p
+  if (!transitionInOf(b)) return p
   return edit(p, (d) => {
     delete (mustFind(d, rightItemId).item as MediaItem).transitionIn
   })
@@ -2055,12 +2056,13 @@ export function removeTransition(p: Project, rightItemId: string): Project {
 export function setTransitionDuration(p: Project, rightItemId: string, durationUs: Us): Project {
   if (!Number.isFinite(durationUs)) throw new EditError('invalid', 'Duração de transição inválida')
   const { track, a, b } = transitionPair(p, rightItemId)
-  if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) throw new EditError('invalid', 'Este clipe não tem transição de entrada')
+  const tr = transitionInOf(b)
+  if (!tr) throw new EditError('invalid', 'Este clipe não tem transição de entrada')
   // regra estrutural (como a normalização): ajustar a duração de uma transição com um lado desativado é permitido
   if (!transitionPairOk(track, a, b)) throw new EditError('invalid', 'Transição só entre dois clipes encostados na mesma faixa')
   if (maxTransitionUs(a, b) < MIN_TRANSITION_US) throw new EditError('invalid', 'Clipes curtos demais para a transição')
   const d = clamp(Math.round(durationUs), MIN_TRANSITION_US, maxTransitionUs(a, b))
-  if (d === b.transitionIn.durationUs) return p
+  if (d === tr.durationUs) return p
   return edit(p, (dr) => {
     ;(mustFind(dr, rightItemId).item as MediaItem).transitionIn!.durationUs = d
   })

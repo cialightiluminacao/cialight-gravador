@@ -41,7 +41,7 @@ export function transitionMenuEntries(p: Project, toId: string): MenuEntry[] {
       shortcut: SHORTCUT_LABELS.delete,
       danger: true,
       onSelect: () => {
-        if (st().apply((q) => removeTransition(q, toId))) st().selectTransition(null)
+        if (st().apply((q) => removeTransition(q, toId), { quietTransitions: true })) st().selectTransition(null)
       }
     }
   ]

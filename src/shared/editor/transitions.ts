@@ -1,4 +1,4 @@
-import type { Item, Project, Track, TransitionKind, Us } from './project'
+import type { Item, Project, Track, Transition, TransitionKind, Us } from './project'
 
 /*
  * Transições entre clipes adjacentes — modelo "centrado no corte, SEM handles".
@@ -42,6 +42,36 @@ export function transitionEligible(it: Item): boolean {
   return (it.type === 'media' && !!it.visual) || it.type === 'text'
 }
 
+/** Transição de entrada gravada no item (só mídia/texto têm o campo); undefined = nenhuma. */
+export function transitionInOf(it: Item): Transition | undefined {
+  return it.type === 'media' || it.type === 'text' ? it.transitionIn : undefined
+}
+
+/**
+ * Quantas transições sumiram de `before` para `after` em itens que CONTINUAM no projeto (ex.: aparar/mover/apagar
+ * separou os clipes e a normalização tirou a transição). Item apagado leva a transição junto (não conta: o usuário vê
+ * o clipe sumir). Faixas não mudadas (mesmo objeto) são puladas: O(itens das faixas mudadas).
+ */
+export function droppedTransitions(before: Project, after: Project): number {
+  if (before === after) return 0
+  const now = new Map(after.tracks.map((t) => [t.id, t]))
+  const lost = new Set<string>()
+  for (const t of before.tracks) {
+    if (t.kind !== 'video' || now.get(t.id) === t) continue
+    for (const it of t.items) if (transitionInOf(it)) lost.add(it.id)
+  }
+  if (!lost.size) return 0
+  let n = 0
+  // o item pode ter mudado de faixa: procura em todas (só quando havia transição numa faixa mudada)
+  for (const t of after.tracks) {
+    if (t.kind !== 'video') continue
+    for (const it of t.items) {
+      if (lost.has(it.id) && !transitionInOf(it)) n++
+    }
+  }
+  return n
+}
+
 /** Maior duração de transição entre A e B (floor(min/2)). */
 export function maxTransitionUs(a: Item, b: Item): Us {
   return Math.floor(Math.min(a.durationUs, b.durationUs) / 2)
@@ -77,14 +107,15 @@ export function canTransition(p: Project, trackId: string, aId: string | undefin
 export function transitionWindowAt(track: Track, i: number): TransitionWindow | null {
   if (i <= 0 || i >= track.items.length) return null
   const b = track.items[i]
-  if ((b.type !== 'media' && b.type !== 'text') || !b.transitionIn) return null
+  const tr = transitionInOf(b)
+  if (!tr) return null
   const a = track.items[i - 1]
   if (!transitionPairOk(track, a, b)) return null
-  const d = Math.min(b.transitionIn.durationUs, maxTransitionUs(a, b))
+  const d = Math.min(tr.durationUs, maxTransitionUs(a, b))
   if (d < MIN_TRANSITION_US) return null
   const cutUs = b.startUs
   const startUs = cutUs - Math.floor(d / 2)
-  return { trackId: track.id, fromId: a.id, toId: b.id, kind: b.transitionIn.kind, durationUs: d, cutUs, startUs, endUs: startUs + d }
+  return { trackId: track.id, fromId: a.id, toId: b.id, kind: tr.kind, durationUs: d, cutUs, startUs, endUs: startUs + d }
 }
 
 /**

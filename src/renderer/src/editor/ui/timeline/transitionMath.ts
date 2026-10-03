@@ -1,6 +1,7 @@
 import { transitionWindowAt, canTransition, maxTransitionUs, MIN_TRANSITION_US, transitionPairOk, type TransitionWindow } from '@shared/editor/transitions'
 import type { Item, Project, Track, Us } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
+import { isCaptionsTrack } from '@shared/editor/ops'
 import { usToPx } from '../../state/zoom'
 
 // Matemática pura das transições na linha do tempo: janelas visíveis de uma faixa, geometria do ícone, alvo do
@@ -81,16 +82,23 @@ export function transitionDropReason(p: Project, trackId: string, toId: string):
 export interface CutChoice { trackId: string; toId: string; cutUs: Us }
 
 /**
- * Corte elegível (canTransition) mais perto do playhead nas faixas dadas (desbloqueadas; null = todas); empate: o
+ * Corte elegível (mesma regra de canTransition) mais perto do playhead nas faixas dadas (desbloqueadas); empate: o
  * primeiro. null = nenhum corte elegível.
+ * Sem faixas dadas (`trackIds` null = nada selecionado), procura em todas as de vídeo MENOS a de legendas e só em pares
+ * com pelo menos um lado de mídia: cortes entre legendas/títulos encostados são comuns (SRT importado) e o atalho
+ * “Dissolver no corte mais próximo” não pode cair neles sem o usuário pedir (texto→texto pede seleção ou soltar).
+ * O(itens das faixas): a regra do par é conferida em O(1) por par, sem buscas no projeto.
  */
 export function nearestEligibleCut(p: Project, trackIds: string[] | null, playheadUs: Us): CutChoice | null {
   let best: (CutChoice & { d: number }) | null = null
+  const only = trackIds ? new Set(trackIds) : null
   for (const t of p.tracks) {
-    if (t.kind !== 'video' || t.locked || (trackIds && !trackIds.includes(t.id))) continue
+    if (t.kind !== 'video' || t.locked) continue
+    if (only ? !only.has(t.id) : isCaptionsTrack(t)) continue
     for (let i = 1; i < t.items.length; i++) {
       const a = t.items[i - 1], b = t.items[i]
-      if (!transitionPairOk(t, a, b) || canTransition(p, t.id, a.id, b.id)) continue
+      if (!transitionPairOk(t, a, b) || a.enabled === false || b.enabled === false || maxTransitionUs(a, b) < MIN_TRANSITION_US) continue
+      if (!only && a.type !== 'media' && b.type !== 'media') continue
       const d = Math.abs(b.startUs - playheadUs)
       if (!best || d < best.d) best = { trackId: t.id, toId: b.id, cutUs: b.startUs, d }
     }

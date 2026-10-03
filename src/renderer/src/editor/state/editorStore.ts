@@ -4,6 +4,7 @@ import { refreshAttachments, withDeferredFallbacks } from '@shared/editor/attach
 import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
 import { withProcessedAudio } from '@shared/editor/audioProcess'
+import { droppedTransitions } from '@shared/editor/transitions'
 import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
 import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from './zoom'
 import { ipcErrorMessage } from '@/lib/ipcError'
@@ -46,8 +47,12 @@ export interface EditorState {
 
   open(p: Project): void
   close(): void
-  /** transient = dentro de transação (não grava histórico). EditError → toast + false. */
-  apply(fn: (p: Project) => Project, opts?: { transient?: boolean }): boolean
+  /**
+   * transient = dentro de transação (não grava histórico). EditError → toast + false. No commit, transição que sumiu
+   * porque os clipes deixaram de estar encostados vira toast (nunca silêncio); quietTransitions = a remoção é o pedido
+   * (removeTransition).
+   */
+  apply(fn: (p: Project) => Project, opts?: { transient?: boolean; quietTransitions?: boolean }): boolean
   /** Aplica patch em asset SEM entrada de histórico (resultado de ingest); corrige past/present/future. */
   applyAssetPatch(assetId: string, patch: Partial<Asset>): void
   setIngest(assetId: string, progress: IngestProgress | null): void
@@ -76,6 +81,16 @@ export interface EditorState {
 const HISTORY_LIMIT = 300
 
 const touch = (p: Project): Project => ({ ...p, updatedAt: new Date().toISOString() })
+
+/**
+ * Commit que tirou transições sem o usuário pedir (aparar/mover/apagar separou os clipes; normalizeTransitions): avisa
+ * uma vez, no commit (nunca nos quadros transitórios do arraste).
+ */
+function warnDroppedTransitions(base: Project, next: Project): void {
+  const n = droppedTransitions(base, next)
+  if (!n) return
+  toast(n === 1 ? 'Transição removida porque os clipes não estão mais encostados' : `${n} transições removidas porque os clipes não estão mais encostados`, { description: 'Ctrl+Z desfaz.' })
+}
 
 /** Campos derivados do histórico (project, canUndo, canRedo). */
 function derive(h: History<Project>): Pick<EditorState, 'history' | 'project' | 'canUndo' | 'canRedo'> {
@@ -141,6 +156,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     const fresh = txBase ? refreshAttachments(next, txBase) : next.canvas !== history.present.canvas ? refreshAttachments(next, history.present) : next
     const h = commit(txBase ? { ...history, present: txBase } : history, touch(fresh), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
+    if (!opts?.quietTransitions) warnDroppedTransitions(txBase ?? history.present, fresh)
     return true
   },
 
@@ -202,6 +218,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     }
     const h = commit({ ...history, present: txBase }, touch(refreshAttachments(history.present, txBase)), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
+    warnDroppedTransitions(txBase, history.present)
   },
 
   cancelTx: () => {

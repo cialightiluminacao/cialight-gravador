@@ -61,7 +61,7 @@ export function TransitionPanel({ toId }: { toId: string }): React.JSX.Element |
           disabled={locked}
           className="mt-1 flex h-7 w-full items-center justify-center gap-1.5 rounded-md border border-danger/40 bg-danger/10 text-[11px] font-medium text-danger hover:bg-danger/20 disabled:opacity-40"
           onClick={() => {
-            if (apply((p) => removeTransition(p, toId))) useEditorStore.getState().selectTransition(null)
+            if (apply((p) => removeTransition(p, toId), { quietTransitions: true })) useEditorStore.getState().selectTransition(null)
           }}
         >
           <Trash2 className="h-3 w-3" /> Remover transição

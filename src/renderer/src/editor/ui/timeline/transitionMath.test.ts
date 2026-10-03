@@ -73,6 +73,41 @@ describe('nearestEligibleCut', () => {
   })
 })
 
+describe('nearestEligibleCut sem seleção (legendas e títulos)', () => {
+  const cues = (n: number, fromS: number, durUs = S) => Array.from({ length: n }, (_, i) => ({ startUs: fromS * S + i * durUs, endUs: fromS * S + (i + 1) * durUs, text: `l${i}` }))
+  it('legendas encostadas mais perto do playhead que o corte de vídeo: escolhe o corte de vídeo', () => {
+    const { p, b } = fixture()
+    const q = ops.importCaptions(p, cues(5, 8), { mode: 'replace' }).project // cortes de legenda em 9, 10, 11, 12 s
+    expect(nearestEligibleCut(q, null, 10 * S)?.toId).toBe(b)
+    // selecionando a faixa de legendas, o corte da legenda vale (texto→texto com pedido explícito)
+    const cap = q.tracks.find(ops.isCaptionsTrack)!
+    expect(nearestEligibleCut(q, [cap.id], 10 * S)).toEqual({ trackId: cap.id, toId: cap.items[2].id, cutUs: 10 * S })
+  })
+  it('sem seleção, par texto→texto numa faixa de texto comum é ignorado; texto→mídia continua valendo', () => {
+    const { p } = fixture()
+    let q = ops.addText(p, 'title', 20 * S, { durationUs: 2 * S }).project
+    const tt = q.tracks.find((t) => t.items.some((i) => i.type === 'text'))!
+    q = ops.addText(q, 'title', 22 * S, { durationUs: 2 * S, trackId: tt.id }).project
+    const cut = nearestEligibleCut(q, null, 22 * S)
+    expect(cut?.trackId).toBe(track(q).id) // o corte de vídeo em 4 s, não o título→título em 22 s
+    expect(nearestEligibleCut(q, [tt.id], 22 * S)?.cutUs).toBe(22 * S)
+  })
+  it('desempenho: 1000 legendas encostadas não pesam (O(n), sem buscas por par)', () => {
+    const { p, b } = fixture()
+    const q = ops.importCaptions(p, cues(1000, 20, 500_000), { mode: 'replace' }).project
+    const cap = q.tracks.find(ops.isCaptionsTrack)!
+    expect(cap.items.length).toBe(1000)
+    nearestEligibleCut(q, [cap.id], 0) // aquece
+    const t0 = performance.now()
+    for (let k = 0; k < 20; k++) {
+      expect(nearestEligibleCut(q, null, 300 * S)?.toId).toBe(b)
+      expect(nearestEligibleCut(q, [cap.id], 300 * S)?.trackId).toBe(cap.id)
+    }
+    const ms = (performance.now() - t0) / 40
+    expect(ms).toBeLessThan(5) // a versão O(n²) levava dezenas de ms por chamada com 1000 itens
+  })
+})
+
 describe('visibleTransitions / markGeometry (ícone)', () => {
   it('só as janelas que tocam o intervalo visível; janela centrada no corte', () => {
     const { p, b } = fixture()
