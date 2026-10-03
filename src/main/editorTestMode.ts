@@ -10,6 +10,7 @@ import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShot
 import { occludedFrame, TEXT_X_EXPR, textX, TRACK_SCENE } from '@shared/testing/trackingScene'
 import { meanDiffPerChannel, paritySample, type TransitionReport } from '@shared/testing/transitionOracle'
 import type { PxBounds, TextReport } from '@shared/testing/textReport'
+import type { YuvReport } from '@shared/testing/yuvReport'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -80,6 +81,7 @@ interface HarnessReport {
   memory?: MemoryReport
   transition?: TransitionReport
   text?: TextReport
+  yuv?: YuvReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -886,6 +888,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!tb && !tb.error && !!tb.crossfade && !!tb.blur && tb.crossfade.mean < 20 && tb.blur.mean < 20, `transições: 1080p < 20 ms/quadro (compositor + GPU; alvo 12) — crossfade média ${tb?.crossfade?.mean} / p95 ${tb?.crossfade?.p95}, blur média ${tb?.blur?.mean} / p95 ${tb?.blur?.p95} ${tb?.error ?? ''}`, failures)
 
   checkText(r.text, failures)
+  checkYuv(r.yuv, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)
@@ -911,6 +914,29 @@ function boundsRgb(d: Uint8Array, W: number, H: number, pred: (r: number, g: num
     x0 = Math.min(x0, x); x1 = Math.max(x1, x + 1); y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1)
   }
   return n ? { x0, y0, x1, y1, n } : null
+}
+
+/**
+ * Caminho de upload YUV (G1, yuvHarness): para cada quadro, o desenho pelo caminho YUV (planos + conversão na GPU) passou
+ * mesmo por ele e difere do caminho antigo (texImage2D do VideoFrame) no máximo 2 níveis por canal em todos os pixels.
+ * Casos informativos (marcação fora do que o app produz) só aparecem no log. Custo por quadro 1080p: só reportado.
+ */
+function checkYuv(y: YuvReport | undefined, failures: string[]): void {
+  check(!!y && !y.error, `YUV: harness sem erro (${y?.error ?? ''})`, failures)
+  check((y?.cases.filter((c) => !c.informative).length ?? 0) === 12, `YUV: 12 casos de paridade medidos (${y?.cases.length})`, failures)
+  for (const c of y?.cases ?? []) {
+    // paridade: ≤ 2 em todo pixel, ou (exceção do brief) ≤ 2 fora de 1 px das bordas de cor com p99 ≤ 1
+    const parity = c.max !== undefined && (c.max <= 2 || (c.maxOffEdge !== undefined && c.maxOffEdge <= 2 && (c.p99 ?? 99) <= 1))
+    // quadros construídos em que o PRÓPRIO caminho antigo se afasta da conta da matriz (> 2 fora das bordas; medido:
+    // NV12/I420A de CPU no Chromium) — o caminho YUV tem de bater com a conta (≤ 2) e ficar mais perto dela que o antigo
+    const reference = c.refNew !== undefined && c.refOld !== undefined && c.refNew <= 2 && c.refOld > 2
+    const msg = `YUV ${c.name} [${c.format} ${JSON.stringify(c.colorSpace)}]: caminho YUV usado ${c.yuv}; diferença × caminho antigo máx. ${c.max} / p99 ${c.p99} (${c.over} valores > 2), fora das bordas máx. ${c.maxOffEdge} (${c.edgePx} px de borda); × conta de referência: antigo ${c.refOld ?? '-'}, novo ${c.refNew ?? '-'}${reference && !parity ? ' — oráculo: conta de referência (o caminho antigo diverge dela)' : ''}; média do quadro ${c.mean} ${c.error ?? ''}`
+    if (!parity) console.log(`YUV diagnóstico ${c.name}: pior ${JSON.stringify(c.worst)} caixa > 2 ${JSON.stringify(c.box)}`)
+    if (c.informative) console.log(`(informativo) ${msg}`)
+    else check(!c.error && c.yuv === true && (parity || reference) && (c.refNew ?? 0) <= 2 && (c.mean ?? 0) > 10, msg, failures)
+  }
+  const t = y?.timing
+  console.log(`YUV — custo por quadro 1080p I420 (decoder em software, com gl.finish): caminho antigo ${t?.oldMs} ms × novo ${t?.newMs} ms (copyTo ${t?.copyMs} + upload/conversão/desenho ${t?.drawMs}) em ${t?.frames} quadros`)
 }
 
 /** Texto e formas (F5 Task 4): verificações das medidas do textHarness. */

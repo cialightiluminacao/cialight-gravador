@@ -8,7 +8,9 @@
 // text/shapeRaster.ts) na escala da saída, num cache LRU de texturas (RasterCache), desenhados como quad (escala e
 // rotação do transform no quad); holofote = passe que escurece o acumulado fora da forma (EffectPass.dimOutside).
 // F6: realce de cliques e cursor ampliado (MediaLayer.cursor) desenhados junto com a camada, no espaço do conteúdo
-// dela (cursorSprite.ts) — abaixo dos efeitos que a afetam.
+// dela (cursorSprite.ts) — abaixo dos efeitos que a afetam. G1: caminho de upload YUV — quadro declarado em memória
+// de CPU (DrawExtra.cpuFrames, copiado antes por prepareCpuFrames) sobe em planos e é convertido na GPU para a mesma
+// textura RGBA da camada (gl.ts YuvConverter); o resto do pipeline não muda.
 import * as twgl from 'twgl.js'
 import type { CursorOverlay } from '@shared/editor/cursorOverlay'
 import { effectBound, type AnnotationsLayer, type EffectLayer, type Layer, type MediaLayer, type ShapeLayer, type TextLayer, type TransitionLayer } from '@shared/editor/resolve'
@@ -19,7 +21,8 @@ import { cssFont, rasterizeText, textCacheKey } from '../text/textRaster'
 import { parseColor } from './color'
 import { EffectPass } from './effects'
 import { CURSOR_ARROW_BOX, CURSOR_ARROW_HOTSPOT, drawArrowSprite, elementMatrix, type OverlaySpace } from './cursorSprite'
-import { createGl, createTexture, sourceSize, uploadTexture } from './gl'
+import { createGl, createTexture, sourceSize, StagedYuv, uploadTexture, YuvConverter, type YuvPlanes } from './gl'
+import { resolveYuvColor, yuvFormatFor } from './yuv'
 import { TEXTURE_IDLE_FRAMES, TextureCache, type TextureCacheStats } from './textureCache'
 import { anchoredMatrix, applyMat3, layerMatrix, type LayerGeometry, type Mat3, type Rotation } from './matrix'
 import { layerBlurRect } from './effectsMath'
@@ -34,6 +37,12 @@ export interface DrawExtra {
   selectionOutline?: { itemId: string }[]
   /** Por itemId; sem entrada: dimensões da própria fonte, rotação 0 (placeholder: canvas inteiro). */
   meta?: Map<string, SourceMeta>
+  /**
+   * G1: ids (mesmas chaves do mapa de fontes) cujo VideoFrame está em memória de CPU (decoder em software). Com
+   * `prepareCpuFrames(sources, cpuFrames)` chamado antes deste draw, os de formato I420/I420A/NV12 vão pelo caminho
+   * YUV; o resto (ou se a cópia falhou) segue o caminho antigo. Nunca marcar quadro de decoder de hardware (na GPU).
+   */
+  cpuFrames?: ReadonlySet<string>
 }
 
 // Larguras de borda e raios do modelo estão em pixels de um quadro de 1920 de largura (como os traços v1).
@@ -93,7 +102,13 @@ export class Compositor {
   private readonly transition: twgl.ProgramInfo
   private readonly quad: twgl.BufferInfo
   private readonly loop: twgl.BufferInfo
-  private readonly textures: TextureCache<WebGLTexture>
+  private readonly textures: TextureCache<WebGLTexture, YuvPlanes>
+  private readonly yuv: YuvConverter
+  // G1: planos copiados por prepareCpuFrames (por itemId), consumidos (e esquecidos) pelo próximo draw
+  private readonly staged = new Map<string, StagedYuv>()
+  // texturas de camada já convertidas do YUV neste draw (por chave de camada)
+  private readonly yuvReady = new Map<string, WebGLTexture>()
+  private yuvCount = 0
   private readonly effects: EffectPass
   private readonly px1 = new Uint8Array(4)
   private framesWithoutFx = 0
@@ -113,10 +128,12 @@ export class Compositor {
     this.quad = twgl.createBufferInfoFromArrays(gl, { a_pos: { numComponents: 2, data: [0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1] } })
     this.loop = twgl.createBufferInfoFromArrays(gl, { a_pos: { numComponents: 2, data: [0, 0, 1, 0, 1, 1, 0, 1] } })
     this.effects = new EffectPass(gl, this.quad)
-    this.textures = new TextureCache<WebGLTexture>({
+    this.yuv = new YuvConverter(gl, this.quad)
+    this.textures = new TextureCache<WebGLTexture, YuvPlanes>({
       create: () => createTexture(gl),
-      upload: (tex, src, sub) => uploadTexture(gl, tex, src as TexImageSource, sub),
-      delete: (tex) => gl.deleteTexture(tex)
+      upload: (tex, src, sub, slot) => (src instanceof StagedYuv ? this.yuv.convert(tex, sub, src, slot) : uploadTexture(gl, tex, src as TexImageSource, sub)),
+      delete: (tex) => gl.deleteTexture(tex),
+      deleteExtra: (ex) => this.yuv.deletePlanes(ex)
     })
     this.rasters = new RasterCache<RasterEntry>({ onEvict: (e) => gl.deleteTexture(e.tex) })
   }
@@ -127,6 +144,43 @@ export class Compositor {
    */
   get pendingFonts(): readonly FontRequest[] {
     return this.pending
+  }
+
+  /**
+   * G1: copia para a CPU (copyTo do visibleRect, num buffer reaproveitado por camada) os planos dos quadros de
+   * `cpuFrames` que vão pelo caminho YUV; o draw seguinte (com o mesmo `cpuFrames` em DrawExtra) só sobe e converte.
+   * Assíncrono porque o copyTo é; o VideoFrame continua do chamador (fechado por ele depois do draw). Falha num quadro
+   * = caminho antigo nele. Uso: `await comp.prepareCpuFrames(sources, cpu); comp.draw(..., { cpuFrames: cpu })`.
+   */
+  async prepareCpuFrames(sources: Map<string, TexImageSource | VideoFrame | null>, cpuFrames: ReadonlySet<string>): Promise<void> {
+    this.staged.clear()
+    await Promise.all(
+      [...cpuFrames].map(async (id) => {
+        const src = sources.get(id)
+        const format = yuvFormatFor(id, src, cpuFrames)
+        if (!format) return
+        const frame = src as VideoFrame
+        try {
+          const vr = frame.visibleRect
+          const color = resolveYuvColor(frame.colorSpace, frame.codedWidth, frame.codedHeight)
+          if (!vr || !color) return
+          // só o visível: coded 1920×1088 com visível 1080 não vaza a faixa de baixo
+          const rect = { x: vr.x, y: vr.y, width: vr.width, height: vr.height }
+          const size = frame.allocationSize({ rect })
+          let buf = this.textures.peekExtra(`m:${id}`)?.buf ?? null
+          if (!buf || buf.byteLength < size) buf = new Uint8Array(size) // realocado só quando cresce
+          const layout = await frame.copyTo(buf, { rect })
+          this.staged.set(id, new StagedYuv(frame, format, rect.width, rect.height, frame.displayWidth, frame.displayHeight, buf, layout, color))
+        } catch {
+          // copyTo/allocationSize falhou (quadro fechado, formato inesperado…): caminho antigo neste quadro
+        }
+      })
+    )
+  }
+
+  /** Camadas convertidas pelo caminho YUV desde a criação (testes/QA: prova de que o caminho foi usado). */
+  get yuvConversions(): number {
+    return this.yuvCount
   }
 
   resize(w: number, h: number): void {
@@ -147,6 +201,7 @@ export class Compositor {
     if (this.framesWithoutFx === IDLE_RELEASE_FRAMES) this.effects.release()
     const accum = hasFx ? this.effects.accum(W, H) : null
     this.textures.beginFrame()
+    this.convertStaged(sources, extra?.cpuFrames)
     this.bindTarget(accum)
     const [r, g, b] = parseColor(background)
     gl.clearColor(r, g, b, 1)
@@ -175,6 +230,7 @@ export class Compositor {
     this.textures.endFrame()
     // rasterizações com fonte ainda não carregada valem só para este quadro
     for (const t of this.transient.splice(0)) gl.deleteTexture(t)
+    this.yuvReady.clear()
   }
 
   /** Memória em uso (QA/testes): texturas das camadas, do texto/forma e do passe de efeitos. */
@@ -210,6 +266,8 @@ export class Compositor {
   dispose(): void {
     const gl = this.gl
     this.textures.clear()
+    this.staged.clear()
+    this.yuv.dispose()
     this.rasters.clear()
     for (const t of this.transient.splice(0)) gl.deleteTexture(t)
     gl.deleteProgram(this.media.program)
@@ -518,8 +576,33 @@ export class Compositor {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
   }
 
+  /**
+   * G1: antes de ligar qualquer alvo, sobe e converte os planos preparados (prepareCpuFrames) dos quadros deste draw
+   * para as texturas das camadas (`m:<itemId>`, mesmo cache/tamanho do caminho antigo). Só vale o preparado para o
+   * MESMO VideoFrame do mapa de fontes e com o id em `cpuFrames`; falha = caminho antigo no bindSource. Os preparados
+   * são esquecidos aqui (nenhum VideoFrame retido depois do draw).
+   */
+  private convertStaged(sources: Map<string, TexImageSource | VideoFrame | null>, cpuFrames: ReadonlySet<string> | undefined): void {
+    this.yuvReady.clear()
+    if (cpuFrames && this.staged.size) {
+      for (const [id, st] of this.staged) {
+        if (!cpuFrames.has(id) || sources.get(id) !== st.frame) continue
+        const key = `m:${id}`
+        try {
+          this.yuvReady.set(key, this.textures.use(key, st, st.dw, st.dh, false))
+          this.yuvCount++
+        } catch {
+          // caminho antigo no bindSource
+        }
+      }
+    }
+    this.staged.clear()
+  }
+
   /** Textura por chave (cache LRU); ImageBitmap igual ao último enviado não é re-enviado (imagens estáticas). */
   private bindSource(key: string, src: TexImageSource | VideoFrame): WebGLTexture {
+    const ready = this.yuvReady.get(key)
+    if (ready) return ready
     const { w, h } = sourceSize(src)
     return this.textures.use(key, src, w, h, src instanceof ImageBitmap)
   }

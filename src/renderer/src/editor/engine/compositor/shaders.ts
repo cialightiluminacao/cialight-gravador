@@ -138,6 +138,31 @@ void main() {
   }
 }`
 
+// Conversão YUV→RGB do caminho de upload YUV (G1, gl.ts YuvConverter): passada de tela cheia (VS_FULL) sobre a
+// textura RGBA8 da camada; tc pelo centro do pixel do alvo (1 texel de Y por pixel quando os tamanhos coincidem).
+// u_layout 0 = I420/I420A (u_u = U, u_v = V), 1 = NV12 (u_u = UV em RG). Filtro do croma escolhido no upload (gl.ts:
+// LINEAR no I420, NEAREST no NV12/I420A, como o Chromium). Saída com
+// alfa NÃO pré-multiplicado, como o upload do caminho antigo (FS_MEDIA multiplica). u_m/u_off: yuv.ts yuvCoeffs.
+export const FS_YUV = `#version 300 es
+precision highp float;
+uniform sampler2D u_y;
+uniform sampler2D u_u;
+uniform sampler2D u_v;
+uniform sampler2D u_a;
+uniform int u_layout;
+uniform int u_hasAlpha;
+uniform mat3 u_m;
+uniform vec3 u_off;
+uniform vec2 u_dst;
+out vec4 o;
+void main() {
+  vec2 tc = gl_FragCoord.xy / u_dst;
+  float y = texture(u_y, tc).r;
+  vec2 c = u_layout == 1 ? texture(u_u, tc).rg : vec2(texture(u_u, tc).r, texture(u_v, tc).r);
+  vec3 rgb = clamp(u_m * vec3(y, c) + u_off, 0.0, 1.0);
+  o = vec4(rgb, u_hasAlpha == 1 ? texture(u_a, tc).r : 1.0);
+}`
+
 // ---- passe de efeitos (effects.ts) ----
 // Passes de tela cheia: o quad [0,1]² cobre o alvo inteiro e o scissor limita a área processada.
 // Coordenadas por gl_FragCoord (px do alvo, origem embaixo à esquerda); texturas na convenção GL.

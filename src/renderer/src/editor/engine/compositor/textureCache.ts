@@ -5,16 +5,29 @@
 // orçamento, e as sem uso há mais de TEXTURE_IDLE_FRAMES quadros desenhados. As do quadro atual nunca saem (quadro
 // sozinho acima do orçamento conta em overBudgetFrames). O Map fica na ordem do último uso (usar = mover para o
 // fim), então o descarte para na primeira entrada que deve ficar: O(descartadas) por quadro.
+// Recursos extras por entrada (G1: texturas de plano YUV + buffer de CPU do caminho YUV): criados pelo `upload` no slot
+// da entrada, reaproveitados entre quadros, contados em bytes (extraBytes) e liberados junto com a entrada.
 // Sem WebGL aqui (operações injetadas): testável em node.
 
 export const TEXTURE_BUDGET_BYTES = 512 * 2 ** 20
 export const TEXTURE_IDLE_FRAMES = 120
 
-export interface TexOps<T> {
+/** Recursos extras de uma entrada (o `upload` cria/atualiza; `extraBytes` = memória de GPU deles). */
+export interface TexSlot<X> {
+  extra: X | null
+  extraBytes: number
+}
+
+export interface TexOps<T, X = never> {
   create(): T
-  /** Envia `src` à textura; `sub`: mesmas dimensões do envio anterior (texSubImage2D, sem realocar). */
-  upload(tex: T, src: unknown, sub: boolean): void
+  /**
+   * Envia `src` à textura; `sub`: mesmas dimensões do envio anterior (texSubImage2D, sem realocar). `slot`: recursos
+   * extras da entrada (pode criar/trocar `extra` e atualizar `extraBytes`).
+   */
+  upload(tex: T, src: unknown, sub: boolean, slot: TexSlot<X>): void
   delete(tex: T): void
+  /** Libera os recursos extras de uma entrada que sai do cache. */
+  deleteExtra?(extra: X): void
 }
 
 export interface TextureCacheStats {
@@ -24,7 +37,7 @@ export interface TextureCacheStats {
   overBudgetFrames: number
 }
 
-interface Entry<T> {
+interface Entry<T, X> extends TexSlot<X> {
   tex: T
   w: number
   h: number
@@ -33,8 +46,8 @@ interface Entry<T> {
   lastFrame: number
 }
 
-export class TextureCache<T> {
-  private readonly entries = new Map<string, Entry<T>>()
+export class TextureCache<T, X = never> {
+  private readonly entries = new Map<string, Entry<T, X>>()
   private readonly defaultBudget: number
   private readonly idleFrames: number
   private budget: number
@@ -43,7 +56,7 @@ export class TextureCache<T> {
   private evictions = 0
   private overBudgetFrames = 0
 
-  constructor(private readonly ops: TexOps<T>, opts: { budgetBytes?: number; idleFrames?: number } = {}) {
+  constructor(private readonly ops: TexOps<T, X>, opts: { budgetBytes?: number; idleFrames?: number } = {}) {
     this.defaultBudget = opts.budgetBytes ?? TEXTURE_BUDGET_BYTES
     this.budget = this.defaultBudget
     this.idleFrames = opts.idleFrames ?? TEXTURE_IDLE_FRAMES
@@ -65,17 +78,29 @@ export class TextureCache<T> {
       e.lastFrame = this.frame
       if (immutable && e.src === src) return e.tex
       const same = e.w === w && e.h === h
-      this.ops.upload(e.tex, src, same)
+      const extraBefore = e.extraBytes
+      try {
+        this.ops.upload(e.tex, src, same, e)
+      } finally {
+        this.bytes += e.extraBytes - extraBefore
+      }
       if (!same) {
         this.bytes += (w * h - e.w * e.h) * 4
         e.w = w
         e.h = h
       }
     } else {
-      e = { tex: this.ops.create(), w, h, src: null, lastFrame: this.frame }
+      e = { tex: this.ops.create(), w, h, src: null, lastFrame: this.frame, extra: null, extraBytes: 0 }
+      try {
+        this.ops.upload(e.tex, src, false, e)
+      } catch (err) {
+        // sem entrada pela metade: o chamador pode cair no caminho antigo (entrada nova, envio completo)
+        this.ops.delete(e.tex)
+        if (e.extra !== null) this.ops.deleteExtra?.(e.extra)
+        throw err
+      }
       this.entries.set(key, e)
-      this.ops.upload(e.tex, src, false)
-      this.bytes += w * h * 4
+      this.bytes += w * h * 4 + e.extraBytes
     }
     e.src = immutable ? src : null
     return e.tex
@@ -92,6 +117,11 @@ export class TextureCache<T> {
     if (this.bytes > this.budget) this.overBudgetFrames++
   }
 
+  /** Recursos extras da entrada de `key` (sem tocar na ordem de uso); null = sem entrada ou sem extra. */
+  peekExtra(key: string): X | null {
+    return this.entries.get(key)?.extra ?? null
+  }
+
   stats(): TextureCacheStats {
     return { textureBytes: this.bytes, textureCount: this.entries.size, evictions: this.evictions, overBudgetFrames: this.overBudgetFrames }
   }
@@ -105,9 +135,10 @@ export class TextureCache<T> {
     for (const [key, e] of this.entries) this.drop(key, e)
   }
 
-  private drop(key: string, e: Entry<T>): void {
+  private drop(key: string, e: Entry<T, X>): void {
     this.ops.delete(e.tex)
+    if (e.extra !== null) this.ops.deleteExtra?.(e.extra)
     this.entries.delete(key)
-    this.bytes -= e.w * e.h * 4
+    this.bytes -= e.w * e.h * 4 + e.extraBytes
   }
 }

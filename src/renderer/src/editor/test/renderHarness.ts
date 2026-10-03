@@ -19,6 +19,8 @@ import { trackingCheck } from './trackingHarness'
 import { memoryCheck } from './memoryHarness'
 import { transitionCheck } from './transitionHarness'
 import { textCheck } from './textHarness'
+import { yuvCheck } from './yuvHarness'
+import { SPEED_SD_PROJECT_ID } from './speedHarness'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>?out=<pasta>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -106,6 +108,10 @@ export async function runRenderHarness(projectId: string, outDir: string | null 
     report.memory = await memoryCheck()
     report.transition = await transitionCheck(outDir)
     report.text = await textCheck(outDir)
+    // caminho de upload YUV (G1): paridade com o caminho antigo e custo por quadro
+    const exportUrls = mediaUrlsFor(project, 'export')
+    const sdProject = await window.api.project.load(SPEED_SD_PROJECT_ID)
+    report.yuv = await yuvCheck({ hd: exportUrls.a_video?.original, rot: exportUrls.a_rot?.original, sd: mediaUrlsFor(sdProject, 'export').a_sd?.original })
     // por último: decodificação 1080p contínua (a CPU desta máquina estrangula depois de alguns segundos de carga)
     report.speed = await speedCheck()
     ok = true

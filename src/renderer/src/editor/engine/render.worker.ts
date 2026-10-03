@@ -295,6 +295,10 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
   const missing = new Set<string>()
   const missingAnnotations = new Set<string>()
   const frames: VideoFrame[] = []
+  // G1 (caminho de upload YUV): itemIds cujo VideoFrame está em memória de CPU (decoder em software). Vazio por
+  // enquanto — a Task 2 marca aqui os quadros do decoder em software da exportação (cpuFrames.add(layer.itemId)).
+  // NUNCA marcar quadro do decoder de hardware: o NV12 dele está na GPU e o copyTo seria um readback caro.
+  const cpuFrames = new Set<string>()
   // mesmo asset em mais de uma camada no quadro: cada uma com seu slot (iterador próprio), estável entre quadros
   const flat = flatLayers(layers)
   const slots = assignSlots(decodedLayers(p.assets, flat), lastSlots)
@@ -350,7 +354,8 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
       })
     )
     const t0 = timing ? performance.now() : 0
-    comp.draw(layers, sources, p.canvas.background, { meta, annotations: drawAnnotations, selectionOutline: selection.map((itemId) => ({ itemId })) })
+    if (cpuFrames.size) await comp.prepareCpuFrames(sources, cpuFrames)
+    comp.draw(layers, sources, p.canvas.background, { meta, annotations: drawAnnotations, selectionOutline: selection.map((itemId) => ({ itemId })), cpuFrames })
     if (timing) {
       comp.finish()
       timing.drawMs = performance.now() - t0
