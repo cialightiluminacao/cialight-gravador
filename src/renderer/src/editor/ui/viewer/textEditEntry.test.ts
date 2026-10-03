@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { addTrack, addText, updateItem, findItem } from '@shared/editor/ops'
 import { createEmptyProject } from '@shared/editor/factory'
 import type { Project, TextItem } from '@shared/editor/project'
-import { planTextEditEntry } from './textEditEntry'
+import { planTextEditEntry, resolveTextEditRequest } from './textEditEntry'
 
 function base(): { p: Project; a: string; b: string } {
   let p = createEmptyProject('t')
@@ -46,5 +46,35 @@ describe('planTextEditEntry', () => {
     p = t.project
     const r = addText(p, 'caption', 0, { trackId: t.trackId })
     expect(planTextEditEntry(r.project, [r.itemId], 0)).toEqual({ kind: 'edit', itemId: r.itemId })
+  })
+})
+
+describe('resolveTextEditRequest (o pedido de Enter/F2 nunca fica pendente)', () => {
+  const ok = { exists: true, playing: false, playheadInside: true, hasBox: true, tool: null } as const
+  it('tudo certo: abre', () => {
+    expect(resolveTextEditRequest(ok)).toEqual({ kind: 'open' })
+  })
+  it('playhead fora do item depois do seek (seek sem efeito, ex.: narração gravando): descarta com motivo', () => {
+    const r = resolveTextEditRequest({ ...ok, playheadInside: false })
+    expect(r.kind).toBe('drop')
+    expect(r.kind === 'drop' && r.why).toMatch(/narração/)
+  })
+  it('ferramenta ativa (desenhar/zoom/reenquadrar): descarta dizendo qual', () => {
+    expect(resolveTextEditRequest({ ...ok, tool: 'drawing' })).toEqual({ kind: 'drop', why: 'Saia de “Desenhar região” (B) para editar o texto.' })
+    expect(resolveTextEditRequest({ ...ok, tool: 'zooming' })).toEqual({ kind: 'drop', why: 'Saia da ferramenta Zoom (Z) para editar o texto.' })
+    expect(resolveTextEditRequest({ ...ok, tool: 'reframing' })).toEqual({ kind: 'drop', why: 'Feche o reenquadramento para editar o texto.' })
+  })
+  it('sem caixa no quadro, tocando ou texto apagado: descarta', () => {
+    expect(resolveTextEditRequest({ ...ok, hasBox: false })).toEqual({ kind: 'drop', why: 'O texto não aparece no quadro do cursor de reprodução.' })
+    expect(resolveTextEditRequest({ ...ok, playing: true }).kind).toBe('drop')
+    expect(resolveTextEditRequest({ ...ok, exists: false }).kind).toBe('drop')
+  })
+  it('nunca devolve "esperar": toda combinação abre ou descarta', () => {
+    for (const exists of [true, false]) for (const playing of [true, false]) for (const playheadInside of [true, false]) for (const hasBox of [true, false])
+      for (const tool of [null, 'drawing', 'zooming', 'reframing'] as const) {
+        const r = resolveTextEditRequest({ exists, playing, playheadInside, hasBox, tool })
+        expect(r.kind === 'open' ? exists && !playing && playheadInside && hasBox && !tool : true).toBe(true)
+        expect(['open', 'drop']).toContain(r.kind)
+      }
   })
 })

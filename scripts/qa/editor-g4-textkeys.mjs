@@ -321,6 +321,19 @@ async function main() {
     await ev(`T.st().apply((p) => ({ ...p, tracks: p.tracks.map((x) => (x.id === '${tid}' ? { ...x, locked: false } : x)) })); await T.settle(); return 1`)
   }
   await shot('g4-textkeys.png')
+
+  console.log('6. ferramenta do visualizador ativa (Desenhar região): o pedido é descartado com aviso e não fica pendente')
+  {
+    await ev(`const it = T.item('${A}'); await T.seek(it.startUs + 100000); T.st().select(['${A}']); await T.settle(); document.querySelector('button[aria-label^="Desenhar região"]').click(); await T.settle(); await T.wait(300); return document.querySelector('button[aria-label="Sair de Desenhar região"]') ? 1 : 0`)
+    await blurAll()
+    const n0 = (await state(A)).toasts.filter((t) => /Não foi possível editar o texto agora/.test(t)).length
+    await pressKey('F2')
+    const s = await state(A)
+    check('Desenhar região ativo: editor não abre e o aviso "Não foi possível editar o texto agora." aparece', !s.open && s.toasts.filter((t) => /Não foi possível editar o texto agora/.test(t)).length > n0, s)
+    await ev(`document.querySelector('button[aria-label="Sair de Desenhar região"]').click(); await T.settle(); const it = T.item('${A}'); await T.seek(it.startUs + 200000); await T.settle(); await T.wait(300); return 1`)
+    check('saindo da ferramenta, o editor NÃO abre sozinho (nenhum pedido pendente)', !(await state(A)).open)
+  }
+
 }
 
 

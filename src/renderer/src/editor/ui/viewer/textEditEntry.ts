@@ -21,3 +21,34 @@ export function planTextEditEntry(project: Project, selection: readonly string[]
   const inside = playheadUs >= it.startUs && playheadUs < itemEndUs(it)
   return inside ? { kind: 'edit', itemId: it.id } : { kind: 'edit', itemId: it.id, seekUs: it.startUs }
 }
+
+/** Ferramenta do visualizador ativa (as três tomam o clique no quadro e escondem as alças). */
+export type ViewerToolActive = 'drawing' | 'zooming' | 'reframing' | null
+
+export const TEXT_EDIT_FAILED = 'Não foi possível editar o texto agora.'
+
+const TOOL_WHY: Record<Exclude<ViewerToolActive, null>, string> = {
+  drawing: 'Saia de “Desenhar região” (B) para editar o texto.',
+  zooming: 'Saia da ferramenta Zoom (Z) para editar o texto.',
+  reframing: 'Feche o reenquadramento para editar o texto.'
+}
+
+/**
+ * Decisão pura do pedido de Enter/F2 (G4): é resolvido NA HORA — abre ou é descartado com o motivo. Nunca fica
+ * pendente (um pedido velho abriria o editor de texto de surpresa quando o playhead passasse pelo item depois).
+ * `hasBox`: a caixa do texto existe no quadro do playhead (itemBoxes).
+ */
+export function resolveTextEditRequest(s: {
+  exists: boolean
+  playing: boolean
+  playheadInside: boolean
+  hasBox: boolean
+  tool: ViewerToolActive
+}): { kind: 'open' } | { kind: 'drop'; why: string } {
+  if (!s.exists) return { kind: 'drop', why: 'O texto não existe mais.' }
+  if (s.tool) return { kind: 'drop', why: TOOL_WHY[s.tool] }
+  if (s.playing) return { kind: 'drop', why: 'Pause a reprodução para editar o texto.' }
+  if (!s.playheadInside) return { kind: 'drop', why: 'O cursor de reprodução não pôde ir até o texto agora (ex.: durante a gravação de narração).' }
+  if (!s.hasBox) return { kind: 'drop', why: 'O texto não aparece no quadro do cursor de reprodução.' }
+  return { kind: 'open' }
+}

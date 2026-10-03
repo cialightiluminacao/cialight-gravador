@@ -19,6 +19,7 @@ import { startZoomDraw, ZoomRectPreview } from './viewer/ZoomTool'
 import { markFocusPoint, ReframeOverlay } from './viewer/ReframeOverlay'
 import { useReframe } from '../state/reframe'
 import { useTextEditRequest } from '../state/textEditRequest'
+import { resolveTextEditRequest, TEXT_EDIT_FAILED } from './viewer/textEditEntry'
 
 // Manipulação direta no visualizador: clique seleciona (Ctrl/Shift alterna) — regiões de efeito
 // primeiro (ficam sempre "por cima" para seleção), senão a mídia abaixo —, arrastar move; alças do
@@ -67,20 +68,25 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
       toast('A edição do texto foi encerrada: o texto saiu do quadro. O que foi digitado não foi aplicado.')
     }
   }, [editingId, boxes])
-  // Enter/F2 (editorActions.editText): abre a edição assim que a caixa do texto existe no quadro (o playhead pode
-  // ter acabado de andar até ele); se o item não aparece no quadro (ex.: totalmente transparente), o pedido é descartado
+  // Enter/F2 (editorActions.editText): o pedido é resolvido no primeiro ciclo depois dele (o seek já aconteceu, a
+  // caixa do texto já foi medida): abre, ou é descartado com o motivo (resolveTextEditRequest) — nunca fica pendente
   const editRequest = useTextEditRequest((s) => s.itemId)
   useEffect(() => {
-    if (!editRequest || !project || playing) return
+    if (!editRequest || !project) return
+    useTextEditRequest.getState().request(null)
     const found = findItem(project, editRequest)
-    if (!found) return void useTextEditRequest.getState().request(null)
-    if (boxes.some((b) => b.itemId === editRequest)) {
-      useTextEditRequest.getState().request(null)
-      if (!drawing && !zooming && !reframing) setEditingId(editRequest)
-    } else if (playheadUs >= found.item.startUs && playheadUs < found.item.startUs + found.item.durationUs) {
-      useTextEditRequest.getState().request(null)
-    }
+    const r = resolveTextEditRequest({
+      exists: !!found,
+      playing,
+      playheadInside: !!found && playheadUs >= found.item.startUs && playheadUs < found.item.startUs + found.item.durationUs,
+      hasBox: boxes.some((b) => b.itemId === editRequest),
+      tool: drawing ? 'drawing' : zooming ? 'zooming' : reframing ? 'reframing' : null
+    })
+    if (r.kind === 'open') setEditingId(editRequest)
+    else toast(TEXT_EDIT_FAILED, { description: r.why })
   }, [editRequest, project, boxes, playing, playheadUs, drawing, zooming, reframing])
+  // desmontado (editor fechado): nenhum pedido sobra para o próximo projeto
+  useEffect(() => () => useTextEditRequest.getState().request(null), [])
   // saindo da tela no meio de um gesto: cancela; a ferramenta não fica ligada para o próximo projeto
   useEffect(
     () => () => {

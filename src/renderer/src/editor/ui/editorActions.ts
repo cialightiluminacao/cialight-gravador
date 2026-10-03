@@ -14,7 +14,8 @@ import { autoMusicLanding, moveToVoice } from './musicLanding'
 import { narrationActive } from './narrationFlow'
 import { planKeyframePaste } from './keyframePaste'
 import { exportCurrentFrame } from './frameExport'
-import { planTextEditEntry } from './viewer/textEditEntry'
+import { planTextEditEntry, resolveTextEditRequest, TEXT_EDIT_FAILED, type ViewerToolActive } from './viewer/textEditEntry'
+import { useReframe } from '../state/reframe'
 import { useTextEditRequest } from '../state/textEditRequest'
 import { nearestEligibleCut } from './timeline/transitionMath'
 import { formatTransitionDuration, transitionLabel } from './transitionInfo'
@@ -383,7 +384,17 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
       else {
         if (s.playing) playback?.pause()
         if (plan.seekUs !== undefined) seekTo(playback, plan.seekUs)
-        useTextEditRequest.getState().request(plan.itemId)
+        // o que já dá para saber aqui (ferramenta ativa, seek sem efeito): descarta na hora, com o motivo — um pedido
+        // pendente abriria o editor de surpresa mais tarde; a caixa no quadro o ViewerOverlay confere no mesmo ciclo
+        const now = st()
+        const it = findItem(now.project!, plan.itemId)?.item
+        const vt = useViewerTool.getState()
+        const tool: ViewerToolActive = vt.drawing ? 'drawing' : vt.zooming ? 'zooming' : useReframe.getState().open ? 'reframing' : null
+        const pre = resolveTextEditRequest({ exists: !!it, playing: now.playing, playheadInside: !!it && now.playheadUs >= it.startUs && now.playheadUs < itemEndUs(it), hasBox: true, tool })
+        if (pre.kind === 'drop') {
+          useTextEditRequest.getState().request(null)
+          toast(TEXT_EDIT_FAILED, { description: pre.why })
+        } else useTextEditRequest.getState().request(plan.itemId)
       }
       return true
     }
