@@ -19,8 +19,15 @@ import type {
 import type { Asset, Project, Us } from './editor/project'
 import type { CursorTrackV1 } from './cursor'
 import type { AssetToCopy, BrandTemplate } from './editor/brand'
+import type { SensitiveKind } from './editor/sensitive'
+import type { ScanError, ScanProgress, ScanResult } from './editor/sensitiveScan'
 
 export type Unsubscribe = () => void
+
+/** Pedido de varredura de dados sensíveis (ver IpcApi.editor.sensitive). */
+export interface SensitiveScanRequest { filePath: string; fromUs: Us; toUs: Us; kinds?: SensitiveKind[]; customTerms?: string[] }
+export type SensitiveScanProgress = ScanProgress & { scanId: string }
+export interface SensitiveScanDone { scanId: string; result: ScanResult }
 
 /**
  * Saída "bytes → stdin do ffmpeg" da exportação do editor. O renderer descreve O QUE quer; o main valida e
@@ -321,6 +328,20 @@ export interface IpcApi {
      * pendente (transação aberta, autosave) e solta o projeto; o preload responde ao main ao terminar.
      */
     onFlushRequest(cb: () => Promise<void>): Unsubscribe
+    /**
+     * "Procurar dados sensíveis" (G3) num arquivo de ORIGEM: o main lê quadros do trecho [fromUs, toUs] (µs da origem),
+     * faz OCR e devolve ocorrências (caixas normalizadas ao quadro da origem ao longo do tempo). Uma por vez: com outra
+     * rodando, `start` volta com `error.code === 'busy'` (pedido inválido: 'invalid'), e aí não há `onDone`. Senão o
+     * resultado chega UMA vez por `onDone` (cancelado: `result.cancelled`; falha: `result.error`). Privacidade: nada
+     * do texto lido nem os valores cruzam o IPC (só tipo, máscara, confiança, caixas e tempos); `customTerms` (até 50,
+     * com até 100 caracteres) ficam só na memória do main durante a varredura.
+     */
+    sensitive: {
+      start(req: SensitiveScanRequest): Promise<{ scanId: string; error?: ScanError }>
+      cancel(scanId: string): Promise<boolean>
+      onProgress(cb: (p: SensitiveScanProgress) => void): Unsubscribe
+      onDone(cb: (d: SensitiveScanDone) => void): Unsubscribe
+    }
   }
   /**
    * Arquivo da exportação do editor: `open` cria `<pasta>/<nome>.mp4.part` (nome livre: " (2)", " (3)"…;
@@ -504,6 +525,7 @@ export const IPC = {
     done: 'media:done'
   },
   editor: { flush: 'editor:flush', flushed: 'editor:flushed' },
+  editorSensitive: { start: 'editorSensitive:start', cancel: 'editorSensitive:cancel', progress: 'editorSensitive:progress', done: 'editorSensitive:done' },
   editorExport: {
     open: 'editorExport:open',
     write: 'editorExport:write',

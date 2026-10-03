@@ -21,7 +21,7 @@ describe('privacidade: os módulos da varredura não gravam arquivos', () => {
   it('src/main/sensitive/*.ts não usa writeFile/createWriteStream/appendFile', () => {
     const dir = __dirname
     const files = readdirSync(dir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
-    expect(files.length).toBeGreaterThanOrEqual(2)
+    expect(files.length).toBeGreaterThanOrEqual(4)
     for (const f of files) {
       const src = readFileSync(join(dir, f), 'utf8')
       expect(src, f).not.toMatch(/writeFile|createWriteStream|appendFile|mkdtemp|copyFile/)

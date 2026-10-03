@@ -3,6 +3,7 @@ import type { Detection, OcrBox } from './sensitive'
 import {
   applyRefinement,
   boxContains,
+  carryDetections,
   CHANGE_MIN_PIXELS,
   frameChanged,
   groupOccurrences,
@@ -11,6 +12,7 @@ import {
   occurrenceKeys,
   occurrenceRegionAt,
   refinementJobs,
+  regionChanged,
   refineScale,
   refineTimes,
   refineTrack,
@@ -40,24 +42,55 @@ function rng(seed: number): () => number {
   }
 }
 
-describe('frameChanged', () => {
-  const w = 64, h = 32
+describe('frameChanged / regionChanged / carryDetections', () => {
+  const w = 256, h = 128
   const base = new Uint8Array(w * h).fill(200)
-  it('quadro igual ou com ruído fraco do codificador não mudou', () => {
+  it('quadro igual ou com ruído espalhado do codificador (mesmo forte) não mudou', () => {
     expect(frameChanged(base, base.slice(), w, h)).toBe(false)
     const r = rng(1)
-    const noisy = base.map((v) => v + Math.round((r() - 0.5) * 60))
+    const noisy = base.map((v) => v + Math.round((r() - 0.5) * 50)) // |d| ≤ 25: abaixo do nível
     expect(frameChanged(base, noisy, w, h)).toBe(false)
+    // 1 pixel forte a cada 8×8 (≈ 16 por janela de 32×32): o ruído de quadro-chave medido fica abaixo de 17
+    const sparse = base.slice()
+    for (let y = 0; y < h; y += 8) for (let x = 0; x < w; x += 8) sparse[y * w + x] = 40
+    expect(frameChanged(base, sparse, w, h)).toBe(false)
   })
-  it('poucos pixels com diferença forte já contam (texto trocado)', () => {
+  it('mudança concentrada (um dígito trocado) conta, mesmo atravessando blocos', () => {
     const a = base.slice()
-    for (let i = 0; i < CHANGE_MIN_PIXELS - 1; i++) a[i * 7] = 20
-    expect(frameChanged(base, a, w, h)).toBe(false)
-    a[500] = 20
+    // 30 pixels fortes num quadrado 6×5 em cima do canto de 4 blocos de 16 px
+    let n = 0
+    for (let y = 14; y < 19; y++) for (let x = 13; x < 19; x++) { a[y * w + x] = 20; n++ }
+    expect(n).toBe(CHANGE_MIN_PIXELS)
     expect(frameChanged(base, a, w, h)).toBe(true)
+    a[14 * w + 13] = 200
+    expect(frameChanged(base, a, w, h)).toBe(false)
   })
   it('tamanho diferente = mudou', () => {
     expect(frameChanged(base, new Uint8Array(w * h * 2), w, h)).toBe(true)
+  })
+  it('regionChanged olha só a região (com margem); carryDetections mantém o que o OCR perdeu sobre pixels iguais', () => {
+    const a = base.slice()
+    for (let y = 100; y < 110; y++) for (let x = 200; x < 210; x++) a[y * w + x] = 0 // mudança longe
+    const box: OcrBox = { x: 10 / w, y: 10 / h, w: 40 / w, h: 10 / h }
+    expect(regionChanged(base, a, w, h, box)).toBe(false)
+    expect(regionChanged(base, a, w, h, { x: 195 / w, y: 95 / h, w: 20 / w, h: 20 / h })).toBe(true)
+    const p = det(box, 'antigo')
+    // nova leitura perdeu p: fica (região igual)
+    expect(carryDetections([p], [], base, a, w, h)).toEqual([p])
+    // nova leitura achou o mesmo (outro valor, mesma caixa): não duplica
+    const n2 = det({ ...box, x: box.x + 1 / w }, 'lido-diferente')
+    const both = carryDetections([p], [n2], base, a, w, h)
+    expect(both).toHaveLength(1)
+    expect(both[0].value).toBe('lido-diferente')
+    expect(boxContains(both[0].box, p.box) && boxContains(both[0].box, n2.box)).toBe(true)
+    // releitura com caixa menor (palavra partida) sobre pixels iguais: fica a união
+    const part = det({ ...box, w: box.w / 3 }, 'antigo')
+    const [u] = carryDetections([p], [part], base, a, w, h)
+    expect(u.box).toEqual(box)
+    expect(u.value).toBe('antigo')
+    // região mudou: não fica
+    const q = det({ x: 195 / w, y: 95 / h, w: 20 / w, h: 20 / h }, 'q')
+    expect(carryDetections([q], [], base, a, w, h)).toEqual([])
   })
 })
 
@@ -143,6 +176,29 @@ describe('groupOccurrences', () => {
       expect(xs.size).toBe(1)
     }
   })
+  it('rolagem com valor relido diferente: a caixa prevista pelo movimento mantém a ocorrência (e não rouba a do vizinho)', () => {
+    // A sobe 60 px por amostra; B vem 60 px abaixo (ocupa o lugar antigo de A); na 3ª amostra o OCR leu A diferente
+    const vals = ['a', 'a', 'a-lido-errado', 'a', 'a']
+    const samples: ScanSample[] = times(5).map((tUs, i) => ({
+      tUs,
+      detections: [det(px(100, 600 - 60 * i, 150, 14), vals[i]), det(px(100, 660 - 60 * i, 150, 14), 'b')]
+    }))
+    const occ = groupOccurrences(samples, ctx)
+    expect(occ).toHaveLength(2)
+    for (const o of occ) {
+      expect(o.samples).toHaveLength(5)
+      const ys = o.samples.map((s) => Math.round(s.box.y * H))
+      for (let i = 1; i < ys.length; i++) expect(ys[i - 1] - ys[i]).toBe(60)
+    }
+  })
+  it('sem movimento próprio (1ª ligação), o movimento dominante da amostra prevê a caixa', () => {
+    // três valores sobem juntos 60 px; o 3º foi relido diferente já na 2ª amostra
+    const samples: ScanSample[] = [
+      { tUs: 0, detections: [det(px(100, 600, 150, 14), 'a'), det(px(400, 600, 150, 14), 'b'), det(px(700, 600, 150, 14), 'c')] },
+      { tUs: 500_000, detections: [det(px(100, 540, 150, 14), 'a'), det(px(400, 540, 150, 14), 'b'), det(px(700, 540, 150, 14), 'c-relido')] }
+    ]
+    expect(groupOccurrences(samples, ctx)).toHaveLength(3)
+  })
   it('tipos diferentes nunca se juntam; confiança sobe para validated', () => {
     const b = px(100, 100, 150, 14)
     const samples: ScanSample[] = [
@@ -218,6 +274,22 @@ describe('occurrenceKeys / occurrenceRegionAt (oráculo denso, 1/240 s)', () => 
       expect(k.box.x).toBeGreaterThanOrEqual(0)
       expect(k.box.x + k.box.w).toBeLessThanOrEqual(1 + 1e-12)
     }
+  })
+  it('pontas sem refinamento de conteúdo em movimento: a caixa extrapolada até startUs/endUs entra na região', () => {
+    const samples: ScanSample[] = [
+      { tUs: 1_000_000, detections: [det(px(100, 600, 150, 14))] },
+      { tUs: 1_500_000, detections: [det(px(100, 540, 150, 14))] }
+    ]
+    const [o] = groupOccurrences(samples, ctx)
+    expect([o.startUs, o.endUs]).toEqual([500_000, 2_000_000])
+    // antes: o conteúdo estava 60 px mais abaixo; depois: 60 px mais acima
+    expect(boxContains(occurrenceRegionAt(o, 500_000)!, px(100, 660, 150, 14))).toBe(true)
+    expect(boxContains(occurrenceRegionAt(o, 500_000)!, px(100, 600, 150, 14))).toBe(true)
+    expect(boxContains(occurrenceRegionAt(o, 1_500_000)!, px(100, 480, 150, 14))).toBe(true)
+    expect(boxContains(occurrenceRegionAt(o, 2_000_000)!, px(100, 540, 150, 14))).toBe(true)
+    // parado: nada muda (só a margem)
+    const [st] = groupOccurrences([{ tUs: 1_000_000, detections: [det(px(100, 600, 150, 14))] }, { tUs: 1_500_000, detections: [det(px(100, 600, 150, 14))] }], ctx)
+    expect(occurrenceRegionAt(st, 500_000)).toEqual(occurrenceRegionAt(st, 1_500_000))
   })
   it('margem proporcional: 0,15 × altura quando passa de 2 px', () => {
     const b = px(500, 500, 300, 40)

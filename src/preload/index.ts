@@ -101,7 +101,13 @@ const api: IpcApi = {
         void cb()
           .catch(() => {})
           .finally(() => ipcRenderer.send(IPC.editor.flushed, id))
-      })
+      }),
+    sensitive: {
+      start: (req) => ipcRenderer.invoke(IPC.editorSensitive.start, req),
+      cancel: (scanId) => ipcRenderer.invoke(IPC.editorSensitive.cancel, scanId),
+      onProgress: (cb) => on(IPC.editorSensitive.progress, cb),
+      onDone: (cb) => on(IPC.editorSensitive.done, cb)
+    }
   },
   editorExport: {
     open: (outputDir, fileName, opts) => ipcRenderer.invoke(IPC.editorExport.open, outputDir, fileName, opts),

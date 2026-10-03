@@ -110,26 +110,80 @@ function grow(b: OcrBox, mx: number, my: number): OcrBox {
 
 // ---------------------------------------------------------------- detecção de mudança
 
-/** Diferença de cinza que conta como pixel mudado e quantos bastam (um dígito trocado a 12 px muda centenas a 2×). */
-export const CHANGE_LEVEL = 40
-export const CHANGE_MIN_PIXELS = 12
-
 /**
- * O quadro `cur` mudou em relação a `prev` (o último que foi ao OCR)? Conservador: poucos pixels com diferença forte já
- * contam (texto novo ou trocado nunca reaproveita as detecções antigas); o ruído do H.264 em tela parada fica abaixo
- * do nível. Tamanhos diferentes = mudou.
+ * Mudança = pixels com |diferença| > CHANGE_LEVEL CONCENTRADOS: ≥ CHANGE_MIN_PIXELS numa janela 2×2 de blocos de
+ * CHANGE_BLOCK px (da imagem comparada, a ampliada 2×). Medido nos vídeos sintéticos (H.264 crf 20, GOP 2 s): o ruído
+ * de quadro-chave/residual em tela parada é espalhado — no máx. 17 pixels por janela —, enquanto um único dígito
+ * trocado em cinza claro (#9A9A9A sobre branco) a 12 px dá 50 (texto escuro, muito mais). Limiar 30 no meio.
  */
-export function frameChanged(prev: Uint8Array, cur: Uint8Array, w: number, h: number): boolean {
-  const n = w * h
-  if (prev.length < n || cur.length < n || prev.length !== cur.length) return true
-  let count = 0
-  for (let i = 0; i < n; i++) {
-    const d = prev[i] - cur[i]
-    if (d > CHANGE_LEVEL || d < -CHANGE_LEVEL) {
-      if (++count >= CHANGE_MIN_PIXELS) return true
+export const CHANGE_LEVEL = 32
+export const CHANGE_BLOCK = 16
+export const CHANGE_MIN_PIXELS = 30
+
+/** Contagem de pixels mudados por bloco no retângulo [x0,x1)×[y0,y1) e o máximo numa janela 2×2 de blocos. */
+function maxWindowChange(prev: Uint8Array, cur: Uint8Array, w: number, x0: number, y0: number, x1: number, y1: number): number {
+  const B = CHANGE_BLOCK
+  const bw = Math.ceil((x1 - x0) / B), bh = Math.ceil((y1 - y0) / B)
+  const blk = new Uint32Array(bw * bh)
+  for (let y = y0; y < y1; y++) {
+    const row = (((y - y0) / B) | 0) * bw
+    let i = y * w + x0
+    for (let x = x0; x < x1; x++, i++) {
+      const d = prev[i] - cur[i]
+      if (d > CHANGE_LEVEL || d < -CHANGE_LEVEL) blk[row + (((x - x0) / B) | 0)]++
     }
   }
-  return false
+  let m = 0
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      const s = blk[by * bw + bx] + (bx + 1 < bw ? blk[by * bw + bx + 1] : 0) + (by + 1 < bh ? blk[(by + 1) * bw + bx] + (bx + 1 < bw ? blk[(by + 1) * bw + bx + 1] : 0) : 0)
+      if (s > m) m = s
+    }
+  }
+  return m
+}
+
+/**
+ * O quadro `cur` mudou em relação a `prev` (o último que foi ao OCR)? Texto novo ou trocado nunca reaproveita as
+ * detecções antigas; o ruído do H.264 em tela parada não conta. Tamanhos diferentes = mudou.
+ */
+export function frameChanged(prev: Uint8Array, cur: Uint8Array, w: number, h: number): boolean {
+  if (prev.length < w * h || prev.length !== cur.length) return true
+  return maxWindowChange(prev, cur, w, 0, 0, w, h) >= CHANGE_MIN_PIXELS
+}
+
+/** A região `box` (normalizada, crescida pela margem do blur) mudou entre os dois quadros (w×h)? */
+export function regionChanged(prev: Uint8Array, cur: Uint8Array, w: number, h: number, box: OcrBox): boolean {
+  if (prev.length < w * h || prev.length !== cur.length) return true
+  const m = Math.max(MARGIN_MIN_PX * 2, MARGIN_FRAC * box.h * h)
+  const x0 = Math.max(0, Math.floor(box.x * w - m)), y0 = Math.max(0, Math.floor(box.y * h - m))
+  const x1 = Math.min(w, Math.ceil((box.x + box.w) * w + m)), y1 = Math.min(h, Math.ceil((box.y + box.h) * h + m))
+  if (x1 <= x0 || y1 <= y0) return false
+  return maxWindowChange(prev, cur, w, x0, y0, x1, y1) >= CHANGE_MIN_PIXELS
+}
+
+/**
+ * União entre leituras (spike §7.3): detecções da leitura anterior que a nova leitura do OCR perdeu (nenhuma do mesmo
+ * tipo com o mesmo valor ou IoU ≥ 0,3) continuam valendo se os pixels da região delas não mudaram entre os dois quadros —
+ * o mesmo conteúdo continua lá e o OCR só oscilou. E uma releitura que achou o mesmo dado com caixa MENOR (palavra
+ * partida, caractere perdido) sobre pixels iguais fica com a união das duas caixas: a cobertura nunca encolhe porque
+ * outra parte da tela mudou. Devolve as novas (talvez ampliadas) + as mantidas.
+ */
+export function carryDetections(prev: readonly Detection[], next: readonly Detection[], prevFrame: Uint8Array, curFrame: Uint8Array, w: number, h: number): Detection[] {
+  const same = (n: Detection, p: Detection): boolean => n.kind === p.kind && (n.value === p.value || iou(n.box, p.box) >= GROUP_MIN_IOU)
+  const unchanged = new Map<Detection, boolean>()
+  const still = (p: Detection): boolean => {
+    let u = unchanged.get(p)
+    if (u === undefined) unchanged.set(p, (u = !regionChanged(prevFrame, curFrame, w, h, p.box)))
+    return u
+  }
+  const out = next.map((n) => {
+    let box = n.box
+    for (const p of prev) if (same(n, p) && !boxContains(box, p.box) && still(p)) box = unionBox(box, p.box)
+    return box === n.box ? n : { ...n, box }
+  })
+  for (const p of prev) if (!next.some((n) => same(n, p)) && still(p)) out.push(p)
+  return out
 }
 
 // ---------------------------------------------------------------- linhas do OCR → OcrLine normalizadas
@@ -207,6 +261,8 @@ interface Run {
   samples: OccurrenceSample[]
   lastIdx: number
   lastBox: OcrBox
+  /** Movimento do centro (normalizado por µs) entre as duas últimas detecções; null = só uma até agora. */
+  vel: { x: number; y: number } | null
   firstSeen: Us
   lastSeen: Us
 }
@@ -218,24 +274,42 @@ const centre = (b: OcrBox): { x: number; y: number } => ({ x: b.x + b.w / 2, y: 
  * a detecção do mesmo tipo com o mesmo valor (só em memória; não sai daqui) ou com IoU ≥ 0,3 com a última caixa; uma
  * amostra sem ela é ponte (falha do OCR: a caixa na falha é a união das vizinhas); duas seguidas encerram. Cada
  * ocorrência pega no máximo uma detecção por amostra (maior pontuação: mesmo valor + IoU; empate, a mais perto).
+ * Movimento (rolagem): a IoU também é medida contra a caixa PREVISTA — a última deslocada pelo movimento da própria
+ * ocorrência ou, sem ele (só uma detecção até agora), pelo movimento dominante da amostra (mediana dos pares com o
+ * mesmo valor). Sem isso, um valor relido diferente numa tela rolando quebraria a ocorrência em duas, e o intervalo
+ * entre elas ficaria só com as pontas paradas.
  */
 export function groupOccurrences(samples: readonly ScanSample[], ctx: GroupCtx): Occurrence[] {
   const interval = ctx.intervalUs ?? SAMPLE_INTERVAL_US
   const runs: Run[] = []
   let active: Run[] = []
+  const shift = (b: OcrBox, v: { x: number; y: number }, dt: number): OcrBox => ({ ...b, x: b.x + v.x * dt, y: b.y + v.y * dt })
+  const median = (xs: number[]): number => { const a = [...xs].sort((p, q) => p - q); return a[a.length >> 1] }
   for (let i = 0; i < samples.length; i++) {
     const s = samples[i]
     active = active.filter((r) => r.lastIdx >= i - 2)
     const dets = s.detections.map((d) => ({ ...d, box: clampBox(d.box) }))
+    // movimento dominante: pares (ocorrência da amostra anterior, detecção) com o mesmo valor, sem ambiguidade
+    const vx: number[] = [], vy: number[] = []
+    for (const r of active) {
+      if (r.lastIdx !== i - 1) continue
+      const m = dets.filter((d) => d.kind === r.kind && r.values.has(d.value))
+      if (m.length !== 1) continue
+      const a = centre(r.lastBox), b = centre(m[0].box), dt = s.tUs - r.lastSeen
+      if (dt > 0) { vx.push((b.x - a.x) / dt); vy.push((b.y - a.y) / dt) }
+    }
+    const global = vx.length >= 2 ? { x: median(vx), y: median(vy) } : null
     const pairs: { r: Run; j: number; score: number; dist: number }[] = []
     for (const r of active) {
+      const v = r.vel ?? global
+      const pred = v ? shift(r.lastBox, v, s.tUs - r.lastSeen) : r.lastBox
       for (let j = 0; j < dets.length; j++) {
         const d = dets[j]
         if (d.kind !== r.kind) continue
         const same = r.values.has(d.value)
-        const o = iou(r.lastBox, d.box)
+        const o = Math.max(iou(r.lastBox, d.box), iou(pred, d.box))
         if (!same && o < GROUP_MIN_IOU) continue
-        const a = centre(r.lastBox), b = centre(d.box)
+        const a = centre(pred), b = centre(d.box)
         pairs.push({ r, j, score: (same ? 1 : 0) + o, dist: Math.hypot((a.x - b.x) * ctx.sourceW, (a.y - b.y) * ctx.sourceH) })
       }
     }
@@ -249,12 +323,14 @@ export function groupOccurrences(samples: readonly ScanSample[], ctx: GroupCtx):
       r.samples.push({ tUs: s.tUs, box: d.box, src: 'ocr' })
       r.values.add(d.value)
       if (d.confidence === 'validated' && r.confidence !== 'validated') { r.confidence = 'validated'; r.masked = d.masked }
+      const a = centre(r.lastBox), b = centre(d.box), dt = s.tUs - r.lastSeen
+      if (dt > 0) r.vel = { x: (b.x - a.x) / dt, y: (b.y - a.y) / dt }
       r.lastIdx = i; r.lastBox = d.box; r.lastSeen = s.tUs
     }
     for (let j = 0; j < dets.length; j++) {
       if (usedDet.has(j)) continue
       const d = dets[j]
-      const r: Run = { kind: d.kind, values: new Set([d.value]), masked: d.masked, confidence: d.confidence, samples: [{ tUs: s.tUs, box: d.box, src: 'ocr' }], lastIdx: i, lastBox: d.box, firstSeen: s.tUs, lastSeen: s.tUs }
+      const r: Run = { kind: d.kind, values: new Set([d.value]), masked: d.masked, confidence: d.confidence, samples: [{ tUs: s.tUs, box: d.box, src: 'ocr' }], lastIdx: i, lastBox: d.box, vel: null, firstSeen: s.tUs, lastSeen: s.tUs }
       runs.push(r)
       active.push(r)
     }
@@ -293,6 +369,8 @@ function grownSpan(occ: Occurrence, a: OcrBox, b: OcrBox): OcrBox {
 /**
  * Keys de degrau da região (usadas tal como estão pelo efeito): pré-rolagem [startUs, 1ª amostra) com a 1ª caixa; em
  * cada [s_i, s_{i+1}) a caixa que contém as duas, crescida pela margem; pós-rolagem [última, endUs] com a última.
+ * Pontas sem refinamento de um conteúdo que se move: a caixa da ponta é unida à dela EXTRAPOLADA pelo movimento entre
+ * as duas amostras da ponta até startUs/endUs (rolagem: o conteúdo estava/vai estar mais abaixo/acima) — só cresce.
  */
 export function occurrenceKeys(occ: Occurrence): RegionKey[] {
   // amostras no mesmo instante (não deveria haver, mas a região nunca perde uma delas): uma só, com a união
@@ -303,11 +381,26 @@ export function occurrenceKeys(occ: Occurrence): RegionKey[] {
     else s.push({ tUs: x.tUs, box: x.box })
   }
   if (s.length === 0) return []
+  const n = s.length
+  /** A caixa de `from` deslocada pelo movimento entre `other` e `from`, até o instante `toUs`. */
+  const extrapolate = (from: { tUs: Us; box: OcrBox }, other: { tUs: Us; box: OcrBox }, toUs: Us): OcrBox => {
+    const span = from.tUs - other.tUs
+    if (span === 0) return from.box
+    const cf = centre(from.box), co = centre(other.box), dt = toUs - from.tUs
+    return { ...from.box, x: from.box.x + ((cf.x - co.x) / span) * dt, y: from.box.y + ((cf.y - co.y) / span) * dt }
+  }
   const keys: RegionKey[] = []
-  if (occ.startUs < s[0].tUs) keys.push({ tUs: occ.startUs, box: grownSpan(occ, s[0].box, s[0].box) })
-  for (let i = 0; i < s.length; i++) {
-    const next = s[i + 1] ?? s[i]
-    keys.push({ tUs: s[i].tUs, box: grownSpan(occ, s[i].box, next.box) })
+  if (occ.startUs < s[0].tUs) {
+    const ext = n > 1 ? extrapolate(s[0], s[1], occ.startUs) : s[0].box
+    keys.push({ tUs: occ.startUs, box: grownSpan(occ, s[0].box, ext) })
+  }
+  for (let i = 0; i < n; i++) {
+    const next = s[i + 1]
+    if (next) keys.push({ tUs: s[i].tUs, box: grownSpan(occ, s[i].box, next.box) })
+    else {
+      const ext = n > 1 ? extrapolate(s[i], s[i - 1], occ.endUs) : s[i].box
+      keys.push({ tUs: s[i].tUs, box: grownSpan(occ, s[i].box, ext) })
+    }
   }
   return keys
 }

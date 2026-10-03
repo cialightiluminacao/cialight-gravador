@@ -26,7 +26,9 @@ import { applyHotkeys, getHotkeyStatus } from './hotkeys/globalShortcuts'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { encoderFallbackChain } from '@shared/encoderCache'
 import type { AudioProcessOpts } from '@shared/editor/audioProcess'
-import { rnnoiseDir } from './export/ffmpegPath'
+import { ffmpegPath, ocrScriptPath, rnnoiseDir } from './export/ffmpegPath'
+import { runScan } from './sensitive/scan'
+import { SensitiveScans } from './sensitive/scanManager'
 import { MissingModelError, missingModelMessage } from './media/audioProcess'
 import { buildReviewAssets } from './export/reviewAssets'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -640,6 +642,30 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     e.preventDefault()
     void editorExports.cancelOwnedBy(null).finally(() => app.quit())
   })
+
+  // ---- dados sensíveis (G3): OCR no main; o renderer só recebe tipo, máscara, confiança, caixas e tempos ----
+  const sensitiveScans = new SensitiveScans(
+    (req, opts) => runScan(req, { ffmpeg: ffmpegPath(), helperScript: ocrScriptPath(), probe, log }, opts),
+    (p) => {
+      try {
+        return statSync(p).isFile()
+      } catch {
+        return false
+      }
+    }
+  )
+  ipcMain.handle(IPC.editorSensitive.start, (e, req: unknown) => {
+    const wc = e.sender
+    const send = (channel: string, payload: unknown): void => {
+      if (!wc.isDestroyed()) wc.send(channel, payload)
+    }
+    const r = sensitiveScans.start(req, { progress: (p) => send(IPC.editorSensitive.progress, p), done: (d) => send(IPC.editorSensitive.done, d) })
+    // janela fechada no meio: a varredura (e os processos dela) acaba junto
+    if (!r.error) wc.once('destroyed', () => sensitiveScans.cancel(r.scanId))
+    return r
+  })
+  ipcMain.handle(IPC.editorSensitive.cancel, (_e, scanId: unknown) => typeof scanId === 'string' && sensitiveScans.cancel(scanId))
+  app.on('will-quit', () => sensitiveScans.cancelAll())
 
   // ---- export ----
   ipcMain.handle(IPC.export.run, (_e, req: ExportRequest) => {
