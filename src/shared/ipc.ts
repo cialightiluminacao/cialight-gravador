@@ -25,7 +25,11 @@ import type { ScanError, ScanProgress, ScanResult } from './editor/sensitiveScan
 export type Unsubscribe = () => void
 
 /** Pedido de varredura de dados sensíveis (ver IpcApi.editor.sensitive). */
-export interface SensitiveScanRequest { filePath: string; fromUs: Us; toUs: Us; kinds?: SensitiveKind[]; customTerms?: string[] }
+export interface SensitiveScanRequest {
+  filePath: string; fromUs: Us; toUs: Us; kinds?: SensitiveKind[]; customTerms?: string[]
+  /** Faixa de vídeo do arquivo (0:v:N; `asset.videoTrackIndex` — rec.mp4 da sessão: tela 0, webcam 1). Ausente = 0. */
+  videoStreamIndex?: number
+}
 export type SensitiveScanProgress = ScanProgress & { scanId: string }
 export interface SensitiveScanDone { scanId: string; result: ScanResult }
 

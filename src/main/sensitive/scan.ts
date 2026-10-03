@@ -42,6 +42,8 @@ export interface ScanRequest {
   toUs: Us
   kinds?: SensitiveKind[]
   customTerms?: string[]
+  /** Faixa de vídeo do arquivo (0:v:N; ruling R23 — rec.mp4 da sessão: tela 0, webcam 1). Ausente = 0. */
+  videoStreamIndex?: number
 }
 
 export interface ScanLog {
@@ -52,8 +54,8 @@ export interface ScanLog {
 export interface ScanDeps {
   ffmpeg: string
   helperScript: string
-  /** Dimensões (codificadas) + giro de exibição + duração (src/main/media/probe.ts). */
-  probe: (file: string) => Promise<{ video?: { width: number; height: number; rotation?: number }; durationUs: number | null }>
+  /** Dimensões (codificadas) + giro de exibição + duração da faixa de vídeo `videoStreamIndex` (0:v:N; padrão 0). */
+  probe: (file: string, videoStreamIndex?: number) => Promise<{ video?: { width: number; height: number; rotation?: number }; durationUs: number | null }>
   log?: ScanLog
   /** Força o idioma do OCR (testes). */
   helperLang?: string
@@ -141,7 +143,7 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
     // ---- origem
     let W = 0, H = 0, toUs = req.toUs
     try {
-      const info = await deps.probe(req.filePath)
+      const info = await deps.probe(req.filePath, req.videoStreamIndex ?? 0)
       const v = info.video
       if (!v || !(v.width > 0) || !(v.height > 0)) return finish({ error: { code: 'invalid', message: SCAN_MESSAGES.noVideo } })
       const rot = v.rotation ?? 0
@@ -156,7 +158,7 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
     if (signal?.aborted) return finish({ cancelled: true })
     const total = frameCountFor(fromUs, toUs, SAMPLE_FPS, false)
     progress({ phase: 'amostrando', done: 0, total })
-    stream = sampleFrames({ ffmpeg: deps.ffmpeg, file: req.filePath, fromUs, toUs, sourceW: W, sourceH: H, fps: SAMPLE_FPS, upscale: OCR_UPSCALE, onSpawn: (pid) => deps.onSpawn?.(pid, 'ffmpeg') })
+    stream = sampleFrames({ ffmpeg: deps.ffmpeg, file: req.filePath, fromUs, toUs, sourceW: W, sourceH: H, fps: SAMPLE_FPS, upscale: OCR_UPSCALE, stream: req.videoStreamIndex ?? 0, onSpawn: (pid) => deps.onSpawn?.(pid, 'ffmpeg') })
 
     // cancelar durante a partida não espera o helper responder
     let onAbortStart: (() => void) | null = null
@@ -241,7 +243,7 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
 
     // ---- ocorrências + refinamento
     occurrences = groupOccurrences(samples, groupCtx)
-    const refined = await refine(occurrences, { deps, file: req.filePath, W, H, rangeUs: toUs - fromUs, samplingMs, signal, progress, setSub: (s) => (live.sub = s) })
+    const refined = await refine(occurrences, { deps, file: req.filePath, stream: req.videoStreamIndex ?? 0, W, H, rangeUs: toUs - fromUs, samplingMs, signal, progress, setSub: (s) => (live.sub = s) })
     occurrences = refined.occurrences
     refineCapped = refined.capped
     timings.refineMs = Math.round(performance.now() - t0 - samplingMs)
@@ -272,6 +274,7 @@ async function ocrFrame(h: OcrHelper, f: RawFrame): Promise<OcrLine[]> {
 interface RefineCtx {
   deps: ScanDeps
   file: string
+  stream: number
   W: number
   H: number
   rangeUs: Us
@@ -348,7 +351,7 @@ async function refine(occs: Occurrence[], c: RefineCtx): Promise<{ occurrences: 
     const boxes = run.wins.flatMap((w) => w.jobs.map((j) => j.anchorBox))
     const s = refineScale(c.W, c.H, boxes)
     const aw = Math.max(1, Math.round(c.W * s)), ah = Math.max(1, Math.round(c.H * s))
-    const st = subFrames({ ffmpeg: c.deps.ffmpeg, file: c.file, fromUs: run.fromUs, toUs: run.toUs, w: aw, h: ah, fps: REFINE_FPS, onSpawn: (pid) => c.deps.onSpawn?.(pid, 'ffmpeg') })
+    const st = subFrames({ ffmpeg: c.deps.ffmpeg, file: c.file, fromUs: run.fromUs, toUs: run.toUs, w: aw, h: ah, fps: REFINE_FPS, stream: c.stream, onSpawn: (pid) => c.deps.onSpawn?.(pid, 'ffmpeg') })
     c.setSub(st)
     const buffers = new Map<Window, { tUs: Us; img: GrayImage }[]>()
     const pending = new Set(run.wins)

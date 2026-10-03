@@ -39,7 +39,12 @@ export function validateScanRequest(raw: unknown, isFile: (p: string) => boolean
     }
     customTerms = [...(t as string[])]
   }
-  return { ok: true, req: { filePath, fromUs: Math.round(fromUs), toUs: Math.round(toUs), ...(kinds ? { kinds } : {}), ...(customTerms ? { customTerms } : {}) } }
+  const vsi = r.videoStreamIndex
+  if (vsi !== undefined && (typeof vsi !== 'number' || !Number.isInteger(vsi) || vsi < 0 || vsi > 63)) return { ok: false, error: invalid('faixa de vídeo') }
+  return {
+    ok: true,
+    req: { filePath, fromUs: Math.round(fromUs), toUs: Math.round(toUs), ...(kinds ? { kinds } : {}), ...(customTerms ? { customTerms } : {}), ...(vsi !== undefined ? { videoStreamIndex: vsi } : {}) }
+  }
 }
 
 export interface ScanSink {

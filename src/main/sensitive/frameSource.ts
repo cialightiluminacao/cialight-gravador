@@ -23,6 +23,8 @@ export interface FrameStreamOpts {
   scale: string
   /** Inclui o quadro em toUs (sub-quadros do refinamento) ou não (amostragem: [fromUs, toUs)). */
   inclusiveEnd: boolean
+  /** Faixa de vídeo do arquivo (0:v:N; rec.mp4 da sessão: tela 0, webcam 1 — ruling R23). Padrão 0. */
+  stream?: number
   onSpawn?: (pid: number) => void
 }
 
@@ -46,13 +48,20 @@ export function frameCountFor(fromUs: Us, toUs: Us, fps: number, inclusiveEnd: b
   return inclusiveEnd ? n + 1 : Math.max(0, Math.ceil(span / step - 1e-9))
 }
 
+/** Argumentos do ffmpeg do trecho (puro: testado). */
+export function frameStreamArgs(o: Omit<FrameStreamOpts, 'ffmpeg' | 'onSpawn' | 'w' | 'h'>): string[] {
+  const stepUs = 1_000_000 / o.fps
+  // meio passo a mais: o quadro em toUs (inclusivo) sai; sem ele, o último fica antes de toUs
+  const durUs = (o.toUs - o.fromUs) + (o.inclusiveEnd ? stepUs / 2 : 0)
+  const stream = Number.isInteger(o.stream) && o.stream! >= 0 ? o.stream! : 0
+  return ['-hide_banner', '-nostdin', '-loglevel', 'error', '-ss', sec(o.fromUs), '-i', o.file, '-t', sec(Math.max(1, Math.round(durUs))),
+    '-an', '-sn', '-dn', '-map', `0:v:${stream}`, '-vf', `fps=${o.fps}:round=up,${o.scale},format=gray`, '-f', 'rawvideo', '-pix_fmt', 'gray', '-']
+}
+
 export function frameStream(o: FrameStreamOpts): FrameStream {
   const stepUs = 1_000_000 / o.fps
   const total = frameCountFor(o.fromUs, o.toUs, o.fps, o.inclusiveEnd)
-  // meio passo a mais: o quadro em toUs (inclusivo) sai; sem ele, o último fica antes de toUs
-  const durUs = (o.toUs - o.fromUs) + (o.inclusiveEnd ? stepUs / 2 : 0)
-  const args = ['-hide_banner', '-nostdin', '-loglevel', 'error', '-ss', sec(o.fromUs), '-i', o.file, '-t', sec(Math.max(1, Math.round(durUs))),
-    '-an', '-sn', '-dn', '-map', '0:v:0', '-vf', `fps=${o.fps}:round=up,${o.scale},format=gray`, '-f', 'rawvideo', '-pix_fmt', 'gray', '-']
+  const args = frameStreamArgs(o)
   const child: ChildProcess = spawn(o.ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   if (child.pid !== undefined) o.onSpawn?.(child.pid)
   let killed = false
@@ -114,12 +123,12 @@ export function frameStream(o: FrameStreamOpts): FrameStream {
 }
 
 /** Amostragem do OCR: 2 qps, ampliado 2× (lanczos), cinza; [fromUs, toUs). */
-export function sampleFrames(o: { ffmpeg: string; file: string; fromUs: Us; toUs: Us; sourceW: number; sourceH: number; fps: number; upscale: number; onSpawn?: (pid: number) => void }): FrameStream {
+export function sampleFrames(o: { ffmpeg: string; file: string; fromUs: Us; toUs: Us; sourceW: number; sourceH: number; fps: number; upscale: number; stream?: number; onSpawn?: (pid: number) => void }): FrameStream {
   const w = o.sourceW * o.upscale, h = o.sourceH * o.upscale
-  return frameStream({ ffmpeg: o.ffmpeg, file: o.file, fromUs: o.fromUs, toUs: o.toUs, fps: o.fps, w, h, scale: `scale=${w}:${h}:flags=lanczos`, inclusiveEnd: false, onSpawn: o.onSpawn })
+  return frameStream({ ffmpeg: o.ffmpeg, file: o.file, fromUs: o.fromUs, toUs: o.toUs, fps: o.fps, w, h, scale: `scale=${w}:${h}:flags=lanczos`, inclusiveEnd: false, stream: o.stream, onSpawn: o.onSpawn })
 }
 
 /** Sub-quadros do refinamento (10 qps) no tamanho da análise; [fromUs, toUs] inclusive. */
-export function subFrames(o: { ffmpeg: string; file: string; fromUs: Us; toUs: Us; w: number; h: number; fps: number; onSpawn?: (pid: number) => void }): FrameStream {
-  return frameStream({ ffmpeg: o.ffmpeg, file: o.file, fromUs: o.fromUs, toUs: o.toUs, fps: o.fps, w: o.w, h: o.h, scale: `scale=${o.w}:${o.h}:flags=area`, inclusiveEnd: true, onSpawn: o.onSpawn })
+export function subFrames(o: { ffmpeg: string; file: string; fromUs: Us; toUs: Us; w: number; h: number; fps: number; stream?: number; onSpawn?: (pid: number) => void }): FrameStream {
+  return frameStream({ ffmpeg: o.ffmpeg, file: o.file, fromUs: o.fromUs, toUs: o.toUs, fps: o.fps, w: o.w, h: o.h, scale: `scale=${o.w}:${o.h}:flags=area`, inclusiveEnd: true, stream: o.stream, onSpawn: o.onSpawn })
 }

@@ -26,7 +26,11 @@ describe('validateScanRequest', () => {
     ['tipo desconhecido', { ...ok, kinds: ['cpf', 'senha'] }],
     ['termos demais', { ...ok, customTerms: Array.from({ length: MAX_CUSTOM_TERMS + 1 }, (_, i) => `t${i}`) }],
     ['termo longo demais', { ...ok, customTerms: ['x'.repeat(101)] }],
-    ['termo não-texto', { ...ok, customTerms: [42] }]
+    ['termo não-texto', { ...ok, customTerms: [42] }],
+    ['faixa de vídeo negativa', { ...ok, videoStreamIndex: -1 }],
+    ['faixa de vídeo fracionária', { ...ok, videoStreamIndex: 1.5 }],
+    ['faixa de vídeo em texto', { ...ok, videoStreamIndex: '1' }],
+    ['faixa de vídeo absurda', { ...ok, videoStreamIndex: 64 }]
   ])('recusa: %s', (_n, raw) => {
     const v = validateScanRequest(raw, isFile)
     expect(v.ok).toBe(false)
@@ -34,6 +38,11 @@ describe('validateScanRequest', () => {
       expect(v.error.code).toBe('invalid')
       expect(v.error.message).toMatch(/^Pedido de busca de dados sensíveis inválido/)
     }
+  })
+  it('videoStreamIndex inteiro ≥ 0 passa adiante (ruling R23); ausente fica ausente', () => {
+    expect(validateScanRequest({ ...ok, videoStreamIndex: 1 }, isFile)).toEqual({ ok: true, req: { ...ok, videoStreamIndex: 1 } })
+    expect(validateScanRequest({ ...ok, videoStreamIndex: 0 }, isFile)).toEqual({ ok: true, req: { ...ok, videoStreamIndex: 0 } })
+    expect(validateScanRequest(ok, isFile)).toEqual({ ok: true, req: ok })
   })
   it('50 termos de 100 caracteres passam', () => {
     expect(validateScanRequest({ ...ok, customTerms: Array.from({ length: 50 }, () => 'y'.repeat(100)) }, isFile).ok).toBe(true)
