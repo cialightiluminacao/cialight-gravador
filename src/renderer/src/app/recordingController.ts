@@ -4,6 +4,10 @@ import { MIN_FREE_SPACE_MB } from '@shared/defaults'
 import { RecordingEngine, type PreparedStreams } from '../engine/RecordingEngine'
 import { buildRecordingConfig, useAppStore } from './store'
 import { toast } from 'sonner'
+import { exportQueue } from '@/editor/export/exportQueueStore'
+import { requestLeaveEditor } from '@/editor/ui/ExportQueuePanel'
+import { leaveEditorNow } from '@/editor/ui/editorLeave'
+import { decideRecordHotkey } from './recordHotkeyGuard'
 
 // Orquestra o fluxo de gravação no renderer: prepara → contagem → grava → para → revisão.
 // Fonte de verdade da fase (espelhada no main via api.recording.setPhase).
@@ -373,6 +377,14 @@ export function handleCommand(cmd: RecorderCommand): void {
   switch (cmd) {
     case 'toggleRecord': {
       if (st.phase === 'idle' || st.phase === 'review') {
+        // exportações do editor na fila: o atalho tira o usuário do editor, então pergunta como os outros caminhos de saída
+        // (confirmado: interrompe a fila — fica salva —, sai do editor e só então grava; cancelar: nada muda, nada grava)
+        if (decideRecordHotkey({ screen: st.screen, editorProjectId: st.editorProjectId, queueActive: exportQueue.active() }) === 'confirm-leave') {
+          const cfg = buildConfigFromStore()
+          if (!cfg) toast.error('Escolha uma fonte de gravação primeiro.')
+          else requestLeaveEditor(() => void leaveEditorNow().then(() => startRecording(cfg)))
+          break
+        }
         const cfg = st.screen === 'prepare' || st.screen === 'review' || st.screen === 'history' || st.screen === 'settings' ? buildConfigFromStore() : null
         if (cfg) void startRecording(cfg)
         else if (st.screen === 'editor' || st.screen === 'projects') toast.error(st.screen === 'editor' ? 'Saia do editor para gravar.' : 'Volte à tela de gravação para começar a gravar.')

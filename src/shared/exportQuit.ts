@@ -10,9 +10,9 @@ export interface ExportCounts {
 
 const exportacoes = (n: number): string => `${n} ${n === 1 ? 'exportação' : 'exportações'}`
 
-/** "Há 1 exportação em andamento e 2 na fila." + "Sair cancela todas (a fila não é salva)." */
+/** "Há 1 exportação em andamento e 2 na fila." + "Sair interrompe as exportações; elas ficam salvas e você pode retomá-las depois." */
 export function exportQuitText(c: ExportCounts): { message: string; detail: string } {
-  if (c.pending <= 0) return { message: `Há ${exportacoes(Math.max(1, c.running))} em andamento.`, detail: 'Sair cancela a exportação e apaga o arquivo parcial.' }
+  if (c.pending <= 0) return { message: `Há ${exportacoes(Math.max(1, c.running))} em andamento.`, detail: 'Sair interrompe a exportação; ela fica salva e você pode retomá-la depois.' }
   const message = c.running > 0 ? `Há ${exportacoes(c.running)} em andamento e ${c.pending} na fila.` : `Há ${exportacoes(c.pending)} na fila.`
-  return { message, detail: 'Sair cancela todas (a fila não é salva).' }
+  return { message, detail: 'Sair interrompe as exportações; elas ficam salvas e você pode retomá-las depois.' }
 }

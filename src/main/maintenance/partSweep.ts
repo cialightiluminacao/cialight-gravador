@@ -62,3 +62,42 @@ export async function sweepStaleParts(targets: SweepTarget[], opts: { now?: () =
   }
   return removed
 }
+
+const MEDIA_EXT_END = /\.(mp4|mov|m4v|mkv|webm|gif|png|mp3|wav|m4a)$/i
+const NUMBER_SUFFIX = /^( \(\d+\))?\./
+
+/**
+ * Parciais de exportação (`<nome>[ (n)].<ext>.part` e os temporários do GIF/x264) que pertencem a uma saída pedida
+ * como `fileName` (com ou sem extensão). Só estes nomes: nada além do que aquela exportação gera.
+ */
+export function exportPartsFor(names: readonly string[], fileName: string): string[] {
+  const stem = fileName.trim().replace(MEDIA_EXT_END, '')
+  if (!stem) return []
+  return names.filter((n) => isExportPart(n) && n.startsWith(stem) && NUMBER_SUFFIX.test(n.slice(stem.length)))
+}
+
+/** Apaga os parciais antigos das saídas dos itens da fila salva (pasta ausente/ilegível → nada). Devolve os apagados. */
+export async function removeItemParts(items: readonly { outputDir: string; fileName: string }[], log?: { warn: (...a: unknown[]) => void }): Promise<string[]> {
+  const removed: string[] = []
+  const seen = new Set<string>()
+  for (const it of items) {
+    let names: string[] = []
+    try {
+      names = readdirSync(it.outputDir)
+    } catch {
+      continue
+    }
+    for (const n of exportPartsFor(names, it.fileName)) {
+      const path = join(it.outputDir, n)
+      if (seen.has(path)) continue
+      seen.add(path)
+      try {
+        await fsp.rm(path, { force: true })
+        removed.push(path)
+      } catch (e) {
+        log?.warn(`não foi possível apagar o temporário ${path}`, e)
+      }
+    }
+  }
+  return removed
+}

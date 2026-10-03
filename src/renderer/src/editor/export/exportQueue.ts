@@ -5,8 +5,11 @@
 // job único do main: nunca dois ao mesmo tempo. O quadro PNG não entra na fila (é instantâneo e direto).
 // Falha num item não para a fila (o item fica com o erro e a fila segue); cancelar o que está rodando aborta pelo
 // AbortSignal (o caminho de cancelamento de sempre apaga o parcial) e a fila segue com o próximo. Colisão de nomes
-// entre itens: resolvida na hora de rodar pelo main (" (2)", nunca sobrescreve). A fila não é salva (sai junto com
-// o app, com aviso na confirmação de saída). Este módulo é independente de DOM/IPC: o executor e os avisos são
+// entre itens: resolvida na hora de rodar pelo main (" (2)", nunca sobrescreve). A fila é PERSISTENTE (G4): o que ainda
+// não terminou (pendente/rodando) é informado a `deps.persist` sempre que o CONJUNTO muda (entrar, sair, reordenar,
+// começar, terminar, cancelar) — nunca em tique de progresso. Sair confirmado do editor/app INTERROMPE (`interrupt`):
+// os itens saem da fila viva para a lista "guardada" (`parked`) e continuam no arquivo, para a oferta de retomar;
+// só cancelar de verdade (item/todas) os tira do arquivo. Este módulo é independente de DOM/IPC: o executor e os avisos são
 // injetados (exportQueueStore.ts liga os reais; os testes, falsos).
 import { freeze } from 'immer'
 import type { EditorExportProgress, EditorExportRequest, EditorExportResult } from './editorExport'
@@ -32,6 +35,17 @@ export interface QueueItem {
   readonly message: string | null
   readonly startedAt: number | null
   readonly endedAt: number | null
+  /** Quando entrou na fila (ms); vai para o arquivo. */
+  readonly createdAt: number
+}
+
+/** Item guardado (interrompido ou lido do arquivo): o suficiente para enfileirar de novo, do zero. */
+export interface ParkedEntry {
+  job: QueueJob
+  label: string
+  durationUs: number
+  privacy: readonly string[]
+  createdAt: number
 }
 
 export interface QueueBatchSummary {
@@ -57,6 +71,11 @@ export interface QueueDeps {
   isBusy?: () => boolean
   retryMs?: number
   now?: () => number
+  /**
+   * Conjunto não terminado mudou (ordem da fila: guardados primeiro, depois os vivos). Só depois de `hydrate`:
+   * antes disso o arquivo da sessão anterior ainda não foi lido e não pode ser sobrescrito.
+   */
+  persist?: (entries: readonly ParkedEntry[]) => void
 }
 
 export interface EnqueueInput {
@@ -76,6 +95,10 @@ export class ExportQueue {
   private retry: ReturnType<typeof setTimeout> | null = null
   private batch: QueueBatchSummary = { done: 0, error: 0, cancelled: 0, items: [] }
   private lastState = ''
+  private lastPersist = ''
+  private parked: ParkedEntry[] = []
+  private parkedRev = 0
+  private hydrated = false
 
   constructor(private readonly deps: QueueDeps) {}
 
@@ -95,15 +118,83 @@ export class ExportQueue {
   }
 
   /** Enfileira (começa já, se a fila estiver parada). `position`: 1 = o próximo/atual. */
-  enqueue(input: EnqueueInput): { id: string; position: number } {
-    // instantâneo: o Project do editor é imutável (immer); congelar garante que ninguém o altere depois
-    freeze(input.job.request.project, true)
-    const item: QueueItem = { id: `q${++seq}`, job: input.job, label: input.label, durationUs: Math.max(0, Math.round(input.durationUs)), privacy: [...input.privacy], state: 'pending', progress: null, result: null, message: null, startedAt: null, endedAt: null }
-    this.list = [...this.list, item]
+  enqueue(input: EnqueueInput & { createdAt?: number }): { id: string; position: number } {
+    const item = this.addItem(input)
     const position = this.list.filter((i) => i.state === 'pending' || i.state === 'running').findIndex((i) => i.id === item.id) + 1
     this.pump()
     this.emit()
     return { id: item.id, position }
+  }
+
+  private addItem(input: EnqueueInput & { createdAt?: number }): QueueItem {
+    // instantâneo: o Project do editor é imutável (immer); congelar garante que ninguém o altere depois
+    freeze(input.job.request.project, true)
+    const item: QueueItem = {
+      id: `q${++seq}`,
+      job: input.job,
+      label: input.label,
+      durationUs: Math.max(0, Math.round(input.durationUs)),
+      privacy: [...input.privacy],
+      state: 'pending',
+      progress: null,
+      result: null,
+      message: null,
+      startedAt: null,
+      endedAt: null,
+      createdAt: input.createdAt ?? (this.deps.now ?? Date.now)()
+    }
+    this.list = [...this.list, item]
+    return item
+  }
+
+  /** Itens guardados (interrompidos/da sessão anterior) esperando a decisão do usuário. */
+  get parkedCount(): number {
+    return this.parked.length
+  }
+
+  /** Fim da leitura do arquivo: os itens da sessão anterior ficam guardados e a persistência passa a valer. */
+  hydrate(entries: readonly ParkedEntry[]): void {
+    this.parked = [...this.parked, ...entries]
+    this.parkedRev++
+    this.hydrated = true
+    this.emit()
+  }
+
+  /** Retomar: enfileira todos os guardados, em ordem, do zero (o que estava rodando volta a pendente). */
+  resume(): number {
+    const entries = this.parked
+    if (!entries.length) return 0
+    this.parked = []
+    this.parkedRev++
+    // sem emitir entre um e outro: o arquivo nunca perde itens no meio da passagem
+    for (const e of entries) this.addItem(e)
+    this.pump()
+    this.emit()
+    return entries.length
+  }
+
+  /** Descartar os guardados (o arquivo é esvaziado pelo chamador/persist). */
+  discardParked(): void {
+    if (!this.parked.length) return
+    this.parked = []
+    this.parkedRev++
+    this.emit()
+  }
+
+  /**
+   * Sair confirmado: o que roda é interrompido (o parcial é apagado pelo caminho de cancelamento) e tudo que não
+   * terminou vai para os guardados — continua no arquivo para retomar depois. Não é "cancelar".
+   */
+  interrupt(): void {
+    const active = this.list.filter((i) => i.state === 'pending' || i.state === 'running')
+    if (!active.length) return
+    this.parked = [...this.parked, ...active.map((i) => ({ job: i.job, label: i.label, durationUs: i.durationUs, privacy: i.privacy, createdAt: i.createdAt }))]
+    this.parkedRev++
+    // fora da lista viva já: o item abortando não conta duas vezes; o resultado dele (cancelado) cai no vazio
+    this.list = this.list.filter((i) => i.state !== 'pending' && i.state !== 'running')
+    this.current?.ac.abort()
+    this.pump()
+    this.emit()
   }
 
   /** Pendente → cancelado (não roda); rodando → aborta (o parcial é apagado) e a fila segue. */
@@ -223,6 +314,7 @@ export class ExportQueue {
   }
 
   private emit(): void {
+    this.persistIfChanged()
     const s = { running: !!this.current, pending: this.list.filter((i) => i.state === 'pending').length }
     const key = `${s.running}:${s.pending}`
     if (key !== this.lastState) {
@@ -234,6 +326,21 @@ export class ExportQueue {
       }
     }
     for (const fn of this.listeners) fn()
+  }
+
+  /** Só quando o conjunto não terminado (ids, estados, ordem, guardados) muda — progresso não conta. */
+  private persistIfChanged(): void {
+    if (!this.hydrated || !this.deps.persist) return
+    const active = this.list.filter((i) => i.state === 'pending' || i.state === 'running')
+    const key = `${this.parkedRev}|${active.map((i) => `${i.id}:${i.state}`).join(',')}`
+    if (key === this.lastPersist) return
+    this.lastPersist = key
+    const entries: ParkedEntry[] = [...this.parked, ...active.map((i) => ({ job: i.job, label: i.label, durationUs: i.durationUs, privacy: i.privacy, createdAt: i.createdAt }))]
+    try {
+      this.deps.persist(entries)
+    } catch (e) {
+      console.error('fila de exportações: falha ao salvar', e)
+    }
   }
 }
 

@@ -8,7 +8,7 @@ import type { Project } from '@shared/editor/project'
 import { useEditorStore } from '../state/editorStore'
 import type { EditorExportProgress } from './editorExport'
 import { EditorExportCancelled } from './finalize'
-import { ExportQueue, queueProgress, queueSummary, type QueueDeps, type QueueItem, type QueueJob, type QueueRunResult } from './exportQueue'
+import { ExportQueue, queueProgress, queueSummary, type ParkedEntry, type QueueDeps, type QueueItem, type QueueJob, type QueueRunResult } from './exportQueue'
 
 // Fila de exportações com um executor falso: cada item fica pendurado até o teste resolver/rejeitar.
 
@@ -309,4 +309,91 @@ describe('queueSummary', () => {
 
 beforeEach(() => {
   vi.useRealTimers()
+})
+
+describe('ExportQueue persistente', () => {
+  const persistSetup = () => {
+    const saved: string[][] = []
+    const t = setup({ persist: (entries) => saved.push(entries.map((e) => e.label)) })
+    return { ...t, saved }
+  }
+  const entry = (name: string): ParkedEntry => ({ job: videoJob(name), label: name, durationUs: 2_000_000, privacy: [], createdAt: 1 })
+
+  it('só persiste depois do hydrate (o arquivo da sessão anterior não é sobrescrito antes de lido)', () => {
+    const t = persistSetup()
+    t.add('a.mp4')
+    expect(t.saved).toEqual([])
+    t.q.hydrate([])
+    expect(t.saved.at(-1)).toEqual(['a.mp4'])
+  })
+
+  it('persiste ao entrar, reordenar, começar, terminar e cancelar — e NÃO em tique de progresso', async () => {
+    const t = persistSetup()
+    t.q.hydrate([])
+    const a = t.add('a.mp4')
+    const b = t.add('b.mp4')
+    const c = t.add('c.mp4')
+    expect(t.saved.at(-1)).toEqual(['a.mp4', 'b.mp4', 'c.mp4'])
+    const before = t.saved.length
+    for (let p = 1; p <= 20; p++) t.calls[0].onProgress({ stage: 'render', frame: p, total: 20, percent: p * 5, speed: 1, etaS: 1 })
+    expect(t.saved.length).toBe(before)
+    t.q.move(c, -1)
+    expect(t.saved.at(-1)).toEqual(['a.mp4', 'c.mp4', 'b.mp4'])
+    t.q.cancel(b)
+    expect(t.saved.at(-1)).toEqual(['a.mp4', 'c.mp4'])
+    t.calls[0].resolve(t.result('a.mp4'))
+    await t.flush()
+    expect(t.stateOf(a)).toBe('done')
+    expect(t.saved.at(-1)).toEqual(['c.mp4'])
+    t.calls[1].resolve(t.result('c.mp4'))
+    await t.flush()
+    expect(t.saved.at(-1)).toEqual([])
+  })
+
+  it('cancelar tudo tira os itens do arquivo', async () => {
+    const t = persistSetup()
+    t.q.hydrate([])
+    t.add('a.mp4')
+    t.add('b.mp4')
+    t.q.cancelAll()
+    await t.flush()
+    expect(t.saved.at(-1)).toEqual([])
+  })
+
+  it('interromper (sair confirmado) guarda rodando + pendentes no arquivo, sem cancelar nem avisar', async () => {
+    const t = persistSetup()
+    t.q.hydrate([])
+    t.add('a.mp4')
+    t.add('b.mp4')
+    t.q.interrupt()
+    await t.flush()
+    expect(t.calls[0].signal.aborted).toBe(true)
+    expect(t.q.items).toHaveLength(0)
+    expect(t.q.parkedCount).toBe(2)
+    expect(t.saved.at(-1)).toEqual(['a.mp4', 'b.mp4'])
+    expect(t.idle).toEqual([])
+    expect(t.q.active()).toBe(false)
+  })
+
+  it('guardados continuam no arquivo quando entra outro; retomar enfileira todos em ordem, do zero, numa única gravação', () => {
+    const t = persistSetup()
+    t.q.hydrate([entry('x.mp4'), entry('y.mp4')])
+    expect(t.q.parkedCount).toBe(2)
+    t.add('novo.mp4')
+    expect(t.saved.at(-1)).toEqual(['x.mp4', 'y.mp4', 'novo.mp4'])
+    const mark = t.saved.length
+    expect(t.q.resume()).toBe(2)
+    expect(t.saved.length).toBe(mark + 1)
+    expect(t.saved.at(-1)).toEqual(['novo.mp4', 'x.mp4', 'y.mp4'])
+    expect(t.q.parkedCount).toBe(0)
+    expect(t.q.items.map((i) => i.state)).toEqual(['running', 'pending', 'pending'])
+  })
+
+  it('descartar esvazia os guardados e o arquivo', () => {
+    const t = persistSetup()
+    t.q.hydrate([entry('x.mp4')])
+    t.q.discardParked()
+    expect(t.q.parkedCount).toBe(0)
+    expect(t.saved.at(-1)).toEqual([])
+  })
 })

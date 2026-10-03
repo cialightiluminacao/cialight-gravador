@@ -48,11 +48,11 @@ describe('createQuitGuard', () => {
 
 describe('exportQuitText (confirmação de saída com a fila)', () => {
   it('conta a exportação em andamento e as da fila', () => {
-    expect(exportQuitText({ running: 1, pending: 2 })).toEqual({ message: 'Há 1 exportação em andamento e 2 na fila.', detail: 'Sair cancela todas (a fila não é salva).' })
-    expect(exportQuitText({ running: 1, pending: 1 })).toEqual({ message: 'Há 1 exportação em andamento e 1 na fila.', detail: 'Sair cancela todas (a fila não é salva).' })
-    expect(exportQuitText({ running: 1, pending: 0 })).toEqual({ message: 'Há 1 exportação em andamento.', detail: 'Sair cancela a exportação e apaga o arquivo parcial.' })
-    expect(exportQuitText({ running: 0, pending: 3 })).toEqual({ message: 'Há 3 exportações na fila.', detail: 'Sair cancela todas (a fila não é salva).' })
-    expect(exportQuitText({ running: 0, pending: 1 })).toEqual({ message: 'Há 1 exportação na fila.', detail: 'Sair cancela todas (a fila não é salva).' })
+    expect(exportQuitText({ running: 1, pending: 2 })).toEqual({ message: 'Há 1 exportação em andamento e 2 na fila.', detail: 'Sair interrompe as exportações; elas ficam salvas e você pode retomá-las depois.' })
+    expect(exportQuitText({ running: 1, pending: 1 })).toEqual({ message: 'Há 1 exportação em andamento e 1 na fila.', detail: 'Sair interrompe as exportações; elas ficam salvas e você pode retomá-las depois.' })
+    expect(exportQuitText({ running: 1, pending: 0 })).toEqual({ message: 'Há 1 exportação em andamento.', detail: 'Sair interrompe a exportação; ela fica salva e você pode retomá-la depois.' })
+    expect(exportQuitText({ running: 0, pending: 3 })).toEqual({ message: 'Há 3 exportações na fila.', detail: 'Sair interrompe as exportações; elas ficam salvas e você pode retomá-las depois.' })
+    expect(exportQuitText({ running: 0, pending: 1 })).toEqual({ message: 'Há 1 exportação na fila.', detail: 'Sair interrompe as exportações; elas ficam salvas e você pode retomá-las depois.' })
   })
 })
 

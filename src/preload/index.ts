@@ -117,6 +117,11 @@ const api: IpcApi = {
     saveText: (defaultPath, text) => ipcRenderer.invoke(IPC.editorExport.saveText, defaultPath, text),
     setQueueState: (state) => ipcRenderer.invoke(IPC.editorExport.setQueueState, state)
   },
+  exportQueue: {
+    load: () => ipcRenderer.invoke(IPC.exportQueue.load),
+    save: (items) => ipcRenderer.invoke(IPC.exportQueue.save, items),
+    cleanParts: () => ipcRenderer.invoke(IPC.exportQueue.cleanParts)
+  },
   brand: {
     list: () => ipcRenderer.invoke(IPC.brand.list),
     save: (template, assetsToCopy, projectId) => ipcRenderer.invoke(IPC.brand.save, template, assetsToCopy, projectId),

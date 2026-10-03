@@ -25,6 +25,10 @@ export function preloadPath(): string {
   return join(__dirname, '../preload/index.js')
 }
 
+export function isQuitting(): boolean {
+  return quitting
+}
+
 export function setQuitting(v: boolean): void {
   quitting = v
 }

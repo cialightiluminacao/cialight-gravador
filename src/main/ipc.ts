@@ -11,13 +11,15 @@ import type { ProjectStore } from './project/projectStore'
 import type { Asset } from '@shared/editor/project'
 import type { AssetToCopy, BrandTemplate } from '@shared/editor/brand'
 import { BrandStore, brandDirFor } from './brand/brandStore'
+import { ExportQueueFile, exportQueueFileFor } from './exportQueue/exportQueueFile'
+import { removeItemParts } from './maintenance/partSweep'
 import { projectFromSession } from '@shared/editor/fromSession'
 import { newId, newProjectId } from '@shared/editor/ids'
 import { parseProject } from '@shared/editor/schema'
 import { IngestQueue, assetFromInfo, type IngestInput } from './media/ingest'
 import { findRelinkCandidates, relinkQuery } from './project/relinkSearch'
 import { IMAGE_EXTENSIONS, probe } from './media/probe'
-import { getRecorderWindow, showRecorder, displayIdOfWindow, setEditorMode } from './windows/recorderWindow'
+import { getRecorderWindow, showRecorder, displayIdOfWindow, setEditorMode, isQuitting } from './windows/recorderWindow'
 import { hideBar, showBar, toggleBar, updateBar, isBarHiddenByUser } from './windows/barWindow'
 import { hideOverlays, setOverlayMode, showOverlays, syncStrokesToOverlays } from './windows/overlayWindows'
 import { setProtection } from './windows/protection'
@@ -533,6 +535,25 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     }
     queueStates.set(wc.id, state)
   })
+  // ---- fila de exportações persistente: só o main grava; os caminhos vêm do próprio arquivo ----
+  const queueFile = new ExportQueueFile(exportQueueFileFor(process.env, app.getPath('userData')), log)
+  const cleanQueueParts = async (): Promise<void> => {
+    // exportação rodando agora: o .part dela não pode ser tocado (e o 'nome ocupado' já a considera)
+    if (editorExports.busy) return
+    const removed = await removeItemParts(queueFile.load().map((i) => ({ outputDir: String(i.request.outputDir), fileName: String(i.request.fileName) })), log)
+    if (removed.length) log.info(`fila de exportações: ${removed.length} temporário(s) .part apagado(s)`)
+  }
+  ipcMain.handle(IPC.exportQueue.load, () => queueFile.load())
+  ipcMain.handle(IPC.exportQueue.save, (_e, items: unknown) => {
+    // saindo: o cancelamento dos jobs esvaziaria a fila gravada; o que ficou salvo é o que se quer retomar
+    if (isQuitting()) return
+    try {
+      queueFile.save(items)
+    } catch (e) {
+      log.warn('não foi possível gravar a fila de exportações', e)
+    }
+  })
+  ipcMain.handle(IPC.exportQueue.cleanParts, () => cleanQueueParts())
   ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => cancelAware(jobId, editorExports.write(jobId, data, position)))
   ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))
   ipcMain.handle(IPC.editorExport.finalize, (e, jobId: string, opts?: { durationUs?: number; maxBytes?: number }) => {

@@ -17,8 +17,9 @@ import { startAudioProcessing } from './audioProcessing'
 import { audioSourceKey } from '@shared/editor/audioProcess'
 import { TopBar } from './TopBar'
 import { ExportDialog } from './ExportDialog'
-import { QueueLeaveDialog, requestLeaveEditor } from './ExportQueuePanel'
-import { exportQueue, setQueueBeforeItem } from '../export/exportQueueStore'
+import { requestLeaveEditor } from './ExportQueuePanel'
+import { registerEditorLeave } from './editorLeave'
+import { exportQueue, offerResume, setQueueBeforeItem } from '../export/exportQueueStore'
 import { SilenceDialog } from './SilenceDialog'
 import { ReframeDialog } from './ReframeDialog'
 import { useReframe } from '../state/reframe'
@@ -89,6 +90,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
 
   // fila de exportações: cada item pausa a reprodução ao começar (a regra do onBeforeExport)
   useEffect(() => setQueueBeforeItem(() => engineRef.current?.playback.pause()), [])
+  // há itens guardados (interrompidos/da sessão anterior) fora da fila viva: oferece retomar ao abrir o editor
+  useEffect(() => offerResume(), [])
 
   // ---- ciclo de vida: projeto, motor, autosave, ingestão, janela maximizada ----
   useEffect(() => {
@@ -248,7 +251,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     await flushAutosave()
     useAppStore.getState().closeEditor()
   }
-  // fila de exportações ativa: pergunta antes (sair cancela todas; a fila não é salva)
+  useEffect(() => registerEditorLeave(leave), [leave])
+  // fila de exportações ativa: pergunta antes (sair interrompe; os itens ficam salvos para retomar depois)
   const back = (): void => requestLeaveEditor(() => void leave())
 
   const startResize = (e: React.PointerEvent): void => {
@@ -302,7 +306,6 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       {loaded ? <ReframeDialog playback={engine?.playback ?? null} /> : null}
       {loaded ? <CurveEditor /> : null}
       {loaded ? <NarrationOverlay /> : null}
-      <QueueLeaveDialog />
       {loaded ? <RelinkDialog /> : null}
       {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} onSeek={(us) => seekTo(engineRef.current?.playback ?? null, us)} /> : null}
     </div>

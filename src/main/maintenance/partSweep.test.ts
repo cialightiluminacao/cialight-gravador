@@ -70,3 +70,13 @@ describe('sweepStaleParts', () => {
     expect(existsSync(p)).toBe(true)
   })
 })
+
+describe('exportPartsFor (parciais da fila salva)', () => {
+  it('só os parciais daquele nome (com ou sem número e extensão digitada); nada de outros arquivos', async () => {
+    const { exportPartsFor } = await import('./partSweep')
+    const names = ['Aula.mp4.part', 'Aula (2).mp4.part', 'Aula.gif.ffv1.part', 'Aula2.mp4.part', 'Outro.mp4.part', 'Aula.mp4', 'Aula.srt.part', 'Aula.mp4.audio.part']
+    expect(exportPartsFor(names, 'Aula.mp4').sort()).toEqual(['Aula (2).mp4.part', 'Aula.gif.ffv1.part', 'Aula.mp4.audio.part', 'Aula.mp4.part'].sort())
+    expect(exportPartsFor(names, 'Aula')).toEqual(exportPartsFor(names, 'Aula.mp4'))
+    expect(exportPartsFor(names, '')).toEqual([])
+  })
+})

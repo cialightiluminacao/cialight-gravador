@@ -69,7 +69,7 @@ if (!gotLock) {
       message: 'Há uma gravação em andamento.',
       detail: 'Se sair agora, a gravação bruta fica salva até o último segundo gravado e pode ser recuperada na próxima abertura.'
     }),
-    export: () => ({ buttons: ['Continuar exportando', 'Sair e cancelar'], ...exportQuitText(editorExportCounts()) })
+    export: () => ({ buttons: ['Continuar exportando', 'Sair e interromper'], ...exportQuitText(editorExportCounts()) })
   }
   setAppQuitGuard(
     createQuitGuard({

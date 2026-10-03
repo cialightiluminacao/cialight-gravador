@@ -15,6 +15,8 @@ import { SettingsScreen } from '@/screens/Settings/SettingsScreen'
 import { HistoryScreen } from '@/screens/History/HistoryScreen'
 import { EditorScreen } from '@/editor/ui/EditorScreen'
 import { ProjectsHome } from '@/editor/ui/ProjectsHome'
+import { QueueLeaveDialog } from '@/editor/ui/ExportQueuePanel'
+import { hydrateExportQueue } from '@/editor/export/exportQueueStore'
 
 // Shell do gravador: título, banner de atualização, tela atual, toasts.
 // A tela é escolhida pelo estado (`screen`) — sem router.
@@ -31,6 +33,8 @@ function useBoot(): void {
     let alive = true
     wireController()
     installQaHooks()
+    // fila de exportações salva da sessão anterior: lê, guarda e oferece retomar (uma vez por janela)
+    void hydrateExportQueue()
     window.__navigate = (screen) => {
       // 'review:<sessionId>' abre uma sessão bruta na Revisão (QA/histórico)
       if (screen.startsWith('settings:')) {
@@ -101,6 +105,7 @@ export function App(): React.JSX.Element {
           {screen === 'editor' && editorProjectId && <EditorScreen key={editorProjectId} projectId={editorProjectId} />}
         </main>
         <RecoverDialog />
+        <QueueLeaveDialog />
         <Toaster
           theme="dark"
           position="bottom-right"

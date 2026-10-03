@@ -19,6 +19,7 @@ import type {
 import type { Asset, Project, Us } from './editor/project'
 import type { CursorTrackV1 } from './cursor'
 import type { AssetToCopy, BrandTemplate } from './editor/brand'
+import type { PersistedQueueItem } from './exportQueueFile'
 
 export type Unsubscribe = () => void
 
@@ -349,8 +350,19 @@ export interface IpcApi {
     writeStill(outputDir: string, fileName: string, png: Uint8Array): Promise<{ path: string; size: number }>
     /** "Salvar como" de um .txt (capítulos): UTF-8 sem BOM, CRLF. Devolve o caminho ou null se o usuário cancelou. */
     saveText(defaultPath: string, text: string): Promise<string | null>
-    /** Estado da fila de exportações desta janela (a confirmação de saída conta os itens; a fila não é salva). */
+    /** Estado da fila de exportações desta janela (a confirmação de saída conta os itens). */
     setQueueState(state: { running: boolean; pending: number }): Promise<void>
+  }
+  /**
+   * Fila de exportações persistente (G4): userData/export-queue.json (em teste/QA, numa pasta de teste), só o main grava.
+   * `load`: itens pendentes/rodando da última sessão (arquivo ausente/corrompido → vazio). `save`: grava o conjunto atual
+   * (atômico; nunca em tique de progresso). `cleanParts`: apaga os .part antigos das saídas dos itens do PRÓPRIO arquivo
+   * (caminho nenhum vem do renderer; ignorado com exportação rodando). Retomar/Descartar chamam cleanParts e depois salvam o conjunto vivo.
+   */
+  exportQueue: {
+    load(): Promise<PersistedQueueItem[]>
+    save(items: PersistedQueueItem[]): Promise<void>
+    cleanParts(): Promise<void>
   }
   /**
    * Modelos de marca (F5). Ficam em userData/brand-templates.json + brand-assets/<id>/ (em teste/QA, numa pasta de
@@ -518,6 +530,7 @@ export const IPC = {
     saveText: 'editorExport:saveText',
     setQueueState: 'editorExport:setQueueState'
   },
+  exportQueue: { load: 'exportQueue:load', save: 'exportQueue:save', cleanParts: 'exportQueue:cleanParts' },
   brand: { list: 'brand:list', save: 'brand:save', remove: 'brand:remove', rename: 'brand:rename', materialize: 'brand:materialize' },
   captions: { openSrt: 'captions:openSrt', saveSrt: 'captions:saveSrt', writeSrtBeside: 'captions:writeSrtBeside' },
   recording: {

@@ -197,7 +197,7 @@ const useLeaveGuard = create<{ proceed: (() => void) | null }>(() => ({ proceed:
 
 /**
  * Sair do editor (voltar aos projetos): com a fila ativa, pergunta antes ("Há 1 exportação em andamento e 2 na
- * fila. Sair cancela todas…"); confirmado, cancela todas e segue. Sem fila, segue direto.
+ * fila. Sair interrompe…"); confirmado, interrompe a fila (os itens ficam salvos para retomar) e segue. Sem fila, segue direto.
  */
 export function requestLeaveEditor(proceed: () => void): void {
   if (!exportQueue.active()) proceed()
@@ -229,11 +229,11 @@ export function QueueLeaveDialog(): React.JSX.Element {
               onClick={() => {
                 const go = proceed
                 close()
-                exportQueue.cancelAll()
+                exportQueue.interrupt()
                 go?.()
               }}
             >
-              Sair e cancelar
+              Sair e interromper
             </Button>
           </div>
         </div>

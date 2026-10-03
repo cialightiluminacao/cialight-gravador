@@ -473,7 +473,7 @@ async function main() {
   // texto e estado da fila lidos juntos (o 1º item pode terminar enquanto o QA clica)
   const leave = await ev(`const q = window.__qaEditor.queue.items; return { text: document.querySelector('[data-queue-leave]')?.textContent ?? null, running: q.filter((i) => i.state === 'running').length, pending: q.filter((i) => i.state === 'pending').length }`)
   const expectLeave = `Há 1 exportação em andamento e ${leave.pending} na fila.`
-  check(`voltar aos projetos com a fila ativa: "${expectLeave} Sair cancela todas (a fila não é salva)."`, !!leave.text && leave.running === 1 && leave.pending >= 1 && leave.text.includes(expectLeave) && leave.text.includes('Sair cancela todas (a fila não é salva).'), leave)
+  check(`voltar aos projetos com a fila ativa: "${expectLeave} Sair interrompe as exportações; elas ficam salvas e você pode retomá-las depois."`, !!leave.text && leave.running === 1 && leave.pending >= 1 && leave.text.includes(expectLeave) && leave.text.includes('Sair interrompe as exportações; elas ficam salvas e você pode retomá-las depois.'), leave)
   await shot('f7-18-fila-sair-confirmacao.png')
   await ev(`[...document.querySelector('[data-queue-leave]').querySelectorAll('button')].find((b) => b.textContent.trim() === 'Continuar exportando').click(); return 1`)
   await sleep(400)
