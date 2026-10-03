@@ -1,12 +1,13 @@
 import * as Popover from '@radix-ui/react-popover'
 import { SlidersHorizontal } from 'lucide-react'
 import { toast } from 'sonner'
-import { attachEffects, effectsOverClip } from '@shared/editor/followTransform'
+import { effectsOverClip } from '@shared/editor/followTransform'
 import { findItem } from '@shared/editor/ops'
 import type { Ease, Project } from '@shared/editor/project'
 import { applyZoom, aspectRect, ZOOM_MAX_DUR_US, ZOOM_MIN_DUR_US, type ZoomEdit, type ZoomRect } from '@shared/editor/zoom'
 import { Select, Tip, Toggle } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
+import { anchorAfterMotion, type MotionRedo } from '../../state/motionAnchor'
 import { useViewerTool } from '../../state/viewerTool'
 import { NumberField } from '../Inspector/NumberField'
 import { hitTest, itemBoxes } from '../viewerGeometry'
@@ -80,7 +81,8 @@ export function runZoomEdit(itemId: string, edit: (p: Project) => ZoomEdit): boo
   })
   if (!ok) return false
   if (replaced > 0) toast(replaced === 1 ? '1 keyframe substituído' : `${replaced} keyframes substituídos`, { description: 'Os keyframes que já existiam no trecho do movimento foram trocados. Ctrl+Z desfaz.' })
-  warnLinkedEffects(itemId)
+  const after = useEditorStore.getState().project
+  warnLinkedEffects(itemId, 'o zoom', after ? { after, edit: (p) => edit(p).project } : undefined)
   return true
 }
 
@@ -90,8 +92,10 @@ export function runZoomEdit(itemId: string, edit: (p: Project) => ZoomEdit): boo
  * parada no quadro enquanto o conteúdo se move. Efeitos do grupo de vínculo cuja região encosta no clipe →
  * "Ancorar efeitos ao clipe" (só esses; a região passa a acompanhar o conteúdo, inclusive edições futuras); efeitos
  * soltos sobre o clipe → "Vincular e ancorar" (todos eles); "Ver efeito(s)" seleciona. Os já ancorados acompanham sozinhos.
+ * `redo`: o movimento recém-aplicado — ancorar usa a pose de antes dele e o refaz (anchorAfterMotion; revisão final da
+ * F6, C1: keys rastreadas no clipe parado, convertidas com a pose do zoom, ficariam onde estavam no quadro).
  */
-export function warnLinkedEffects(itemId: string, motion = 'o zoom'): void {
+export function warnLinkedEffects(itemId: string, motion = 'o zoom', redo?: MotionRedo): void {
   const p = useEditorStore.getState().project
   if (!p) return
   let over: { linked: string[]; unlinked: string[] }
@@ -118,11 +122,11 @@ export function warnLinkedEffects(itemId: string, motion = 'o zoom'): void {
   })
   const anchor = run(() => {
     const live = alive(over.linked)
-    if (live.length && useEditorStore.getState().apply((r) => attachEffects(r, itemId, live))) toast.success(live.length === 1 ? 'Efeito ancorado ao clipe' : 'Efeitos ancorados ao clipe')
+    if (live.length && anchorAfterMotion(itemId, live, redo)) toast.success(live.length === 1 ? 'Efeito ancorado ao clipe' : 'Efeitos ancorados ao clipe')
   })
   const linkAnchor = run(() => {
     const live = alive(over.unlinked)
-    if (live.length && useEditorStore.getState().apply((r) => attachEffects(r, itemId, live))) toast.success(live.length === 1 ? 'Efeito vinculado e ancorado ao clipe' : 'Efeitos vinculados e ancorados ao clipe')
+    if (live.length && anchorAfterMotion(itemId, live, redo)) toast.success(live.length === 1 ? 'Efeito vinculado e ancorado ao clipe' : 'Efeitos vinculados e ancorados ao clipe')
   })
   const one = ids.length === 1
   const title = one ? 'Há um efeito de privacidade sobre este clipe' : `Há ${ids.length} efeitos de privacidade sobre este clipe`

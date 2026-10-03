@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { applyAutoZoom, AUTO_ZOOM_LIMITS, DEFAULT_AUTO_ZOOM, itemClicks, type AutoZoomOpts } from '@shared/editor/autoZoom'
 import { cursorTimeMap } from '@shared/editor/cursorTime'
 import { EditError } from '@shared/editor/ops'
+import type { PrivacyWarning } from '@shared/editor/privacy'
 import type { MediaItem, Project } from '@shared/editor/project'
 import { Button } from '@/components/ui/Button'
 import { Slider, Tip } from '@/components/ui/primitives'
@@ -18,6 +19,13 @@ import { PanelSection } from './common'
 // gravá-la — qualquer mudança do projeto a descarta, com aviso); mexer nos controles refaz a prévia. "Aplicar" é uma
 // edição normal sobre o projeto atual (um passo de desfazer); "Cancelar" descarta a prévia. Depois de aplicar: toast
 // com os zooms e os keyframes trocados, e a oferta do F4 de ancorar os efeitos de privacidade sem âncora.
+
+/** Avisos de privacidade do zoom aplicado (applyAutoZoom.privacyWarnings), no toast: cada texto uma vez. */
+function privacyText(ws: PrivacyWarning[]): string {
+  if (ws.length === 0) return ''
+  const msgs = [...new Set(ws.map((w) => w.message))]
+  return ` Privacidade: ${ws.length === 1 ? '1 efeito' : `${ws.length} efeitos`} sobre o clipe — ${msgs.join('; ')}.`
+}
 
 const nf = (n: number, d: number): string => n.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d })
 
@@ -96,23 +104,25 @@ export function AutoZoomPanel({ item, locked }: { item: MediaItem; locked?: bool
   }
   const apply = (): void => {
     if (!track) return
-    let out: { segments: number; replaced: number } | null = null
+    let out: { segments: number; replaced: number; warnings: PrivacyWarning[] } | null = null
+    const o = optsRef.current
     // edição normal sobre o projeto atual: um passo de desfazer; a prévia (se houver) some com a mudança do projeto
     const ok = useEditorStore.getState().apply((p) => {
-      const r = applyAutoZoom(p, item.id, track, optsRef.current)
-      out = { segments: r.segments, replaced: r.replaced }
+      const r = applyAutoZoom(p, item.id, track, o)
+      out = { segments: r.segments, replaced: r.replaced, warnings: r.privacyWarnings }
       return r.project
     })
     mine.current = null
     setPreviewing(false)
-    const r = out as { segments: number; replaced: number } | null
+    const r = out as { segments: number; replaced: number; warnings: PrivacyWarning[] } | null
     if (!ok || !r) return
     const again = appliedOnce ? ' Para trocar os ajustes de um zoom automático já aplicado, desfaça-o antes (Ctrl+Z): aplicar de novo soma os zooms.' : ''
     toast.success(r.segments === 1 ? '1 zoom automático aplicado' : `${r.segments} zooms automáticos aplicados`, {
-      description: `${r.replaced > 0 ? (r.replaced === 1 ? '1 keyframe existente foi substituído. ' : `${r.replaced} keyframes existentes foram substituídos. `) : ''}Ctrl+Z desfaz.${again}`
+      description: `${r.replaced > 0 ? (r.replaced === 1 ? '1 keyframe existente foi substituído. ' : `${r.replaced} keyframes existentes foram substituídos. `) : ''}Ctrl+Z desfaz.${again}${privacyText(r.warnings)}`
     })
     setAppliedOnce(true)
-    warnLinkedEffects(item.id, 'o zoom automático')
+    const after = useEditorStore.getState().project
+    warnLinkedEffects(item.id, 'o zoom automático', after ? { after, edit: (p) => applyAutoZoom(p, item.id, track, o).project } : undefined)
   }
   const commitSlider = (key: keyof AutoZoomOpts, v: number): void => {
     const o = { ...optsRef.current, [key]: v }

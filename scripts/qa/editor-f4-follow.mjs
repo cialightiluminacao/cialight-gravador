@@ -212,8 +212,10 @@ async function main() {
     check('zoom com blur vinculado: toast com "Ancorar efeito ao clipe" e "Ver efeito" (foco visível)', r.linked && r.s > 0 && !!r.toast && r.toast.includes('não acompanha o zoom') && r.anchor && r.view && r.focusRing, r)
     await shot('f4-follow-01-oferta.png')
     const a = await ev(`const p0 = T.past(); await T.click(__fl.toastBtn('Ancorar efeito ao clipe')); await T.wait(400)
-      return { p0, past: T.past(), attach: T.item('${fx}').attach?.mediaItemId, keys: __fl.region('${fx}'), toast: T.toasts().find((t) => t.includes('ancorado')) }`)
-    check('ancorar: attach no vídeo, um passo de desfazer, sem keys na região, toast de confirmação', a.past === a.p0 + 1 && a.attach === v && a.keys.every((n) => n === 0) && !!a.toast, a)
+      return { p0, past: T.past(), canRedo: T.st().canRedo, attach: T.item('${fx}').attach?.mediaItemId, keys: __fl.region('${fx}'), toast: T.toasts().find((t) => t.includes('ancorado')) }`)
+    // F6 (revisão final, C1): ancorar pelo toast do zoom ancora na pose de antes do zoom e refaz o zoom, no lugar do
+    // passo do zoom — zoom + âncora = um passo de desfazer (o histórico não cresce)
+    check('ancorar: attach no vídeo, zoom + âncora num passo só (substitui o do zoom), sem keys na região, toast de confirmação', a.past === a.p0 && !a.canRedo && a.attach === v && a.keys.every((n) => n === 0) && !!a.toast, a)
     const f = await followsAtEnd(fx)
     check('a região na tela acompanha o conteúdo no fim do zoom (centro e tamanho pela escala, ±1 % do quadro)', f.ok, f)
     await ev(`T.st().select(['${fx}']); const s = T.keys('${v}', 'scale'); await T.seek(Math.round((s[0][0] + s[1][0]) / 2)); await T.wait(300); return 1`)
@@ -256,8 +258,11 @@ async function main() {
 
   console.log('sem âncora: botão "Ancorar ao clipe" no aviso do inspetor')
   {
-    // desfaz o 2º zoom e a ancoragem: efeito vinculado sem âncora sob o zoom
-    const r = await ev(`await T.key('z', { ctrlKey: true }); await T.key('z', { ctrlKey: true }); await T.wait(200); T.st().select(['${fx}']); await T.settle(); await T.wait(300)
+    // desfaz o 2º zoom e o 1º zoom + ancoragem (um passo desde a F6) e refaz o 1º zoom com a ferramenta: efeito vinculado
+    // sem âncora sob o zoom
+    const r = await ev(`await T.key('z', { ctrlKey: true }); await T.key('z', { ctrlKey: true }); await T.wait(200)
+      T.st().select([]); await T.settle(); await T.key('z'); await T.seek(2e6); await T.drag(T.toScreen(240, 165), T.toScreen(720, 380)); await T.wait(500); await T.key('z')
+      T.st().select(['${fx}']); await T.settle(); await T.wait(300)
       return { attach: !!T.item('${fx}').attach, warnings: __fl.warnings(), btn: __fl.followBtn()?.textContent, kind: __fl.followBtn()?.dataset.followMotion }`)
     check('sem âncora: aviso com "Ancorar ao clipe"', !r.attach && r.warnings.some((w) => w.includes('a região deste efeito não acompanha')) && r.btn === 'Ancorar ao clipe' && r.kind === 'transformedUnderEffect', r)
     await shot('f4-follow-06-inspetor-aviso.png')
