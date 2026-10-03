@@ -6,6 +6,7 @@ import type { CursorTrackV1 } from '@shared/cursor'
 import type { Project, Us } from '@shared/editor/project'
 import type { MediaUrls } from './mediaUrls'
 import type { ExportJobSpec, FramesJobSpec, RenderIn, RenderOut, TrackJobSpec } from './protocol'
+import type { DecoderAccel } from './decoderPool'
 
 type Rendered = Extract<RenderOut, { t: 'rendered' }>
 type ErrorOut = Extract<RenderOut, { t: 'error' }>
@@ -167,6 +168,11 @@ export class RenderClient {
       })
       this.send({ t: 'testBench', id, tUs, frames, fps })
     })
+  }
+
+  /** Testes: aceleração dos decoders desta instância (medição do preview em software × hardware). */
+  testDecoder(accel: DecoderAccel): void {
+    this.send({ t: 'testDecoder', accel })
   }
 
   /** Memória do compositor (QA/testes): texturas das camadas (cache LRU, 512 MiB) e do passe de efeitos. */

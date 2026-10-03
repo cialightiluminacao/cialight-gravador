@@ -5,6 +5,9 @@
 //
 // uso (depois de `npm run build`, sob o lock):
 //   node C:/Users/Eduardo/projetos/_locks/run-locked.mjs "node scripts/qa/bench-export.mjs --seconds 180 --blur"
+// `--decoder hardware|auto` (padrão auto): hardware força o caminho antigo da exportação (decoder de hardware, sem o
+// caminho YUV; CIALIGHT_QA_EXPORT_DECODER, só QA) para a comparação A/B intercalada com o mesmo build. Entra no nome do
+// JSON (bench-export-180s[-blur]-hw.json / -auto.json).
 // Tudo em test-out/qa-bench (apagado no fim); restaura o settings.json (hash).
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
@@ -15,6 +18,8 @@ import electronPath from 'electron'
 const args = process.argv.slice(2)
 const SECONDS = Number(args[args.indexOf('--seconds') + 1]) || 180
 const BLUR = args.includes('--blur')
+const DECODER = args.includes('--decoder') ? args[args.indexOf('--decoder') + 1] : 'auto'
+if (DECODER !== 'hardware' && DECODER !== 'auto') throw new Error(`--decoder deve ser hardware ou auto (veio ${DECODER})`)
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9338'
 const TAG = process.env.BENCH_TAG ?? ''
@@ -29,7 +34,7 @@ const settingsBefore = existsSync(SETTINGS) ? readFileSync(SETTINGS) : null
 
 const app = spawn(electronPath, ['.', `--remote-debugging-port=${PORT}`], {
   cwd: ROOT,
-  env: { ...process.env, CIALIGHT_QA: 'editor-fixture', CIALIGHT_RAW_DIR: 'test-out/raw' + TAG, CIALIGHT_QA_FIXTURE_SECONDS: String(SECONDS), CIALIGHT_QA_FIXTURE_SIZE: '1920x1080' },
+  env: { ...process.env, CIALIGHT_QA: 'editor-fixture', CIALIGHT_RAW_DIR: 'test-out/raw' + TAG, CIALIGHT_QA_FIXTURE_SECONDS: String(SECONDS), CIALIGHT_QA_FIXTURE_SIZE: '1920x1080', CIALIGHT_QA_EXPORT_DECODER: DECODER === 'hardware' ? 'hardware' : '' },
   stdio: 'ignore'
 })
 
@@ -129,12 +134,12 @@ try {
   const profile = await ev(`return globalThis.__exportProfile ?? null`)
   const file = readdirSync(OUT).find((f) => f.endsWith('.mp4'))
   const result = {
-    seconds: SECONDS, blur: BLUR, ok: text.includes('Vídeo exportado'), totalS: Math.round(total * 10) / 10,
+    seconds: SECONDS, blur: BLUR, decoder: DECODER, ok: text.includes('Vídeo exportado'), totalS: Math.round(total * 10) / 10,
     speedX: Math.round((SECONDS / total) * 100) / 100, fps: Math.round(((SECONDS * 30) / total) * 10) / 10,
     profile, sizeMB: file ? Math.round(statSync(join(OUT, file)).size / 1e5) / 10 : null, done: text.replace(/\s+/g, ' ').slice(0, 220), samples
   }
   console.log(JSON.stringify(result, null, 2))
-  writeFileSync(join(ROOT, 'test-out', `bench-export-${SECONDS}s${BLUR ? '-blur' : ''}${TAG}.json`), JSON.stringify(result, null, 2))
+  writeFileSync(join(ROOT, 'test-out', `bench-export-${SECONDS}s${BLUR ? '-blur' : ''}-${DECODER === 'hardware' ? 'hw' : 'auto'}${TAG}.json`), JSON.stringify(result, null, 2))
   if (!result.ok) code = 1
 } catch (e) {
   console.error('falhou:', e)

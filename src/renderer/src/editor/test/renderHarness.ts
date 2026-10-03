@@ -20,6 +20,7 @@ import { memoryCheck } from './memoryHarness'
 import { transitionCheck } from './transitionHarness'
 import { textCheck } from './textHarness'
 import { yuvCheck } from './yuvHarness'
+import { decoderBenchCheck } from './decoderBenchHarness'
 import { SPEED_SD_PROJECT_ID } from './speedHarness'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>?out=<pasta>:
@@ -112,6 +113,8 @@ export async function runRenderHarness(projectId: string, outDir: string | null 
     const exportUrls = mediaUrlsFor(project, 'export')
     const sdProject = await window.api.project.load(SPEED_SD_PROJECT_ID)
     report.yuv = await yuvCheck({ hd: exportUrls.a_video?.original, rot: exportUrls.a_rot?.original, sd: mediaUrlsFor(sdProject, 'export').a_sd?.original })
+    // G1: reprodução com decoder em software × hardware (1080p e 4K), só números para a decisão do preview
+    report.decoderBench = await decoderBenchCheck()
     // por último: decodificação 1080p contínua (a CPU desta máquina estrangula depois de alguns segundos de carga)
     report.speed = await speedCheck()
     ok = true

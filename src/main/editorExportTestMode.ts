@@ -104,7 +104,7 @@ const LONG_ID = 'p-editor-export-20s'
 const SQUARE_ID = 'p-editor-export-quadrado'
 const F7_TARGET_MB = 3
 
-export interface ExportOut { audioBitrate?: number; path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; fellBackFromHevc?: boolean; codec?: string; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
+export interface ExportOut { audioBitrate?: number; path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; fellBackFromHevc?: boolean; codec?: string; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number; yuvFrames?: number }
 type Region = { x: number; y: number; w: number; h: number }
 interface HarnessReport {
   errors: string[]
@@ -715,6 +715,11 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
 
   // ---- cor ----
   const color = r.color ?? {}
+  // G1: a exportação decodifica em software e sobe os I420 pelo caminho YUV (as checagens de cor abaixo valem para ele)
+  for (const id of [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD]) {
+    const ce = color[id]?.export
+    check(!!ce?.path && (ce.yuvFrames ?? 0) >= 80, `${id}: exportado pelo decoder em software + caminho YUV (${ce?.yuvFrames} camadas convertidas ≥ 80 de 90 quadros) ${ce?.error ?? ''}`, failures)
+  }
   const c601 = color[COLOR_601]
   console.log(`cor BT.601: ${JSON.stringify(c601?.frame)}`)
   if (c601?.export.path && existsSync(c601.export.path)) {

@@ -165,6 +165,8 @@ export interface AppInfo {
   chrome: string
   isPackaged: boolean
   paths: { output: string; raw: string; logs: string; userData: string }
+  /** QA (só fora do pacote, com CIALIGHT_QA e CIALIGHT_QA_EXPORT_DECODER=hardware): exportação com o decoder de hardware. */
+  qaExportDecoder?: 'hardware'
 }
 
 export interface RecordingPhaseContext {

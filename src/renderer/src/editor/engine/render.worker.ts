@@ -43,7 +43,7 @@ import { fontReady } from './text/textRaster'
 import { SR } from './audio/mixer'
 import type { AudioIn, AudioOut } from './audio/protocol'
 import { frameCount } from '../export/exportPlan'
-import type { ExportJobSpec, FramesJobSpec, RenderIn, RenderOut, TrackJobSpec } from './protocol'
+import type { ExportDecoder, ExportJobSpec, FramesJobSpec, RenderIn, RenderOut, TrackJobSpec } from './protocol'
 
 type FrameMsg = Extract<RenderIn, { t: 'frame' }>
 
@@ -58,6 +58,10 @@ let compositor: Compositor | null = null
 let canvas: OffscreenCanvas | null = null
 let dpr = 1
 const pool = new DecoderPool()
+// G1: o preview fica no decoder sem preferência (hardware). Medido (test:editor, decoderBenchHarness, 03/10/2026, p95
+// de frameMs na pior rodada, hw × sw): 1ª execução 1080p 12,9 × 9,8 ms, 4K 28,1 × 19,4; 2ª execução 1080p 11,6 × 10,4,
+// 4K 27,1 × 33,2 (piora) — e com o preview em software o reverso a 1× caiu para 3 quadros em 2 s (bloco do GOP
+// decodificado na CPU). Só a exportação (setExportDecoder) usa software.
 let project: Project | null = null
 // trilhas do cursor por id do asset (F6; o cliente manda as que os clipes com cursorFx ligado usam)
 const cursors = new Map<string, CursorTrackV1>()
@@ -136,6 +140,9 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
       }
       case 'testBench':
         void bench(m)
+        break
+      case 'testDecoder':
+        pool.setAcceleration(m.accel)
         break
       case 'memStats':
         post({ t: 'memStats', id: m.id, stats: compositor?.memoryStats() ?? null })
@@ -295,9 +302,9 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
   const missing = new Set<string>()
   const missingAnnotations = new Set<string>()
   const frames: VideoFrame[] = []
-  // G1 (caminho de upload YUV): itemIds cujo VideoFrame está em memória de CPU (decoder em software). Vazio por
-  // enquanto — a Task 2 marca aqui os quadros do decoder em software da exportação (cpuFrames.add(layer.itemId)).
-  // NUNCA marcar quadro do decoder de hardware: o NV12 dele está na GPU e o copyTo seria um readback caro.
+  // G1 (caminho de upload YUV): itemIds cujo VideoFrame está em memória de CPU (decoder em software: a exportação
+  // usa prefer-software, ver setExportDecoder). NUNCA marcar quadro do decoder de hardware: o NV12 dele está na GPU
+  // e o copyTo seria um readback caro — por isso só entra o que o pool diz que veio do decoder em software.
   const cpuFrames = new Set<string>()
   // mesmo asset em mais de uma camada no quadro: cada uma com seu slot (iterador próprio), estável entre quadros
   const flat = flatLayers(layers)
@@ -336,6 +343,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
                   const frame = sample.toVideoFrame()
                   frames.push(frame)
                   src = frame
+                  if (pool.isSoftware(sample)) cpuFrames.add(layer.itemId)
                   meta.set(layer.itemId, { w: frame.displayWidth, h: frame.displayHeight, rotation: sample.rotation })
                 } finally {
                   sample.close()
@@ -647,12 +655,15 @@ async function runExport(
   signal: AbortSignal,
   outbox: ChunkOutbox,
   state: { packets: number }
-): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; audioBitrate: number; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[] }> {
+): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; audioBitrate: number; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[]; yuvFrames: number }> {
   const p = project
   if (!compositor || !canvas || !p) throw new Error('exportação antes de init/project')
   compositor.resize(job.width, job.height)
   selection = []
   prefetched.clear()
+  setExportDecoder(job.decoder)
+  // camadas que subiram pelo caminho YUV nesta exportação (testes/QA: prova de que o decoder em software foi usado)
+  const yuv0 = compositor.yuvConversions
   // fontes dos textos carregadas antes do 1º quadro (nenhum quadro exportado com a fonte de reserva)
   const missingFonts = await requestFonts(projectFontRequests(p), false)
   const durationUs = job.toUs - job.fromUs
@@ -735,7 +746,7 @@ async function runExport(
     if (feed) await feed.feed(audio!, Infinity)
     if (signal.aborted) throw new Cancelled()
     await encoderCall(() => output.finalize())
-    return { videoCodec, audioCodec, audioBitrate: audioCodec ? audioBitrate : 0, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations], missingFonts }
+    return { videoCodec, audioCodec, audioBitrate: audioCodec ? audioBitrate : 0, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations], missingFonts, yuvFrames: (compositor?.yuvConversions ?? yuv0) - yuv0 }
   } catch (err) {
     if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {})
     throw err
@@ -817,6 +828,17 @@ async function runTracking(job: TrackJobSpec, signal: AbortSignal): Promise<Trac
   return results
 }
 
+/**
+ * G1: a exportação decodifica em software — os quadros I420 ficam na CPU e sobem pelo caminho YUV do compositor
+ * (sem o NV12 de hardware → RGBA do Chromium); fonte que não decodifica em software cai para hardware no pool. Vale
+ * para o vídeo e para os quadros (GIF / reserva libx264): o mesmo decoder e a mesma conversão em todos os formatos.
+ * Esta instância do worker é só da exportação (o preview tem a dele, que fica em hardware — medição no topo do arquivo).
+ * `decoder: 'hardware'` (só QA, A/B do benchmark) força o caminho antigo.
+ */
+function setExportDecoder(decoder: ExportDecoder | undefined): void {
+  pool.setAcceleration(decoder === 'hardware' ? 'no-preference' : 'prefer-software')
+}
+
 /** Laço de quadros da exportação (o mesmo do vídeo), com cada quadro lido do canvas e enviado em RGBA. */
 async function runFrames(job: FramesJobSpec, signal: AbortSignal, win: AckWindow): Promise<{ frames: number; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[] }> {
   const p = project
@@ -825,6 +847,7 @@ async function runFrames(job: FramesJobSpec, signal: AbortSignal, win: AckWindow
   comp.resize(job.width, job.height)
   selection = []
   prefetched.clear()
+  setExportDecoder(job.decoder)
   // fontes dos textos carregadas antes do 1º quadro (como no vídeo)
   const missingFonts = await requestFonts(projectFontRequests(p), false)
   const total = frameCount(job.fromUs, job.toUs, job.fps)

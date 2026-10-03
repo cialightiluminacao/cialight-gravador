@@ -32,6 +32,7 @@ const STRETCH_PROJECT_ID = 'p-editor-stretch-test'
 const SPEED_PROJECT_ID = 'p-editor-speed-test'
 // paridade do reverso numa fonte SD sem marcação de cor
 const SPEED_SD_PROJECT_ID = 'p-editor-speed-sd-test'
+const DECODER_BENCH_PROJECT_ID = 'p-editor-decoder-bench'
 // zoom/pan (F4): PNG escuro com um quadrado vermelho de 12 px em (1300, 350); o harness aplica o zoom (zoomHarness.ts)
 const ZOOM_PROJECT_ID = 'p-editor-zoom-test'
 // zoom automático nos cliques (F6): vídeo de 6 s do mesmo alvo do zoom; o harness monta a trilha do cursor em memória
@@ -82,6 +83,7 @@ interface HarnessReport {
   transition?: TransitionReport
   text?: TextReport
   yuv?: YuvReport
+  decoderBench?: DecoderBenchReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -314,6 +316,18 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const sdProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Paridade SD', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: SPEED_SD_PROJECT_ID }, aSd), aSd.id, 0).project
   rmSync(projects.dirOf(SPEED_SD_PROJECT_ID), { recursive: true, force: true })
   projects.create(sdProject)
+  // G1: preview com decoder em software × hardware — 1080p (o marcador de 8 s) e 4K (testsrc2 3840×2160, 4 s)
+  const uhd = join(dir, 'testsrc2-4k.mp4')
+  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=3840x2160:rate=30', '-t', '4', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', uhd], 'editor: testsrc2 4K')
+  const a4k: Asset = { ...assetFromInfo('a_4k', uhd, statSync(uhd), await probe(uhd)), status: 'ready' }
+  const benchProject: Project = {
+    ...createEmptyProject('Decoder software × hardware', { width: 1920, height: 1080, fps: 30, background: '#000000' }),
+    id: DECODER_BENCH_PROJECT_ID,
+    assets: [{ ...aMarker, id: 'a_hd' }, a4k],
+    tracks: []
+  }
+  rmSync(projects.dirOf(DECODER_BENCH_PROJECT_ID), { recursive: true, force: true })
+  projects.create(benchProject)
   // zoom: fundo escuro + quadrado vermelho 12×12 centrado em (1300, 350) + caixa verde (detalhe que não é o alvo)
   const zoomPng = join(dir, 'zoom-alvo.png')
   await gen(['-f', 'lavfi', '-i', 'color=c=0x203040:s=1920x1080', '-vf', 'drawbox=x=1294:y=344:w=12:h=12:color=red:t=fill,drawbox=x=300:y=700:w=200:h=120:color=0x40a060:t=fill', '-frames:v', '1', '-update', '1', zoomPng], 'editor: alvo do zoom')
@@ -889,6 +903,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
 
   checkText(r.text, failures)
   checkYuv(r.yuv, failures)
+  checkDecoderBench(r.decoderBench, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)
@@ -926,6 +941,21 @@ function boundsRgb(d: Uint8Array, W: number, H: number, pred: (r: number, g: num
  * croma da última linha com a linha codificada abaixo do visibleRect). NV12/I420A marcados: caem no caminho antigo
  * (idêntico ao envio parcial). Casos informativos só no log.
  */
+type BenchStats = { n: number; median: number; p95: number; max: number }
+/** G1 (decoderBenchHarness): reprodução com decoder em software × hardware; frameMs inclui a decodificação. */
+interface DecoderBenchReport {
+  error?: string
+  runs: { res: string; accel: string; frameMs: BenchStats; drawMs: BenchStats; error?: string }[]
+  summary?: Record<string, { hwP95: number; swP95: number; hwMedian: number; swMedian: number }>
+}
+
+/** Só números (decisão do preview no relatório da G1): a medição tem de ter rodado sem erro, sem limite de tempo. */
+function checkDecoderBench(d: DecoderBenchReport | undefined, failures: string[]): void {
+  for (const r of d?.runs ?? []) console.log(`decoder ${r.res} ${r.accel}: frameMs ${JSON.stringify(r.frameMs)} drawMs ${JSON.stringify(r.drawMs)} ${r.error ?? ''}`)
+  console.log(`decoder software × hardware (pior rodada, frameMs): ${JSON.stringify(d?.summary)}`)
+  check(!!d && !d.error && d.runs.length === 8 && d.runs.every((r) => !r.error && r.frameMs.n > 0), `preview com decoder em software × hardware medido em 1080p e 4K (${d?.runs.length ?? 0} rodadas) ${d?.error ?? d?.runs.find((r) => r.error)?.error ?? ''}`, failures)
+}
+
 function checkYuv(y: YuvReport | undefined, failures: string[]): void {
   check(!!y && !y.error, `YUV: harness sem erro (${y?.error ?? ''})`, failures)
   check((y?.cases.filter((c) => !c.informative).length ?? 0) === 13, `YUV: 13 casos medidos (${y?.cases.filter((c) => !c.informative).length})`, failures)

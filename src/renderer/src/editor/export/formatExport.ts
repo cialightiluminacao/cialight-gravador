@@ -19,6 +19,8 @@ import { missingFontWarnings, missingMediaWarnings } from './exportPlan'
 import { audioBlocks, audioOnlyBlocker, audioPipeSpec, gifPipeSpec, type AudioFormat } from './formatPlan'
 import { EditorExportCancelled, isCancelledReply, settleOrCancel } from './finalize'
 import { withExportLock } from './exportLock'
+import { RateMeter } from './rateMeter'
+import { qaExportDecoder } from './qaDecoder'
 import type { EditorExportProgress } from './editorExport'
 import { ipcErrorMessage } from '@/lib/ipcError'
 
@@ -159,10 +161,11 @@ export function pipeFrames(
   const render = new RenderClient(new OffscreenCanvas(req.width, req.height), { width: req.width, height: req.height, dpr: 1 })
   render.setProject(req.project, mediaUrlsFor(req.project, 'export'), false)
   if (req.cursorTracks?.size) render.setCursorTracks(req.cursorTracks)
-  const job: FramesJobSpec = { jobId, width: req.width, height: req.height, fps: req.fps, fromUs: req.fromUs, toUs: req.toUs }
+  const job: FramesJobSpec = { jobId, width: req.width, height: req.height, fps: req.fps, fromUs: req.fromUs, toUs: req.toUs, decoder: qaExportDecoder() }
   return new Promise((resolve, reject) => {
     let settled = false
-    let first: { t: number; frame: number } | null = null
+    // velocidade/ETA pela taxa dos últimos 10 s (rateMeter.ts)
+    const meter = new RateMeter()
     // quadros esperando gravação (na ordem) e gravações em voo
     const queue: { seq: number; total: number; data: Uint8Array }[] = []
     let inflight = 0
@@ -184,10 +187,8 @@ export function pipeFrames(
               // o main já cancelou o job (janela/saída): cancelamento, não erro
               if (isCancelledReply(reply)) return fail(new EditorExportCancelled())
               render.chunkAck(jobId, seq)
-              const now = performance.now()
-              if (!first) first = { t: now, frame: seq }
-              const elapsedS = (now - first.t) / 1000
-              const fpsDone = elapsedS > 0.3 && seq > first.frame ? (seq - first.frame) / elapsedS : null
+              meter.add(performance.now(), seq)
+              const fpsDone = meter.fps()
               onFrame?.(seq, total, fpsDone ? fpsDone / req.fps : null, fpsDone ? Math.max(0, (total - seq) / fpsDone) : null)
             },
             (e: unknown) => fail(new Error(`Falha ao gravar o arquivo: ${ipcErrorMessage(e)}`))
