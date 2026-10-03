@@ -205,7 +205,7 @@ async function main() {
   {
     const r = await ev(`await T.tab('Legendas'); const p = T.panel()
       return { tabs: T.all('aside[aria-label="Biblioteca de mídia"] [role="tab"]').map((x) => x.textContent.trim()), empty: p.textContent.includes('Nenhuma legenda ainda'), buttons: T.all('button', p).map((b) => b.textContent.trim()), caps: T.caps().length }`)
-    check('abas: … Transições, Legendas', JSON.stringify(r.tabs) === JSON.stringify(['Mídia', 'Áudio', 'Gravações', 'Efeitos', 'Texto', 'Transições', 'Legendas']), r.tabs)
+    check('abas: … Transições, Legendas, Modelos', JSON.stringify(r.tabs) === JSON.stringify(['Mídia', 'Áudio', 'Gravações', 'Efeitos', 'Texto', 'Transições', 'Legendas', 'Modelos']), r.tabs)
     check('estado vazio e botões pt-BR (Nova legenda no playhead, Importar SRT…, Exportar SRT…)', r.empty && r.caps === 0 && ['Nova legenda no playhead', 'Importar SRT…', 'Exportar SRT…'].every((b) => r.buttons.includes(b)), r)
     await shot('f5-captions-01-vazia.png')
   }

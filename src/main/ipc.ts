@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
-import { basename, extname, join } from 'path'
-import { promises as fsp, renameSync, rmSync, statSync } from 'fs'
+import { basename, dirname, extname, join } from 'path'
+import { existsSync, promises as fsp, renameSync, rmSync, statSync } from 'fs'
 import { IPC, type GeneratedExt, type GeneratedMeta, type BarState, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
 import type { HotkeyAction, RecorderCommand, RecorderPhase, RecordingConfig, Session, Settings, Stroke } from '@shared/types'
 import { getSettings, outputDir, rawDir, setSettings } from './settings/settingsStore'
@@ -9,6 +9,8 @@ import { selectCaptureSource } from './capture/displayMediaHandler'
 import type { SessionStore } from './session/sessionStore'
 import type { ProjectStore } from './project/projectStore'
 import type { Asset } from '@shared/editor/project'
+import type { AssetToCopy, BrandTemplate } from '@shared/editor/brand'
+import { BrandStore, brandDirFor } from './brand/brandStore'
 import { projectFromSession } from '@shared/editor/fromSession'
 import { newId, newProjectId } from '@shared/editor/ids'
 import { parseProject } from '@shared/editor/schema'
@@ -446,6 +448,51 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     })
   })
   ipcMain.handle(IPC.editorExport.cancel, (_e, jobId: string) => editorExports.cancel(jobId))
+  // ---- modelos de marca ----
+  // userData/brand-templates.json + brand-assets/ (nunca settings.json); em teste/QA, a pasta de teste (brandDirFor)
+  const brand = new BrandStore(brandDirFor(process.env, app.getPath('userData')))
+  ipcMain.handle(IPC.brand.list, () => brand.list())
+  ipcMain.handle(IPC.brand.save, (_e, template: BrandTemplate, assetsToCopy: AssetToCopy[], projectId: string) => {
+    // os arquivos vêm dos assets do projeto (nunca um caminho arbitrário do renderer): o caminho mandado só confere
+    const p = projects.cached(projectId)
+    const files = (Array.isArray(assetsToCopy) ? assetsToCopy : []).map((c) => {
+      const a = p.assets.find((x) => x.id === c?.assetId)
+      if (!a || a.source.type === 'session') throw new Error('Um arquivo do modelo não está no projeto; salve o projeto e tente de novo.')
+      const expected = a.source.type === 'file' ? a.source.path : a.source.file
+      if (c.sourcePath !== expected) throw new Error(`O arquivo “${a.name}” mudou no projeto; tente de novo.`)
+      return { assetId: a.id, path: a.source.type === 'file' ? a.source.path : projects.filePath(p.id, a.source.file) }
+    })
+    return brand.save(template, files)
+  })
+  ipcMain.handle(IPC.brand.remove, (_e, id: string) => brand.remove(String(id)))
+  ipcMain.handle(IPC.brand.rename, (_e, id: string, name: string) => brand.rename(String(id), String(name ?? '')))
+  ipcMain.handle(IPC.brand.materialize, async (_e, templateId: string, projectId: string) => {
+    projects.cached(projectId) // lança cedo se o projeto não existe
+    const t = brand.get(String(templateId))
+    const out: { assetId: string; asset: Asset }[] = []
+    for (const a of t.assets) {
+      // cópia própria do projeto (apagar o modelo não quebra nada); o mesmo modelo aplicado de novo reusa o arquivo
+      const ext = extname(a.file).replace(/[^\w.]/g, '').slice(0, 10)
+      const rel = `generated/brand-${t.id}-${a.id}${ext}`
+      const dest = projects.filePath(projectId, rel)
+      if (!existsSync(dest)) {
+        await fsp.mkdir(dirname(dest), { recursive: true })
+        const tmp = `${dest}.part`
+        try {
+          await fsp.copyFile(brand.assetPath(t.id, a.id), tmp)
+          renameSync(tmp, dest)
+        } catch (e) {
+          rmSync(tmp, { force: true })
+          throw new Error(`Não foi possível copiar “${a.name}” do modelo: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+      const asset: Asset = { ...assetFromInfo(newId('a_'), dest, statSync(dest), await probe(dest)), name: a.name, source: { type: 'generated', file: rel } }
+      out.push({ assetId: a.id, asset })
+    }
+    projects.cacheAssets(projectId, out.map((x) => x.asset))
+    return out
+  })
+
   // ---- legendas (SRT) ----
   // QA (só fora do pacote, com CIALIGHT_QA): CIALIGHT_QA_SRT_OPEN/CIALIGHT_QA_SRT_SAVE trocam os diálogos por caminhos
   // fixos de teste (test-out/) — o resto (leitura com detecção de codificação, gravação com BOM) é o caminho real

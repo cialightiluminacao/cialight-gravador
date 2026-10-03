@@ -110,6 +110,13 @@ const api: IpcApi = {
     cancel: (jobId) => ipcRenderer.invoke(IPC.editorExport.cancel, jobId),
     onFinalizeProgress: (cb) => on(IPC.editorExport.finalizeProgress, cb)
   },
+  brand: {
+    list: () => ipcRenderer.invoke(IPC.brand.list),
+    save: (template, assetsToCopy, projectId) => ipcRenderer.invoke(IPC.brand.save, template, assetsToCopy, projectId),
+    remove: (id) => ipcRenderer.invoke(IPC.brand.remove, id),
+    rename: (id, name) => ipcRenderer.invoke(IPC.brand.rename, id, name),
+    materialize: (templateId, projectId) => ipcRenderer.invoke(IPC.brand.materialize, templateId, projectId)
+  },
   captions: {
     openSrt: () => ipcRenderer.invoke(IPC.captions.openSrt),
     saveSrt: (text, defaultName) => ipcRenderer.invoke(IPC.captions.saveSrt, text, defaultName),

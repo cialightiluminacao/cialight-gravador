@@ -17,6 +17,7 @@ import type {
 } from './types'
 
 import type { Asset, Project, Us } from './editor/project'
+import type { AssetToCopy, BrandTemplate } from './editor/brand'
 
 export type Unsubscribe = () => void
 
@@ -311,6 +312,21 @@ export interface IpcApi {
    * editor concluída nesta sessão (o caminho devolvido pela exportação, que pode ser numerado), uma vez; nunca
    * sobrescreve: com `<nome>.srt` já existente devolve `{ path: null, warning }`.
    */
+  /**
+   * Modelos de marca (F5). Ficam em userData/brand-templates.json + brand-assets/<id>/ (em teste/QA, numa pasta de
+   * teste). `list`: `warning` quando o arquivo estava corrompido (foi renomeado; a lista começa vazia). `save`: copia os
+   * arquivos (`assetsToCopy`, assets do projeto `projectId` aberto, já salvo) — falha não deixa nada pela metade; limite
+   * de 500 MB por modelo. `materialize`: copia os arquivos do modelo para generated/ do projeto e devolve, por asset do
+   * modelo, o Asset `generated` pronto (probe; vídeo/áudio em 'processing', para media.enqueue), já resolvível no
+   * protocolo media/ — o renderer o passa a applyTemplate.
+   */
+  brand: {
+    list(): Promise<{ templates: BrandTemplate[]; warning?: string }>
+    save(template: BrandTemplate, assetsToCopy: AssetToCopy[], projectId: string): Promise<BrandTemplate>
+    remove(id: string): Promise<void>
+    rename(id: string, name: string): Promise<BrandTemplate>
+    materialize(templateId: string, projectId: string): Promise<{ assetId: string; asset: Asset }[]>
+  }
   captions: {
     openSrt(): Promise<{ text: string; name: string } | null>
     saveSrt(text: string, defaultName: string): Promise<string | null>
@@ -432,6 +448,7 @@ export const IPC = {
     cancel: 'editorExport:cancel',
     finalizeProgress: 'editorExport:finalizeProgress'
   },
+  brand: { list: 'brand:list', save: 'brand:save', remove: 'brand:remove', rename: 'brand:rename', materialize: 'brand:materialize' },
   captions: { openSrt: 'captions:openSrt', saveSrt: 'captions:saveSrt', writeSrtBeside: 'captions:writeSrtBeside' },
   recording: {
     setPhase: 'recording:setPhase',

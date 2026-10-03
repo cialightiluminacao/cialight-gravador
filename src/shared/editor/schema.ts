@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
 import { ANIM_PRESETS, DEFAULT_TEXT_SHADOW, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, AnimPreset, EffectItem, EffectRegion, Item, PresetAnim, Project, Track, VisualProps } from './project'
+import type { Anim, AnimPreset, EffectItem, EffectRegion, Item, MediaItem, PresetAnim, Project, ShapeItem, TextItem, Track, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
 import { conservativeRegion } from './contentPose'
@@ -141,6 +141,11 @@ const effectItem = z.object({
 })
 const annotationsItem = z.object({ ...itemBase, type: z.literal('annotations'), sessionId: z.string(), inUs: us, autoFadeMs: z.number().nonnegative().nullable().optional() })
 const item = z.discriminatedUnion('type', [mediaItem, textItem, shapeItem, effectItem, annotationsItem])
+/**
+ * Item de um modelo de marca (brand.ts): só mídia, texto e forma, no formato do modelo em memória (os transforms do
+ * schema são idempotentes nele). Efeitos e anotações não entram em modelos.
+ */
+export const BrandItemSchema = z.discriminatedUnion('type', [mediaItem, textItem, shapeItem]) as unknown as z.ZodType<MediaItem | TextItem | ShapeItem>
 
 const assetSource = z.discriminatedUnion('type', [
   z.object({ type: z.literal('session'), sessionId: z.string(), stream: z.enum(['screen', 'webcam', 'mic', 'system']) }),

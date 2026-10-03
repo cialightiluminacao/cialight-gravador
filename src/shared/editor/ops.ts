@@ -575,7 +575,7 @@ export function musicTrackName(p: Project): string {
 }
 
 /** `base`, "`base` 2", "`base` 3"… — o primeiro nome que nenhuma faixa usa. */
-function freeTrackName(p: Project, base: string): string {
+export function freeTrackName(p: Project, base: string): string {
   if (!p.tracks.some((t) => t.name === base)) return base
   let n = 2
   while (p.tracks.some((t) => t.name === `${base} ${n}`)) n++
@@ -1627,6 +1627,24 @@ export function closeGaps(p: Project, trackId: string): Project {
       }
     }
     finalize(d)
+  })
+}
+
+/**
+ * Desloca TODO o conteúdo para a direita por `deltaUs`: itens de todas as faixas (inclusive efeitos, legendas e faixas
+ * ocultas) e marcadores — o projeto inteiro anda junto, então efeitos vinculados/ancorados/`scope:'track'` continuam
+ * sobre o mesmo conteúdo em cada instante deslocado. Faixa bloqueada com itens → EditError('locked') (ela ficaria para
+ * trás, fora de sincronia). Abre [0, deltaUs) livre em todas as faixas (abertura de um modelo de marca).
+ */
+export function shiftAllContent(p: Project, deltaUs: Us): Project {
+  const delta = Math.round(deltaUs)
+  if (delta < 0) throw new EditError('invalid', 'Deslocamento negativo')
+  if (delta === 0) return p
+  const locked = p.tracks.filter((t) => t.locked && t.items.length > 0)
+  if (locked.length) throw new EditError('locked', `Faixa bloqueada: ${locked.map((t) => `"${t.name}"`).join(', ')}. Desbloqueie para deslocar o projeto sem perder a sincronia.`)
+  return edit(p, (d) => {
+    for (const t of d.tracks) for (const it of t.items) it.startUs += delta
+    for (const m of d.markers) m.tUs += delta
   })
 }
 
