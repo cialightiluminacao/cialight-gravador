@@ -54,6 +54,7 @@ import {
   type ExportFormat
 } from '../export/formatPlan'
 import { exportStill, type FormatExportResult } from '../export/formatExport'
+import { EFFECT_LABEL, privacyLine } from '../export/stillNotice'
 import type { EnqueueInput, QueueItem } from '../export/exportQueue'
 import { exportQueue, useQueueActive, useQueueItem } from '../export/exportQueueStore'
 import { defaultExportFolder } from './frameExport'
@@ -100,15 +101,7 @@ const formatMbps = (bps: number): string => `${(bps / 1e6).toLocaleString('pt-BR
 const formatFps = (fps: number): string => `${fps.toLocaleString('pt-BR', { maximumFractionDigits: 3 })} fps`
 const CODEC_LABEL: Record<VideoCodecChoice, string> = { h264: 'H.264', hevc: 'HEVC' }
 const ISSUE_LABEL: Record<ExportMediaIssue['status'], string> = { missing: 'ausente', processing: 'ainda processando', error: 'com erro' }
-const EFFECT_LABEL = { blur: 'Blur', pixelate: 'Pixelizar', solid: 'Tarja' } as const
 const canvasKey = (c: Project['canvas']): string => `${c.width}x${c.height}@${c.fps}`
-
-/** Aviso de privacidade como texto ("Blur em 0:03 — …"), guardado no item da fila. */
-function privacyLine(p: Project, w: PrivacyWarning): string {
-  const item = findItem(p, w.itemId)?.item
-  const name = item?.type === 'effect' ? (item.name ?? EFFECT_LABEL[item.effect]) : 'Efeito'
-  return `${name} em ${formatClock(w.tUs / 1000, false)} — ${w.message}`
-}
 
 /** Item da fila concluído → tela de concluído do diálogo. */
 function doneOf(it: QueueItem): Done | null {
