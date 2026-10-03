@@ -21,3 +21,8 @@ export function modelsDir(): string {
 export function rnnoiseDir(): string {
   return join(modelsDir(), 'rnnoise')
 }
+
+// Helper de OCR do "Procurar dados sensíveis" (resources/ocr/; empacotado: process.resourcesPath/ocr via extraResources).
+export function ocrScriptPath(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'ocr', 'ocr-winrt.ps1') : join(app.getAppPath(), 'resources', 'ocr', 'ocr-winrt.ps1')
+}
