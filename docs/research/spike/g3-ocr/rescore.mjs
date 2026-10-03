@@ -18,6 +18,7 @@ for (const f of readdirSync(RES).filter((f) => f.endsWith('-ocr.json') && f.incl
   const recs = []
   for (const s of truth.screens) recs.push(...scoreScreen(truth.items.filter((i) => i.screen === s.name), { lines: raw[s.name] }, scale))
   printTable(`${f} — por tamanho`, [...aggregate(recs, 'size'), ...aggregate(recs.filter((r) => r.size <= 14), () => '12-14px'), ...aggregate(recs, () => 'todos')])
+  for (const r of aggregate(recs.filter((x) => x.size <= 14), () => '12-14px')) console.log(`caixa por presença 12–14 px: IoU med ${r.presIouMedian.toFixed(2)} mín ${r.presIouMin.toFixed(2)} margem p99 ${r.presMarginP99Px.toFixed(1)} px máx ${r.presMarginMaxPx.toFixed(1)} px`)
   if (detail) {
     printTable(`${f} — por categoria (12–14px)`, aggregate(recs.filter((r) => r.size <= 14), 'cat'))
     printTable(`${f} — por fonte (12–14px)`, aggregate(recs.filter((r) => r.size <= 14), 'font'))

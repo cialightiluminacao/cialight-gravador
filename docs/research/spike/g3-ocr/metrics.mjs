@@ -64,10 +64,12 @@ export function scoreScreen(items, ocr, scale) {
     {
       const t = it.ink
       const iv = []
+      let bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9
       for (const [, x, y, w, h] of words) {
         const X0 = x / scale, X1 = (x + w) / scale, Y0 = y / scale, Y1 = (y + h) / scale
         if (Y1 <= t.y || Y0 >= t.y + t.h || X1 <= t.x || X0 >= t.x + t.w) continue
         iv.push([Math.max(X0, t.x), Math.min(X1, t.x + t.w)])
+        bx0 = Math.min(bx0, X0); by0 = Math.min(by0, Y0); bx1 = Math.max(bx1, X1); by1 = Math.max(by1, Y1)
       }
       iv.sort((p, q) => p[0] - q[0])
       let cov = 0, end = -1e9
@@ -79,6 +81,15 @@ export function scoreScreen(items, ocr, scale) {
       }
       rec.coverage = cov / t.w
       rec.present = rec.coverage >= 0.9
+      // caixa por presença: união das caixas INTEIRAS das palavras que tocam a tinta (vale também para itens
+      // lidos errado — evita o viés de sobrevivência de medir caixas só nos casamentos norm)
+      if (rec.present) {
+        const ix = Math.max(0, Math.min(bx1, t.x + t.w) - Math.max(bx0, t.x))
+        const iy = Math.max(0, Math.min(by1, t.y + t.h) - Math.max(by0, t.y))
+        rec.presIou = (ix * iy) / ((bx1 - bx0) * (by1 - by0) + t.w * t.h - ix * iy)
+        rec.presMarginPx = Math.max(0, bx0 - t.x, t.x + t.w - bx1, by0 - t.y, t.y + t.h - by1)
+        rec.presMarginRel = rec.presMarginPx / it.size
+      }
     }
     if (at >= 0) {
       const ws = new Set(owner.slice(at, at + nt.length))
@@ -123,7 +134,12 @@ export function aggregate(recs, key) {
       iouMedian: median(found.map((r) => r.iou)),
       iouMin: Math.min(...found.map((r) => r.iou)),
       marginP99Px: quant(found.map((r) => r.marginPx), 0.99),
-      marginP99Rel: quant(found.map((r) => r.marginRel), 0.99)
+      marginP99Rel: quant(found.map((r) => r.marginRel), 0.99),
+      // caixas por presença (todos os itens com presença, lidos certo ou errado)
+      presIouMedian: median(rs.filter((r) => r.present).map((r) => r.presIou)),
+      presIouMin: Math.min(...rs.filter((r) => r.present).map((r) => r.presIou)),
+      presMarginP99Px: quant(rs.filter((r) => r.present).map((r) => r.presMarginPx), 0.99),
+      presMarginMaxPx: Math.max(...rs.filter((r) => r.present).map((r) => r.presMarginPx))
     })
   }
   return rows
