@@ -65,13 +65,21 @@ export type Layer = MediaLayer | AnnotationsLayer | EffectLayer | TextLayer | Sh
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
 
-/** Tempo na fonte (µs) para o instante tUs da timeline. */
+/**
+ * Tempo na fonte (µs) para o instante tUs da timeline. Sempre dentro do trecho aparado [inUs, inUs + ⌈dur·speed⌉ − 1]
+ * (congelado: o próprio freeze.atUs): o que foi cortado pode ser sigiloso. Até a v1.4 o reverso lia, no fim do clipe,
+ * até um quadro ANTES de inUs (− 1 quadro da fórmula) — um quadro do trecho cortado aparecia; a trava corrige isso (F5).
+ */
 export function sourceTimeUs(item: MediaItem, asset: Asset, tUs: Us): Us {
   const local = tUs - item.startUs
   let src: number
   if (item.freeze) src = item.freeze.atUs
-  else if (item.reverse) src = item.inUs + (item.durationUs - local) * item.speed - frameDurUs(asset.video?.fps || 30)
-  else src = item.inUs + local * item.speed
+  else {
+    src = item.reverse
+      ? item.inUs + (item.durationUs - local) * item.speed - frameDurUs(asset.video?.fps || 30)
+      : item.inUs + local * item.speed
+    src = clamp(Math.round(src), item.inUs, item.inUs + Math.max(0, Math.ceil(item.durationUs * item.speed) - 1))
+  }
   const max = asset.durationUs != null ? Math.max(0, asset.durationUs - 1) : Infinity
   return Math.round(clamp(src, 0, max))
 }
@@ -338,26 +346,14 @@ function transitionSide(p: Project, itemId: string, trackId: string, at: Us): La
   const stack = stackAt(p, at)
   const i = stack.findIndex((l) => l.kind !== 'effect' && l.itemId === itemId)
   if (i < 0) return []
-  const own = stack[i]
-  const item = own.kind === 'media' ? p.tracks.find((t) => t.id === trackId)?.items.find((x) => x.id === itemId) : undefined
-  const out: Layer[] = [own.kind === 'media' && item?.type === 'media' ? clampToTrim(own, item) : own]
+  // srcUs já vem preso ao trecho aparado (sourceTimeUs): congelar o último quadro de um reverso por d/2 não mostra
+  // conteúdo cortado
+  const out: Layer[] = [stack[i]]
   for (let j = i + 1; j < stack.length; j++) {
     const l = stack[j]
     if (l.kind === 'effect' && (l.scope === 'below' || (l.targetTrackId === trackId && effectBound(stack, j)))) out.push(l)
   }
   return out
-}
-
-/**
- * srcUs preso ao trecho aparado do clipe, [inUs, inUs + dur·speed) (congelado: o próprio freeze.atUs). O reverso de
- * sourceTimeUs lê, no último quadro do clipe, até um quadro ANTES de inUs (comportamento da v1.3, mantido fora das
- * transições pelo golden); no corte seco isso dura um quadro, mas a transição congela esse instante por d/2 — então o
- * lado da transição nunca mostra conteúdo cortado.
- */
-function clampToTrim(l: MediaLayer, item: MediaItem): MediaLayer {
-  if (l.srcUs === null || item.freeze) return l
-  const src = clamp(l.srcUs, item.inUs, item.inUs + Math.max(0, Math.ceil(item.durationUs * item.speed) - 1))
-  return src === l.srcUs ? l : { ...l, srcUs: src }
 }
 
 /** Camada da transição `w` no instante tUs (dentro da janela). */

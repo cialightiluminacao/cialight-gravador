@@ -114,6 +114,10 @@ describe('schema F4: propriedades que viraram animáveis (compatível com v1.1�
   // (golden gerado com o código da v1.3 antes da mudança; ShapeLayer.item reduzido ao id). F5: TextLayer/ShapeLayer
   // ganharam `trackId` (escopo `track` com alvo em texto/forma) — campo novo, não um valor diferente: a comparação o
   // ignora em vez de regenerar o golden (o resto da camada continua idêntico ao da v1.3).
+  // F5 (correção de privacidade): UMA entrada do golden mudou — frames[206] (t = 8 999 999, último µs do clipe
+  // reverso i_v2, inUs 2 000 000, 2×): srcUs 1 966 669 → 2 000 000. A v1.3 lia ali um quadro ANTES de inUs (trecho
+  // cortado, que pode ser sigiloso); sourceTimeUs agora prende srcUs ao trecho aparado. Nenhuma outra entrada mudou
+  // (planAudio idêntico).
   const old = fixture as unknown
   const shrink = (layers: ReturnType<typeof resolveFrame>) =>
     layers.map((l) => {
