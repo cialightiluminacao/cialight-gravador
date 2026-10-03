@@ -473,3 +473,31 @@ describe('transição removida pela normalização (toast no commit)', () => {
     expect(toast).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('editorStore — marcas no histórico (abertura)', () => {
+  const run = (marks0: { inUs: number | null; outUs: number | null; playheadUs: number }): void => {
+    st().setInOut(marks0.inUs, marks0.outUs)
+    st().setPlayhead(marks0.playheadUs)
+    const p0 = st().project!
+    const after = { inUs: marks0.inUs === null ? null : marks0.inUs + 2_000_000, outUs: marks0.outUs === null ? null : marks0.outUs + 2_000_000, playheadUs: marks0.playheadUs + 2_000_000 }
+    st().apply((p) => addMarker(p, 500), { marks: { before: marks0, after } })
+    st().setInOut(after.inUs, after.outUs)
+    st().setPlayhead(after.playheadUs)
+    expect(st().history.past).toHaveLength(1)
+    st().undo()
+    expect({ i: st().inUs, o: st().outUs, p: st().playheadUs }).toEqual({ i: marks0.inUs, o: marks0.outUs, p: marks0.playheadUs })
+    expect(st().project).toBe(p0)
+    st().redo()
+    expect({ i: st().inUs, o: st().outUs, p: st().playheadUs }).toEqual({ i: after.inUs, o: after.outUs, p: after.playheadUs })
+    expect(st().project!.markers).toHaveLength(1)
+  }
+  it('undo/redo restauram Entrada/Saída/playhead (1/3/2 s <-> 3/5/4 s)', () => run({ inUs: 1_000_000, outUs: 3_000_000, playheadUs: 2_000_000 }))
+  it('Entrada/Saída nulas', () => run({ inUs: null, outUs: null, playheadUs: 2_000_000 }))
+  it('entrada sem meta não mexe nas marcas', () => {
+    st().apply((p) => addMarker(p, 500))
+    st().setInOut(7, 9)
+    st().setPlayhead(8)
+    st().undo()
+    expect([st().inUs, st().outUs, st().playheadUs]).toEqual([7, 9, 8])
+  })
+})

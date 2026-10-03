@@ -5,7 +5,7 @@ import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
 import { withProcessedAudio } from '@shared/editor/audioProcess'
 import { droppedTransitions } from '@shared/editor/transitions'
-import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
+import { commit, initHistory, redo as redoH, redoMeta, undo as undoH, undoMeta, type History, type HistoryMeta } from './history'
 import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from './zoom'
 import { ipcErrorMessage } from '@/lib/ipcError'
 
@@ -16,8 +16,11 @@ export interface IngestProgress { step: string; percent: number }
 /** Pré-processamento de áudio (redução de ruído/normalização) de um par asset~chave: progresso ou falha. */
 export type AudioJobState = { percent: number } | { error: string }
 
+/** Marcas de UI (fora do projeto): Entrada/Saída/playhead. */
+export interface UiMarks { inUs: Us | null; outUs: Us | null; playheadUs: Us }
+
 export interface EditorState {
-  history: History<Project>
+  history: History<Project, UiMarks>
   project: Project | null // === history.present
   dirty: boolean
   saving: boolean
@@ -58,7 +61,7 @@ export interface EditorState {
    * porque os clipes deixaram de estar encostados vira toast (nunca silêncio); quietTransitions = a remoção é o pedido
    * (removeTransition).
    */
-  apply(fn: (p: Project) => Project, opts?: { transient?: boolean; quietTransitions?: boolean }): boolean
+  apply(fn: (p: Project) => Project, opts?: { transient?: boolean; quietTransitions?: boolean; marks?: HistoryMeta<UiMarks> }): boolean
   /** Aplica patch em asset SEM entrada de histórico (resultado de ingest); corrige past/present/future. */
   applyAssetPatch(assetId: string, patch: Partial<Asset>): void
   setIngest(assetId: string, progress: IngestProgress | null): void
@@ -101,12 +104,12 @@ function warnDroppedTransitions(base: Project, next: Project): void {
 }
 
 /** Campos derivados do histórico (project, canUndo, canRedo). */
-function derive(h: History<Project>): Pick<EditorState, 'history' | 'project' | 'canUndo' | 'canRedo'> {
+function derive(h: History<Project, UiMarks>): Pick<EditorState, 'history' | 'project' | 'canUndo' | 'canRedo'> {
   return { history: h, project: h.present, canUndo: h.past.length > 0, canRedo: h.future.length > 0 }
 }
 
 const INITIAL = {
-  history: { past: [], present: null as unknown as Project, future: [] } as History<Project>,
+  history: { past: [], present: null as unknown as Project, future: [] } as History<Project, UiMarks>,
   project: null as Project | null,
   canUndo: false,
   canRedo: false,
@@ -134,7 +137,7 @@ const INITIAL = {
 export const useEditorStore = create<EditorState>()((set, get) => ({
   ...INITIAL,
 
-  open: (p) => set({ ...INITIAL, ...derive(initHistory(p)) }),
+  open: (p) => set({ ...INITIAL, ...derive(initHistory<Project, UiMarks>(p)) }),
   close: () => set({ ...INITIAL }),
 
   apply: (fn, opts) => {
@@ -163,7 +166,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     // transação as operações já mantêm as âncoras (edit()); o tamanho do quadro muda por função crua (barra de cima,
     // inspetor), que não passa por lá — então o refresh
     const fresh = txBase ? refreshAttachments(next, txBase) : next.canvas !== history.present.canvas ? refreshAttachments(next, history.present) : next
-    const h = commit(txBase ? { ...history, present: txBase } : history, touch(fresh), HISTORY_LIMIT)
+    const h = commit(txBase ? { ...history, present: txBase } : history, touch(fresh), HISTORY_LIMIT, opts?.marks)
     set({ ...derive(h), dirty: true, txBase: null })
     if (!opts?.quietTransitions) warnDroppedTransitions(txBase ?? history.present, fresh)
     return true
@@ -176,7 +179,8 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       if (!p.assets.some((a) => a.id === assetId)) return p // snapshot anterior à criação do asset
       return updateAsset(p, assetId, patch)
     }
-    const h: History<Project> = {
+    const h: History<Project, UiMarks> = {
+      ...history,
       past: history.past.map(fix),
       present: fix(history.present),
       future: history.future.map(fix),
@@ -246,13 +250,16 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       return
     }
     if (history.past.length === 0) return
-    set({ ...derive(undoH(history)), dirty: true, selectedTransition: null })
+    // entrada com marcas de UI (ex.: "Usar como abertura"): Entrada/Saída/playhead voltam exatamente ao estado anterior
+    const m = undoMeta(history)?.before
+    set({ ...derive(undoH(history)), dirty: true, selectedTransition: null, ...(m ? { inUs: m.inUs, outUs: m.outUs, playheadUs: m.playheadUs } : {}) })
   },
 
   redo: () => {
     const { history, txBase } = get()
     if (txBase || history.future.length === 0) return
-    set({ ...derive(redoH(history)), dirty: true, selectedTransition: null })
+    const m = redoMeta(history)?.after
+    set({ ...derive(redoH(history)), dirty: true, selectedTransition: null, ...(m ? { inUs: m.inUs, outUs: m.outUs, playheadUs: m.playheadUs } : {}) })
   },
 
   markSaved: () => set({ dirty: false, lastSavedAt: Date.now() }),

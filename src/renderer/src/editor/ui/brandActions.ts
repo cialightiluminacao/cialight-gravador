@@ -72,10 +72,12 @@ export async function applyBrandTemplate(t: BrandTemplate, mode: ApplyMode): Pro
     }
   }
   let result: ReturnType<typeof applyTemplate> | null = null
+  // marcas antes/depois no MESMO passo de histórico: desfazer a abertura devolve Entrada/Saída/playhead exatos
+  const before = { inUs: st().inUs, outUs: st().outUs, playheadUs: st().playheadUs }
   const ok = st().apply((q) => {
     result = applyTemplate(q, t, assetMap, mode, atUs)
     return result.project
-  })
+  }, { marks: { before, after: marksAfterApply(mode, t.durationUs, before) } })
   if (!ok || !result) return false
   const r = result as ReturnType<typeof applyTemplate>
   // abertura: o projeto andou t.durationUs — Entrada/Saída e playhead andam junto (o mesmo trecho continua marcado)
