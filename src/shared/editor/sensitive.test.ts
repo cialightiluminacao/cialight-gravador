@@ -1241,3 +1241,148 @@ describe('Task 2b fix round 3: artigos só como enchimento antes de outro enchim
     }
   })
 })
+
+// Task 2c: perdas medidas na varredura real (test:sensitive). As strings são as leituras ERRADAS que o OCR do Windows
+// devolveu para os valores SINTÉTICOS dos vídeos de teste (scanVideos.ts); x em px de um quadro 1920×1080.
+describe('Task 2c: leituras reais do OCR (recall de ponta a ponta)', () => {
+  const PW = 1920
+  const PH = 1080
+  /** Uma OcrLine do OCR real: [texto, x0 px, x1 px]; y/altura em px. */
+  const ocr = (parts: Array<[string, number, number]>, y = 300, h = 12): OcrLine => ({
+    words: parts.map(([text, x0, x1]) => ({ text, box: { x: x0 / PW, y: y / PH, w: (x1 - x0) / PW, h: h / PH } }))
+  })
+  const right = (b: OcrBox): number => Math.round((b.x + b.w) * PW)
+  const left = (b: OcrBox): number => Math.round(b.x * PW)
+  /** Alguma detecção do tipo cobre [x0, x1] px. */
+  const covers = (ds: Detection[], k: SensitiveKind, x0: number, x1: number): boolean =>
+    only(ds, k).some((d) => left(d.box) <= x0 && right(d.box) >= x1)
+
+  describe('1: token partido pelo OCR estende pelas palavras de continuação', () => {
+    it('ghp_ partido em duas palavras (Segoe 14 px)', () => {
+      const ds = detectSensitive([ocr([['Token:', 1190, 1235], ['ghp_t3kFDr4i60du11', 1240, 1366], ['fwoB41GAlgj26JRtXNyEjT', 1369, 1521]])])
+      expect(covers(ds, 'token', 1240, 1521)).toBe(true)
+    })
+    it('ghp_ partido (Arial 16 px) e sk- partido (Arial 20 px)', () => {
+      expect(covers(detectSensitive([ocr([['ghp_MdkUCaF90g51', 1297, 1450], ['FCPpDSbDp47evCPuGbvnyKOf', 1453, 1685]], 300, 16)]), 'token', 1297, 1685)).toBe(true)
+      expect(covers(detectSensitive([ocr([['sk-JMsY6nBEJg1', 1402, 1556], ['hid3Cz7s6dcsijllYZS5g', 1561, 1764]], 300, 20)]), 'token', 1402, 1764)).toBe(true)
+    })
+    it('JWT com pedaços curtos no fim ("MI", "4d")', () => {
+      const ds = detectSensitive([ocr([['eyJoobQrmxlKnjOztp13RVd.ymq3yk5WDEVSOhk6KifsCgUty_EvNROwOkufromi.BTFoSGTgVFqdnraknzcmQBH80_qJCwlyu8Exty1', 280, 936], ['MI', 939, 954], ['4d', 955, 968]])])
+      expect(covers(ds, 'token', 280, 968)).toBe(true)
+    })
+    it('JWT partido onde o "_" sumiu (vão de ~1 caractere)', () => {
+      const a = detectSensitive([ocr([['eyJTTgQBVnTzqcuHddOikcL.vvRzMUERlnq7mOYTNXzd04nxcMGuLmmZ6fTw2_CZ.R98', 280, 919], ['FRIPXqHTe13JxWcyEKkulPvtn4Q151cF1jybOua', 929, 1262]], 300, 16)])
+      expect(covers(a, 'token', 280, 1262)).toBe(true)
+      const b = detectSensitive([ocr([['eyJXCYoJfZKobfWJ70jD-G.q4LjoRSa29Tx54C6FqAdZBGfXEWtTBn', 280, 652], ['nBRj17v.qYVkK5MChkoeajxblOwcv75GuK5aUOc12STs10TCGxlJ', 666, 1011]])])
+      expect(covers(b, 'token', 280, 1011)).toBe(true)
+    })
+    it('JWT em vários pedaços com glifos do Consolas (Ø, ")")', () => {
+      const ds = detectSensitive([ocr([['eyJa8DrDsDL8V-RsvQKfVmØ.-snGwgDRZKØIPCRJnx)zPGq1nCczhfeS', 280, 648], ['-ZGwQj4Ø', 650, 701], ['.mNAd)z8V72qEe173wSr6i', 704, 846], ['IMLmHs-e93AtOuZsOijLha', 848, 991]])])
+      expect(covers(ds, 'token', 280, 991)).toBe(true)
+    })
+    it('não estende sobre coluna larga nem sobre palavra de prosa com pontuação', () => {
+      const wide = detectSensitive([ocr([['ghp_MdkUCaF90g51FCPpDSbDp47e', 300, 520], ['FCPpDSbDp47', 600, 690]], 300, 16)])
+      expect(right(only(wide, 'token')[0]!.box)).toBe(520)
+      const prose = detectSensitive([ocr([['ghp_MdkUCaF90g51FCPpDSbDp47e', 300, 520], ['(expira', 525, 575], ['amanhã)', 580, 640]], 300, 16)])
+      expect(right(only(prose, 'token')[0]!.box)).toBe(520)
+    })
+  })
+
+  describe('2: o OCR parte uma linha visual em várias OcrLine', () => {
+    it('"Senha:" e o valor em linhas separadas (Arial 12 px)', () => {
+      const ds = detectSensitive([ocr([['Senha:', 1132, 1169]], 820, 9), ocr([['NSeDEFitc', 1178, 1237]], 820, 9)])
+      expect(covers(ds, 'labeled', 1178, 1237)).toBe(true)
+    })
+    it('telefone com "(79)" numa linha depois do resto (ordem trocada)', () => {
+      const ds = detectSensitive([ocr([['94127-5411', 1608, 1716]], 900, 15), ocr([['(79)', 1554, 1593]], 900, 15)])
+      expect(covers(ds, 'phone', 1554, 1716)).toBe(true)
+    })
+    it('cartão com o 1º grupo numa linha à parte', () => {
+      const ds = detectSensitive([ocr([['4166', 741, 775]], 600, 12), ocr([['6331', 785, 819], ['5232', 829, 863], ['8290', 873, 907]], 600, 12)])
+      expect(covers(ds, 'card', 741, 907)).toBe(true)
+    })
+    it('JWT com o fim numa linha à parte depois de "Bearer"', () => {
+      const ds = detectSensitive([
+        ocr([['Bearer', 409, 468], ['eyJFYKDfUPjifxRJn6t7uMf.O', 474, 733]], 700, 16),
+        ocr([['J15u', 745, 786], ['PTt-LhOU043ARyLBrB05fMqFq6CqLnSTg.Jbmbbf7Mn-jXBwmdzHvYVLUinxFFTVAYke7Jcv_3jOJ', 800, 1664]], 700, 16)
+      ])
+      expect(covers(ds, 'token', 474, 1664)).toBe(true)
+    })
+    it('linhas em alturas diferentes ou distantes não se juntam', () => {
+      const far = detectSensitive([ocr([['Senha:', 100, 140]], 300), ocr([['x9Kd', 400, 430]], 300)])
+      expect(only(far, 'labeled').every((d) => right(d.box) <= 140)).toBe(true)
+      const below = detectSensitive([ocr([['Senha:', 100, 140]], 300), ocr([['x9Kd', 145, 175]], 330)])
+      expect(only(below, 'labeled').every((d) => right(d.box) <= 140)).toBe(true)
+    })
+  })
+
+  describe('3: UUID (chave PIX) tolerante', () => {
+    const cases: Array<[string, Array<[string, number, number]>]> = [
+      ['O no lugar de 0 no início', [['Oe9bd679-d10e-4171-96cc-464c5336e199', 280, 579]]],
+      ['O no lugar de 0 no fim', [['db7fd597-0166-4b79-b76d-67bOb2afObf2', 675, 1045]]],
+      ['partido em duas palavras', [['1', 651, 660], ['b325d83-13fa-4bbf-b8f9-8b4003588807', 664, 1017]]],
+      ['hífen engolido', [['da5a3a65-2dea4020-ba4e-dfc80baa4788', 280, 581]]],
+      ['hífen engolido e O', [['cee6026f-d10e4f7f-bc8a-faOe107e86fb', 280, 562]]],
+      ['fim em palavra à parte', [['425d2dda-64fO-4af4-8261-c706db61', 649, 975], ['cdOd', 979, 1017]]],
+      ['I no lugar de 1 (Consolas)', [['Ifdc7b94-a292-4a7d-9ea3-f3b2a1ce3976', 665, 1059]]],
+      ['ø no lugar de 0 (Consolas)', [['39a9dcø6-ae5ø-43c2-be78-d7ccc3a78e54', 1510, 1746]]]
+    ]
+    for (const [name, parts] of cases) {
+      it(name, () => {
+        const ds = only(detectSensitive([ocr(parts, 400, 16)]), 'pix')
+        expect(ds).toHaveLength(1)
+        expect(left(ds[0]!.box)).toBe(parts[0]![1])
+        expect(right(ds[0]!.box)).toBe(parts[parts.length - 1]![2])
+        expect(ds[0]!.confidence).toBe('pattern')
+        expect(ds[0]!.value).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+      })
+    }
+    it('valor canônico igual ao UUID verdadeiro quando só há O/0', () => {
+      expect(only(detectSensitive([ocr([['Oe9bd679-d10e-4171-96cc-464c5336e199', 280, 579]])]), 'pix')[0]!.value).toBe('0e9bd679-d10e-4171-96cc-464c5336e199')
+    })
+    it('32 hexadecimais seguidos com dígitos e letras', () => {
+      expect(only(detectSensitive([line('chave 0e9bd679d10e417196cc464c5336e199')]), 'pix')).toHaveLength(1)
+    })
+    it('negativos: 32 dígitos só, hash de 40, hífens fora do lugar, palavra vizinha não entra', () => {
+      expect(only(detectSensitive([line('chave 01234567890123456789012345678901')]), 'pix')).toHaveLength(0)
+      expect(only(detectSensitive([line('commit 3f2a9c1b7d4e8f6a0b5c2d9e1f3a7b4c8d6e0f2a')]), 'pix')).toHaveLength(0)
+      expect(only(detectSensitive([line('ab-cdef0123-4567-89ab-cdef0-123456ab')]), 'pix')).toHaveLength(0)
+      const ds = only(detectSensitive([ocr([['de', 600, 615], ['1b325d83-13fa-4bbf-b8f9-8b4003588807', 621, 975]])]), 'pix')
+      expect(ds).toHaveLength(1)
+      expect(left(ds[0]!.box)).toBe(621)
+    })
+  })
+
+  describe('4: e-mail partido', () => {
+    it('domínio partido depois do ponto (Consolas 16 px)', () => {
+      const ds = detectSensitive([ocr([['bruno.melo@exemplo.', 990, 1154], ['com', 1158, 1183]], 500, 16)])
+      expect(covers(ds, 'email', 990, 1183)).toBe(true)
+      expect(only(ds, 'email')[0]!.value).toBe('bruno.melo@exemplo.com')
+    })
+    it('"." e TLD em palavras à parte', () => {
+      const ds = detectSensitive([ocr([['pedr01ima411@empresa.net', 971, 1181], ['.', 1184, 1188], ['br', 1191, 1208]], 500, 16)])
+      expect(covers(ds, 'email', 971, 1208)).toBe(true)
+    })
+    it('parte local partida depois de "." com vão de espaço do OCR', () => {
+      const ds = detectSensitive([ocr([['E-mail:', 200, 250], ['pedro.', 256, 294], ['lima411@empresa.net', 298, 420]], 500, 16)])
+      expect(covers(ds, 'email', 256, 420)).toBe(true)
+    })
+  })
+
+  describe('5: placa e CEP', () => {
+    it('placa com hífen extra lido ("II-M-0172" para ILM-0172)', () => {
+      const ds = only(detectSensitive([ocr([['II-M-0172', 1540, 1598]])]), 'plate')
+      expect(ds).toHaveLength(1)
+      expect(ds[0]!.value).toBe('IIM0172')
+    })
+    it('CEP com o hífen lido como dígito: coberto pelo rótulo CEP (8 ou 9 dígitos)', () => {
+      for (const v of ['25172066', '251721366']) {
+        for (const lab of ['CEP:', 'CEP']) {
+          const ds = detectSensitive([ocr([[lab, 200, 230], [v, 236, 300]])])
+          expect(ds.some((d) => left(d.box) <= 236 && right(d.box) >= 300), `${lab} ${v}`).toBe(true)
+        }
+      }
+      expect(detectSensitive([line('25172066')])).toEqual([])
+    })
+  })
+})

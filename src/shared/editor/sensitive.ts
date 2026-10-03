@@ -205,6 +205,8 @@ interface Pass {
   wordStart: readonly number[]
   /** spaceOk[i]: vão entre a palavra i e i+1 é de espaço normal (0,3–2 × largura de caractere). */
   spaceOk: readonly boolean[]
+  /** near[i]: vão entre a palavra i e i+1 < 2 × largura de caractere (pedaços do mesmo valor partido pelo OCR). */
+  near: readonly boolean[]
   /** Número da passada (1 = espaço único; 2 = vãos pequenos colados). */
   n: 1 | 2
 }
@@ -330,7 +332,7 @@ function mapDigits(t: string): string {
   return out ? out.join('') : t
 }
 
-function buildPass(texts: readonly string[], join: readonly boolean[], n: 1 | 2, spaceOk: readonly boolean[]): Pass {
+function buildPass(texts: readonly string[], join: readonly boolean[], n: 1 | 2, spaceOk: readonly boolean[], near: readonly boolean[]): Pass {
   // join[i] = true => sem separador entre a palavra i e i+1
   let t = ''
   const wo: number[] = []
@@ -349,7 +351,7 @@ function buildPass(texts: readonly string[], join: readonly boolean[], n: 1 | 2,
   const glued = new Int32Array(wordOf.length)
   let g = 0
   for (let i = 0; i < wordOf.length; i++) glued[i] = wordOf[i]! < 0 ? -1 : g++
-  return { t, f: fold(t), m: mapDigits(t), mAlt: t.includes('|') ? mapDigits(t.replace(/\|/g, '\\')) : null, wordOf, glued, words: texts, wordStart, spaceOk, n }
+  return { t, f: fold(t), m: mapDigits(t), mAlt: t.includes('|') ? mapDigits(t.replace(/\|/g, '\\')) : null, wordOf, glued, words: texts, wordStart, spaceOk, near, n }
 }
 
 // ───────────────────────── candidatos ─────────────────────────
@@ -416,7 +418,8 @@ const RE_EMAIL =
   /[A-Za-z0-9._%+\-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}/g
 const RE_EMAIL_FULL = new RegExp(`^${RE_EMAIL.source}$`)
 const PLATE_DENY: ReadonlySet<string> = new Set(['CVE', 'ISO', 'NFE', 'WIN', 'RFC', 'PCI', 'SKU'])
-const RE_PLATE = /(?<![A-Za-z0-9])(?:[A-Za-z]{3}-?\d{4}|[A-Za-z]{3}\d[A-Za-z]\d{2})(?![A-Za-z0-9])/g
+// Placa antiga tolera hífen extra entre as letras: o OCR lê "ILM-0172" como "II-M-0172" (Task 2c)
+const RE_PLATE = /(?<![A-Za-z0-9])(?:[A-Za-z]-?[A-Za-z]-?[A-Za-z]-?\d{4}|[A-Za-z]{3}\d[A-Za-z]\d{2})(?![A-Za-z0-9])/g
 const H = '[0-9a-fA-F]'
 const RE_PIX = new RegExp(`(?<![0-9A-Za-z])${H}{8}-${H}{4}-${H}{4}-${H}{4}-${H}{12}(?![0-9A-Za-z])`, 'g')
 const RE_TOKEN = new RegExp(
@@ -585,7 +588,106 @@ function detectTokenWords(p: Pass, out: Cand[]): void {
   }
 }
 
-function detectTextKinds(p: Pass, out: Cand[]): void {
+// UUID (chave PIX) como o OCR lê (Task 2c): 0↔O, 1↔l/I, hífen engolido ou trocado por espaço, UUID partido em duas
+// palavras. Só p/ casar: o valor canônico é o hex mapeado no formato 8-4-4-4-12.
+const UUID_MAP: Record<string, string> = { O: '0', o: '0', 'ø': '0', 'Ø': '0', l: '1', I: '1', S: '5', B: '8', Z: '2', G: '6' }
+const UUID_BOUNDS: ReadonlySet<number> = new Set([8, 12, 16, 20])
+
+function uuidHex(ch: string): string | null {
+  const c = ch.charCodeAt(0)
+  if ((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) return ch
+  if (c >= 65 && c <= 70 && ch !== 'B') return ch.toLowerCase()
+  return UUID_MAP[ch] ?? null
+}
+
+function isAlnumLike(ch: string): boolean {
+  return /[A-Za-z0-9øØ]/.test(ch)
+}
+
+/**
+ * Segmentos = sequências máximas de letras/dígitos separadas por 1–2 de '-' ou ' ' (espaço só entre palavras próximas,
+ * vão < 2 × largura de caractere). Um candidato é uma sequência de segmentos só-hex (após o mapeamento) com 32 hex no
+ * total: vale com ≥ 3 das 4 quebras nas posições do UUID (8/12/16/20, hífen ou espaço) e ≤ 2 quebras fora delas, ou
+ * como um só segmento de 32 hex com dígitos e letras.
+ */
+function detectUuidTolerant(p: Pass, out: Cand[]): void {
+  const t = p.t
+  if (t.length < 32) return
+  interface Seg { s: number; e: number; hex: string | null }
+  const segs: Seg[] = []
+  const sepOk: boolean[] = [] // sepOk[k]: o separador entre segs[k-1] e segs[k] permite continuar
+  let i = 0
+  while (i < t.length) {
+    if (!isAlnumLike(t[i]!)) {
+      i++
+      continue
+    }
+    const s = i
+    let hex = ''
+    let ok = true
+    while (i < t.length && isAlnumLike(t[i]!)) {
+      const h = uuidHex(t[i]!)
+      if (h === null) ok = false
+      else hex += h
+      i++
+    }
+    // separador anterior: 1–2 caracteres de '-'/' ', e espaço só entre palavras próximas
+    let okSep = false
+    if (segs.length > 0) {
+      const prevE = segs[segs.length - 1]!.e
+      const gap = t.slice(prevE, s)
+      if (gap.length >= 1 && gap.length <= 2 && /^[- ]+$/.test(gap)) {
+        okSep = true
+        for (let k = prevE; k < s; k++) {
+          if (t[k] === ' ' && p.wordOf[k] === -1 && !p.near[p.wordOf[k - 1]!]) okSep = false
+        }
+      }
+    }
+    segs.push({ s, e: i, hex: ok ? hex : null })
+    sepOk.push(okSep)
+  }
+  interface UCand { a: number; b: number; good: number; stray: number; hex: string }
+  const found: UCand[] = []
+  for (let a = 0; a < segs.length; a++) {
+    if (segs[a]!.hex === null) continue
+    let len = 0
+    let good = 0
+    let stray = 0
+    let hex = ''
+    for (let b = a; b < segs.length; b++) {
+      const sg = segs[b]!
+      if (sg.hex === null || (b > a && !sepOk[b])) break
+      if (b > a) {
+        if (UUID_BOUNDS.has(len)) good++
+        else stray++
+      }
+      len += sg.hex.length
+      hex += sg.hex
+      if (len > 32) break
+      if (len === 32) {
+        const single = a === b && /\d/.test(hex) && /[a-f]/.test(hex)
+        if ((good >= 3 && stray <= 2) || single) found.push({ a, b, good, stray, hex })
+        break
+      }
+    }
+  }
+  // sobrepostos: fica o de mais quebras certas, depois menos quebras fora do lugar
+  found.sort((x, y) => y.good - x.good || x.stray - y.stray || x.a - y.a)
+  const used: boolean[] = new Array<boolean>(segs.length).fill(false)
+  for (const c of found) {
+    let free = true
+    for (let k = c.a; k <= c.b; k++) if (used[k]) free = false
+    if (!free) continue
+    for (let k = c.a; k <= c.b; k++) used[k] = true
+    const s = segs[c.a]!.s
+    const e = segs[c.b]!.e
+    const h = c.hex
+    const value = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+    emit(out, p, 'pix', value, 'pattern', s, e)
+  }
+}
+
+function detectEmail(p: Pass, out: Cand[]): void {
   const t = p.t
   if (t.includes('@')) {
     for (const x of t.matchAll(RE_EMAIL)) {
@@ -608,17 +710,24 @@ function detectTextKinds(p: Pass, out: Cand[]): void {
       emit(out, p, 'email', txt.toLowerCase(), 'pattern', s, e)
     }
   }
+}
+
+function detectTextKinds(p: Pass, out: Cand[]): void {
+  const t = p.t
+  detectEmail(p, out)
   for (const x of t.matchAll(RE_PLATE)) {
     // Prefixos de 3 letras de códigos comuns (não placas): a lista é um trade-off consciente — uma
     // placa real com esses prefixos deixa de ser achada, em troca de menos ruído em texto técnico.
-    if (PLATE_DENY.has(x[0].slice(0, 3).toUpperCase())) continue
-    emit(out, p, 'plate', x[0].replace('-', '').toUpperCase(), 'pattern', x.index, x.index + x[0].length)
+    const plate = x[0].replace(/-/g, '').toUpperCase()
+    if (PLATE_DENY.has(plate.slice(0, 3))) continue
+    emit(out, p, 'plate', plate, 'pattern', x.index, x.index + x[0].length)
   }
   if (t.includes('-')) {
     for (const x of t.matchAll(RE_PIX)) {
       emit(out, p, 'pix', x[0].toLowerCase(), 'pattern', x.index, x.index + x[0].length)
     }
   }
+  if (p.n === 1) detectUuidTolerant(p, out)
   for (const x of t.matchAll(RE_TOKEN)) {
     emit(out, p, 'token', x[0], 'pattern', x.index, x.index + x[0].length)
   }
@@ -801,59 +910,160 @@ function median(xs: number[]): number {
   return n === 0 ? 0 : n % 2 ? s[(n - 1) >> 1]! : (s[n / 2 - 1]! + s[n / 2]!) / 2
 }
 
+// O OCR parte uma linha visual em várias OcrLine ("Senha:" | valor; "(79)" depois de "94127-5411"; o fim de um JWT).
+// Linhas na mesma altura (centros a ≤ 0,5 × a maior altura, alturas na razão ≥ 0,5) e vizinhas na horizontal (vão
+// ≤ 2 × largura de caractere, sobreposição ≤ 3 caracteres: um "•" solto lido por cima do fim da outra) viram um
+// grupo, com as palavras em ordem de x (Task 2c). Devolve, por grupo, as palavras unidas e as de cada linha.
+function mergeLines(lines: readonly OcrLine[]): OcrWord[][][] {
+  interface L { idx: number; words: OcrWord[]; x0: number; x1: number; cy: number; h: number; cw: number }
+  const ls: L[] = []
+  lines.forEach((line, idx) => {
+    const words = line.words.filter((w) => w.text.trim().length > 0)
+    if (words.length === 0) return
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+    for (const w of words) {
+      x0 = Math.min(x0, w.box.x); x1 = Math.max(x1, w.box.x + w.box.w)
+      y0 = Math.min(y0, w.box.y); y1 = Math.max(y1, w.box.y + w.box.h)
+    }
+    ls.push({ idx, words, x0, x1, cy: (y0 + y1) / 2, h: y1 - y0, cw: median(words.map((w) => w.box.w / w.text.trim().length)) })
+  })
+  const parent = ls.map((_, i) => i)
+  const find = (i: number): number => {
+    while (parent[i] !== i) i = parent[i] = parent[parent[i]!]!
+    return i
+  }
+  const byY = ls.map((_, i) => i).sort((a, b) => ls[a]!.cy - ls[b]!.cy)
+  const maxH = ls.reduce((m, l) => Math.max(m, l.h), 0)
+  for (let ii = 0; ii < byY.length; ii++) {
+    const a = ls[byY[ii]!]!
+    for (let jj = ii + 1; jj < byY.length; jj++) {
+      const b = ls[byY[jj]!]!
+      if (b.cy - a.cy > 0.5 * maxH) break
+      const hMax = Math.max(a.h, b.h)
+      if (Math.abs(b.cy - a.cy) > 0.5 * hMax || Math.min(a.h, b.h) < 0.5 * hMax) continue
+      const cw = Math.max(a.cw, b.cw)
+      const gap = Math.max(b.x0 - a.x1, a.x0 - b.x1)
+      if (gap > 2 * cw || gap < -3 * cw) continue
+      parent[find(byY[ii]!)] = find(byY[jj]!)
+    }
+  }
+  const groups = new Map<number, L[]>()
+  for (let i = 0; i < ls.length; i++) {
+    const r = find(i)
+    const g = groups.get(r)
+    if (g) g.push(ls[i]!)
+    else groups.set(r, [ls[i]!])
+  }
+  return [...groups.values()]
+    .sort((a, b) => a[0]!.idx - b[0]!.idx)
+    .map((g) => (g.length === 1 ? [g[0]!.words] : g.map((l) => l.words)))
+}
+
+// Continuação de token partido pelo OCR: só [A-Za-z0-9_-.=+/] e glifos que o OCR troca por eles (ø, €, |, •…);
+// parênteses só no miolo (o ")" do Consolas lido no lugar de "J"), nunca na ponta ("(expira" é prosa).
+const TOKEN_CONT = /^[A-Za-z0-9_\-.=+/øØêé€θ|!$•·]+$/
+function isTokenCont(w: string): boolean {
+  if (/^[()]|[()]$/.test(w)) return false
+  return TOKEN_CONT.test(w.replace(/[()]/g, ''))
+}
+
 /**
- * Detecta dados sensíveis nas linhas de OCR. Duas passadas por linha: (1) palavras unidas por
- * espaço; (2) palavras com vão pequeno (< 0,6 × altura mediana) coladas sem separador, p/ OCR que
- * quebra "123.456." + "789-00". A caixa de cada detecção é a união de toda palavra que contribuiu.
+ * Detecta dados sensíveis nas linhas de OCR. Linhas na mesma altura e vizinhas são unidas antes (mergeLines). Duas
+ * passadas por linha: (1) palavras unidas por espaço; (2) palavras com vão pequeno (< 0,3 × largura de caractere)
+ * coladas sem separador, p/ OCR que quebra "123.456." + "789-00"; mais uma passada só de e-mail que cola os pedaços
+ * próximos quebrados na pontuação ("exemplo." + "com"). A caixa de cada detecção é a união de toda palavra que
+ * contribuiu; um token se estende pelas palavras de continuação seguintes (o OCR parte tokens longos).
  */
 export function detectSensitive(lines: readonly OcrLine[], opts?: DetectOpts): Detection[] {
   const enabled = opts?.kinds ? new Set<SensitiveKind>(opts.kinds) : null
   const terms = !enabled || enabled.has('custom') ? compileTerms(opts?.customTerms) : []
   const result: Detection[] = []
-  for (const line of lines) {
-    const words = line.words.filter((w) => w.text.trim().length > 0)
-    if (words.length === 0) continue
-    const texts = words.map((w) => w.text.trim())
-    const cands: Cand[] = []
-    const none = new Array<boolean>(Math.max(0, words.length - 1)).fill(false)
-    // vão de "espaço normal" (< 1 × largura mediana de caractere): distingue cartão de coluna de tabela
-    const medW = median(words.map((w, i) => w.box.w / texts[i]!.length))
-    // faixa [0,3 ; 2,0) × largura (monoespaçada com caixa justa ao tinteiro fica em ~1,3): abaixo disso a passada 2 já cola as palavras
-    const spaceOk = none.map((_, i) => {
-      const gap = words[i + 1]!.box.x - (words[i]!.box.x + words[i]!.box.w)
-      return gap >= 0.3 * medW && gap < 2 * medW
-    })
-    const p1 = buildPass(texts, none, 1, spaceOk)
-    detectTokenWords(p1, cands)
-    detectDigitKinds(p1, cands)
-    detectTextKinds(p1, cands)
-    detectCustom(p1, terms, cands)
-    if (words.length > 1) {
-      // limiar no eixo x (x comparado com x): 0,3 × largura mediana de um caractere da linha
-      const thr = 0.3 * medW
-      const join = none.map((_, i) => {
-        const a = words[i]!.box
-        const b = words[i + 1]!.box
-        return b.x - (a.x + a.w) < thr
-      })
-      if (join.some(Boolean)) {
-        const p2 = buildPass(texts, join, 2, spaceOk)
-        detectDigitKinds(p2, cands)
-        detectTextKinds(p2, cands)
-        detectCustom(p2, terms, cands)
-      }
+  for (const group of mergeLines(lines)) {
+    if (group.length === 1) {
+      result.push(...detectWords(group[0]!, enabled, terms))
+      continue
     }
-    // filtra por tipo ANTES de resolver: tipo desligado não pode suprimir tipo ligado
-    const kept = enabled ? cands.filter((c) => enabled.has(c.kind)) : cands
-    for (const c of resolve(kept)) {
-      result.push({
-        kind: c.kind,
-        value: c.value,
-        masked: maskSensitive(c.kind, c.value),
-        box: unionBox(words, c.wa, c.wb),
-        confidence: c.conf
-      })
+    // linha visual partida: detecta no grupo unido e, para que unir nunca PERCA nada (palavras de linhas sobrepostas
+    // intercaladas), também em cada linha; o que uma linha achou e o grupo já cobre com o mesmo tipo é descartado
+    const merged = detectWords(group.flat().sort((p, q) => p.box.x - q.box.x), enabled, terms)
+    result.push(...merged)
+    for (const words of group) {
+      for (const d of detectWords(words, enabled, terms)) {
+        if (!merged.some((m) => m.kind === d.kind && boxContains(m.box, d.box))) result.push(d)
+      }
     }
   }
   return result
 }
+
+function boxContains(a: OcrBox, b: OcrBox): boolean {
+  const e = 1e-9
+  return b.x >= a.x - e && b.y >= a.y - e && b.x + b.w <= a.x + a.w + e && b.y + b.h <= a.y + a.h + e
+}
+
+function detectWords(words: readonly OcrWord[], enabled: ReadonlySet<SensitiveKind> | null, terms: readonly CustomTerm[]): Detection[] {
+  const out: Detection[] = []
+  const texts = words.map((w) => w.text.trim())
+  const cands: Cand[] = []
+  const none = new Array<boolean>(Math.max(0, words.length - 1)).fill(false)
+  // vão de "espaço normal" (< 1 × largura mediana de caractere): distingue cartão de coluna de tabela
+  const medW = median(words.map((w, i) => w.box.w / texts[i]!.length))
+  // vão até a palavra seguinte medido da maior borda direita até ali (no grupo de linhas unidas, um "•" solto lido
+  // por cima do fim da palavra anterior não pode encurtar a borda)
+  let maxR = -Infinity
+  const gaps = none.map((_, i) => {
+    maxR = Math.max(maxR, words[i]!.box.x + words[i]!.box.w)
+    return words[i + 1]!.box.x - maxR
+  })
+  // faixa [0,3 ; 2,0) × largura (monoespaçada com caixa justa ao tinteiro fica em ~1,3): abaixo disso a passada 2 já cola as palavras
+  const spaceOk = gaps.map((g) => g >= 0.3 * medW && g < 2 * medW)
+  // pedaços do mesmo valor: vão ≤ 2 × largura de caractere (a altura da linha não é comparável no eixo x: as caixas
+  // são normalizadas por eixo; 1 altura de linha ≈ 2 larguras de caractere)
+  const near = gaps.map((g) => g <= 2 * medW)
+  const p1 = buildPass(texts, none, 1, spaceOk, near)
+  detectTokenWords(p1, cands)
+  detectDigitKinds(p1, cands)
+  detectTextKinds(p1, cands)
+  detectCustom(p1, terms, cands)
+  if (words.length > 1) {
+    // limiar no eixo x (x comparado com x): 0,3 × largura mediana de um caractere da linha
+    const thr = 0.3 * medW
+    const join = gaps.map((g) => g < thr)
+    if (join.some(Boolean)) {
+      const p2 = buildPass(texts, join, 2, spaceOk, near)
+      detectDigitKinds(p2, cands)
+      detectTextKinds(p2, cands)
+      detectCustom(p2, terms, cands)
+    }
+    // e-mail quebrado na pontuação com vão de espaço: "bruno.melo@exemplo." + "com", "empresa.net" + "." + "br"
+    const ejoin = gaps.map((_, i) => near[i]! && (/[.@_+-]$/.test(texts[i]!) || /^[.@]/.test(texts[i + 1]!)))
+    if (ejoin.some(Boolean) && texts.some((t) => t.includes('@'))) detectEmail(buildPass(texts, ejoin, 2, spaceOk, near), cands)
+  }
+  // filtra por tipo ANTES de resolver: tipo desligado não pode suprimir tipo ligado
+  const kept = enabled ? cands.filter((c) => enabled.has(c.kind)) : cands
+  for (const c of resolve(kept)) {
+    let { wb, value } = c
+    if (c.kind === 'token') {
+      // privacidade: cobrir a MAIS é aceitável, a menos não. Palavra curta (< 3) só com vão ≤ 1 caractere; vão de
+      // até 3 caracteres quando a palavra seguinte parece segredo (≥ 8, letras e dígitos): o OCR engole o "_" e
+      // deixa ~2 caracteres de vão (medido: JWT Arial 12 px, 14 px de vão com caractere de 6,8 px)
+      while (wb + 1 < words.length && isTokenCont(texts[wb + 1]!)) {
+        const nx = texts[wb + 1]!
+        const g = gaps[wb]!
+        const ok = nx.length >= 3 ? near[wb]! || (g <= 3 * medW && nx.length >= 8 && /\d/.test(nx) && /[A-Za-z]/.test(nx)) : g <= medW
+        if (!ok) break
+        wb++
+        value += nx
+      }
+    }
+    out.push({
+      kind: c.kind,
+      value,
+      masked: maskSensitive(c.kind, value),
+      box: unionBox(words, c.wa, wb),
+      confidence: c.conf
+    })
+  }
+  return out
+}
+
