@@ -504,6 +504,9 @@ async function main() {
 
   // ------------------------------------------------------------------ 5
   console.log('5. exportar (Alta 1080p) com "Queimar no vídeo" + ".srt ao lado"')
+  // `end` = fim do último item visível que não é efeito: aqui ≈ 11,50 s, não os 3 + 4 + 4 = 11 s dos clipes — o
+  // Holofote (solto em corte + 1,5 s com a duração padrão de 3 s) passa 0,5 s do fim de B; essa cauda não tem mídia, só
+  // a forma escurecendo o fundo (a exportação vai até o fim do conteúdo, e o conteúdo inclui a forma)
   const layout = await ev(`const p = T.st().project; const it = (id) => T.item(id)
     const end = Math.max(...p.tracks.filter((t) => !t.hidden).flatMap((t) => t.items).filter((i) => i.type !== 'effect').map((i) => i.startUs + i.durationUs))
     const shape = T.items().find((i) => i.type === 'shape')
