@@ -18,6 +18,12 @@ describe('padrões de .part', () => {
     for (const n of ['Clipe.gif.part', 'Clipe.gif.ffv1.part', 'Clipe.gif.palette.part', 'Projeto - 00m12s.png.part', 'Trilha.wav.part', 'Trilha.MP3.part', 'Trilha.m4a.part']) expect(isExportPart(n)).toBe(true)
     for (const n of ['Clipe.gif', 'notas.txt.part', 'Clipe.part', 'Trilha.wav']) expect(isExportPart(n)).toBe(false)
   })
+  it('áudio temporário da reserva libx264: <nome>.mp4.audio.part (sobra de queda); só com .mp4', () => {
+    for (const n of ['Vídeo.mp4.audio.part', 'Meu vídeo (2).MP4.audio.part']) expect(isExportPart(n)).toBe(true)
+    for (const n of ['Vídeo.mp4.audio', 'gravacao.audio.part', 'Vídeo.wav.audio.part', 'Vídeo.mp4.audio.part.bak', 'Clipe.mp4.ffv1.part', 'Clipe.png.palette.part', 'Clipe.gif.audio.part', 'Vídeo.mp4.audio.part-1-2']) {
+      expect(isExportPart(n)).toBe(false)
+    }
+  })
 })
 
 describe('sweepStaleParts', () => {
@@ -46,10 +52,14 @@ describe('sweepStaleParts', () => {
     const realProxy = touch(join(proxies, 'a.mp4'), 10 * DAY)
     const oldStrip = touch(join(cache, 'a.strip.part-3-4.jpg'), 3 * DAY)
     const oldExport = touch(join(out, 'Vídeo.mp4.part'), 2 * DAY)
+    const oldAudio = touch(join(out, 'Vídeo.mp4.audio.part'), 2 * DAY) // reserva libx264 interrompida
+    const oldFfv1 = touch(join(out, 'Clipe.gif.ffv1.part'), 2 * DAY)
+    const oldPalette = touch(join(out, 'Clipe.gif.palette.part'), 2 * DAY)
+    const newAudio = touch(join(out, 'Outro.mp4.audio.part'), 60_000) // exportação em andamento
     const userFile = touch(join(out, 'notas.part'), 9 * DAY) // não é nosso
     const removed = await sweepStaleParts([{ dir: proxies, kind: 'ingest' }, { dir: cache, kind: 'ingest' }, { dir: out, kind: 'export' }, { dir: join(root, 'nao-existe'), kind: 'ingest' }], { now: () => now })
-    expect(removed.sort()).toEqual([oldExport, oldProxy, oldStrip].sort())
-    expect([newProxy, realProxy, userFile].every(existsSync)).toBe(true)
+    expect(removed.sort()).toEqual([oldExport, oldAudio, oldFfv1, oldPalette, oldProxy, oldStrip].sort())
+    expect([newProxy, realProxy, userFile, newAudio].every(existsSync)).toBe(true)
   })
 
   it('staleParts lista sem apagar', () => {
