@@ -1,4 +1,5 @@
-import { closeSync, copyFileSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'fs'
+import { closeSync, copyFileSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'fs'
+import { renameSyncRetry } from '../fs/renameRetry'
 import { join } from 'path'
 import { parseProject, toDiskProject } from '@shared/editor/schema'
 import { projectDurationUs, updateAsset } from '@shared/editor/ops'
@@ -134,7 +135,7 @@ export class ProjectStore {
     // formato que a v1.3 instalada também lê (toDiskProject); o cache guarda o modelo
     const json = JSON.stringify(toDiskProject(p), null, 2)
     writeFileSync(tmp, json, 'utf8')
-    renameSync(tmp, file)
+    renameSyncRetry(tmp, file)
     this.cache.set(p.id.toLowerCase(), p)
     try {
       this.rotateVersions(dir, json)
@@ -156,7 +157,7 @@ export class ProjectStore {
     const name = `${String(next).padStart(3, '0')}.json`
     const tmp = join(vdir, `${name}.tmp`)
     writeFileSync(tmp, json, 'utf8')
-    renameSync(tmp, join(vdir, name))
+    renameSyncRetry(tmp, join(vdir, name))
     names.push(name)
     while (names.length > MAX_VERSIONS) unlinkSync(join(vdir, names.shift()!))
   }
@@ -426,7 +427,7 @@ export class ProjectStore {
     if (!isGeneratedMeta(meta)) throw new Error('meta de arquivo gerado inválido')
     const tmp = `${w.marker}.tmp`
     writeFileSync(tmp, JSON.stringify(meta), 'utf8')
-    renameSync(tmp, w.marker)
+    renameSyncRetry(tmp, w.marker)
   }
 
   /** Fecha o arquivo; o marcador fica até clearPendingGenerated (o renderer salvou o projeto com o asset). */

@@ -1,5 +1,6 @@
 import { app } from 'electron'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { renameSyncRetry } from '../fs/renameRetry'
 import { join, resolve } from 'path'
 import { parseSettings } from '@shared/schemas'
 import type { Settings } from '@shared/types'
@@ -35,7 +36,7 @@ function persist(s: Settings): void {
   mkdirSync(join(file, '..'), { recursive: true })
   const tmp = `${file}.tmp`
   writeFileSync(tmp, JSON.stringify(s, null, 2), 'utf8')
-  renameSync(tmp, file)
+  renameSyncRetry(tmp, file)
 }
 
 export function getSettings(): Settings {

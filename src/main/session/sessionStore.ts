@@ -1,4 +1,5 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, writeSync, promises as fsp } from 'fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync, writeSync, promises as fsp } from 'fs'
+import { renameSyncRetry } from '../fs/renameRetry'
 import { join } from 'path'
 import { parseSession } from '@shared/schemas'
 import type { RecordingConfig, Session, SessionSummary } from '@shared/types'
@@ -93,7 +94,7 @@ export class SessionStore {
     const file = join(dir, 'session.json')
     const tmp = `${file}.tmp`
     writeFileSync(tmp, JSON.stringify(session, null, 2), 'utf8')
-    renameSync(tmp, file)
+    renameSyncRetry(tmp, file)
   }
 
   get(id: string): Session | null {
