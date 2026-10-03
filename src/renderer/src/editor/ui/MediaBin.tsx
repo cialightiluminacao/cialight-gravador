@@ -10,7 +10,8 @@ import { useEditorStore } from '../state/editorStore'
 import { EffectLibrary } from './EffectLibrary'
 import { MediaCard } from './MediaCard'
 import { addAssetAtPlayhead } from './editorActions'
-import { importPaths, importSession, relinkAsset } from './mediaImport'
+import { importPaths, importSession } from './mediaImport'
+import { relinkAsset } from './relinkFlow'
 import { stopAudioPreview } from './audioPreview'
 
 // Biblioteca (coluna esquerda): abas Mídia / Áudio / Gravações / Efeitos; importar por botão ou arrastando

@@ -13,6 +13,7 @@ import { projectFromSession } from '@shared/editor/fromSession'
 import { newId, newProjectId } from '@shared/editor/ids'
 import { parseProject } from '@shared/editor/schema'
 import { IngestQueue, assetFromInfo, type IngestInput } from './media/ingest'
+import { findRelinkCandidates, relinkQuery } from './project/relinkSearch'
 import { IMAGE_EXTENSIONS, probe } from './media/probe'
 import { getRecorderWindow, showRecorder, displayIdOfWindow, setEditorMode } from './windows/recorderWindow'
 import { hideBar, showBar, toggleBar, updateBar, isBarHiddenByUser } from './windows/barWindow'
@@ -29,11 +30,12 @@ import { buildReviewAssets } from './export/reviewAssets'
 import { runFfmpeg } from './export/ffmpegRunner'
 import { normalizeFallbackSession } from './export/fallbackRemux'
 import { cancelExportJob, startExportJob } from './export/exportJob'
-import { EditorExportJobs } from './export/editorExportJob'
+import { saveTextFile } from './export/saveText'
+import { EditorExportJobs, ExportCancelledError } from './export/editorExportJob'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
 import { trayBalloon } from './tray'
-import { setExportBusyCheck } from './quitGuard'
+import { ExportQueueStates, setExportCountsSource } from './quitGuard'
 
 const VIDEO_EXT = ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'ts']
 const AUDIO_EXT = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
@@ -94,6 +96,9 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ingest.on('done', (projectId, assetId, patch) => {
     const owners = BrowserWindow.getAllWindows().filter((w) => !w.webContents.isDestroyed() && openProjects.get(w.webContents.id) === projectId)
     if (owners.length) {
+      // o cache em memória recebe o patch já: o renderer passa a pedir o proxy novo (ex.: depois de reapontar) antes
+      // do próximo autosave, e o protocolo media/ resolve pelo cache
+      projects.cacheAssetPatch(projectId, assetId, patch)
       for (const w of owners) w.webContents.send(IPC.media.done, { projectId, assetId, patch })
       return
     }
@@ -230,6 +235,13 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     }
     const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
     return r.canceled ? [] : r.filePaths
+  })
+
+  // relink automático: status conferido no disco agora (o cache guarda o do carregamento/último relink)
+  ipcMain.handle(IPC.project.findRelinks, async (_e, projectId: string, opts?: { extraRoots?: unknown }) => {
+    const q = relinkQuery(projects.withMediaStatus(projects.cached(projectId)), Array.isArray(opts?.extraRoots) ? opts.extraRoots.filter((r): r is string => typeof r === 'string') : [])
+    if (q.missing.length === 0) return []
+    return findRelinkCandidates(q.missing, { otherAssetDirs: q.otherAssetDirs, extraRoots: q.extraRoots })
   })
 
   // ---- gravações em generated/ (narração), no padrão de session.write* ----
@@ -414,12 +426,14 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
 
   // ---- exportação do editor (arquivo .part → faststart) ----
   const editorExports = new EditorExportJobs()
-  setExportBusyCheck(() => editorExports.busy)
+  // fila de exportações (renderer): estado por janela; a confirmação de saída conta rodando + na fila
+  const queueStates = new ExportQueueStates()
+  setExportCountsSource(() => queueStates.counts(editorExports.busy))
+  const queueOwners = new Set<number>()
   const exportOwners = new Set<number>()
-  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string, opts?: { estimateBytes?: number }) => {
-    const wc = e.sender
+  /** Os jobs são da janela que os abriu: fechada, caída ou recarregada → cancelados (nada de parcial órfão). */
+  const ownExport = (wc: Electron.WebContents): void => {
     if (!exportOwners.has(wc.id)) {
-      // janela fechada, renderer caído ou recarregado: o parcial não fica órfão
       exportOwners.add(wc.id)
       const drop = (): void => void editorExports.cancelOwnedBy(wc.id)
       wc.once('destroyed', () => {
@@ -429,19 +443,77 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       wc.on('render-process-gone', drop)
       wc.on('did-navigate', drop)
     }
-    return editorExports.open(outputDir, fileName, wc.id, Math.max(0, Number(opts?.estimateBytes) || 0))
+  }
+  ipcMain.handle(IPC.editorExport.open, (e, outputDir: string, fileName: string, opts?: { estimateBytes?: number }) => {
+    ownExport(e.sender)
+    return editorExports.open(outputDir, fileName, e.sender.id, Math.max(0, Number(opts?.estimateBytes) || 0))
   })
-  ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => editorExports.write(jobId, data, position))
+  ipcMain.handle(IPC.editorExport.openPipe, (e, outputDir: string, fileName: string, spec: unknown, opts?: { estimateBytes?: number }) => {
+    ownExport(e.sender)
+    return editorExports.openPipe(outputDir, fileName, spec, e.sender.id, Math.max(0, Number(opts?.estimateBytes) || 0))
+  })
+  /** Cancelamento esperado (usuário, janela fechada, saída): resposta { cancelled: true } e log de cancelamento, não erro. */
+  const cancelAware = async <T>(jobId: string, p: Promise<T>): Promise<T | { cancelled: true }> => {
+    try {
+      return await p
+    } catch (e) {
+      if (!(e instanceof ExportCancelledError)) throw e
+      log.info(`exportação do editor ${jobId}: chamada depois do cancelamento (cancelada)`)
+      return { cancelled: true }
+    }
+  }
+  // só a janela dona do job grava/finaliza (a mesma posse do open/cancel)
+  ipcMain.handle(IPC.editorExport.pipeWrite, (e, jobId: string, data: Uint8Array) => cancelAware(jobId, editorExports.pipeWrite(jobId, data, e.sender.id)))
+  ipcMain.handle(IPC.editorExport.pipeFinish, (e, jobId: string, opts?: { maxBytes?: number }) => {
+    const wc = e.sender
+    const maxBytes = Number(opts?.maxBytes)
+    return cancelAware(
+      jobId,
+      editorExports.pipeFinish(jobId, {
+        owner: wc.id,
+        maxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : undefined,
+        onProgress: (fraction) => {
+          if (!wc.isDestroyed()) wc.send(IPC.editorExport.finalizeProgress, { jobId, fraction })
+        }
+      })
+    )
+  })
+  ipcMain.handle(IPC.editorExport.writeStill, (e, outputDir: string, fileName: string, png: Uint8Array) => {
+    ownExport(e.sender)
+    return editorExports.writeStill(outputDir, fileName, png, e.sender.id)
+  })
+  // capítulos (.txt): o diálogo abre sobre a janela que pediu
+  ipcMain.handle(IPC.editorExport.saveText, (e, defaultPath: string, text: string) => {
+    if (typeof defaultPath !== 'string' || typeof text !== 'string' || text.length > 1_000_000) throw new Error('Texto inválido')
+    const w = BrowserWindow.fromWebContents(e.sender)
+    return saveTextFile({ showSave: (opts) => (w ? dialog.showSaveDialog(w, opts) : dialog.showSaveDialog(opts)) }, defaultPath, text)
+  })
+  ipcMain.handle(IPC.editorExport.setQueueState, (e, state: { running: boolean; pending: number }) => {
+    const wc = e.sender
+    if (!queueOwners.has(wc.id)) {
+      queueOwners.add(wc.id)
+      // janela fechada, caída ou recarregada: a fila dela sumiu junto
+      const drop = (): void => queueStates.drop(wc.id)
+      wc.once('destroyed', () => {
+        drop()
+        queueOwners.delete(wc.id)
+      })
+      wc.on('render-process-gone', drop)
+      wc.on('did-navigate', drop)
+    }
+    queueStates.set(wc.id, state)
+  })
+  ipcMain.handle(IPC.editorExport.write, (_e, jobId: string, data: Uint8Array, position: number) => cancelAware(jobId, editorExports.write(jobId, data, position)))
   ipcMain.handle(IPC.editorExport.close, (_e, jobId: string) => editorExports.close(jobId))
   ipcMain.handle(IPC.editorExport.finalize, (e, jobId: string, opts?: { durationUs?: number; maxBytes?: number }) => {
     const wc = e.sender
-    return editorExports.finalize(jobId, {
+    return cancelAware(jobId, editorExports.finalize(jobId, {
       durationUs: opts?.durationUs,
       maxBytes: opts?.maxBytes,
       onProgress: (fraction) => {
         if (!wc.isDestroyed()) wc.send(IPC.editorExport.finalizeProgress, { jobId, fraction })
       }
-    })
+    }))
   })
   ipcMain.handle(IPC.editorExport.cancel, (_e, jobId: string) => editorExports.cancel(jobId))
   // saindo no meio de uma exportação/remux: interrompe, apaga os parciais e só então sai

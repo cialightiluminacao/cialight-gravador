@@ -23,6 +23,7 @@ import { preloadPath, loadPage } from './windows/recorderWindow'
 import { log } from './log'
 import { testEditorRender } from './editorTestMode'
 import { testEditorExport } from './editorExportTestMode'
+import { testEditorFormats } from './editorFormatsTestMode'
 import { crossCorrelationLag, isFastStart, makeSyntheticSession, makeVoiceFixture } from './testFixtures'
 import { rnnoiseDir } from './export/ffmpegPath'
 import { DENOISE_DELAY_SAMPLES, processAudioFile } from './media/audioProcess'
@@ -663,6 +664,7 @@ export async function runIntegrationTest(mode: string, store: SessionStore, proj
     else if (mode === 'ingest') code = await testIngest(store)
     else if (mode === 'editor-render') code = await testEditorRender(projects, store, outDir)
     else if (mode === 'editor-export') code = await testEditorExport(projects, store, outDir)
+    else if (mode === 'editor-formats') code = await testEditorFormats(projects, outDir)
     else if (mode === 'models') code = await testModels()
     else console.error(`modo de teste desconhecido: ${mode}`)
   } catch (e) {

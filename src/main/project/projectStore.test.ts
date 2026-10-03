@@ -208,6 +208,15 @@ describe('ProjectStore', () => {
     expect(store.load('p-a').assets).toEqual([]) // disco intocado
   })
 
+  it('cacheAssetPatch aplica o resultado da ingestão só na memória (protocolo resolve o proxy antes do autosave)', () => {
+    const a: Asset = { id: 'a1', name: 'a', kind: 'video', source: { type: 'file', path: 'C:/m/a.mp4', size: 1, mtimeMs: 1 }, durationUs: 1, status: 'processing' }
+    store.create({ ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets: [a] })
+    store.cacheAssetPatch('P-A', 'a1', { proxy: 'proxies/a1.mp4', status: 'ready' })
+    expect(store.cached('p-a').assets[0]).toMatchObject({ proxy: 'proxies/a1.mp4', status: 'ready' })
+    expect(store.load('p-a').assets[0].proxy).toBeUndefined() // disco intocado (o renderer é quem grava)
+    store.cacheAssetPatch('p-a', 'nao-existe', { status: 'ready' }) // asset de outra versão do projeto: ignora
+  })
+
   it('applyAssetPatch grava no disco mesclando assets só do cache e atualiza o cache', () => {
     const disk: Asset = { id: 'd1', name: 'd', kind: 'audio', source: { type: 'file', path: 'C:/m/d.mp3', size: 1, mtimeMs: 1 }, durationUs: 1, status: 'ready' }
     store.create({ ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets: [disk] })

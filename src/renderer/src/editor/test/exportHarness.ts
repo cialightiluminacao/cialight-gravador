@@ -2,7 +2,9 @@ import { ALL_FORMATS, Input, UrlSource, VideoSampleSink } from 'mediabunny'
 import { projectDurationUs, updateItem } from '@shared/editor/ops'
 import { createMediaItem } from '@shared/editor/factory'
 import type { Asset, MediaItem, Project } from '@shared/editor/project'
-import { exportMediaIssues } from '../export/exportPlan'
+import { exportMediaIssues, frameCount } from '../export/exportPlan'
+import { exportRequestFor, presetAvailability, settingsForPreset, validateExport, type ExportSettings } from '../export/exportPresets'
+import { probeHevc } from '../export/hevcSupport'
 import { RenderClient } from '../engine/RenderClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import { EditorExportCancelled, runEditorExport, type EditorExportRequest } from '../export/editorExport'
@@ -15,6 +17,9 @@ import { AudioClient } from '../engine/audio/AudioClient'
 // projeto da sessão sintética, e compõe a mesma sessão pela v1 (composed.mp4; o main roda o job ffmpeg).
 // Um preview vivo (RenderClient próprio) é lido antes e depois para provar que a exportação não o perturba.
 // O main valida os arquivos (editorExportTestMode.ts).
+// F7: configurações do diálogo (exportPresets) — tamanho alvo personalizado, 60 fps de um projeto de 30,
+// intermediário (quadro-chave 0,5 s), Feed 1:1, HEVC (se o hardware tiver; senão o diálogo o bloqueia), a volta
+// do HEVC para H.264 e a privacidade (tarja/blur) num preset reduzido (WhatsApp) e no HEVC.
 
 declare global {
   interface Window {
@@ -22,7 +27,25 @@ declare global {
   }
 }
 
-interface Params { projectId: string; sessionId: string; outputDir: string; targetBytes: number; colorProjects: string[]; speedProjectId: string; reverseProjectId: string; denoiseProjectId: string; duckingProjectId: string; duckingHz: number; effects: { projectId: string; width: number; height: number; tUs: number; block: number; blurCrop: { x: number; y: number; w: number; h: number } } }
+type Region = { x: number; y: number; w: number; h: number }
+interface Params {
+  projectId: string
+  sessionId: string
+  outputDir: string
+  targetBytes: number
+  colorProjects: string[]
+  speedProjectId: string
+  reverseProjectId: string
+  denoiseProjectId: string
+  duckingProjectId: string
+  duckingHz: number
+  /** blur/outside: regiões normalizadas (centro, largura, altura) do blur e de um trecho só de ruído. */
+  effects: { projectId: string; width: number; height: number; tUs: number; block: number; blur: Region; outside: Region }
+  /** F7: projeto de ~20 s (tamanho alvo personalizado) e projeto 1080×1080 (Feed 1:1). */
+  longProjectId: string
+  squareProjectId: string
+  targetMB: number
+}
 
 export async function runExportHarness(params: Params): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
@@ -82,7 +105,8 @@ export async function runExportHarness(params: Params): Promise<void> {
       color[id] = { export: await exportOnce(base(p, `${id}.mp4`)), frame: await colorDiag(mediaUrlsFor(p, 'export')[p.assets[0].id]?.original) }
     }
     report.color = color
-    report.effects = await effectsParity(params.effects, params.outputDir)
+    report.effects = await effectsParity(params.effects, params.outputDir, { fileName: 'efeitos.mp4' })
+    await f7Cases(params, project, report)
     // velocidade 2× com tom preservado: voz sintética de 220 Hz (o main confere o tom e a duração)
     const speedProject = await window.api.project.load(params.speedProjectId)
     report.speed = await exportOnce(base(speedProject, 'velocidade-2x.mp4'))
@@ -158,45 +182,132 @@ async function previewToneLevels(p: Project, hz: number): Promise<{ levelsDb?: n
  * Devolve a variância de luma por bloco (block×block, linha a linha) do preview reduzido; o main calcula a
  * mesma coisa no quadro decodificado da exportação e compara as máscaras de baixa variância (IoU).
  */
-async function effectsParity(fx: Params['effects'], outputDir: string): Promise<Record<string, unknown>> {
+async function effectsParity(fx: Params['effects'], outputDir: string, variant: { fileName: string; settings?: ExportSettings }): Promise<Record<string, unknown>> {
   try {
     const p = await window.api.project.load(fx.projectId)
-    // 12 Mbps: o fundo de ruído é o pior caso do H.264; com menos bits o quantizador desvia a cor dos
-    // macroblocos chapados vizinhos dele (medido: até 4–6 níveis a 8 Mbps)
-    const exported = await exportOnce({
-      project: p, width: fx.width, height: fx.height, fps: p.canvas.fps, fromUs: 0, toUs: projectDurationUs(p),
-      videoBitrate: 12_000_000, audioBitrate: 128_000, outputDir, fileName: 'efeitos.mp4'
-    })
-    const PW = p.canvas.width
-    const PH = p.canvas.height
-    const canvas = document.createElement('canvas')
-    document.body.appendChild(canvas)
-    const client = new RenderClient(canvas, { width: PW, height: PH, dpr: 1 })
-    try {
-      await client.ready
-      client.setProject(p, mediaUrlsFor(p, 'preview'), true)
-      const r = await client.requestFrame(fx.tUs, false)
-      if (r.t !== 'rendered') throw new Error(`preview: ${JSON.stringify(r)}`)
-      const full = await client.readPixels(0, 0, PW, PH)
-      const src = new OffscreenCanvas(PW, PH)
-      src.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(full), PW, PH), 0, 0)
-      const dst = new OffscreenCanvas(fx.width, fx.height)
-      const ctx = dst.getContext('2d')!
-      ctx.imageSmoothingQuality = 'high'
-      ctx.drawImage(src, 0, 0, fx.width, fx.height)
-      const small = ctx.getImageData(0, 0, fx.width, fx.height).data
-      // RGB do miolo da região borrada no preview reduzido (o main compara com a exportação por PSNR)
-      const c = fx.blurCrop
-      const blurRgb: number[] = []
-      for (let y = c.y; y < c.y + c.h; y++) for (let x = c.x; x < c.x + c.w; x++) blurRgb.push(small[(y * fx.width + x) * 4], small[(y * fx.width + x) * 4 + 1], small[(y * fx.width + x) * 4 + 2])
-      return { export: exported, previewBlockVar: blockVariance(small, fx.width, fx.height, fx.block), previewBlurRgb: blurRgb }
-    } finally {
-      client.dispose()
-      canvas.remove()
-    }
+    const toUs = projectDurationUs(p)
+    // sem configurações: 12 Mbps na resolução pedida — o fundo de ruído é o pior caso do H.264; com menos bits o
+    // quantizador desvia a cor dos macroblocos chapados vizinhos dele (medido: até 4–6 níveis a 8 Mbps)
+    const req: EditorExportRequest = variant.settings
+      ? { project: p, fromUs: 0, toUs, ...exportRequestFor(variant.settings, toUs), outputDir, fileName: variant.fileName }
+      : { project: p, width: fx.width, height: fx.height, fps: p.canvas.fps, fromUs: 0, toUs, videoBitrate: 12_000_000, audioBitrate: 128_000, outputDir, fileName: variant.fileName }
+    const exported = await exportOnce(req)
+    return { export: exported, ...(await effectsPreviewRef(p, fx.tUs, req.width, req.height, fx)) }
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/**
+ * Referência do preview para os oráculos de privacidade (checkEffects no main): o quadro `tUs` do projeto no
+ * preview (RenderClient no tamanho do projeto) reduzido para OW×OH — variância de luma por bloco, RGB do miolo
+ * borrado e energia de detalhe do miolo e de fora. Também usada pela fila (formatsHarness).
+ */
+export async function effectsPreviewRef(p: Project, tUs: number, OW: number, OH: number, fx: { block: number; blur: Region; outside: Region }): Promise<Record<string, unknown>> {
+  // miolo da região borrada na saída, longe do feather (24 px a 720p, proporcional à altura)
+  const inset = Math.round((24 * OH) / 720)
+  // recortes pares (o crop do ffmpeg em yuv420p arredonda ímpares e o RGB sairia com outro tamanho)
+  const ev2 = (v: number): number => Math.round(v / 2) * 2
+  const crop = (r: Region, pad: number): Region => ({ x: ev2((r.x - r.w / 2) * OW + pad), y: ev2((r.y - r.h / 2) * OH + pad), w: ev2(r.w * OW - 2 * pad), h: ev2(r.h * OH - 2 * pad) })
+  const blurCrop = crop(fx.blur, inset)
+  const outsideCrop = crop(fx.outside, 0)
+  const PW = p.canvas.width
+  const PH = p.canvas.height
+  const canvas = document.createElement('canvas')
+  document.body.appendChild(canvas)
+  const client = new RenderClient(canvas, { width: PW, height: PH, dpr: 1 })
+  try {
+    await client.ready
+    client.setProject(p, mediaUrlsFor(p, 'preview'), true)
+    const r = await client.requestFrame(tUs, false)
+    if (r.t !== 'rendered') throw new Error(`preview: ${JSON.stringify(r)}`)
+    const full = await client.readPixels(0, 0, PW, PH)
+    const src = new OffscreenCanvas(PW, PH)
+    src.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(full), PW, PH), 0, 0)
+    const dst = new OffscreenCanvas(OW, OH)
+    const ctx = dst.getContext('2d')!
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(src, 0, 0, OW, OH)
+    const small = ctx.getImageData(0, 0, OW, OH).data
+    // RGB do miolo da região borrada no preview reduzido (o main compara com a exportação por PSNR)
+    const c = blurCrop
+    const blurRgb: number[] = []
+    for (let y = c.y; y < c.y + c.h; y++) for (let x = c.x; x < c.x + c.w; x++) blurRgb.push(small[(y * OW + x) * 4], small[(y * OW + x) * 4 + 1], small[(y * OW + x) * 4 + 2])
+    return {
+      width: OW,
+      height: OH,
+      blurCrop,
+      outsideCrop,
+      previewBlockVar: blockVariance(small, OW, OH, fx.block),
+      previewBlurRgb: blurRgb,
+      previewEnergy: { blur: detailEnergy(small, OW, blurCrop), outside: detailEnergy(small, OW, outsideCrop) }
+    }
+  } finally {
+    client.dispose()
+    canvas.remove()
+  }
+}
+
+/** Energia de detalhe: média de (ΔL)² entre vizinhos (horizontal + vertical) no recorte de uma imagem RGBA. */
+function detailEnergy(d: Uint8ClampedArray, w: number, c: Region): number {
+  const L = (x: number, y: number): number => {
+    const i = (y * w + x) * 4
+    return 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+  }
+  let s = 0
+  let n = 0
+  for (let y = c.y; y < c.y + c.h - 1; y++) {
+    for (let x = c.x; x < c.x + c.w - 1; x++) {
+      const l = L(x, y)
+      s += (L(x + 1, y) - l) ** 2 + (L(x, y + 1) - l) ** 2
+      n++
+    }
+  }
+  return n ? +(s / n).toFixed(3) : 0
+}
+
+/**
+ * Casos da F7, pelo mesmo caminho do ExportDialog (settingsForPreset → ajustes → exportRequestFor →
+ * runEditorExport). O main valida os arquivos.
+ */
+async function f7Cases(params: Params, scenario: Project, report: Record<string, unknown>): Promise<void> {
+  const out = params.outputDir
+  const req = (p: Project, s: ExportSettings, fileName: string): EditorExportRequest => {
+    const toUs = projectDurationUs(p)
+    return { project: p, fromUs: 0, toUs, ...exportRequestFor(s, toUs), outputDir: out, fileName }
+  }
+  // a) tamanho alvo personalizado (não WhatsApp) num projeto de ~20 s: o pedido leva targetBytes (2ª passada)
+  const long = await window.api.project.load(params.longProjectId)
+  const targetSettings: ExportSettings = { ...settingsForPreset('youtube1080', long.canvas), quality: { kind: 'target', mb: params.targetMB } }
+  const targetReq = req(long, targetSettings, 'f7-alvo.mp4')
+  report.f7Target = { ...(await exportOnce(targetReq)), requestTargetBytes: targetReq.targetBytes ?? null, requestVideoBitrate: targetReq.videoBitrate, durationUs: projectDurationUs(long) }
+  // a2) o mesmo pedido com a 1ª passada forçada acima do alvo (4× o bitrate): a 2ª passada do alvo personalizado
+  report.f7TargetResize = await exportOnce({ ...req(long, targetSettings, 'f7-alvo-2a-passada.mp4'), simulateFirstPassOvershoot: true })
+  // b) 60 fps de um projeto de 30 fps: quadros exatos (frameCount)
+  const fps60: ExportSettings = { ...settingsForPreset('youtube1080', scenario.canvas), fps: 60 }
+  report.f7Fps60 = { ...(await exportOnce(req(scenario, fps60, 'f7-60fps.mp4'))), expectedFrames: frameCount(0, projectDurationUs(scenario), 60) }
+  // c) intermediário: quadro-chave a cada 0,5 s, áudio 320 kbps
+  report.f7Intermediate = await exportOnce(req(scenario, settingsForPreset('intermediate', scenario.canvas), 'f7-intermediario.mp4'))
+  // áudio de 320 kbps pedido direto: ou sai a 320 sem aviso, ou sai menor COM aviso (nunca em silêncio)
+  report.f7Audio320 = await exportOnce({ ...req(scenario, settingsForPreset('youtube1080', scenario.canvas), 'f7-audio-320.mp4'), audioBitrate: 320_000 })
+  // d) Feed 1:1 num projeto 1080×1080 (e indisponível no 16:9)
+  const square = await window.api.project.load(params.squareProjectId)
+  report.f7Feed11 = {
+    ...(await exportOnce(req(square, settingsForPreset('feed11', square.canvas), 'f7-feed11.mp4'))),
+    availability: presetAvailability('feed11', square.canvas, projectDurationUs(square)),
+    unavailableOn169: presetAvailability('feed11', scenario.canvas, projectDurationUs(scenario))
+  }
+  // e) HEVC: só se o hardware confirmar (o diálogo usa o mesmo probeHevc); privacidade no arquivo HEVC
+  const fxProject = await window.api.project.load(params.effects.projectId)
+  const hevcOriginal: ExportSettings = { ...settingsForPreset('original', fxProject.canvas), codec: 'hevc' }
+  const hevcSupported = await probeHevc(hevcOriginal.width, hevcOriginal.height, hevcOriginal.fps)
+  report.f7Hevc = hevcSupported
+    ? { supported: true, effects: await effectsParity(params.effects, out, { fileName: 'f7-hevc-efeitos.mp4', settings: hevcOriginal }) }
+    : { supported: false, dialogBlocker: validateExport(hevcOriginal, fxProject.canvas, projectDurationUs(fxProject), false).blocker }
+  // falha injetada do HEVC antes do 1º pacote → a mesma exportação em H.264
+  report.f7HevcFallback = await exportOnce({ ...req(scenario, { ...settingsForPreset('youtube1080', scenario.canvas), codec: 'hevc' }, 'f7-hevc-falha.mp4'), simulateHevcFailure: true })
+  // f) privacidade num preset reduzido: WhatsApp (1280×720 a partir do projeto 1920×1080)
+  report.f7Whatsapp = await effectsParity(params.effects, out, { fileName: 'f7-whatsapp-efeitos.mp4', settings: settingsForPreset('whatsapp', fxProject.canvas) })
 }
 
 /** Variância de luma por bloco b×b (blocos inteiros, linha a linha) de uma imagem RGBA. */

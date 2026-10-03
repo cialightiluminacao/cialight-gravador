@@ -1,7 +1,7 @@
 // E2E do editor F3 via CDP, ponta a ponta num projeto de gravação (tela testsrc + microfone com fala sintética e pausas
 // conhecidas): remove os silêncios pelo painel → importa uma música e põe no playhead (faixa Música, ducking ligado) →
 // grava uma narração com o microfone falso do Chromium (CIALIGHT_TEST=editor-narration) → põe o último clipe a 2× com
-// "Manter tom" → exporta "Alta 1080p". No arquivo, com o ffmpeg: duração total e fim da voz como o plano calcula,
+// "Manter tom" → exporta "YouTube 1080p". No arquivo, com o ffmpeg: duração total e fim da voz como o plano calcula,
 // a música abaixa −12 dB (±1,5) sob a fala, o tom da voz no clipe a 2× é o mesmo (Goertzel 220/440 Hz) e a narração
 // está no lugar do item (±50 ms). Eventos sintéticos despachados no elemento real sob o ponto — nunca entrada do sistema
 // operacional. Só mídia sintética (o repositório é público).
@@ -310,13 +310,13 @@ async function main() {
     await shot('f3-e2e-02-timeline-final.png')
   }
 
-  // ---------- 5) exportar Alta 1080p ----------
-  console.log('5) exportar "Alta 1080p"')
+  // ---------- 5) exportar YouTube 1080p ----------
+  console.log('5) exportar "YouTube 1080p"')
   const plan = await ev(`return { videoEnd: T.trackEnd('Tela'), voiceEnd: T.trackEnd('Microfone'), end: Math.max(...T.project().tracks.filter((t) => !t.hidden).flatMap((t) => t.items.map((i) => i.startUs + i.durationUs))), narr: T.narrItems().map((i) => ({ startUs: i.startUs, durationUs: i.durationUs })) }`)
   await ev(`window.__qaEditor.exportDir = ${JSON.stringify(OUT)}; await T.seek(0); await T.clickEl([...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar'))); await T.wait(500)
-    await T.clickEl([...T.dialog().querySelectorAll('[role="radio"]')].find((b) => b.textContent.startsWith('Alta 1080p'))); return 1`)
+    await T.clickEl([...T.dialog().querySelectorAll('[role="radio"]')].find((b) => b.textContent.startsWith('YouTube 1080p'))); return 1`)
   const dlg = await ev(`return T.dialog()?.textContent ?? ''`)
-  check('diálogo com "Alta 1080p"', dlg.includes('Alta 1080p'), dlg.slice(0, 200))
+  check('diálogo com "YouTube 1080p"', dlg.includes('YouTube 1080p'), dlg.slice(0, 200))
   await shot('f3-e2e-03-exportar.png')
   await ev(`await T.clickEl(T.button('Exportar', T.dialog())); return 1`)
   const t0 = Date.now()

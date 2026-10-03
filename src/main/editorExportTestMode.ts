@@ -14,7 +14,7 @@ import { clampPip, pipPixelRect, pipRectAt } from '@shared/compositor/pipMath'
 import { untaggedFamily } from '@shared/editor/sourceColor'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
-import { probeFile, runFfmpeg } from './export/ffmpegRunner'
+import { probeFile, probeKeyframes, runFfmpeg } from './export/ffmpegRunner'
 import { ffprobePath } from './export/ffmpegPath'
 import { startExportJob } from './export/exportJob'
 import { cachedEncoderProbe } from './export/encoderProbe'
@@ -43,7 +43,7 @@ const FPS = 30
 const FRAME_MS = 1000 / FPS
 // fonte marcada como BT.709 (como as gravações do app): sem a marcação, o Chromium e o ffmpeg convertem o
 // YUV para RGB com matrizes diferentes e a comparação de pixels mediria a matriz, não a exportação
-const BT709 = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv']
+export const BT709 = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv']
 // como as gravações de tela da v1 (WebCodecs): BT.601 marcado
 const BT601 = ['-colorspace', 'smpte170m', '-color_primaries', 'smpte170m', '-color_trc', 'smpte170m', '-color_range', 'tv']
 const COLOR_601 = 'p-editor-export-cor-601'
@@ -51,13 +51,30 @@ const COLOR_UNTAGGED = 'p-editor-export-cor-sem-marcacao'
 const COLOR_UNTAGGED_SD = 'p-editor-export-cor-sem-marcacao-sd'
 // efeitos (F2): projeto 1920×1080 (ruído + blur + tarja) exportado em 1280×720
 const EFFECTS_ID = 'p-editor-export-efeitos'
-const FX_BLOCK = 16
+export const FX_BLOCK = 16
 const FX_T_US = 1_000_000
-const FX_TARJA = [0x12, 0x34, 0x56]
-const FX_SOLID = { x: 0.72, y: 0.5, w: 0.3, h: 0.4 }
-const FX_BLUR = { x: 0.3, y: 0.5, w: 0.3, h: 0.4 }
-// miolo da região borrada na saída (1280×720), 24 px para dentro da borda (longe do feather)
-const FX_BLUR_CROP = { x: Math.round((FX_BLUR.x - FX_BLUR.w / 2) * W) + 24, y: Math.round((FX_BLUR.y - FX_BLUR.h / 2) * H) + 24, w: Math.round(FX_BLUR.w * W) - 48, h: Math.round(FX_BLUR.h * H) - 48 }
+export const FX_TARJA = [0x12, 0x34, 0x56]
+export const FX_SOLID = { x: 0.72, y: 0.5, w: 0.3, h: 0.4 }
+export const FX_BLUR = { x: 0.3, y: 0.5, w: 0.3, h: 0.4 }
+// trecho só de ruído, longe do blur e da tarja (energia de detalhe de referência)
+export const FX_OUTSIDE = { x: 0.065, y: 0.5, w: 0.11, h: 0.8 }
+// pixelização (preset padrão: intensidade 50, sem feather) na faixa de cima, longe do blur, da tarja, do recorte
+// "fora" e do marcador do test:editor-formats: x 0,6–0,8, y 0,07–0,21. Pequena de propósito (2,8 % do quadro): com
+// 0,36 × 0,2 (7 %) o H.264 por hardware do item de 720p da fila codificava pior o anel da tarja (medido 4 > ±3,
+// em qualquer posição, intensidade ou ordem de faixa; provavelmente a quantização adaptativa vendo a área lisa)
+export const FX_PIXEL = { x: 0.7, y: 0.14, w: 0.2, h: 0.14 }
+export const FX_PIXEL_STRENGTH = 50
+// oráculo da pixelização (pixelateCheck): ruído da fonte com variância de luma ≈ 255²/12 ≈ 5400 por bloco; depois do
+// encoder (H.264/HEVC/libx264, guard de 2 px nas bordas do bloco contra o deblocking e o croma 4:2:0) a variância
+// dentro do bloco fica ≤ PIXEL_VAR_MAX_CODEC — medido: H.264 720p 0,11, WhatsApp 720p 0,32, HEVC 1080p 0,01, fila
+// 720p 0,22, libx264 1080p 0,13 (pior de 60 quadros); 2 dá folga ~6× e continua 1/2700 da variância do ruído.
+// Entre blocos vizinhos o degrau médio das médias (medido 4,7–4,8 a 720p, 6,6–6,7 a 1080p, 8,4 no GIF) ≥ 2
+export const NOISE_LUMA_VAR = 5400
+export const PIXEL_GUARD_CODEC = 2
+export const PIXEL_VAR_MAX_CODEC = 2
+export const PIXEL_STEP_MIN = 2
+// blocos inteiros dentro da região que o oráculo exige (medido 14 em todas as saídas, do GIF 480×270 ao 1080p)
+export const PIXEL_MIN_BLOCKS = 8
 // velocidade (F3): testsrc2 + voz sintética de 6 s a 2× com tom preservado
 const SPEED_ID = 'p-editor-export-velocidade'
 const VOICE_HZ = 220
@@ -73,8 +90,14 @@ const DUCK_WIN = 2400 // 50 ms: 11 ciclos de 220 Hz e 50 de 1 kHz (Goertzel sem 
 const DUCK_HOP = 480 // 10 ms
 // tamanho-alvo forçado (o cenário de 7 s a 8 Mbps dá ~7 MB)
 const SMALL_TARGET = 2 * 1024 * 1024
+// F7: projeto de 20 s (a fonte do cenário duas vezes) exportado com tamanho alvo personalizado de 3 MB, e
+// projeto 1080×1080 para o Feed 1:1
+const LONG_ID = 'p-editor-export-20s'
+const SQUARE_ID = 'p-editor-export-quadrado'
+const F7_TARGET_MB = 3
 
-interface ExportOut { path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
+export interface ExportOut { audioBitrate?: number; path?: string; size?: number; passes?: number; warnings?: string[]; error?: string; fellBackToSoftware?: boolean; fellBackFromHevc?: boolean; codec?: string; hardware?: string; audioCodec?: string | null; videoCodec?: string; ms?: number; speed?: number | null; progressEvents?: number }
+type Region = { x: number; y: number; w: number; h: number }
 interface HarnessReport {
   errors: string[]
   scenario?: ExportOut
@@ -86,7 +109,16 @@ interface HarnessReport {
   missingMedia?: { preflight: { assetId: string; status: string }[]; export: ExportOut }
   color?: Record<string, { export: ExportOut; frame: unknown }>
   v1Composed?: { path?: string; error?: string }
-  effects?: { export?: ExportOut; previewBlockVar?: number[]; previewBlurRgb?: number[]; error?: string }
+  effects?: EffectsOut
+  f7Target?: ExportOut & { requestTargetBytes?: number | null; requestVideoBitrate?: number; durationUs?: number }
+  f7Fps60?: ExportOut & { expectedFrames?: number }
+  f7Intermediate?: ExportOut
+  f7TargetResize?: ExportOut
+  f7Audio320?: ExportOut
+  f7Feed11?: ExportOut & { availability?: { ok: boolean; reason?: string }; unavailableOn169?: { ok: boolean; reason?: string } }
+  f7Hevc?: { supported: true; effects?: EffectsOut } | { supported: false; dialogBlocker?: string | null }
+  f7HevcFallback?: ExportOut
+  f7Whatsapp?: EffectsOut
   speed?: ExportOut
   speedAgain?: ExportOut
   reverse?: ExportOut
@@ -155,20 +187,20 @@ function duckingCheck(levels: number[], speech: SpeechInterval[]): DuckingResult
   return out
 }
 
-function check(cond: boolean, msg: string, failures: string[]): void {
+export function check(cond: boolean, msg: string, failures: string[]): void {
   if (!cond) failures.push(msg)
   console.log(`${cond ? 'OK ' : 'FAIL'} ${msg}`)
 }
 
-function settingsHash(): string | null {
+export function settingsHash(): string | null {
   const f = join(app.getPath('userData'), 'settings.json')
   return existsSync(f) ? createHash('sha1').update(readFileSync(f)).digest('hex') : null
 }
 
-const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
+export const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
 
 /** Quadro em tSec (decodificação exata a partir do keyframe anterior), recortado, como RGB24. */
-async function frameRgb(file: string, tSec: number, out: string, crop?: { x: number; y: number; w: number; h: number }): Promise<Uint8Array> {
+export async function frameRgb(file: string, tSec: number, out: string, crop?: { x: number; y: number; w: number; h: number }): Promise<Uint8Array> {
   const vf = crop ? ['-vf', `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`] : []
   await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', tSec.toFixed(3), '-i', file, '-frames:v', '1', ...vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', out], { label: 'teste: quadro' })
   return new Uint8Array(readFileSync(out))
@@ -203,7 +235,7 @@ function blockVar(d: Uint8Array, w: number, h: number, b: number): number[] {
 }
 
 /** PSNR (dB) entre duas imagens RGB24 do mesmo tamanho. */
-function psnr(a: Uint8Array, b: Uint8Array): number {
+export function psnr(a: Uint8Array, b: Uint8Array): number {
   if (a.length !== b.length || a.length === 0) return -1
   let se = 0
   for (let i = 0; i < a.length; i++) {
@@ -215,26 +247,233 @@ function psnr(a: Uint8Array, b: Uint8Array): number {
 }
 
 /** RMS geral (dB) do áudio em [from, to) s pelo astats. */
-async function rmsDb(file: string, from: number, to: number): Promise<number> {
+export async function rmsDb(file: string, from: number, to: number): Promise<number> {
   const r = await runFfmpeg(['-hide_banner', '-nostdin', '-i', file, '-vn', '-af', `atrim=start=${from}:end=${to},astats=measure_perchannel=none`, '-f', 'null', '-'], { label: 'teste: astats' })
   const m = /RMS level dB:\s*(-?[\d.]+|-inf)/.exec(r.stderrTail.split('Overall').pop() ?? '')
   return m ? (m[1] === '-inf' ? -Infinity : Number(m[1])) : NaN
 }
 
 /** Áudio do arquivo como PCM float 48 kHz intercalado (ffmpeg → f32le); mono por padrão. */
-async function pcmOf(file: string, out: string, channels = 1): Promise<Float32Array> {
+export async function pcmOf(file: string, out: string, channels = 1): Promise<Float32Array> {
   await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-i', file, '-vn', '-ac', String(channels), '-ar', '48000', '-f', 'f32le', out], { label: 'teste: pcm' })
   const b = readFileSync(out)
   return new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength))
 }
 
 /** Quadros decodificados da faixa de vídeo (ffprobe -count_frames). */
-function countFrames(file: string): Promise<number> {
+export function countFrames(file: string): Promise<number> {
   return new Promise((resolve) => {
     execFile(ffprobePath(), ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', file], { windowsHide: true }, (err, stdout) => {
       resolve(err ? -1 : Number(String(stdout).trim().replace(/,$/, '')))
     })
   })
+}
+
+export interface EffectsOut { export?: ExportOut; width?: number; height?: number; blurCrop?: Region; outsideCrop?: Region; previewBlockVar?: number[]; previewBlurRgb?: number[]; previewEnergy?: { blur: number; outside: number }; error?: string }
+
+/** Energia de detalhe: média de (ΔL)² entre vizinhos (horizontal + vertical) de uma imagem RGB24 w×h. */
+export function detailEnergy(d: Uint8Array, w: number, h: number): number {
+  const L = (x: number, y: number): number => {
+    const i = (y * w + x) * 3
+    return 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+  }
+  let s = 0
+  let n = 0
+  for (let y = 0; y < h - 1; y++) {
+    for (let x = 0; x < w - 1; x++) {
+      const l = L(x, y)
+      s += (L(x + 1, y) - l) ** 2 + (L(x, y + 1) - l) ** 2
+      n++
+    }
+  }
+  return n ? s / n : 0
+}
+
+/**
+ * Lado do bloco da pixelização em 1/256 px numa saída W×H — a regra do compositor (effectsMath.effectPixelBlockPx +
+ * pixelCellQ) reescrita aqui de propósito (oráculo independente; o main não importa o renderer):
+ * max(2 + s·(max(2, H/12) − 2), 0,35 × menor lado da região × s) px, s = intensidade/100, nunca abaixo de 2 px.
+ */
+export function pixelCellQ(strength: number, r: { w: number; h: number }, W: number, H: number): number {
+  const s = Math.min(100, Math.max(0, strength)) / 100
+  const byHeight = 2 + s * (Math.max(2, H / 12) - 2)
+  const byRegion = 0.35 * Math.min(Math.min(Math.abs(r.w), 1) * W, Math.min(Math.abs(r.h), 1) * H) * s
+  return Math.max(512, Math.round(Math.max(byHeight, byRegion) * 256))
+}
+
+export interface PixelateResult { cellPx: number; blocks: number; worstVar: number; worstAt: number[]; meanVar: number; step: number }
+
+/**
+ * Oráculo da pixelização numa imagem RGB24 `iw`×`ih` cuja origem é (ox, oy) num quadro W×H. Grade presa ao quadro,
+ * como nos shaders: o pixel i é do bloco ⌊(2i + 1)·128/q⌋ (q = pixelCellQ na saída). Só blocos inteiros a ≥ 1 px
+ * dentro da região (borda dura) e dentro da imagem. Em cada bloco: variância de luma dos pixels a ≥ `guard` px das
+ * bordas do bloco (≈ 0: o detalhe da fonte sumiu; o guard tira o deblocking/croma 4:2:0 do encoder na fronteira
+ * entre blocos). Entre blocos vizinhos: degrau médio |Δmédia| — os blocos são da grade esperada (um
+ * borrão ou uma cor lisa daria ≈ 0; uma grade deslocada/de outro tamanho poria o degrau dentro dos blocos).
+ */
+export function pixelateCheck(img: Uint8Array, iw: number, ih: number, ox: number, oy: number, W: number, H: number, region: Region, strength: number, guard: number): PixelateResult {
+  const q = pixelCellQ(strength, region, W, H)
+  const blk = (i: number): number => Math.floor(((2 * i + 1) * 128) / q)
+  // [início, fim] (inclusivo) de cada bloco numa dimensão, só os inteiros dentro de [lo + 1, hi − 1] e da imagem
+  const spans = (n: number, lo: number, hi: number, o: number, len: number): [number, number][] => {
+    const out: [number, number][] = []
+    let start = 0
+    for (let i = 1; i <= n; i++) {
+      if (i < n && blk(i) === blk(start)) continue
+      const end = i - 1
+      if (start >= lo + 1 && end + 1 <= hi - 1 && start >= o && end < o + len) out.push([start, end])
+      start = i
+    }
+    return out
+  }
+  const xs = spans(W, (region.x - region.w / 2) * W, (region.x + region.w / 2) * W, ox, iw)
+  const ys = spans(H, (region.y - region.h / 2) * H, (region.y + region.h / 2) * H, oy, ih)
+  const means: number[][] = ys.map(() => xs.map(() => NaN))
+  const res: PixelateResult = { cellPx: q / 256, blocks: 0, worstVar: 0, worstAt: [], meanVar: 0, step: 0 }
+  let varSum = 0
+  ys.forEach(([y0, y1], j) => {
+    xs.forEach(([x0, x1], k) => {
+      let s = 0
+      let s2 = 0
+      let n = 0
+      for (let y = y0 + guard; y <= y1 - guard; y++) {
+        for (let x = x0 + guard; x <= x1 - guard; x++) {
+          const i = ((y - oy) * iw + (x - ox)) * 3
+          const l = 0.299 * img[i] + 0.587 * img[i + 1] + 0.114 * img[i + 2]
+          s += l
+          s2 += l * l
+          n++
+        }
+      }
+      if (!n) return
+      const m = s / n
+      const v = Math.max(0, s2 / n - m * m)
+      means[j][k] = m
+      res.blocks++
+      varSum += v
+      if (v > res.worstVar || res.worstAt.length === 0) Object.assign(res, { worstVar: Math.max(v, res.worstVar), worstAt: [x0, y0] })
+    })
+  })
+  res.meanVar = res.blocks ? varSum / res.blocks : NaN
+  let stepSum = 0
+  let pairs = 0
+  for (let j = 0; j < ys.length; j++) {
+    for (let k = 0; k < xs.length; k++) {
+      for (const [dj, dk] of [[0, 1], [1, 0]]) {
+        const a = means[j][k]
+        const b = means[j + dj]?.[k + dk]
+        if (!Number.isFinite(a) || b === undefined || !Number.isFinite(b)) continue
+        const d = Math.abs(a - b)
+        stepSum += d
+        pairs++
+      }
+    }
+  }
+  res.step = pairs ? stepSum / pairs : 0
+  return res
+}
+
+/** Pixelização como texto para o log/a mensagem do check. */
+export const pixelateText = (p: PixelateResult): string => `bloco ${p.cellPx.toFixed(2)} px, ${p.blocks} blocos, variância no bloco pior ${p.worstVar.toFixed(3)} (em ${p.worstAt}) / média ${p.meanVar.toFixed(3)}, degrau entre blocos ${p.step.toFixed(1)}`
+
+/** Faixa de vídeo pelo ffprobe (codec, tag, taxa de quadros, resolução). */
+export function streamInfo(file: string): Promise<{ codec_name?: string; codec_tag_string?: string; r_frame_rate?: string; avg_frame_rate?: string; width?: number; height?: number } | null> {
+  return new Promise((resolve) => {
+    execFile(ffprobePath(), ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,codec_tag_string,r_frame_rate,avg_frame_rate,width,height', '-of', 'json', file], { windowsHide: true }, (err, stdout) => {
+      if (err) return resolve(null)
+      try {
+        resolve((JSON.parse(String(stdout)) as { streams?: Record<string, never>[] }).streams?.[0] ?? null)
+      } catch {
+        resolve(null)
+      }
+    })
+  })
+}
+
+/**
+ * Oráculos de privacidade numa exportação do projeto de efeitos (ruído 1920×1080 + blur + tarja #123456) em
+ * w×h: tarja com a cor exata (±3, centro de cada macrobloco inteiro na região), área borrada/tarjada no mesmo
+ * lugar do preview reduzido (IoU dos blocos de baixa variância ≥ 0,9), miolo borrado ≈ preview reduzido (PSNR >
+ * 30; raio ∝ altura), energia de detalhe do miolo borrado < 10 % da do ruído de fora, e o ruído de fora intacto
+ * (energia ≥ 50 % da do preview reduzido: nada borrado fora da região); pixelização (FX_PIXEL) com blocos
+ * uniformes na grade do compositor e degrau entre vizinhos (pixelateCheck).
+ */
+export async function checkEffects(label: string, what: string, fx: EffectsOut | undefined, expect: { w: number; h: number; codec: 'h264' | 'hevc'; ringTol?: number }, dir: string, failures: string[]): Promise<void> {
+  const out = fx?.export?.path
+  const tag = label.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+  check(!!out && existsSync(out) && !!fx?.previewBlockVar, `${label}: projeto 1920×1080 exportado (${what}) (${out ?? fx?.export?.error ?? fx?.error})`, failures)
+  if (!out || !existsSync(out) || !fx?.previewBlockVar || !fx.blurCrop || !fx.outsideCrop) return
+  const { w: OW, h: OH } = expect
+  const st = await streamInfo(out)
+  check(st?.width === OW && st?.height === OH, `${label}: saída ${OW}×${OH} (${st?.width}×${st?.height})`, failures)
+  if (expect.codec === 'hevc') check(st?.codec_name === 'hevc' && st?.codec_tag_string === 'hvc1' && fx.export?.codec === 'hevc', `${label}: codec HEVC com a tag hvc1 (${st?.codec_name}/${st?.codec_tag_string}; ${fx.export?.videoCodec})`, failures)
+  else check(st?.codec_name === 'h264', `${label}: codec H.264 (${st?.codec_name})`, failures)
+  const img = await frameRgb(out, FX_T_US / 1e6, join(dir, `${tag}-saida.rgb`))
+  // tarja: centro de cada bloco 16×16 (macrobloco) inteiro dentro da região. Miolo: ±3 por canal após o encoder.
+  // Anel (macroblocos na borda da região, vizinhos do ruído): ±3 como o miolo, exceto onde a variante pede outra
+  // tolerância (só o WhatsApp a 8 Mbps: o deblocking/croma 4:2:0 puxa até 4 níveis ali — opaco e sem detalhe, ±6).
+  const by0 = Math.ceil(((FX_SOLID.y - FX_SOLID.h / 2) * OH) / FX_BLOCK)
+  const bx0 = Math.ceil(((FX_SOLID.x - FX_SOLID.w / 2) * OW) / FX_BLOCK)
+  const by1 = Math.floor(((FX_SOLID.y + FX_SOLID.h / 2) * OH) / FX_BLOCK) - 1
+  const bx1 = Math.floor(((FX_SOLID.x + FX_SOLID.w / 2) * OW) / FX_BLOCK) - 1
+  const worst = { inner: { d: 0, px: [] as number[], n: 0 }, ring: { d: 0, px: [] as number[], n: 0 } }
+  for (let by = by0; by <= by1; by++) {
+    for (let bx = bx0; bx <= bx1; bx++) {
+      const i = ((by * FX_BLOCK + FX_BLOCK / 2) * OW + bx * FX_BLOCK + FX_BLOCK / 2) * 3
+      const px = [img[i], img[i + 1], img[i + 2]]
+      const d = Math.max(...px.map((v, c) => Math.abs(v - FX_TARJA[c])))
+      const w = by === by0 || by === by1 || bx === bx0 || bx === bx1 ? worst.ring : worst.inner
+      w.n++
+      if (d >= w.d) {
+        w.d = d
+        w.px = px
+      }
+    }
+  }
+  check(worst.inner.n > 100 && worst.inner.d <= 3, `${label}: tarja com a cor exata na exportação — miolo (${worst.inner.n} blocos, pior desvio ${worst.inner.d} em ${worst.inner.px}; esperado 18,52,86 ± 3)`, failures)
+  const ringTol = expect.ringTol ?? 3
+  check(worst.ring.n > 20 && worst.ring.d <= ringTol, `${label}: tarja — anel da borda (${worst.ring.n} blocos, pior desvio ${worst.ring.d} em ${worst.ring.px}; ± ${ringTol})`, failures)
+  // região borrada no mesmo lugar: blocos de baixa variância (ruído: milhares; borrado/tarja: ~0), exportação × preview
+  const exportVar = blockVar(img, OW, OH, FX_BLOCK)
+  const pv = fx.previewBlockVar
+  const LOW = 300
+  let inter = 0
+  let union = 0
+  // os blocos da pixelização (que o preview reduzido de 1080p tem numa grade de outro tamanho) ficam fora do IoU:
+  // ele continua medindo só o blur e a tarja; a pixelização tem o oráculo próprio abaixo
+  const cols = Math.floor(OW / FX_BLOCK)
+  const px0 = Math.floor(((FX_PIXEL.x - FX_PIXEL.w / 2) * OW) / FX_BLOCK) - 1
+  const px1 = Math.floor(((FX_PIXEL.x + FX_PIXEL.w / 2) * OW) / FX_BLOCK) + 1
+  const py0 = Math.floor(((FX_PIXEL.y - FX_PIXEL.h / 2) * OH) / FX_BLOCK) - 1
+  const py1 = Math.floor(((FX_PIXEL.y + FX_PIXEL.h / 2) * OH) / FX_BLOCK) + 1
+  const inPixel = (k: number): boolean => k % cols >= px0 && k % cols <= px1 && Math.floor(k / cols) >= py0 && Math.floor(k / cols) <= py1
+  for (let k = 0; k < Math.min(pv.length, exportVar.length); k++) {
+    if (inPixel(k)) continue
+    const a = pv[k] < LOW
+    const b = exportVar[k] < LOW
+    if (a && b) inter++
+    if (a || b) union++
+  }
+  const iou = union ? inter / union : 0
+  check(pv.length === exportVar.length && union > 100 && iou >= 0.9, `${label}: área borrada/tarjada no mesmo lugar (IoU ${iou.toFixed(3)} ≥ 0,9; ${inter}/${union} blocos de ${FX_BLOCK}×${FX_BLOCK})`, failures)
+  // mesmo raio relativo à altura: o miolo borrado da exportação ≈ preview 1080p reduzido
+  const bc = fx.blurCrop
+  const ex = await frameRgb(out, FX_T_US / 1e6, join(dir, `${tag}-blur.rgb`), bc)
+  const pBlur = psnr(ex, Uint8Array.from(fx.previewBlurRgb ?? []))
+  check(pBlur > 30, `${label}: região borrada exportação ${OW}×${OH} × preview 1080p reduzido (raio ∝ altura): PSNR ${pBlur.toFixed(1)} dB > 30 (miolo ${bc.w}×${bc.h})`, failures)
+  // energia de detalhe: borrado ≪ ruído de fora; ruído de fora preservado (comparado ao preview reduzido)
+  const oc = fx.outsideCrop
+  const eBlur = detailEnergy(ex, bc.w, bc.h)
+  const outside = await frameRgb(out, FX_T_US / 1e6, join(dir, `${tag}-fora.rgb`), oc)
+  check(ex.length === bc.w * bc.h * 3 && outside.length === oc.w * oc.h * 3, `${label}: recortes do miolo (${bc.w}×${bc.h}) e de fora (${oc.w}×${oc.h}) com o tamanho pedido`, failures)
+  const eOut = detailEnergy(outside, oc.w, oc.h)
+  const pe = fx.previewEnergy
+  check(eBlur < 0.1 * eOut, `${label}: energia de detalhe do miolo borrado ${eBlur.toFixed(1)} < 10 % da do ruído de fora ${eOut.toFixed(1)} (preview: ${pe?.blur} / ${pe?.outside})`, failures)
+  check(!!pe && eOut >= 0.5 * pe.outside, `${label}: fora da região o ruído continua (energia ${eOut.toFixed(1)} ≥ 50 % da do preview reduzido ${pe?.outside})`, failures)
+  // pixelização: blocos uniformes na grade do compositor (tamanho pela altura da SAÍDA), com degrau entre vizinhos
+  const pix = pixelateCheck(img, OW, OH, 0, 0, OW, OH, FX_PIXEL, FX_PIXEL_STRENGTH, PIXEL_GUARD_CODEC)
+  console.log(`${label}: pixelização ${pixelateText(pix)}`)
+  check(pix.blocks >= PIXEL_MIN_BLOCKS && pix.worstVar <= PIXEL_VAR_MAX_CODEC && pix.step >= PIXEL_STEP_MIN, `${label}: pixelização com blocos uniformes na grade do compositor — ${pixelateText(pix)} (variância ≤ ${PIXEL_VAR_MAX_CODEC} a ${PIXEL_GUARD_CODEC} px das bordas do bloco; degrau ≥ ${PIXEL_STEP_MIN}; ruído da fonte ≈ ${NOISE_LUMA_VAR})`, failures)
 }
 
 function scenarioProject(video: Asset, red: Asset): Project {
@@ -292,20 +531,31 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
 
   // efeitos: ruído 1920×1080 em células de 4 px (detalhe em todo bloco: a máscara de baixa variância é exatamente
   // a área borrada/tarjada; ruído por pixel esgota os bits do H.264 a 8 Mbps e suja a tarja) + blur (preset
-  // padrão) + tarja #123456 sem feather
+  // padrão) + tarja #123456 sem feather + pixelização (preset padrão, F7 final)
   const noise = join(dir, 'ruido.png')
   await gen(['-f', 'lavfi', '-i', 'nullsrc=s=480x270,format=gray,geq=lum=random(1)*255,scale=1920:1080:flags=neighbor', '-frames:v', '1', '-update', '1', noise], 'editor-export: ruído')
   const aNoise = assetFromInfo('a_noise', noise, statSync(noise), await probe(noise))
   const noiseItem: MediaItem = { ...createMediaItem(aNoise, 0, 'video'), durationUs: 2_000_000 }
   const blurFx: EffectItem = createEffectItem('blur', 0, 2_000_000, FX_BLUR)
   const solidFx: EffectItem = { ...createEffectItem('solid', 0, 2_000_000, FX_SOLID), color: '#123456', feather: 0 }
+  const pixelFx: EffectItem = { ...createEffectItem('pixelate', 0, 2_000_000, FX_PIXEL), strength: { value: FX_PIXEL_STRENGTH }, feather: 0 }
   const vt = (id: string, item: MediaItem | EffectItem): Track => ({ id, kind: 'video', name: id, muted: false, hidden: false, locked: false, volume: 1, items: [item] })
   const fxp: Project = {
     ...addAsset({ ...createEmptyProject('Efeitos', { width: 1920, height: 1080, fps: FPS, background: '#000000' }), id: EFFECTS_ID }, aNoise),
-    tracks: [vt('t_ruido', noiseItem), vt('t_blur', blurFx), vt('t_tarja', solidFx)]
+    tracks: [vt('t_ruido', noiseItem), vt('t_blur', blurFx), vt('t_tarja', solidFx), vt('t_pixelizar', pixelFx)]
   }
   rmSync(projects.dirOf(EFFECTS_ID), { recursive: true, force: true })
   projects.create(fxp)
+
+  // F7: projeto de 20 s (a fonte do cenário duas vezes) e projeto 1080×1080 (testsrc2 + seno, 3 s)
+  const longProject: Project = { ...createEmptyProject('Vinte segundos', { width: W, height: H, fps: FPS, background: '#000000' }), id: LONG_ID }
+  rmSync(projects.dirOf(LONG_ID), { recursive: true, force: true })
+  projects.create(addMediaFromAsset(addMediaFromAsset(addAsset(longProject, aVideo), aVideo.id, 0).project, aVideo.id, 10_000_000).project)
+  const squareSrc = join(dir, 'quadrado.mp4')
+  await gen(['-f', 'lavfi', '-i', `testsrc2=size=1080x1080:rate=${FPS}`, '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '3', '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', ...BT709, '-c:a', 'aac', '-b:a', '128k', '-ac', '2', squareSrc], 'editor-export: quadrado')
+  const aSquare: Asset = { ...assetFromInfo('a_quadrado', squareSrc, statSync(squareSrc), await probe(squareSrc)), status: 'ready' }
+  rmSync(projects.dirOf(SQUARE_ID), { recursive: true, force: true })
+  projects.create(addMediaFromAsset(addAsset({ ...createEmptyProject('Quadrado', { width: 1080, height: 1080, fps: FPS, background: '#000000' }), id: SQUARE_ID }, aSquare), aSquare.id, 0).project)
 
   // velocidade: voz sintética (220 Hz + harmônicos ½ e ¼, sílabas a 4 Hz) com vídeo, item inteiro a 2×
   const voice = join(dir, 'voz-sintetica.mp4')
@@ -360,7 +610,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
 
   const win = new BrowserWindow({ width: 800, height: 600, show: false, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
   const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 240 s'] } }), 240_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 480 s'] } }), 480_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
       clearTimeout(timer)
       resolve(r)
@@ -368,7 +618,7 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, denoiseProjectId: DENOISE_ID, duckingProjectId: DUCKING_ID, duckingHz: DUCK_HZ, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blurCrop: FX_BLUR_CROP } }))
+    const params = encodeURIComponent(JSON.stringify({ projectId: PROJECT_ID, sessionId: SESSION_ID, outputDir: exportsDir, targetBytes: SMALL_TARGET, colorProjects: [COLOR_601, COLOR_UNTAGGED, COLOR_UNTAGGED_SD], speedProjectId: SPEED_ID, reverseProjectId: REVERSE_ID, denoiseProjectId: DENOISE_ID, duckingProjectId: DUCKING_ID, duckingHz: DUCK_HZ, effects: { projectId: EFFECTS_ID, width: W, height: H, tUs: FX_T_US, block: FX_BLOCK, blur: FX_BLUR, outside: FX_OUTSIDE }, longProjectId: LONG_ID, squareProjectId: SQUARE_ID, targetMB: F7_TARGET_MB }))
     loadPage(win, `index.html#editor-export-test/${params}`)
   })
   // a janela só fecha no fim: sem janelas o app sai (window-all-closed) no meio das verificações
@@ -467,50 +717,80 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
   }
 
   // ---- efeitos: projeto 1080p exportado em 720p × preview reduzido ----
-  const fx = r.effects
-  const fxOut = fx?.export?.path
-  check(!!fxOut && existsSync(fxOut) && !!fx?.previewBlockVar, `efeitos: projeto 1920×1080 exportado em ${W}×${H} (${fxOut ?? fx?.export?.error ?? fx?.error})`, failures)
-  if (fxOut && existsSync(fxOut) && fx?.previewBlockVar) {
-    const vs = (await probeFile(fxOut)).streams.find((s) => s.type === 'video')
-    check(vs?.width === W && vs?.height === H, `efeitos: saída ${W}×${H} (${vs?.width}×${vs?.height})`, failures)
-    const img = await frameRgb(fxOut, FX_T_US / 1e6, join(dir, 'efeitos-saida.rgb'))
-    // tarja: centro de cada bloco 16×16 (macrobloco) inteiro dentro da região, ±3 por canal após o H.264
-    let blocks = 0
-    let worst = 0
-    let worstPx: number[] = []
-    for (let by = Math.ceil(((FX_SOLID.y - FX_SOLID.h / 2) * H) / FX_BLOCK); (by + 1) * FX_BLOCK <= (FX_SOLID.y + FX_SOLID.h / 2) * H; by++) {
-      for (let bx = Math.ceil(((FX_SOLID.x - FX_SOLID.w / 2) * W) / FX_BLOCK); (bx + 1) * FX_BLOCK <= (FX_SOLID.x + FX_SOLID.w / 2) * W; bx++) {
-        const i = ((by * FX_BLOCK + FX_BLOCK / 2) * W + bx * FX_BLOCK + FX_BLOCK / 2) * 3
-        const px = [img[i], img[i + 1], img[i + 2]]
-        const d = Math.max(...px.map((v, c) => Math.abs(v - FX_TARJA[c])))
-        blocks++
-        if (d >= worst) {
-          worst = d
-          worstPx = px
-        }
-      }
-    }
-    check(blocks > 100 && worst <= 3, `efeitos: tarja com a cor exata na exportação (${blocks} blocos, pior desvio ${worst} em ${worstPx}; esperado 18,52,86 ± 3)`, failures)
-    // região borrada no mesmo lugar: blocos de baixa variância (ruído: milhares; borrado/tarja: ~0), exportação × preview
-    const exportVar = blockVar(img, W, H, FX_BLOCK)
-    const pv = fx.previewBlockVar
-    const LOW = 300
-    let inter = 0
-    let union = 0
-    for (let k = 0; k < Math.min(pv.length, exportVar.length); k++) {
-      const a = pv[k] < LOW
-      const b = exportVar[k] < LOW
-      if (a && b) inter++
-      if (a || b) union++
-    }
-    const iou = union ? inter / union : 0
-    // mesmo raio relativo à altura: o miolo borrado da exportação 720p ≈ preview 1080p reduzido
-    const ex = await frameRgb(fxOut, FX_T_US / 1e6, join(dir, 'efeitos-blur.rgb'), FX_BLUR_CROP)
-    const pb = Uint8Array.from(fx.previewBlurRgb ?? [])
-    const pBlur = psnr(ex, pb)
-    check(pBlur > 30, `efeitos: região borrada exportação 720p × preview 1080p reduzido (raio ∝ altura): PSNR ${pBlur.toFixed(1)} dB > 30 (miolo ${FX_BLUR_CROP.w}×${FX_BLUR_CROP.h})`, failures)
-    check(pv.length === exportVar.length && union > 100 && iou >= 0.9, `efeitos: área borrada/tarjada no mesmo lugar (IoU ${iou.toFixed(3)} ≥ 0,9; ${inter}/${union} blocos de ${FX_BLOCK}×${FX_BLOCK})`, failures)
+  await checkEffects('efeitos', 'H.264 720p a 12 Mbps', r.effects, { w: W, h: H, codec: 'h264' }, dir, failures)
+
+  // ================================ F7: configurações do diálogo ================================
+  // a) tamanho alvo personalizado (YouTube 1080p com "Tamanho alvo" de 3 MB) num projeto de 20 s
+  const ft = r.f7Target
+  const targetBytes = F7_TARGET_MB * 1024 * 1024
+  check(ft?.requestTargetBytes === targetBytes, `F7 alvo: o pedido de um tamanho alvo personalizado leva targetBytes = ${targetBytes} (2ª passada habilitada) (${ft?.requestTargetBytes}; bitrate ${ft?.requestVideoBitrate})`, failures)
+  check(!!ft?.path && existsSync(ft.path), `F7 alvo: exportado (${ft?.path ?? ft?.error})`, failures)
+  if (ft?.path && existsSync(ft.path)) {
+    const size = statSync(ft.path).size
+    const pr = await probeFile(ft.path)
+    check(size <= targetBytes && size >= 0.8 * targetBytes, `F7 alvo: ${(size / 1048576).toFixed(2)} MB ≤ ${F7_TARGET_MB} MB e ≥ ${(0.8 * F7_TARGET_MB).toFixed(1)} MB (${size} bytes, ${ft.passes} passada(s), ${pr.durationMs} ms)`, failures)
+    check(Math.abs(pr.durationMs - 20000) <= FRAME_MS, `F7 alvo: duração 20 s ± 1 quadro (${pr.durationMs} ms)`, failures)
   }
+
+  // a2) mesmo alvo com a 1ª passada forçada acima (4× o bitrate): 2 passadas e ≤ alvo
+  const fr = r.f7TargetResize
+  check(!!fr?.path && existsSync(fr.path) && fr.passes === 2 && statSync(fr.path).size <= targetBytes, `F7 alvo (2ª passada): 1ª passada acima do alvo → refeito, ${fr?.passes} passadas, ${fr?.path && existsSync(fr.path) ? statSync(fr.path).size : fr?.error} bytes ≤ ${targetBytes}`, failures)
+
+  // b) 60 fps a partir de um projeto de 30 fps: quadros exatos
+  const f60 = r.f7Fps60
+  check(!!f60?.path && existsSync(f60.path), `F7 60 fps: exportado (${f60?.path ?? f60?.error})`, failures)
+  if (f60?.path && existsSync(f60.path)) {
+    const st = await streamInfo(f60.path)
+    const frames = await countFrames(f60.path)
+    check(st?.r_frame_rate === '60/1', `F7 60 fps: r_frame_rate 60/1 (${st?.r_frame_rate}, avg ${st?.avg_frame_rate})`, failures)
+    check(frames === f60.expectedFrames && frames === Math.round(7 * 60), `F7 60 fps: ${frames} quadros = round(7 s × 60) = ${f60.expectedFrames}`, failures)
+  }
+
+  // c) intermediário: quadro-chave a cada ≤ 0,5 s
+  const fi = r.f7Intermediate
+  check(!!fi?.path && existsSync(fi.path), `F7 intermediário: exportado (${fi?.path ?? fi?.error}; áudio ${fi?.audioCodec})`, failures)
+  if (fi?.path && existsSync(fi.path)) {
+    const keys = await probeKeyframes(fi.path)
+    const gaps = keys.slice(1).map((t, i) => t - keys[i])
+    const maxGap = Math.max(0, ...gaps)
+    check(keys.length >= 14 && maxGap <= 0.5 + 1e-3, `F7 intermediário: ${keys.length} quadros-chave, maior intervalo ${maxGap.toFixed(3)} s ≤ 0,5 s`, failures)
+    const as = (await probeFile(fi.path)).streams.find((s) => s.type === 'audio')
+    check(as?.codec === 'aac' && fi.audioCodec === 'aac' && fi.audioBitrate === 192_000 && !(fi.warnings ?? []).some((w) => w.includes('O áudio saiu')), `F7 intermediário: áudio AAC 192 kbps = o do preset, sem rebaixamento (${fi.audioBitrate}; ${JSON.stringify(as)})`, failures)
+  }
+  const a320 = r.f7Audio320
+  const rateWarn = (a320?.warnings ?? []).find((w) => w.startsWith('O áudio saiu em'))
+  check(!!a320?.path && (a320.audioBitrate === 320_000 ? !rateWarn : (a320.audioBitrate ?? 0) < 320_000 && !!rateWarn && rateWarn.includes(`${Math.round((a320.audioBitrate ?? 0) / 1000)} kbps`)), `F7 áudio 320 kbps pedido: saiu a ${a320?.audioBitrate} bps ${rateWarn ? `com aviso "${rateWarn}"` : 'sem aviso'} (rebaixar só com aviso)`, failures)
+  if (a320?.path && existsSync(a320.path)) {
+    const as = (await probeFile(a320.path)).streams.find((s) => s.type === 'audio')
+    check(as?.codec === a320.audioCodec && Math.abs((as?.bitrate ?? 0) - (a320.audioBitrate ?? 0)) <= 0.15 * (a320.audioBitrate ?? 1), `F7 áudio 320: taxa no arquivo ≈ a informada (${as?.bitrate} × ${a320.audioBitrate})`, failures)
+  }
+
+  // d) Feed 1:1 num projeto 1080×1080
+  const f11 = r.f7Feed11
+  check(!!f11?.availability?.ok && f11?.unavailableOn169?.ok === false, `F7 Feed 1:1: disponível no 1080×1080, indisponível no 16:9 (${JSON.stringify(f11?.unavailableOn169)})`, failures)
+  check(!!f11?.path && existsSync(f11.path), `F7 Feed 1:1: exportado (${f11?.path ?? f11?.error})`, failures)
+  if (f11?.path && existsSync(f11.path)) {
+    const st = await streamInfo(f11.path)
+    check(st?.width === 1080 && st?.height === 1080 && st?.codec_name === 'h264', `F7 Feed 1:1: saída 1080×1080 H.264 (${st?.width}×${st?.height} ${st?.codec_name})`, failures)
+  }
+
+  // e) HEVC (se o hardware tiver) com a privacidade provada no arquivo HEVC; senão o diálogo bloqueia
+  const fh = r.f7Hevc
+  if (fh?.supported) {
+    await checkEffects('F7 HEVC', 'HEVC 1080p (Original)', fh.effects, { w: 1920, h: 1080, codec: 'hevc' }, dir, failures)
+  } else {
+    console.log('F7 HEVC: HEVC indisponível — pulado')
+    check(fh?.supported === false && fh.dialogBlocker === 'HEVC não suportado neste computador', `F7 HEVC indisponível: o diálogo bloqueia com "HEVC não suportado neste computador" (${fh?.dialogBlocker})`, failures)
+  }
+  const fhf = r.f7HevcFallback
+  check(!!fhf?.path && existsSync(fhf.path) && fhf.fellBackFromHevc === true && fhf.codec === 'h264' && (fhf.warnings ?? []).some((w) => w.includes('HEVC falhou')), `F7 HEVC com falha injetada → refeito em H.264 com aviso (${JSON.stringify({ path: fhf?.path, codec: fhf?.codec, fellBackFromHevc: fhf?.fellBackFromHevc, warnings: fhf?.warnings, error: fhf?.error })})`, failures)
+  if (fhf?.path && existsSync(fhf.path)) {
+    const st = await streamInfo(fhf.path)
+    check(st?.codec_name === 'h264', `F7 HEVC com falha: arquivo H.264 (${st?.codec_name}/${st?.codec_tag_string})`, failures)
+  }
+
+  // f) privacidade num preset reduzido: WhatsApp (1280×720 do projeto 1920×1080, bitrate do preset)
+  await checkEffects('F7 WhatsApp', 'preset WhatsApp 720p', r.f7Whatsapp, { w: 1280, h: 720, codec: 'h264', ringTol: 6 }, dir, failures)
 
   // ---- velocidade 2× com tom preservado ----
   const spOut = r.speed?.path

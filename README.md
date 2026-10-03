@@ -35,7 +35,7 @@ Os workflows de CI/Release do GitHub Actions estão em `docs/ci/` (para ativá-l
 
 ## Editor de vídeo (v1.1.0)
 
-Editor multi-faixa dentro do app: **Histórico → Editar** (ou **Projetos → Novo projeto**). A gravação vira um projeto com tela, webcam (PiP com os movimentos gravados), microfone e áudio do sistema em faixas separadas; dá para importar vídeos, áudios e imagens, dividir (`S`), apagar trechos (`I`/`O` + `Ctrl+Shift+X`), mover/aparar com ímã, ajustar posição/escala/corte/forma no visualizador e no inspetor, volume e fades, desfazer tudo (`Ctrl+Z`) e exportar (Alta 1080p, WhatsApp ≤ 64 MB, Original, Vertical 9:16). Os projetos ficam em `Vídeos\CiaLight Gravador\Projetos` (ao lado dos brutos) com salvamento automático; a mídia importada não é copiada.
+Editor multi-faixa dentro do app: **Histórico → Editar** (ou **Projetos → Novo projeto**). A gravação vira um projeto com tela, webcam (PiP com os movimentos gravados), microfone e áudio do sistema em faixas separadas; dá para importar vídeos, áudios e imagens, dividir (`S`), apagar trechos (`I`/`O` + `Ctrl+Shift+X`), mover/aparar com ímã, ajustar posição/escala/corte/forma no visualizador e no inspetor, volume e fades, desfazer tudo (`Ctrl+Z`) e exportar (presets por destino — WhatsApp, YouTube, Instagram, Original, Edição —, GIF, quadro PNG ou só o áudio; veja abaixo). Os projetos ficam em `Vídeos\CiaLight Gravador\Projetos` (ao lado dos brutos) com salvamento automático; a mídia importada não é copiada.
 
 **Efeitos de privacidade (v1.2.0):** esconda dados sensíveis com **Blur**, **Pixelizar** ou **Tarja** (cor sólida, a única proteção irreversível). Desenhe a região no visualizador com a ferramenta **Desenhar região** (`B`; Shift = elipse, Alt = do centro) ou arraste uma predefinição da aba **Efeitos** da biblioteca (Blur, Pixelizar, Tarja, Esconder rosto, Esconder texto, Borrar tudo menos…) para a linha do tempo ou para o visualizador (duplo clique adiciona no playhead). A região pode ser movida, redimensionada, girada e animada por **keyframes** (`Alt+K` liga/desliga no playhead, `[`/`]` navegam; losangos no item e botões ◇ no inspetor), com borda suave e "inverter" (borrar tudo menos a região). Cada efeito é um item na faixa "Efeitos": a duração define quando ele vale e `Shift+E` desativa/ativa. Criado sobre um clipe, o efeito fica **vinculado** a ele e acompanha mover, aparar, dividir, apagar, duplicar e mudar a velocidade do clipe (desvincule para soltá-lo). Mídia nova nunca entra por cima dos efeitos. O preview e o arquivo exportado são desenhados pelo mesmo compositor; o diálogo de exportação avisa (sem bloquear) sobre efeitos fracos, desativados no trecho ou com mídia por cima, com o botão **Revisar**.
 
@@ -57,7 +57,17 @@ Editor multi-faixa dentro do app: **Histórico → Editar** (ou **Projetos → N
 - **Reenquadrar:** **Reenquadrar** na barra de cima converte o projeto para **9:16**, **1:1** ou **4:5**, em "Preencher" (com **pontos de foco**: clique no visualizador marca o ponto que fica no centro naquele instante; a câmera vai suave de um ponto ao outro; durante um zoom que o clipe já tem, o alvo do zoom fica no centro e o detalhe ampliado continua no quadro) ou "Caber inteiro". O padrão é **Criar cópia** ("<nome> (Vertical)", numa pasta própria com os proxies, sem reprocessar a mídia) — o original fica intacto; "Este projeto" aplica em um passo de desfazer. PiP e textos mantêm o tamanho relativo; os efeitos de privacidade continuam sobre o mesmo conteúdo (ancorados ou ajustados ao novo quadro) e o painel lista o que precisa de conferência (efeito fora do novo quadro, buraco do "Borrar tudo menos…" fechado, anotações).
 - **Compatibilidade:** projetos salvos pela v1.4 continuam abrindo na v1.3, **exceto** os que usam recursos novos sem equivalente nela (keyframes em corte, ajustes, raio ou tamanho do texto; Ken Burns num PiP): esses só abrem na v1.4 — atualize todas as máquinas. Efeitos ancorados e as animações Girar/Quicar/Desfoque abrem na v1.3 de forma segura (região fixa que cobre todo o movimento — no "Borrar tudo menos…" ancorado, o quadro inteiro borrado; animação trocada por Fade/Deslizar).
 
-- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4)
+**Exportação completa (v1.7.0):**
+
+- **Presets:** `Ctrl+E` (ou **Exportar**) abre o diálogo com **WhatsApp (até 64 MB)**, **YouTube 1080p**, **YouTube 4K**, **Instagram Reels/Stories (9:16)**, **Feed 1:1**, **Feed 4:5**, **Original (máxima)** e **Edição (intermediário)**, com a estimativa de tamanho ao vivo. Presets de outra proporção aparecem desativados com o motivo (o vídeo nunca é cortado nem ganha faixas pretas sem você pedir). **Personalizar** ajusta resolução, fps, qualidade por taxa ou por **tamanho alvo** (ex.: "caber em 25 MB") e o codec.
+- **HEVC:** disponível quando o computador tem codificador de hardware para ele (senão aparece desativado com o motivo); se falhar, o vídeo sai em H.264 com aviso.
+- **GIF, quadro PNG e só áudio:** no mesmo diálogo — **GIF** curto (até 30 s; 320/480/640 px, 10/12/15 fps), **Quadro (PNG)** do cursor no tamanho do projeto (também com `Ctrl+Shift+E` ou o botão **Quadro**, direto na pasta) e **Só áudio** (MP3, M4A ou WAV, a mesma mixagem do vídeo). GIF e só áudio respeitam o trecho **I–O** (o quadro PNG é sempre o do cursor); todos respeitam os efeitos de privacidade.
+- **Capítulos do YouTube:** os marcadores viram a lista de capítulos ("00:00 Abertura…"; marcador sem rótulo vira "Capítulo N"), relativa ao trecho exportado; copie ou salve como .txt no diálogo, ou use **Capítulos** na barra de cima. Avisos quando o YouTube não aceitaria a lista (menos de 3 capítulos, capítulo com menos de 10 s).
+- **Fila de exportações:** **Adicionar à fila** guarda o projeto como está e as configurações; as exportações rodam uma de cada vez enquanto você continua editando, no painel **Exportações** (progresso, reordenar, cancelar, abrir pasta). A fila não é salva: sair do editor ou fechar o app com exportações ativas pede confirmação.
+- **Codificador de reserva:** se o codificador de vídeo do Windows falhar (hardware e software), a exportação continua com o libx264 do ffmpeg (mesma imagem e mesmos efeitos de privacidade).
+- **Memória e mídia movida:** texturas e miniaturas da linha do tempo têm teto de memória (512 MB / 200 MB) em projetos grandes. Se uma pasta de mídia foi movida ou renomeada, ao abrir o projeto o editor procura os arquivos (mesmo nome e tamanho) e propõe reapontar — você confere o caminho antigo → novo e confirma.
+
+- Especificação: [docs/superpowers/specs/2026-10-01-editor-design.md](docs/superpowers/specs/2026-10-01-editor-design.md) (§18: notas de implementação da F1; §19: da F2; §20: da F3; §21: da F4; §24: da F7)
 - Checklist manual: [docs/qa-checklist.md](docs/qa-checklist.md) (seção Editor)
 
 QA automatizado via CDP (eventos sintéticos na página, sem mexer no mouse/teclado do Windows; tudo em `test-out/`), depois de `npm run build`:
@@ -66,11 +76,11 @@ QA automatizado via CDP (eventos sintéticos na página, sem mexer no mouse/tecl
 node scripts/qa/editor-timeline.mjs   # linha do tempo: dividir, mover, ímã, trim, ripple, J/K/L, desempenho
 node scripts/qa/editor-export.mjs     # diálogo de exportação e exportação da fixture
 node scripts/qa/editor-e2e.mjs        # ponta a ponta: grava 9 s → Histórico → Editar → corta, move webcam,
-                                      # importa mp3/png, volume → exporta Alta 1080p → ffprobe (--reuse: sem regravar;
+                                      # importa mp3/png, volume → exporta YouTube 1080p → ffprobe (--reuse: sem regravar;
                                       # screenshots com a mídia borrada, --no-blur desliga)
 node scripts/qa/editor-effects.mjs    # efeitos: desenhar/mover/girar regiões, keyframes, inspetor, losangos, desativar
 node scripts/qa/editor-f2-e2e.mjs     # privacidade ponta a ponta: vídeo com CPF/conta/senha (drawtext) → Esconder texto
-                                      # com 2 keyframes, Tarja e Pixelizar pela biblioteca → aviso → Alta 1080p → ffmpeg
+                                      # com 2 keyframes, Tarja e Pixelizar pela biblioteca → aviso → YouTube 1080p → ffmpeg
                                       # confere o texto ilegível (laplaciano) e a cor exata da tarja
 node scripts/qa/editor-f3-speed.mjs   # velocidade: presets, Manter tom, congelar, reverso, shuttle J/K/L
 node scripts/qa/editor-f3-voice.mjs   # reduzir ruído / normalizar, A/B, cache reprocessado em outro PC
@@ -78,7 +88,7 @@ node scripts/qa/editor-f3-music.mjs   # música: faixa Música, papel da faixa, 
 node scripts/qa/editor-f3-silence.mjs # remover silêncios: prévia, aplicar em sincronia, desfazer em 1 passo
 node scripts/qa/editor-f3-narration.mjs  # narração com o microfone falso (= npm run test:editor-narration)
 node scripts/qa/editor-f3-e2e.mjs     # F3 ponta a ponta: gravação com pausas → remover silêncios → música → narração
-                                      # → clipe a 2× → Alta 1080p → ffmpeg confere duração, ducking (−12 dB),
+                                      # → clipe a 2× → YouTube 1080p → ffmpeg confere duração, ducking (−12 dB),
                                       # tom preservado (Goertzel) e a narração no lugar
 node scripts/qa/editor-f4-keyframes.mjs  # linhas de keyframes por propriedade, seleção, copiar/colar, editor de curvas
 node scripts/qa/editor-f4-zoom.mjs    # ferramenta Zoom (Z), opções, enquadramento-alvo, Ken Burns (tela cheia e PiP)
@@ -86,11 +96,17 @@ node scripts/qa/editor-f4-follow.mjs  # Ancorar ao clipe: oferta no zoom, regiã
 node scripts/qa/editor-f4-anim.mjs    # animações de entrada/saída: cartões, duração, curva, combinação, texto
 node scripts/qa/editor-f4-reframe.mjs # Reenquadrar: painel, pontos de foco, este projeto × criar cópia
 node scripts/qa/editor-f4-e2e.mjs     # F4 ponta a ponta: blur vinculado → zoom 2× → Ancorar → Pop/Desfoque → curva
-                                      # personalizada → Alta 1080p → Reenquadrar 9:16 (cópia, foco) → Vertical 9:16;
+                                      # personalizada → YouTube 1080p → Reenquadrar 9:16 (cópia, foco) → Instagram Reels/Stories (9:16);
                                       # ffmpeg confere tamanhos, durações, o foco no centro e o texto ilegível no zoom
+node scripts/qa/editor-f7-export.mjs  # exportação completa: presets, HEVC, tamanho alvo, GIF/PNG/só áudio, capítulos, fila
+node scripts/qa/editor-f7-relink.mjs  # relink: pasta de mídia movida → "Mídia encontrada em outro local" → reapontar
+node scripts/qa/editor-f7-e2e.mjs     # F7 ponta a ponta: tarja + blur + marcadores → fila (YouTube 1080p, GIF 480, MP3)
+                                      # → PNG (Ctrl+Shift+E) → capítulos → ffprobe e privacidade nos pixels → relink → memória
 ```
 
-Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/` e `docs/qa/editor-f4/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
+Testes reais dos formatos (GIF, PNG, só áudio, fila e codificador de reserva): `npm run test:editor-formats`.
+
+Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/`, `docs/qa/editor-f4/` e `docs/qa/editor-f7/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
 
 ## Estrutura
 

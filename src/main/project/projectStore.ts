@@ -248,6 +248,16 @@ export class ProjectStore {
   }
 
   /**
+   * Resultado da ingestão com o projeto aberto num editor (que grava o project.json no próximo autosave): aplica só
+   * no cache em memória, para o protocolo media/ resolver já o proxy/intermediário novo. Asset ausente: ignora.
+   */
+  cacheAssetPatch(id: string, assetId: string, patch: Partial<Asset>): void {
+    const p = this.cache.get(id.toLowerCase())
+    if (!p || !p.assets.some((a) => a.id === assetId)) return
+    this.cache.set(p.id.toLowerCase(), updateAsset(p, assetId, patch))
+  }
+
+  /**
    * Aplica o resultado da ingestão direto no disco (sem editor com o projeto aberto): parte do
    * project.json, acrescenta assets que só existem no cache (importados e ainda não salvos), aplica o
    * patch e salva (o save atualiza o cache). Lança se o asset não existe em nenhum dos dois.

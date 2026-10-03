@@ -67,6 +67,16 @@ export class EffectPass {
     this.freeSized()
   }
 
+  /** Bytes dos FBOs/texturas alocados agora (RGBA8 = 4 bytes/px): acumulação, auxiliar, snapshot, blur, pixelização. */
+  bytes(): number {
+    const s = this.sized
+    if (!s) return 0
+    const fbo = (f: twgl.FramebufferInfo): number => f.width * f.height * 4
+    let n = fbo(s.accum) + (s.aux ? fbo(s.aux) : 0) + s.w * s.h * 4
+    for (const [a, b] of [...s.blur.values(), ...(s.pix ? [s.pix] : [])]) n += fbo(a) + fbo(b)
+    return n
+  }
+
   /** Compõe o alvo `src` (premultiplicado) sobre o framebuffer ligado (blend já configurado pelo chamador). */
   composite(src: twgl.FramebufferInfo): void {
     this.pass(this.copy, { u_tex: src.attachments[0] as WebGLTexture })

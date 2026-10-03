@@ -6,12 +6,16 @@ import { useAppStore } from '@/app/store'
 import { flushAutosave, startAutosave, useEditorStore } from '../state/editorStore'
 import { CURVE_EDITOR_ACTIONS, shortcutFor, TRANSPORT_ACTIONS } from '../shortcuts'
 import { createEditorEngine, type EditorEngine } from './editorEngine'
-import { runShortcut, seekTo } from './editorActions'
+import { registerExportOpen, runShortcut, seekTo } from './editorActions'
 import { enqueuePending, importPaths } from './mediaImport'
+import { closeRelinkPrompt, offerRelinks } from './relinkFlow'
+import { RelinkDialog } from './RelinkDialog'
 import { startAudioProcessing } from './audioProcessing'
 import { audioSourceKey } from '@shared/editor/audioProcess'
 import { TopBar } from './TopBar'
 import { ExportDialog } from './ExportDialog'
+import { QueueLeaveDialog, requestLeaveEditor } from './ExportQueuePanel'
+import { exportQueue, setQueueBeforeItem } from '../export/exportQueueStore'
 import { SilenceDialog } from './SilenceDialog'
 import { ReframeDialog } from './ReframeDialog'
 import { useReframe } from '../state/reframe'
@@ -26,6 +30,7 @@ import { Inspector } from './Inspector/Inspector'
 import { CurveEditor } from './Inspector/CurveEditor'
 import { Timeline } from './timeline/Timeline'
 import { invalidatePeaks } from './timeline/peaks'
+import { filmstripBudget, type FilmstripStats } from './timeline/filmstripBudget'
 import { gestureActive } from './timeline/useTimelineDrag'
 import { viewerGestureActive } from './viewer/viewerGesture'
 
@@ -35,7 +40,7 @@ import { viewerGestureActive } from './viewer/viewerGesture'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; reframe: typeof useReframe; narration: typeof useNarration; expanded: typeof useExpandedItems; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; exportDir?: string; narrationFailWritesAfter?: number }
+    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; reframe: typeof useReframe; narration: typeof useNarration; expanded: typeof useExpandedItems; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; queue: typeof exportQueue; memStats: () => ReturnType<EditorEngine['render']['memStats']>; filmstrips: () => FilmstripStats; exportDir?: string; narrationFailWritesAfter?: number }
   }
 }
 
@@ -64,6 +69,15 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
   const loaded = useEditorStore((s) => s.project?.id === projectId)
   const engineRef = useRef<EditorEngine | null>(null)
 
+  // Ctrl+E (editorActions) abre o diálogo de exportação desta tela
+  useEffect(() => {
+    registerExportOpen(() => setExportOpen(true))
+    return () => registerExportOpen(null)
+  }, [])
+
+  // fila de exportações: cada item pausa a reprodução ao começar (a regra do onBeforeExport)
+  useEffect(() => setQueueBeforeItem(() => engineRef.current?.playback.pause()), [])
+
   // ---- ciclo de vida: projeto, motor, autosave, ingestão, janela maximizada ----
   useEffect(() => {
     const token = ++mountSeq
@@ -74,7 +88,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     setEngine(eng)
     const stopAutosave = startAutosave((p) => api.project.save(p))
     // QA (fora do pacote): store e motor acessíveis por CDP
-    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, reframe: useReframe, narration: useNarration, expanded: useExpandedItems, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths) }
+    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, reframe: useReframe, narration: useNarration, expanded: useExpandedItems, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths), queue: exportQueue, memStats: () => eng.render.memStats(), filmstrips: () => filmstripBudget.stats() }
     const offProgress = api.media.onProgress((j) => {
       if (j.projectId.toLowerCase() !== projectId.toLowerCase()) return
       const st = useEditorStore.getState()
@@ -121,6 +135,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
         await api.media.setOpenProject(project.id)
         if (!alive) return
         enqueuePending(project.id, project.assets)
+        // mídia importada ausente (pasta movida/renomeada): procura em segundo plano e pergunta antes de reapontar
+        void offerRelinks(project.id)
         // narrações que a janela/o app não chegaram a inserir (queda no meio da gravação): entram com aviso
         void recoverNarrations(project.id)
         // redução de ruído/normalização pedidas e sem o arquivo em cache (ex.: projeto vindo de outro PC): reprocessa
@@ -140,6 +156,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       offDone()
       // gravando narração ao desmontar sem passar por "Voltar": fecha o arquivo; o projeto a recupera ao abrir
       abandonNarration()
+      closeRelinkPrompt()
       eng.playback.pause()
       useSilencePreview.getState().close()
       engineRef.current = null
@@ -213,12 +230,14 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     }
   }, [projectId])
 
-  const back = async (): Promise<void> => {
+  const leave = async (): Promise<void> => {
     await settleNarration()
     engineRef.current?.playback.pause()
     await flushAutosave()
     useAppStore.getState().closeEditor()
   }
+  // fila de exportações ativa: pergunta antes (sair cancela todas; a fila não é salva)
+  const back = (): void => requestLeaveEditor(() => void leave())
 
   const startResize = (e: React.PointerEvent): void => {
     e.preventDefault()
@@ -248,7 +267,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
       {/* até o projeto desta tela estar no store, nada é editável (numa troca, o anterior ainda pode estar lá) */}
-      {loaded ? <TopBar onBack={() => void back()} onExport={() => setExportOpen(true)} /> : <div className="h-12 shrink-0 border-b border-border bg-surface/70" />}
+      {loaded ? <TopBar onBack={back} onExport={() => setExportOpen(true)} /> : <div className="h-12 shrink-0 border-b border-border bg-surface/70" />}
       <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)_320px]">
         {loaded ? <MediaBin projectId={projectId} /> : <div className="border-r border-border bg-surface/60" />}
         <Viewer engine={loaded ? engine : null} />
@@ -271,6 +290,8 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       {loaded ? <ReframeDialog playback={engine?.playback ?? null} /> : null}
       {loaded ? <CurveEditor /> : null}
       {loaded ? <NarrationOverlay /> : null}
+      <QueueLeaveDialog />
+      {loaded ? <RelinkDialog /> : null}
       {loaded ? <ExportDialog open={exportOpen} onOpenChange={setExportOpen} onBeforeExport={() => engineRef.current?.playback.pause()} onSeek={(us) => seekTo(engineRef.current?.playback ?? null, us)} /> : null}
     </div>
   )

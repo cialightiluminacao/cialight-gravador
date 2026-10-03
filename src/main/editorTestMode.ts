@@ -34,6 +34,8 @@ const ZOOM_PROJECT_ID = 'p-editor-zoom-test'
 // cópia 9:16 pelo IPC project.duplicate (reframeHarness.ts)
 const REFRAME_PROJECT_ID = 'p-editor-reframe-test'
 const REFRAME_COPY_ID = 'p-editor-reframe-copia'
+// memória do compositor (F7): 12 imagens 1920×1080 distintas em sequência + 4 vídeos 1080p (memoryHarness.ts)
+const MEMORY_PROJECT_ID = 'p-editor-memory-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -56,6 +58,7 @@ interface HarnessReport {
   follow?: FollowReport
   anim?: AnimReport
   reframe?: ReframeReport
+  memory?: MemoryReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -114,6 +117,12 @@ interface ReframeReport {
 interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>>; pip?: PipBlurReport }
 type PxRect4 = { x0: number; y0: number; x1: number; y1: number }
 interface PipBlurReport { error?: string; box?: PxRect4; scissor?: PxRect4; inside?: { rest: number; blur: number }; outsideScissorMaxDiff?: number; haloMean?: number; marginMaxDiff?: number; marginStep?: number }
+
+interface MemoryReport {
+  error?: string; budget?: number; maxDefault?: number; maxLow?: number; imageMaxDiff?: number; videoMaxDiff?: number; imageNonBlack?: number; frameErrors?: string[]
+  afterDefault?: MemStats; afterLow?: MemStats; afterRedraw?: MemStats
+}
+interface MemStats { textureBytes: number; textureCount: number; effectBytes: number; evictions: number; overBudgetFrames: number }
 
 interface StretchReport {
   error?: string
@@ -280,6 +289,27 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(REFRAME_PROJECT_ID), { recursive: true, force: true })
   rmSync(projects.dirOf(REFRAME_COPY_ID), { recursive: true, force: true })
   projects.create(reframeProject)
+  // memória: 12 quadros distintos do testsrc2 (1 por segundo) como PNG 1920×1080, 0,5 s cada em sequência; depois 4
+  // itens do testsrc2.mp4 (1080p), 1 s cada
+  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=1', '-frames:v', '12', join(dir, 'memoria-%02d.png')], 'editor: imagens da memória')
+  let memProject: Project = { ...createEmptyProject('Memória', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: MEMORY_PROJECT_ID, assets: [aVideo] }
+  const memImages: MediaItem[] = []
+  for (let k = 0; k < 12; k++) {
+    const f = join(dir, `memoria-${String(k + 1).padStart(2, '0')}.png`)
+    const a = assetFromInfo(`a_mem${k}`, f, statSync(f), await probe(f))
+    memProject = addAsset(memProject, a)
+    memImages.push({ ...createMediaItem(a, k * 500_000, 'video'), durationUs: 500_000 })
+  }
+  const memVideos: MediaItem[] = Array.from({ length: 4 }, (_, k) => ({ ...createMediaItem(aVideo, 6_000_000 + k * 1_000_000, 'video'), inUs: k * 500_000, durationUs: 1_000_000 }))
+  memProject = {
+    ...memProject,
+    tracks: [
+      { ...track('t_mem_img', 'Imagens', memImages[0]), items: memImages },
+      { ...track('t_mem_vid', 'Vídeos', memVideos[0]), items: memVideos }
+    ]
+  }
+  rmSync(projects.dirOf(MEMORY_PROJECT_ID), { recursive: true, force: true })
+  projects.create(memProject)
 
   // janela visível sem foco (fora da barra de tarefas): oculta, o Chromium derruba o requestAnimationFrame para ~2/s
   // depois de umas dezenas de segundos, e a reprodução do editor anda por rAF
@@ -572,6 +602,18 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(re?.width === 1080 && re.height === 1920, `reenquadrar: exportação em 1080×1920 (${re?.width}×${re?.height}) ${rr?.exportError ?? ''}`, failures)
   check(!!re?.red && Math.abs(re.red.cx - 540) <= 3 && Math.abs(re.red.cy - 960) <= 3, `reenquadrar (exportação): foco no centro — ${at(re?.red ?? null)} ±3 px`, failures)
   check(unreadable(re?.legib), `reenquadrar (exportação): texto sob o blur ilegível (${fmt([re?.legib])})`, failures)
+
+  const mem = r.memory
+  console.log(`memória do compositor: ${JSON.stringify(mem)}`)
+  const MiB = 2 ** 20
+  const tex1080 = 1920 * 1080 * 4
+  check(!!mem && !mem.error && (mem.frameErrors?.length ?? 1) === 0, `memória: harness sem erro, 16 itens desenhados sem ausentes (${mem?.error ?? ''} ${JSON.stringify(mem?.frameErrors)})`, failures)
+  check(mem?.budget === 512 * MiB && (mem.maxDefault ?? Infinity) <= 512 * MiB, `memória: texturas ≤ 512 MiB em todos os quadros (máx. ${((mem?.maxDefault ?? 0) / MiB).toFixed(1)} MiB)`, failures)
+  check(mem?.afterDefault?.textureCount === 16 && mem.afterDefault.textureBytes === 16 * tex1080 && mem.afterDefault.evictions === 0, `memória: no orçamento padrão as 16 texturas 1080p ficam no cache entre quadros, sem descarte (${JSON.stringify(mem?.afterDefault)})`, failures)
+  check((mem?.afterLow?.evictions ?? 0) > 0 && (mem?.maxLow ?? Infinity) <= 64 * MiB && (mem?.afterLow?.textureBytes ?? Infinity) <= 64 * MiB && mem?.afterLow?.overBudgetFrames === 0, `memória: orçamento de 64 MiB (teste) → descarte LRU (${mem?.afterLow?.evictions} descartes; máx. ${((mem?.maxLow ?? 0) / MiB).toFixed(1)} MiB, ${mem?.afterLow?.textureCount} texturas)`, failures)
+  check((mem?.afterRedraw?.evictions ?? 0) > (mem?.afterLow?.evictions ?? Infinity), `memória: os quadros comparados foram redesenhados com texturas recriadas (descartes ${mem?.afterLow?.evictions} → ${mem?.afterRedraw?.evictions})`, failures)
+  check(mem?.imageMaxDiff === 0 && (mem.imageNonBlack ?? 0) > 1_000_000, `memória: imagem redesenhada depois do descarte = pixels de antes (dif. máx. ${mem?.imageMaxDiff}; ${mem?.imageNonBlack} px não pretos)`, failures)
+  check(mem?.videoMaxDiff === 0, `memória: vídeo redesenhado depois do descarte = pixels de antes (dif. máx. ${mem?.videoMaxDiff})`, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)

@@ -9,6 +9,7 @@ import { effectBound, type AnnotationsLayer, type EffectLayer, type Layer, type 
 import { parseColor } from './color'
 import { EffectPass } from './effects'
 import { createGl, createTexture, sourceSize, uploadTexture } from './gl'
+import { TEXTURE_IDLE_FRAMES, TextureCache, type TextureCacheStats } from './textureCache'
 import { applyMat3, layerMatrix, type Mat3, type Rotation } from './matrix'
 import { layerBlurRect } from './effectsMath'
 import { FS_MEDIA, FS_SOLID, VS_QUAD } from './shaders'
@@ -34,12 +35,15 @@ const MIN_LAYER_BLUR_PX = 0.5
 const DEFAULT_ROUNDED = 0.06
 const SELECTION_COLOR: [number, number, number, number] = [0.32, 0.6, 1, 1]
 
-// quadros seguidos sem efeito até liberar os FBOs do passe de efeitos (~4 s a 30 fps)
-const IDLE_RELEASE_FRAMES = 120
+// quadros seguidos sem efeito até liberar os FBOs do passe de efeitos (~4 s a 30 fps): o mesmo prazo das texturas
+const IDLE_RELEASE_FRAMES = TEXTURE_IDLE_FRAMES
 
 const SHAPE_CODE = { rect: 0, rounded: 1, circle: 2 } as const
 
-interface TexEntry { tex: WebGLTexture; src: unknown }
+/** Memória do compositor (QA/testes): texturas das camadas (cache LRU) e FBOs/texturas do passe de efeitos. */
+export interface CompositorMemStats extends TextureCacheStats {
+  effectBytes: number
+}
 
 /** Estado de um quadro compartilhado pelo desenho das camadas. */
 interface LayerCtx {
@@ -49,7 +53,6 @@ interface LayerCtx {
   H: number
   /** px do canvas por px do quadro de referência (1920 de largura). */
   px: number
-  used: Set<string>
   boxes: Map<string, Mat3>
 }
 
@@ -59,7 +62,7 @@ export class Compositor {
   private readonly solid: twgl.ProgramInfo
   private readonly quad: twgl.BufferInfo
   private readonly loop: twgl.BufferInfo
-  private readonly textures = new Map<string, TexEntry>()
+  private readonly textures: TextureCache<WebGLTexture>
   private readonly effects: EffectPass
   private readonly px1 = new Uint8Array(4)
   private framesWithoutFx = 0
@@ -72,6 +75,11 @@ export class Compositor {
     this.quad = twgl.createBufferInfoFromArrays(gl, { a_pos: { numComponents: 2, data: [0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1] } })
     this.loop = twgl.createBufferInfoFromArrays(gl, { a_pos: { numComponents: 2, data: [0, 0, 1, 0, 1, 1, 0, 1] } })
     this.effects = new EffectPass(gl, this.quad)
+    this.textures = new TextureCache<WebGLTexture>({
+      create: () => createTexture(gl),
+      upload: (tex, src, sub) => uploadTexture(gl, tex, src as TexImageSource, sub),
+      delete: (tex) => gl.deleteTexture(tex)
+    })
   }
 
   resize(w: number, h: number): void {
@@ -91,6 +99,7 @@ export class Compositor {
     this.framesWithoutFx = hasFx ? 0 : this.framesWithoutFx + 1
     if (this.framesWithoutFx === IDLE_RELEASE_FRAMES) this.effects.release()
     const fx = hasFx ? { accum: this.effects.accum(W, H) } : null
+    this.textures.beginFrame()
     this.bindTarget(fx?.accum ?? null)
     const [r, g, b] = parseColor(background)
     gl.clearColor(r, g, b, 1)
@@ -98,7 +107,7 @@ export class Compositor {
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 
-    const ctx: LayerCtx = { sources, extra, W, H, px: W / REFERENCE_WIDTH, used: new Set<string>(), boxes: new Map<string, Mat3>() }
+    const ctx: LayerCtx = { sources, extra, W, H, px: W / REFERENCE_WIDTH, boxes: new Map<string, Mat3>() }
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i]
       if (layer.kind === 'effect') {
@@ -152,11 +161,18 @@ export class Compositor {
       this.drawQuad(this.solid, mat, { u_checker: 0, u_color: SELECTION_COLOR, u_opacity: 1, u_mask: 0, u_size: [1, 1], u_shape: 0, u_radius: 0 }, this.loop, gl.LINE_LOOP)
     }
 
-    for (const [key, t] of this.textures) {
-      if (ctx.used.has(key)) continue
-      gl.deleteTexture(t.tex)
-      this.textures.delete(key)
-    }
+    // texturas fora deste quadro: ficam no cache até o orçamento/ociosidade (textureCache.ts)
+    this.textures.endFrame()
+  }
+
+  /** Memória em uso (QA/testes): texturas das camadas e do passe de efeitos. */
+  memoryStats(): CompositorMemStats {
+    return { ...this.textures.stats(), effectBytes: this.effects.bytes() }
+  }
+
+  /** Testes: orçamento das texturas das camadas (null = o padrão, 512 MiB). */
+  setTextureBudget(bytes: number | null): void {
+    this.textures.setBudget(bytes)
   }
 
   /** Espera a GPU terminar o quadro (leitura 1×1 síncrona); só para medições. */
@@ -181,7 +197,6 @@ export class Compositor {
   /** Libera texturas, FBOs, programas e buffers (o contexto em si some com o worker). */
   dispose(): void {
     const gl = this.gl
-    for (const t of this.textures.values()) gl.deleteTexture(t.tex)
     this.textures.clear()
     gl.deleteProgram(this.media.program)
     gl.deleteProgram(this.solid.program)
@@ -205,12 +220,10 @@ export class Compositor {
         ctx.boxes.set(layer.itemId, geom.mat)
         const shape = shapeUniforms(layer, geom.size, px)
         if (src) {
-          const key = `m:${layer.itemId}`
-          this.bindSource(key, src)
-          ctx.used.add(key)
+          const tex = this.bindSource(`m:${layer.itemId}`, src)
           const adj = layer.adjust
           this.drawQuad(this.media, geom.mat, {
-            u_tex: this.textures.get(key)!.tex,
+            u_tex: tex,
             u_uv: geom.uv,
             u_rot: meta.rotation / 90,
             u_mirror: layer.mirror ? 1 : 0,
@@ -228,12 +241,10 @@ export class Compositor {
       case 'annotations': {
         const cv = extra?.annotations?.(layer)
         if (!cv) break
-        const key = `a:${layer.itemId}`
-        this.bindSource(key, cv)
-        ctx.used.add(key)
+        const tex = this.bindSource(`a:${layer.itemId}`, cv)
         const geom = layerMatrix({ rect: { cx: 0.5, cy: 0.5, scale: 1, rotation: 0 }, fit: 'fill', crop: { l: 0, t: 0, r: 0, b: 0 } }, { w: W, h: H, rotation: 0 }, { w: W, h: H })
         this.drawQuad(this.media, geom.mat, {
-          u_tex: this.textures.get(key)!.tex, u_uv: geom.uv, u_rot: 0, u_mirror: 0, u_opacity: 1, u_adjust: [0, 0, 0], u_border: 0, u_borderColor: [0, 0, 0, 0],
+          u_tex: tex, u_uv: geom.uv, u_rot: 0, u_mirror: 0, u_opacity: 1, u_adjust: [0, 0, 0], u_border: 0, u_borderColor: [0, 0, 0, 0],
           u_size: geom.size, u_shape: 0, u_radius: 0
         })
         break
@@ -252,16 +263,10 @@ export class Compositor {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
   }
 
-  /** Textura por chave; ImageBitmap igual à última enviada não é re-enviada (imagens estáticas). */
-  private bindSource(key: string, src: TexImageSource | VideoFrame): void {
-    let t = this.textures.get(key)
-    if (!t) {
-      t = { tex: createTexture(this.gl), src: null }
-      this.textures.set(key, t)
-    }
-    if (src instanceof ImageBitmap && t.src === src) return
-    uploadTexture(this.gl, t.tex, src)
-    t.src = src instanceof ImageBitmap ? src : null
+  /** Textura por chave (cache LRU); ImageBitmap igual ao último enviado não é re-enviado (imagens estáticas). */
+  private bindSource(key: string, src: TexImageSource | VideoFrame): WebGLTexture {
+    const { w, h } = sourceSize(src)
+    return this.textures.use(key, src, w, h, src instanceof ImageBitmap)
   }
 
   /** Liga o alvo das camadas (null = canvas) com o viewport do tamanho dele. */

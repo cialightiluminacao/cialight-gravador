@@ -13,6 +13,7 @@ import { useViewerTool } from '../state/viewerTool'
 import { autoMusicLanding, moveToVoice } from './musicLanding'
 import { narrationActive } from './narrationFlow'
 import { planKeyframePaste } from './keyframePaste'
+import { exportCurrentFrame } from './frameExport'
 
 /** Efeito ancorado colado/duplicado sem o clipe da âncora: a cópia fica solta na caixa de reserva (ops.duplicateItems). */
 const LOOSE_PASTE = 'Efeito colado sem o clipe — ficou solto'
@@ -29,6 +30,12 @@ export const hasClipboard = (): boolean => clipboard !== null
 let zoomFitHandler: (() => void) | null = null
 export function registerZoomFit(fn: (() => void) | null): void {
   zoomFitHandler = fn
+}
+
+/** Ctrl+E abre o diálogo de exportação, que é estado da tela do editor: ela registra o handler aqui. */
+let exportOpenHandler: (() => void) | null = null
+export function registerExportOpen(fn: (() => void) | null): void {
+  exportOpenHandler = fn
 }
 
 export function seekTo(playback: PlaybackController | null, us: Us): void {
@@ -319,6 +326,13 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'zoomOut': zoomBy(0.8); return true
     case 'zoomFit': zoomFitHandler?.(); return true
     case 'save': void saveNow(); return true
+    case 'export':
+      if (!exportOpenHandler) return false
+      exportOpenHandler()
+      return true
+    case 'exportFrame':
+      void exportCurrentFrame()
+      return true
     case 'toggleSnap':
       s.toggleSnapping()
       toast(st().snapping ? 'Ímã ligado' : 'Ímã desligado', { duration: 1200 })

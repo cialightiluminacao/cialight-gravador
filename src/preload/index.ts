@@ -77,6 +77,7 @@ const api: IpcApi = {
     duplicate: (sourceId, p) => ipcRenderer.invoke(IPC.project.duplicate, sourceId, p),
     fromSession: (sessionId) => ipcRenderer.invoke(IPC.project.fromSession, sessionId),
     pickMedia: () => ipcRenderer.invoke(IPC.project.pickMedia),
+    findRelinks: (projectId, opts) => ipcRenderer.invoke(IPC.project.findRelinks, projectId, opts),
     writeGeneratedOpen: (projectId, base, ext, meta) => ipcRenderer.invoke(IPC.project.writeGeneratedOpen, projectId, base, ext, meta),
     writeGenerated: (handle, data, position) => ipcRenderer.invoke(IPC.project.writeGenerated, handle, data, position),
     writeGeneratedMeta: (handle, meta) => ipcRenderer.invoke(IPC.project.writeGeneratedMeta, handle, meta),
@@ -108,7 +109,13 @@ const api: IpcApi = {
     close: (jobId) => ipcRenderer.invoke(IPC.editorExport.close, jobId),
     finalize: (jobId, opts) => ipcRenderer.invoke(IPC.editorExport.finalize, jobId, opts),
     cancel: (jobId) => ipcRenderer.invoke(IPC.editorExport.cancel, jobId),
-    onFinalizeProgress: (cb) => on(IPC.editorExport.finalizeProgress, cb)
+    onFinalizeProgress: (cb) => on(IPC.editorExport.finalizeProgress, cb),
+    openPipe: (outputDir, fileName, spec, opts) => ipcRenderer.invoke(IPC.editorExport.openPipe, outputDir, fileName, spec, opts),
+    pipeWrite: (jobId, data) => ipcRenderer.invoke(IPC.editorExport.pipeWrite, jobId, data),
+    pipeFinish: (jobId, opts) => ipcRenderer.invoke(IPC.editorExport.pipeFinish, jobId, opts),
+    writeStill: (outputDir, fileName, png) => ipcRenderer.invoke(IPC.editorExport.writeStill, outputDir, fileName, png),
+    saveText: (defaultPath, text) => ipcRenderer.invoke(IPC.editorExport.saveText, defaultPath, text),
+    setQueueState: (state) => ipcRenderer.invoke(IPC.editorExport.setQueueState, state)
   },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),
