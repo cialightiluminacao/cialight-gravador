@@ -543,7 +543,8 @@ function relocateFollowers(d: Project, ids: Iterable<string>): void {
   // estado atual lido UMA vez (sem um proxy do immer por item) e os grupos com mídia numa passada; com centenas de
   // seguidores, findItem/isFollower/isFree no rascunho por id eram O(itens²) em proxies
   const cur = isDraft(d) ? current(d) : d
-  const want = new Set(ids)
+  const order = [...ids]
+  const want = new Set(order)
   const groups = mediaGroups(cur)
   const clash: string[] = []
   for (const t of cur.tracks) {
@@ -552,6 +553,9 @@ function relocateFollowers(d: Project, ids: Iterable<string>): void {
     // colisão com outro item da faixa (objetos puros: barato mesmo O(n) por seguidor)
     for (const it of its) if (!isFree(t, it.startUs, end(it), new Set([it.id]))) clash.push(it.id)
   }
+  // na ordem de `ids` (placeEffect é primeira-livre: a ordem decide quem fica com a vaga)
+  const rank = new Map(order.map((id, i) => [id, i]))
+  clash.sort((a, b) => rank.get(a)! - rank.get(b)!)
   for (const id of clash) {
     const f = findItem(d, id)
     if (!f || isFree(f.track, f.item.startUs, end(f.item), new Set([id]))) continue
@@ -973,15 +977,22 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
   if (delta === 0 && plan.every((x) => x.fromTrackId === x.toTrackId)) return p
   const idSet = new Set(ids)
   return edit(p, (d) => {
-    // arrays novos de objetos puros (lidos do estado atual, não item a item pelo rascunho) e itens movidos congelados:
-    // com centenas de efeitos vinculados, os proxies e as cópias do immer (current) dominavam cada passo do arraste
+    // tira os movidos decidindo pelo estado puro (p) e lendo do rascunho SÓ os que ficam (continuam rascunhos: as
+    // escritas no lugar depois — makeRoom, relinkAcross… — seguem valendo); com centenas de efeitos vinculados, um
+    // proxy do immer por item lido dominava cada passo do arraste
     const byId = new Map<string, Track>()
     d.tracks.forEach((t, ti) => {
       byId.set(t.id, t)
       const its = p.tracks[ti]?.id === t.id ? p.tracks[ti].items : null
-      if (its && !its.some((i) => idSet.has(i.id))) return
-      const now = isDraft(t.items) ? current(t.items) : t.items
-      if (now.some((i) => idSet.has(i.id))) t.items = now.filter((i) => !idSet.has(i.id))
+      if (!its) {
+        if (t.items.some((i) => idSet.has(i.id))) t.items = t.items.filter((i) => !idSet.has(i.id))
+        return
+      }
+      if (!its.some((i) => idSet.has(i.id))) return
+      const keep: number[] = []
+      its.forEach((i, k) => { if (!idSet.has(i.id)) keep.push(k) })
+      const draft = t.items
+      t.items = keep.map((k) => draft[k])
     })
     const trackOf = (id: string): Track => byId.get(id) ?? mustTrack(d, id)
     let moved = plan.map((x) => ({ ...x, item: { ...x.item, startUs: x.item.startUs + delta } as Item }))
@@ -1003,7 +1014,7 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
     }
     const add = new Map<Track, Item[]>()
     for (const x of moved) { const t = trackOf(x.toTrackId); (add.get(t) ?? add.set(t, []).get(t)!).push(x.item) }
-    for (const [t, its] of add) t.items = [...(isDraft(t.items) ? current(t.items) : t.items), ...its]
+    for (const [t, its] of add) t.items.push(...its)
     for (const it of lifted) placeEffect(d, it)
     // clipe que mudou de faixa: os efeitos vinculados a ele passam a mirar a faixa nova
     for (const x of moved) {
@@ -2160,8 +2171,8 @@ export function addEffectItems(p: Project, items: readonly EffectItem[], linkTo:
     }
     for (const [tid, its] of toOld) {
       const t = mustTrack(d, tid)
-      // a faixa ganha um array novo (ordenar o do rascunho criaria um proxy por item)
-      t.items = [...(isDraft(t.items) ? current(t.items) : t.items), ...its.map((it) => ready.get(it)!)].sort((a, b) => a.startUs - b.startUs)
+      // os itens que já estavam continuam rascunhos (escritas no lugar depois seguem valendo); só a ordem é nova
+      t.items = [...t.items, ...its.map((it) => ready.get(it)!)].sort((a, b) => a.startUs - b.startUs)
     }
     for (const f of fresh) mustTrack(d, createTrack(d, 'video', fxInsertIndex(d), nextFxName(d), 'effects')).items = f.items.map((it) => ready.get(it)!)
     finalize(d)

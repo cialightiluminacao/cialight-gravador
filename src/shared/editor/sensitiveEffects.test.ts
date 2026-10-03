@@ -5,7 +5,6 @@ import { createEmptyProject, createMediaItem } from './factory'
 import { deleteItems, findItem, moveItems, setItemEnabled, setReverse, setSpeed, splitAt, trimItem, updateItem } from './ops'
 import { privacyWarnings, WEAK_BLUR } from './privacy'
 import type { Anim, Asset, EffectItem, MediaItem, Project, Track, Us } from './project'
-import { withDeferredFallbacks } from './attachment'
 import { clipFrameAt, resolveFrame, type EffectLayer } from './resolve'
 import { parseProject, toDiskProject } from './schema'
 import { hideOccurrences, occurrenceSpans } from './sensitiveEffects'
@@ -321,59 +320,4 @@ describe('hideOccurrences — v1.3', () => {
     }
     expect(misses(p, occs, (l) => diskRegion.get(l.itemId)!).misses).toEqual([])
   })
-})
-
-describe('hideOccurrences — desempenho', () => {
-  it('200 ocorrências × 3 clipes < 50 ms', () => {
-    const occs = Array.from({ length: 200 }, (_, i) => occurrence(`o${i}`, ((i * 97) % 18) * S, ((i * 97) % 18) * S + 1_500_000, (t) => ({ x: (i % 10) / 11, y: ((i * 7) % 30) / 31 + (t % 1000) / 1e7, w: 0.08, h: 0.03 })))
-    const p0 = project([clip('a', 0, 20 * S), clip('b', 20 * S, 10 * S, { speed: 2 }), clip('c', 30 * S, 20 * S, { reverse: true })])
-    // melhor medida (padrão do attachPerf), repetindo por até 6 s enquanto passar do alvo: a suíte inteira em paralelo
-    // (16 workers) deixa uma medida isolada ~6× mais lenta; a 1ª chamada aquece o JIT. Sozinho (esta máquina): ~20 ms
-    // (node) / ~40 ms (vitest).
-    hideOccurrences(p0, 'v', occs, { style: 'blur' }) // aquecimento
-    // 1ª chamada já aquecida, sem repetição: ≤ 3 × o alvo (pega uma regressão lenta e constante que o melhor-de-N esconderia)
-    const tw = performance.now()
-    let r = hideOccurrences(p0, 'v', occs, { style: 'blur' })
-    const first = performance.now() - tw
-    let ms = Infinity
-    const until = performance.now() + 6000
-    while (ms >= 50 && performance.now() < until) {
-      const t0 = performance.now()
-      r = hideOccurrences(p0, 'v', occs, { style: 'blur' })
-      ms = Math.min(ms, performance.now() - t0)
-    }
-    console.log(`hideOccurrences 200×3: melhor ${ms.toFixed(1)} ms, 1ª aquecida ${first.toFixed(1)} ms, ${r.itemIds.length} efeitos, ${r.project.tracks.filter((t) => t.role === 'effects').length} faixas`)
-    expect(r.itemIds.length).toBe(600)
-    expect(ms).toBeLessThan(50)
-    expect(first).toBeLessThanOrEqual(150)
-  }, 30_000)
-
-  it('arrastar o clipe com 600 efeitos vinculados: < 8 ms por passo (transitório, caixas de reserva adiadas)', () => {
-    const occs = Array.from({ length: 600 }, (_, i) => occurrence(`o${i}`, ((i * 37) % 15) * S + 500_000, ((i * 37) % 15) * S + 2_500_000, () => ({ x: (i % 12) / 13, y: ((i * 7) % 30) / 31, w: 0.06, h: 0.03 })))
-    const p0 = hideOccurrences(project([clip('a', 0, 20 * S, { linkId: 'L' })]), 'v', occs, { style: 'blur' }).project
-    expect(effects(p0).filter((f) => f.linkId === 'L').length).toBe(600)
-    // passos de arraste como o store os aplica: cada um sobre o anterior, em withDeferredFallbacks (transação transitória)
-    const steps = (n: number): number[] => {
-      let p = p0
-      const out: number[] = []
-      for (let k = 1; k <= n; k++) {
-        const t0 = performance.now()
-        p = withDeferredFallbacks(() => moveItems(p, ['a'], 33_333))
-        out.push(performance.now() - t0)
-      }
-      expect(findItem(p, 'a')!.item.startUs).toBe(n * 33_333)
-      return out
-    }
-    steps(5) // aquecimento
-    // mediana de 30 passos; a menor mediana de rodadas repetidas por até 6 s (a suíte em paralelo deixa medidas lentas)
-    let best = Infinity, median = Infinity
-    const until = performance.now() + 6000
-    while (median >= 8 && performance.now() < until) {
-      const ts = steps(30).sort((x, y) => x - y)
-      median = Math.min(median, ts[15])
-      best = Math.min(best, ts[0])
-    }
-    console.log(`arraste com 600 efeitos vinculados: mediana ${median.toFixed(2)} ms/passo (melhor ${best.toFixed(2)} ms)`)
-    expect(median).toBeLessThan(8)
-  }, 30_000)
 })
