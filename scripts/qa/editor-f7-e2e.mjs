@@ -312,6 +312,15 @@ async function main() {
   await key('e', 'KeyE', 69, 2)
   await sleep(600)
   check('Ctrl+E abre o diálogo', (await ev(`return ${DLG}?.textContent ?? ''`)).includes('Exportar vídeo'), null)
+  // amostrador contínuo: a fila começa ao enfileirar e, numa máquina rápida, termina (e o toast some) antes de o
+  // painel ser aberto — guarda se a fila foi vista exportando (painel ou estado) e todos os toasts vistos
+  await ev(`window.__f7seen = { running: false, toasts: new Set() }
+    window.__f7sampler = setInterval(() => {
+      const t = document.querySelector('[data-export-queue-panel]')?.textContent ?? ''
+      if (/Exportando \\d+%/.test(t) || window.__qaEditor.queue.items.some((i) => i.state === 'running')) window.__f7seen.running = true
+      for (const el of document.querySelectorAll('[data-sonner-toast]')) window.__f7seen.toasts.add(el.textContent)
+    }, 50); return 1`)
+  const seenToasts = `return [...window.__f7seen.toasts].join(' | ')`
   const enqueue = async (format, name, setup) => {
     await ev(`${clickText(format)}; return 1`)
     await sleep(250)
@@ -351,8 +360,9 @@ async function main() {
   await sleep(400)
   await ev(`if (!document.querySelector('[data-export-queue-panel]')) document.querySelector('[data-export-queue-button]').click(); return 1`)
   await sleep(500)
-  const running = await waitFor(`const t = document.querySelector('[data-export-queue-panel]')?.textContent ?? ''; return /Exportando \\d+%/.test(t) ? t : null`, 20000)
-  check('painel "Exportações" com a fila rodando', !!running, null)
+  const panelOpen = await waitFor(`return document.querySelector('[data-export-queue-panel]') ? 1 : null`, 5000)
+  const running = await ev(`return window.__f7seen.running`)
+  check('painel "Exportações" aberto e a fila foi vista exportando', !!panelOpen && running, { panelOpen, running })
   await shot('fila-rodando')
   let states = null
   for (let i = 0; i < 3000; i++) {
@@ -362,7 +372,8 @@ async function main() {
   }
   check('fila: os 3 concluídos', JSON.stringify(states) === '["done","done","done"]', { states, items: await ev(`return window.__qaEditor.queue.items.map((i) => ({ s: i.state, e: i.error }))`) })
   await sleep(600)
-  check('toast "Fila de exportações: 3 concluídas"', (await ev(toasts)).includes('Fila de exportações: 3 concluídas'), await ev(toasts))
+  check('toast "Fila de exportações: 3 concluídas"', (await ev(seenToasts)).includes('Fila de exportações: 3 concluídas'), await ev(seenToasts))
+  await ev(`clearInterval(window.__f7sampler); return 1`)
   await shot('fila-concluida')
   await key('Escape', 'Escape', 27)
   await sleep(300)

@@ -209,6 +209,7 @@ async function main() {
   await sleep(1500)
 
   console.log('Histórico → Editar')
+  for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`)); i++) await sleep(500)
   await ev(`window.__navigate('history'); return 1`)
   for (let i = 0; i < 30; i++) {
     if (await ev(`return [...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Editar')`)) break

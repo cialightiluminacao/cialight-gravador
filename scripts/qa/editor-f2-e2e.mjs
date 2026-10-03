@@ -281,6 +281,7 @@ async function main() {
   await ev(HELPERS + '; return 1')
 
   console.log('Projetos → Novo projeto')
+  for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`)); i++) await sleep(500)
   await ev(`localStorage.setItem('editor.timelineHeight', '260'); window.__navigate('projects'); return 1`)
   await sleep(800)
   await ev(`await T.clickEl(T.button('Novo projeto')); await T.wait(300); const d = T.dialog(); T.setValue(d.querySelector('input'), 'E2E privacidade'); await T.settle(); await T.clickEl(T.button('Criar e abrir', d)); return 1`)
