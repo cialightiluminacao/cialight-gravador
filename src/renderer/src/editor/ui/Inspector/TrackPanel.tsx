@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { Crosshair, Play, SkipBack, X } from 'lucide-react'
 import type { EffectItem, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
@@ -5,7 +6,7 @@ import { formatTrackTime, trackingBlocker } from '@shared/editor/track'
 import { Button } from '@/components/ui/Button'
 import { Progress, Tip } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
-import { liveLossUs, useTrackStrips } from '../../state/trackStrips'
+import { createLiveLossSelector, useTrackStrips } from '../../state/trackStrips'
 import { cancelFollow, continueFrom, followContent, useTrackJobs } from '../followContent'
 import { PanelSection } from './common'
 
@@ -22,7 +23,9 @@ export function TrackPanel({ project, item }: { project: Project; item: EffectIt
   const pct = job && job.total > 0 ? (job.frame / job.total) * 100 : 0
   const showLegend = !!strip && strip.region === item.region
   // do estado atual (G4): some se o rastreamento foi desfeito; acompanha o efeito movido
-  const lossUs = useEditorStore((s) => liveLossUs(strip, s.project, s.history.past, item.id))
+  // memoizado por referência (invariante 6): o playhead andando não refaz a busca no histórico
+  const lossOf = useMemo(() => createLiveLossSelector(item.id), [item.id])
+  const lossUs = useEditorStore((s) => lossOf(strip, s.project, s.history.past))
   const end = itemEndUs(item)
   const lossInside = lossUs !== null
   const atLoss = useEditorStore((s) => lossInside && s.playheadUs >= lossUs! && s.playheadUs < end)

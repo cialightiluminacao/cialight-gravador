@@ -74,3 +74,21 @@ export function liveLossUs(strip: TrackStrip | undefined, project: Project | nul
   }
   return alive ? f.item.startUs + strip.lossLocalUs : null
 }
+
+/**
+ * liveLossUs memoizado pelas REFERÊNCIAS de (faixa, projeto, histórico passado) — invariante 6: o seletor do painel
+ * roda a cada atualização do store (o playhead anda a cada quadro), e a busca no histórico é O(passado × itens).
+ * Playhead/seleção/zoom não trocam essas referências → custo O(1) por atualização; só uma edição recalcula.
+ */
+export function createLiveLossSelector(
+  itemId: string,
+  compute: typeof liveLossUs = liveLossUs
+): (strip: TrackStrip | undefined, project: Project | null, past: readonly Project[]) => Us | null {
+  let last: { strip: TrackStrip | undefined; project: Project | null; past: readonly Project[]; value: Us | null } | null = null
+  return (strip, project, past) => {
+    if (last && last.strip === strip && last.project === project && last.past === past) return last.value
+    const value = compute(strip, project, past, itemId)
+    last = { strip, project, past, value }
+    return value
+  }
+}

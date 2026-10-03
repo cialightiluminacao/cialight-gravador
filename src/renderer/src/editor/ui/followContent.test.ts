@@ -12,7 +12,7 @@ import { addMarker, applyTrackedRegion, findItem } from '@shared/editor/ops'
 import type { EffectItem, EffectRegion, Project } from '@shared/editor/project'
 import { runContentTracking, TrackingCancelled, type ContentTrackingResult } from '../engine/contentTracking'
 import { useEditorStore } from '../state/editorStore'
-import { liveLossUs, mergeStripSamples, stripRuns, useTrackStrips } from '../state/trackStrips'
+import { createLiveLossSelector, liveLossUs, mergeStripSamples, stripRuns, useTrackStrips } from '../state/trackStrips'
 import { CONTINUE_HINT, followContent, useTrackJobs } from './followContent'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
@@ -194,6 +194,31 @@ describe('Continuar daqui / Continuar rastreamento (G4)', () => {
     opts.action.onClick()
     expect(st().playheadUs).toBe(42)
     expect(toast.info).toHaveBeenLastCalledWith('Esta perda não vale mais', expect.anything())
+  })
+
+  it('seletor do painel memoizado: o playhead andando (cada quadro) não refaz a busca no histórico (invariante 6)', async () => {
+    st().open(base())
+    vi.mocked(runContentTracking).mockResolvedValue(out([{ tUs: 1_250_000 }]))
+    await followContent('fx')
+    // fluxo normal "ajustar e continuar": a região atual não é a da faixa → a busca percorre o passado
+    expect(st().apply((p) => applyTrackedRegion(p, 'fx', { ...tracked, y: { value: 0.35 } }))).toBeTruthy()
+    const compute = vi.fn(liveLossUs)
+    const sel = createLiveLossSelector('fx', compute)
+    const strip = useTrackStrips.getState().strips.fx
+    const run = (): number | null => sel(strip, st().project, st().history.past)
+    expect(run()).toBe(1_250_000)
+    for (let i = 1; i <= 500; i++) {
+      st().setPlayhead(i * 16_667)
+      expect(run()).toBe(1_250_000)
+    }
+    expect(compute).toHaveBeenCalledTimes(1)
+    // uma edição troca as referências → recalcula (e acompanha o efeito movido)
+    expect(st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map((it) => (it.id === 'fx' ? { ...it, startUs: it.startUs + 500_000 } : it)) })) }))).toBeTruthy()
+    expect(run()).toBe(1_750_000)
+    expect(compute).toHaveBeenCalledTimes(2)
+    st().undo()
+    expect(run()).toBe(1_250_000)
+    expect(compute).toHaveBeenCalledTimes(3)
   })
 
   it('mergeStripSamples: antes do ponto de partida ficam, dali em diante as novas', () => {
