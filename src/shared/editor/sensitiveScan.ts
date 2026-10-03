@@ -38,6 +38,8 @@ export const MOVE_FRAC = 0.5
 export const REFINE_TRACK_OPTS: Partial<TrackOpts> = { searchPx: 24, growth: 1.5 }
 /** Lado mínimo do molde do NCC (px da análise): abaixo disso a análise sobe de escala (até a resolução da origem). */
 export const REFINE_MIN_TPL_PX = 16
+/** Molde de no máximo 8 × a altura de largura (o começo de um token/JWT longo basta para a translação). */
+export const REFINE_TPL_MAX_ASPECT = 8
 
 export type ScanPhase = 'amostrando' | 'lendo' | 'analisando'
 export interface ScanProgress { phase: ScanPhase; done: number; total: number }
@@ -66,12 +68,15 @@ export interface Occurrence {
   /** Perdas do refinamento (caixa segurada e ampliada dali até o fim do intervalo). */
   lostAt?: Us[]
 }
+/** Tempos (ms) da varredura: partida do helper, amostragem (decodificação + OCR), só OCR, refinamento. */
+export interface ScanTimings { startMs: number; samplingMs: number; ocrMs: number; refineMs: number }
 export interface ScanResult {
   occurrences: Occurrence[]
   framesSampled: number
   framesOcr: number
   ms: number
   lang: string
+  timings?: ScanTimings
   cancelled?: boolean
   error?: ScanError
 }
@@ -121,7 +126,7 @@ export const CHANGE_BLOCK = 16
 export const CHANGE_MIN_PIXELS = 30
 
 /** Contagem de pixels mudados por bloco no retângulo [x0,x1)×[y0,y1) e o máximo numa janela 2×2 de blocos. */
-function maxWindowChange(prev: Uint8Array, cur: Uint8Array, w: number, x0: number, y0: number, x1: number, y1: number): number {
+function maxWindowChange(prev: ArrayLike<number>, cur: ArrayLike<number>, w: number, x0: number, y0: number, x1: number, y1: number): number {
   const B = CHANGE_BLOCK
   const bw = Math.ceil((x1 - x0) / B), bh = Math.ceil((y1 - y0) / B)
   const blk = new Uint32Array(bw * bh)
@@ -492,8 +497,19 @@ export function refineTrack(frames: readonly { tUs: Us; img: GrayImage }[], job:
   const ai = order.findIndex((f) => f.tUs === job.anchorUs)
   if (ai < 0) return null
   const seq = order.slice(ai).filter((f) => f.tUs >= job.fromUs && f.tUs <= job.toUs)
+  const full = templateBoxPx(job.anchorBox, W, H, scale)
+  // conteúdo parado na janela inteira (pré/pós-rolagem de tela estática, o caso comum): a caixa da âncora já vale —
+  // sem NCC. Movimento de uma linha de texto muda muitos pixels nas bordas dos glifos; o ruído do codificador, não.
+  if (job.kind !== 'move') {
+    const a = seq[0].img
+    const x0 = Math.max(0, Math.floor(full.x - full.w / 2)), y0 = Math.max(0, Math.floor(full.y - full.h / 2))
+    const x1 = Math.min(a.width, Math.ceil(full.x + full.w / 2)), y1 = Math.min(a.height, Math.ceil(full.y + full.h / 2))
+    if (x1 > x0 && y1 > y0 && seq.every((f) => f.img.width === a.width && f.img.height === a.height && maxWindowChange(a.data, f.img.data, a.width, x0, y0, x1, y1) < CHANGE_MIN_PIXELS)) return { points: [] }
+  }
+  // molde: a caixa inteira, ou só o começo dela numa linha longa (a translação é a mesma; o custo do NCC cai muito)
+  const tpl: TrackBox = full.w > REFINE_TPL_MAX_ASPECT * full.h ? { x: full.x - full.w / 2 + (REFINE_TPL_MAX_ASPECT * full.h) / 2, y: full.y, w: REFINE_TPL_MAX_ASPECT * full.h, h: full.h } : full
+  const offX = tpl.x - full.x
   let step: { tracker: ReturnType<typeof startTracker>['tracker']; result: TrackResult }
-  const tpl = templateBoxPx(job.anchorBox, W, H, scale)
   try {
     step = startTracker(seq[0].img, tpl, seq[0].tUs, REFINE_TRACK_OPTS)
   } catch {
@@ -502,7 +518,8 @@ export function refineTrack(frames: readonly { tUs: Us; img: GrayImage }[], job:
   const bw = job.anchorBox.w, bh = job.anchorBox.h
   const toNorm = (r: TrackResult): OcrBox => {
     const w = bw * r.scale, h = bh * r.scale
-    return { x: r.x / scale / W - w / 2, y: r.y / scale / H - h / 2, w, h }
+    const cx = r.x - offX * r.scale
+    return { x: cx / scale / W - w / 2, y: r.y / scale / H - h / 2, w, h }
   }
   const points: OccurrenceSample[] = []
   let lastGood = job.anchorBox

@@ -20,7 +20,8 @@ import {
   type ScanError,
   type ScanProgress,
   type ScanResult,
-  type ScanSample
+  type ScanSample,
+  type ScanTimings
 } from '@shared/editor/sensitiveScan'
 import type { GrayImage } from '@shared/editor/track'
 import { frameCountFor, sampleFrames, subFrames, type FrameStream, type RawFrame } from './frameSource'
@@ -96,66 +97,69 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
   let framesOcr = 0
   let lang = ''
   let occurrences: Occurrence[] = []
+  const timings: ScanTimings = { startMs: 0, samplingMs: 0, ocrMs: 0, refineMs: 0 }
   const finish = (extra: { cancelled?: boolean; error?: ScanError } = {}): ScanResult => {
     const ms = Math.round(performance.now() - t0)
     if (extra.cancelled) log.info(`sensitive: varredura cancelada (${framesSampled} quadros, ${framesOcr} lidos, ${ms} ms)`)
     else if (extra.error) log.warn(`sensitive: varredura com erro ${extra.error.code} (${framesSampled} quadros, ${framesOcr} lidos, ${ms} ms)`)
-    else log.info(`sensitive: varredura concluída: ${framesSampled} quadros, ${framesOcr} lidos, ${occurrences.length} ocorrências (${countKinds(occurrences)}), ${ms} ms, idioma ${lang}`)
-    return { occurrences: extra.cancelled ? [] : occurrences, framesSampled, framesOcr, ms, lang, ...extra }
+    else log.info(`sensitive: varredura concluída: ${framesSampled} quadros, ${framesOcr} lidos, ${occurrences.length} ocorrências (${countKinds(occurrences)}), ${ms} ms (partida ${timings.startMs}, amostragem ${timings.samplingMs}, OCR ${timings.ocrMs}, refinamento ${timings.refineMs}), idioma ${lang}`)
+    return { occurrences: extra.cancelled ? [] : occurrences, framesSampled, framesOcr, ms, lang, timings, ...extra }
   }
   if (signal?.aborted) return finish({ cancelled: true })
 
-  // ---- origem
-  let W = 0, H = 0, toUs = req.toUs
-  try {
-    const info = await deps.probe(req.filePath)
-    const v = info.video
-    if (!v || !(v.width > 0) || !(v.height > 0)) return finish({ error: { code: 'invalid', message: SCAN_MESSAGES.noVideo } })
-    const rot = v.rotation ?? 0
-    // o ffmpeg gira na decodificação: o quadro da origem é o exibido
-    ;[W, H] = rot === 90 || rot === 270 ? [v.height, v.width] : [v.width, v.height]
-    if (info.durationUs !== null && info.durationUs > 0) toUs = Math.min(toUs, info.durationUs)
-  } catch {
-    return finish({ error: { code: 'ffmpeg', message: SCAN_MESSAGES.ffmpeg } })
-  }
-  const fromUs = Math.max(0, req.fromUs)
-  if (!(toUs > fromUs)) return finish({ error: { code: 'invalid', message: SCAN_MESSAGES.range } })
-  const total = frameCountFor(fromUs, toUs, SAMPLE_FPS, false)
-  progress({ phase: 'amostrando', done: 0, total })
-
-  // ---- processos (só os PIDs iniciados aqui são mortos no cancelamento)
+  // ---- processos (só os PIDs iniciados aqui são mortos no cancelamento). O helper (partida do PowerShell + WinRT,
+  // 0,4–1 s) sobe em paralelo com o probe e o ffmpeg (que espera no pipe até o 1º quadro ser lido).
   let helper: OcrHelper | null = null
   let stream: FrameStream | null = null
   const live: { sub: FrameStream | null } = { sub: null }
+  const helperP = OcrHelper.start({
+    script: deps.helperScript,
+    lang: deps.helperLang,
+    frameTimeoutMs: deps.frameTimeoutMs,
+    readyTimeoutMs: deps.readyTimeoutMs,
+    onSpawn: (pid) => deps.onSpawn?.(pid, 'ocr')
+  })
+  helperP.catch(noop)
+  const dropHelper = (): void => void helperP.then((h) => h.kill(), noop)
   const onAbort = (): void => {
     stream?.kill()
     live.sub?.kill()
     helper?.kill()
+    dropHelper()
   }
   signal?.addEventListener('abort', onAbort)
   try {
-    const helperP = OcrHelper.start({
-      script: deps.helperScript,
-      lang: deps.helperLang,
-      frameTimeoutMs: deps.frameTimeoutMs,
-      readyTimeoutMs: deps.readyTimeoutMs,
-      onSpawn: (pid) => deps.onSpawn?.(pid, 'ocr')
-    })
+    // ---- origem
+    let W = 0, H = 0, toUs = req.toUs
+    try {
+      const info = await deps.probe(req.filePath)
+      const v = info.video
+      if (!v || !(v.width > 0) || !(v.height > 0)) return finish({ error: { code: 'invalid', message: SCAN_MESSAGES.noVideo } })
+      const rot = v.rotation ?? 0
+      // o ffmpeg gira na decodificação: o quadro da origem é o exibido
+      ;[W, H] = rot === 90 || rot === 270 ? [v.height, v.width] : [v.width, v.height]
+      if (info.durationUs !== null && info.durationUs > 0) toUs = Math.min(toUs, info.durationUs)
+    } catch {
+      return finish({ error: { code: 'ffmpeg', message: SCAN_MESSAGES.ffmpeg } })
+    }
+    const fromUs = Math.max(0, req.fromUs)
+    if (!(toUs > fromUs)) return finish({ error: { code: 'invalid', message: SCAN_MESSAGES.range } })
+    if (signal?.aborted) return finish({ cancelled: true })
+    const total = frameCountFor(fromUs, toUs, SAMPLE_FPS, false)
+    progress({ phase: 'amostrando', done: 0, total })
+    stream = sampleFrames({ ffmpeg: deps.ffmpeg, file: req.filePath, fromUs, toUs, sourceW: W, sourceH: H, fps: SAMPLE_FPS, upscale: OCR_UPSCALE, onSpawn: (pid) => deps.onSpawn?.(pid, 'ffmpeg') })
+
     // cancelar durante a partida não espera o helper responder
     const aborted = new Promise<'aborted'>((r) => signal?.addEventListener('abort', () => r('aborted')))
     const started = await Promise.race([helperP, aborted]).catch((e: unknown) => e)
-    if (started === 'aborted') {
-      void helperP.then((h) => h.kill(), noop)
-      return finish({ cancelled: true })
-    }
-    if (started instanceof OcrUnavailableError) return finish({ error: { code: 'ocrUnavailable', message: started.message } })
-    if (!(started instanceof OcrHelper)) return finish({ error: { code: 'ocrUnavailable', message: OCR_UNAVAILABLE_MESSAGE } })
+    if (started === 'aborted') return finish({ cancelled: true })
+    if (!(started instanceof OcrHelper)) return finish({ error: { code: 'ocrUnavailable', message: started instanceof OcrUnavailableError ? started.message : OCR_UNAVAILABLE_MESSAGE } })
     helper = started
     lang = helper.lang
+    timings.startMs = Math.round(performance.now() - t0)
     if (signal?.aborted) return finish({ cancelled: true })
 
     // ---- amostragem + OCR
-    stream = sampleFrames({ ffmpeg: deps.ffmpeg, file: req.filePath, fromUs, toUs, sourceW: W, sourceH: H, fps: SAMPLE_FPS, upscale: OCR_UPSCALE, onSpawn: (pid) => deps.onSpawn?.(pid, 'ffmpeg') })
     const samples: ScanSample[] = []
     const detectOpts = { kinds: req.kinds, customTerms: req.customTerms }
     let lastFrame: Uint8Array | null = null
@@ -167,7 +171,10 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
       framesSampled++
       if (!lastFrame || frameChanged(lastFrame, f.data, f.w, f.h)) {
         try {
-          const fresh = detectSensitive(await ocrFrame(h, f), detectOpts)
+          const tOcr = performance.now()
+          const lines = await ocrFrame(h, f)
+          timings.ocrMs += Math.round(performance.now() - tOcr)
+          const fresh = detectSensitive(lines, detectOpts)
           // união entre leituras: o que o OCR deixou de ler sobre pixels que não mudaram continua valendo
           lastDets = lastFrame ? carryDetections(lastDets, fresh, lastFrame, f.data, f.w, f.h) : fresh
           lastFrame = f.data
@@ -197,11 +204,14 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
       return finish({ error: { code: 'ffmpeg', message: SCAN_MESSAGES.ffmpeg } })
     }
     const samplingMs = performance.now() - t0
-    await helper.close()
+    timings.samplingMs = Math.round(samplingMs)
+    // o helper fecha em paralelo com o refinamento (o finally espera)
+    void helper.close().catch(noop)
 
     // ---- ocorrências + refinamento
     occurrences = groupOccurrences(samples, groupCtx)
     occurrences = await refine(occurrences, { deps, file: req.filePath, W, H, rangeUs: toUs - fromUs, samplingMs, signal, progress, setSub: (s) => (live.sub = s) })
+    timings.refineMs = Math.round(performance.now() - t0 - samplingMs)
     if (signal?.aborted) return finish({ cancelled: true })
     return finish()
   } finally {
@@ -209,6 +219,7 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
     stream?.kill()
     live.sub?.kill()
     if (helper) await helper.close().catch(noop)
+    else dropHelper()
   }
 }
 
@@ -304,7 +315,11 @@ async function refine(occs: Occurrence[], c: RefineCtx): Promise<Occurrence[]> {
     }
     try {
       for await (const f of st.frames) {
-        if (c.signal?.aborted) break
+        // teto de tempo também dentro da corrida: as janelas ainda incompletas ficam com a regra conservadora
+        if (c.signal?.aborted || performance.now() - tStart > wallMax) {
+          buffers.clear()
+          break
+        }
         const img: GrayImage = { width: f.w, height: f.h, data: Float32Array.from(f.data) }
         for (const w of run.wins) {
           if (f.tUs < w.fromUs || f.tUs > w.toUs) continue

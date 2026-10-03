@@ -41,6 +41,7 @@ export class OcrHelper {
   private closing = false
   private readonly exitPromise: Promise<void>
   private failure: OcrUnavailableError | null = null
+  private closePromise: Promise<void> | null = null
   lang = ''
   maxDim = 10000
   startMs = 0
@@ -192,7 +193,12 @@ export class OcrHelper {
   }
 
   /** `{"cmd":"quit"}`; se não sair em 2 s, kill do PID. Resolve quando o processo saiu. */
-  async close(graceMs = 2000): Promise<void> {
+  close(graceMs = 2000): Promise<void> {
+    if (!this.closePromise) this.closePromise = this.doClose(graceMs)
+    return this.closePromise
+  }
+
+  private async doClose(graceMs: number): Promise<void> {
     if (this.exited) return
     this.closing = true
     try {

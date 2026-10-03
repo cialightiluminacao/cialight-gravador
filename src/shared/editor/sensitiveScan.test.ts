@@ -388,17 +388,38 @@ describe('refinamento (NCC)', () => {
     expect(ref.lostAt).toEqual([2_300_000])
     expect(boxContains(occurrenceRegionAt(ref, t1)!, nb(b))).toBe(true)
   })
-  it('pré-rolagem para trás; molde liso não é refinável', () => {
+  it('pré-rolagem de conteúdo parado: nada a refinar (a caixa da âncora vale), sem NCC', () => {
     const t0 = 500_000, t1 = 1_000_000
     const b = { x: 50, y: 50, w: 70, h: 14 }
     const frames = refineTimes(t0, t1).map((tUs) => ({ tUs, img: scene(b) }))
     const [o] = groupOccurrences([{ tUs: t1, detections: [det(nb(b))] }], { fromUs: 0, toUs: t1, sourceW: AW, sourceH: AH })
     const job = refinementJobs(o).find((j) => j.kind === 'pre')!
+    expect(refineTrack(frames, job, AW, AH)).toEqual({ points: [] })
+  })
+  it('pré-rolagem para trás de conteúdo que subia; molde liso não é refinável', () => {
+    const t0 = 500_000, t1 = 1_000_000
+    const at = (t: number): { x: number; y: number; w: number; h: number } => ({ x: 50, y: 150 + ((t1 - t) / 100_000) * 5, w: 70, h: 14 })
+    const frames = refineTimes(t0, t1).map((tUs) => ({ tUs, img: scene(at(tUs)) }))
+    const [o] = groupOccurrences([{ tUs: t1, detections: [det(nb(at(t1)))] }], { fromUs: 0, toUs: t1, sourceW: AW, sourceH: AH })
+    const job = refinementJobs(o).find((j) => j.kind === 'pre')!
     const res = refineTrack(frames, job, AW, AH)!
     expect(res.points.map((p) => p.tUs)).toEqual([900_000, 800_000, 700_000, 600_000, 500_000])
     expect(res.points.every((p) => p.src === 'track')).toBe(true)
+    for (const p of res.points) expect(iou(p.box, nb(at(p.tUs)))).toBeGreaterThan(0.8)
     const flat = refineTimes(t0, t1).map((tUs) => ({ tUs, img: scene(null) }))
-    expect(refineTrack(flat, job, AW, AH)).toBeNull()
+    const moveJob = { ...job, kind: 'move' as const, dir: 'forward' as const, anchorUs: t0, fromUs: t0, toUs: t1, endBox: job.anchorBox }
+    expect(refineTrack(flat, moveJob, AW, AH)).toBeNull()
+  })
+  it('linha longa (token): o molde é só o começo dela e a caixa inteira acompanha', () => {
+    const t0 = 1_000_000, t1 = 1_500_000
+    const at = (t: number): { x: number; y: number; w: number; h: number } => ({ x: 40, y: 200 - ((t - t0) / 100_000) * 6, w: 400, h: 12 })
+    const frames = refineTimes(t0, t1).map((tUs) => ({ tUs, img: scene(at(tUs), 9) }))
+    const [o] = groupOccurrences([{ tUs: t0, detections: [det(nb(at(t0)), 'v')] }, { tUs: t1, detections: [det(nb(at(t1)), 'v')] }], { fromUs: t0, toUs: t1, sourceW: AW, sourceH: AH })
+    const job = refinementJobs(o).find((j) => j.kind === 'move')!
+    const res = refineTrack(frames, job, AW, AH)!
+    expect(res.lostAt).toBeUndefined()
+    expect(res.points).toHaveLength(4)
+    for (const p of res.points) expect(iou(p.box, nb(at(p.tUs)))).toBeGreaterThan(0.85)
   })
   it('movimento que chega longe da caixa do OCR do fim é rejeitado (fica a regra conservadora)', () => {
     const t0 = 1_000_000, t1 = 1_500_000
