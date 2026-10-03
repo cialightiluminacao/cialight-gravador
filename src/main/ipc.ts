@@ -11,7 +11,7 @@ import type { ProjectStore } from './project/projectStore'
 import type { Asset } from '@shared/editor/project'
 import type { AssetToCopy, BrandTemplate } from '@shared/editor/brand'
 import { BrandStore, brandDirFor } from './brand/brandStore'
-import { ExportQueueFile, exportQueueFileFor } from './exportQueue/exportQueueFile'
+import { ExportQueueFile, resolveExportQueueFile, sweepStaleQueueFiles } from './exportQueue/exportQueueFile'
 import { removeItemParts } from './maintenance/partSweep'
 import { projectFromSession } from '@shared/editor/fromSession'
 import { newId, newProjectId } from '@shared/editor/ids'
@@ -536,7 +536,21 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     queueStates.set(wc.id, state)
   })
   // ---- fila de exportações persistente: só o main grava; os caminhos vêm do próprio arquivo ----
-  const queueFile = new ExportQueueFile(exportQueueFileFor(process.env, app.getPath('userData')), log)
+  const queueTarget = resolveExportQueueFile(process.env, app.getPath('userData'))
+  const queueFile = new ExportQueueFile(queueTarget.file, log)
+  if (queueTarget.ephemeral) {
+    // teste/QA: arquivo desta instância; nunca herda itens (PID reaproveitado) e não fica para trás ao sair
+    const dropQueueFile = (): void => {
+      try {
+        rmSync(queueTarget.file, { force: true })
+      } catch {
+        // melhor esforço
+      }
+    }
+    dropQueueFile()
+    sweepStaleQueueFiles(dirname(queueTarget.file)) // de instâncias de QA mortas por PID
+    app.on('quit', dropQueueFile)
+  }
   const cleanQueueParts = async (): Promise<void> => {
     // exportação rodando agora: o .part dela não pode ser tocado (e o 'nome ocupado' já a considera)
     if (editorExports.busy) return

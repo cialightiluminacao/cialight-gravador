@@ -1,5 +1,5 @@
 // QA da fila de exportações PERSISTENTE (G4, Task 1) via CDP, com mídia sintética (fixture do editor):
-//  A) enfileira 2 exportações, grava o arquivo (test-out/export-queue.json), RECARREGA o app → toast "Retomar N
+//  A) enfileira 2 exportações, grava o arquivo (test-out/qa-g4-queue/export-queue.json), RECARREGA o app → toast "Retomar N
 //     exportações pendentes" → Retomar → todas terminam (arquivos finais, nenhum .part) e o arquivo esvazia;
 //  B) enfileira, recarrega, deixa um .part velho de um item (e um alheio) → Descartar → arquivo vazio, .part do item
 //     apagado, o alheio intocado;
@@ -21,12 +21,16 @@ import { guardSettings } from './settingsGuard.mjs'
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9336'
 const OUT = join(ROOT, 'test-out', 'qa-g4-queue')
-const QFILE = join(ROOT, 'test-out', 'export-queue.json')
+// arquivo próprio desta execução (nunca o padrão por instância nem o %APPDATA%); apagado no finally
+const QFILE = join(OUT, 'export-queue.json')
 const APPDATA_DIR = join(process.env.APPDATA ?? '', 'cialight-gravador')
 const REAL_QFILE = join(APPDATA_DIR, 'export-queue.json')
 const SETTINGS = join(APPDATA_DIR, 'settings.json')
 
 rmSync(OUT, { recursive: true, force: true })
+// sessões de gravação criadas por esta execução (etapa D) saem no finally: nada de "gravação interrompida" depois
+const RAW = join(ROOT, 'test-out', 'raw')
+const rawBefore = new Set(existsSync(RAW) ? readdirSync(RAW) : [])
 rmSync(QFILE, { force: true })
 mkdirSync(OUT, { recursive: true })
 const guard = guardSettings(SETTINGS)
@@ -34,7 +38,7 @@ const realBefore = existsSync(REAL_QFILE) ? statSync(REAL_QFILE).mtimeMs : null
 
 const app = spawn(electronPath, ['.', `--remote-debugging-port=${PORT}`], {
   cwd: ROOT,
-  env: { ...process.env, CIALIGHT_QA: 'editor-fixture', CIALIGHT_RAW_DIR: 'test-out/raw' },
+  env: { ...process.env, CIALIGHT_QA: 'editor-fixture', CIALIGHT_RAW_DIR: 'test-out/raw', CIALIGHT_EXPORT_QUEUE_FILE: QFILE },
   stdio: 'ignore'
 })
 
@@ -178,7 +182,7 @@ async function main() {
     const f = readQueueFile()
     return f?.items?.length >= 1 ? f : null
   }, 10000, 50)
-  check('o arquivo da fila (test-out/export-queue.json) foi gravado, versão 1, com os itens ativos', fileA?.version === 1 && fileA.items.length >= 1, fileA && { v: fileA.version, n: fileA.items.length })
+  check('o arquivo da fila (test-out/qa-g4-queue/export-queue.json) foi gravado, versão 1, com os itens ativos', fileA?.version === 1 && fileA.items.length >= 1, fileA && { v: fileA.version, n: fileA.items.length })
   console.log(`  itens no arquivo antes de recarregar: ${fileA?.items?.map((i) => i.request.fileName).join(', ')}`)
   const nA = fileA?.items?.length ?? 0
   await reload()
@@ -254,13 +258,21 @@ async function main() {
   await ev(`window.api.recording.sendCommand('toggleRecord'); return 1`)
   await waitFor(async () => ((await ev(`return !!document.querySelector('[data-queue-leave]')`)) ? true : null), 5000, 100)
   await ev(`[...document.querySelector('[data-queue-leave]').querySelectorAll('button')].find((b) => b.textContent.trim() === 'Sair e interromper').click(); return 1`)
+  // a tela troca um pouco depois da fase: espera as duas (antes, a conferência às vezes via 'projects' + 'countdown')
   const rec = await waitFor(async () => {
     const st = await ev(`const s = window.__qa.store.getState(); return { screen: s.screen, phase: s.phase }`)
-    return st.phase === 'countdown' || st.phase === 'recording' ? st : null
+    return (st.phase === 'countdown' || st.phase === 'recording') && st.screen === 'recording' ? st : null
   }, 15000, 100)
-  check('"Sair e interromper" pelo atalho: sai do editor e a gravação começa (contagem/gravando)', !!rec && rec.screen === 'recording', rec)
-  await ev(`await window.__qa.controller.cancelRecording(); return 1`)
-  await waitFor(async () => ((await ev(`return window.__qa.store.getState().phase`)) === 'idle' ? true : null), 15000, 100)
+  check('"Sair e interromper" pelo atalho: sai do editor e a gravação começa (contagem/gravando)', !!rec, rec)
+  // cancela até ficar parado: um cancelamento logo no início da contagem pode não pegar (a gravação começaria e
+  // ficaria interrompida em test-out/raw quando o app é morto, abrindo "gravação interrompida" nas próximas execuções)
+  await sleep(300)
+  await waitFor(async () => {
+    const ph = await ev(`return window.__qa.store.getState().phase`)
+    if (ph === 'idle') return true
+    if (ph === 'countdown' || ph === 'recording' || ph === 'paused') await ev(`await window.__qa.controller.cancelRecording(); return 1`)
+    return null
+  }, 20000, 250)
   const fileD = readQueueFile()
   check('D: a fila interrompida ficou no arquivo (g4d-*)', (fileD?.items ?? []).some((i) => i.request.fileName.startsWith('g4d-')), fileD?.items?.map((i) => i.request.fileName))
   await sleep(1000)
@@ -287,6 +299,10 @@ try {
     // já saiu
   }
   await sleep(500)
+  // a etapa D deixa itens interrompidos no arquivo: nada fica para a próxima execução
+  rmSync(QFILE, { force: true })
+  rmSync(`${QFILE}.bad`, { force: true })
+  for (const d of existsSync(RAW) ? readdirSync(RAW) : []) if (!rawBefore.has(d)) rmSync(join(RAW, d), { recursive: true, force: true })
   failures += guard.finish()
   console.log(failures ? `\n${failures} falha(s)` : '\ntudo OK')
   process.exit(failures ? 1 : 0)

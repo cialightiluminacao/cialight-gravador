@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'fs'
-import { dirname, resolve } from 'path'
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'fs'
+import { dirname, join, resolve } from 'path'
 import { parseQueueFile, sanitizeItems, serializeQueueFile, type PersistedQueueItem } from '@shared/exportQueueFile'
 import { renameSyncRetry } from '../fs/renameRetry'
 
@@ -8,12 +8,64 @@ import { renameSyncRetry } from '../fs/renameRetry'
 
 /**
  * Arquivo da fila: CIALIGHT_EXPORT_QUEUE_FILE; em teste/QA (CIALIGHT_TEST/CIALIGHT_QA/CIALIGHT_SHOT) NUNCA o userData
- * (o app instalado o compartilha): <CIALIGHT_RAW_DIR>/../export-queue.json (padrão test-out/export-queue.json); senão userData.
+ * (o app instalado o compartilha) e sim um arquivo POR INSTÂNCIA: <CIALIGHT_RAW_DIR>/../export-queue/export-queue-<pid>.json
+ * (padrão test-out/export-queue/…). As suítes/QA rodam em paralelo e são mortas por PID: um arquivo comum ficaria
+ * com itens de uma execução anterior e toda execução seguinte abriria com "Retomar N exportações". Esse arquivo é
+ * `ephemeral` (o main o apaga ao iniciar — PID reaproveitado — e ao sair); quem testa a retomada entre recargas usa o
+ * mesmo processo (mesmo PID) ou fixa CIALIGHT_EXPORT_QUEUE_FILE. Uso normal: <userData>/export-queue.json.
  */
-export function exportQueueFileFor(env: Record<string, string | undefined>, userData: string, cwd: string = process.cwd()): string {
-  if (env.CIALIGHT_EXPORT_QUEUE_FILE) return resolve(cwd, env.CIALIGHT_EXPORT_QUEUE_FILE)
-  if (env.CIALIGHT_TEST || env.CIALIGHT_QA || env.CIALIGHT_SHOT) return resolve(cwd, env.CIALIGHT_RAW_DIR || 'test-out/raw', '..', 'export-queue.json')
-  return resolve(userData, 'export-queue.json')
+export function resolveExportQueueFile(
+  env: Record<string, string | undefined>,
+  userData: string,
+  cwd: string = process.cwd(),
+  pid: number = process.pid
+): { file: string; ephemeral: boolean } {
+  if (env.CIALIGHT_EXPORT_QUEUE_FILE) return { file: resolve(cwd, env.CIALIGHT_EXPORT_QUEUE_FILE), ephemeral: false }
+  if (env.CIALIGHT_TEST || env.CIALIGHT_QA || env.CIALIGHT_SHOT) {
+    return { file: resolve(cwd, env.CIALIGHT_RAW_DIR || 'test-out/raw', '..', 'export-queue', `export-queue-${pid}.json`), ephemeral: true }
+  }
+  return { file: resolve(userData, 'export-queue.json'), ephemeral: false }
+}
+
+/** Só o caminho (ver resolveExportQueueFile). */
+export function exportQueueFileFor(env: Record<string, string | undefined>, userData: string, cwd: string = process.cwd(), pid: number = process.pid): string {
+  return resolveExportQueueFile(env, userData, cwd, pid).file
+}
+
+/** Processo vivo? (sinal 0 só confere; EPERM = existe, mas de outro usuário). */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === 'EPERM'
+  }
+}
+
+/**
+ * Teste/QA: apaga os arquivos de fila por instância (`export-queue-<pid>.json`) de processos que já não existem — as
+ * instâncias de QA são mortas por PID (taskkill /F) e não chegam a apagar o próprio arquivo ao sair. Os de instâncias
+ * vivas (rodando em paralelo) ficam. Melhor esforço; devolve quantos apagou.
+ */
+export function sweepStaleQueueFiles(dir: string, alive: (pid: number) => boolean = pidAlive): number {
+  let n = 0
+  let names: string[] = []
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return 0
+  }
+  for (const name of names) {
+    const m = /^export-queue-(\d+)\.json(?:\.bad|\.tmp-\d+)?$/.exec(name)
+    if (!m || alive(Number(m[1]))) continue
+    try {
+      rmSync(join(dir, name), { force: true })
+      n++
+    } catch {
+      // melhor esforço
+    }
+  }
+  return n
 }
 
 export interface QueueFileLog {
