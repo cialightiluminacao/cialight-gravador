@@ -339,7 +339,8 @@ describe('keyframeMarkLefts (losangos na timeline)', () => {
     expect(marks.map((m) => m.tUs)).toEqual(expect.arrayContaining([times[7], times[150]]))
     expect(marks.length).toBeLessThanOrEqual(25)
   })
-  it('perf (invariante 6): 1 h com um key por quadro (108 000) — losangos e curva da linha em poucos ms', () => {
+  // retry: medida de tempo sob a suíte inteira em paralelo (e a CPU desacelerando) oscila; regressão real falha nas 3
+  it('perf (invariante 6): 1 h com um key por quadro (108 000) — losangos e curva da linha em poucos ms', { retry: 2 }, () => {
     const times = Array.from({ length: 108_000 }, (_, i) => Math.round((i * S) / 30))
     const anim = { value: 0, keys: times.map((tUs, i) => ({ tUs, value: Math.sin(i / 50), ease: 'linear' as const })) }
     let best = Infinity

@@ -128,7 +128,8 @@ describe('desempenho F4 em projetos de 1 h (reenquadrar, privacidade, gravação
     expect(best(10, () => privacyWarnings(p, 0, H1), 150)).toBeLessThanOrEqual(150)
   }, PERF_TIMEOUT_MS * 4)
 
-  it('toDiskProject sem mudança (2400 ancorados): ≤ 20 ms nos mesmos objetos e no projeto parseado de novo (IPC); a mudança refaz o que mudou', () => {
+  // retry: medida de tempo sob a suíte inteira em paralelo (e a CPU desacelerando) oscila; regressão real falha nas 3
+  it('toDiskProject sem mudança (2400 ancorados): ≤ 20 ms nos mesmos objetos e no projeto parseado de novo (IPC); a mudança refaz o que mudou', { retry: 2, timeout: PERF_TIMEOUT_MS * 2 }, () => {
     const p = deleteRanges(hourProject(true, true), silences1200)
     const cold = JSON.stringify(toDiskProject(p))
     expect(best(10, () => toDiskProject(p), 20)).toBeLessThanOrEqual(20)
@@ -146,7 +147,7 @@ describe('desempenho F4 em projetos de 1 h (reenquadrar, privacidade, gravação
     const fresh = toDiskProject({ ...moved, id: 'p_sem_cache' }) as Project
     expect(JSON.stringify({ ...warm, id: 'p_sem_cache' })).toBe(JSON.stringify(fresh))
     expect(JSON.stringify(warm)).not.toBe(cold)
-  }, PERF_TIMEOUT_MS * 2)
+  })
 
   it('resolveFrame com 50 itens × 13 propriedades animadas (curva bezier, presets pop/desfoque): ≤ 0,5 ms por quadro', () => {
     const p = createEmptyProject('quadro')
