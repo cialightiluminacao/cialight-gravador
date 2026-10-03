@@ -47,4 +47,18 @@ describe('clipMovesIn', () => {
     m.visual!.transform.x = { value: 0.5, keys: [{ tUs: S, value: 0.5, ease: 'hold' }, { tUs: 3 * S, value: 0.8, ease: 'hold' }] }
     expect(clipMovesIn(m, 2 * S, 2.5 * S)).toBe(true)
   })
+  it('rotação animada conta', () => {
+    const m = clip()
+    m.visual!.transform.rotation = keys([S, 0], [2 * S, 30])
+    expect(clipMovesIn(m, 0, S)).toBe(false)
+    expect(clipMovesIn(m, 1.5 * S, 2 * S)).toBe(true)
+  })
+  it('keys fora da duração do clipe: só vale o que cruza [a, b)', () => {
+    const m = clip() // 10 s
+    m.visual!.transform.x = keys([12 * S, 0.5], [14 * S, 0.9])
+    expect(clipMovesIn(m, 0, 10 * S)).toBe(false)
+    m.visual!.transform.y = keys([-2 * S, 0.2], [4 * S, 0.6])
+    expect(clipMovesIn(m, 0, S)).toBe(true)
+    expect(clipMovesIn(m, 4 * S, 10 * S)).toBe(false)
+  })
 })

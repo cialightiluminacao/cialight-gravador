@@ -1,7 +1,6 @@
 // Avisos de privacidade: efeitos fracos demais, desativados ou com mídia por cima, num intervalo da timeline. Puro.
 import { evalAnim } from './anim'
-import { regionTouchesOver } from './attachment'
-import { clipMovingSpans, contentPose, followCheckTimes, poseError, type ContentPose } from './contentPose'
+import { clipMovingSpans, contentPose, followCheckTimes, poseError, regionTouchesClip, type ContentPose } from './contentPose'
 import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
 import { attachedMedia, clipFrameAt, effectRegionAt, visualTrackBelow } from './resolve'
@@ -138,16 +137,52 @@ const FOLLOW_TOL = 0.01
 const FOLLOW_TOL_DEG = 1
 
 /**
- * Primeiro instante (absoluto) de [a, b) em que a região do efeito deixa de acompanhar o conteúdo do clipe; null =
- * acompanha. A região é levada ao espaço do conteúdo (contentPose: desfaz centro, rotação, escala e espelho do clipe —
- * geometria do resolve, com animações de entrada/saída — e fit e corte por layerBase, a mesma conta do compositor).
- * Acompanhar = ponto da fonte sob o centro, tamanho e rotação constantes nesse espaço em relação ao início do trecho
- * em comum clipe ∩ efeito, com tolerância de FOLLOW_TOL do quadro medida na tela (poseError). Amostras:
- * followCheckTimes. A região é a do quadro (effectRegionAt: ancorada a outro clipe, como o resolve a desenha).
+ * Primeiro instante (absoluto) em que a região do efeito deixa de acompanhar o conteúdo do clipe, só onde o clipe se
+ * move; null = acompanha (ou o clipe não se move / a região não encosta nele nesses trechos). A região é levada ao
+ * espaço do conteúdo (contentPose: desfaz centro, rotação, escala e espelho do clipe — geometria do resolve, com
+ * animações de entrada/saída — e fit e corte por layerBase, a mesma conta do compositor). Acompanhar = ponto da fonte
+ * sob o centro, tamanho e rotação constantes nesse espaço em relação ao INÍCIO DO TRECHO EM MOVIMENTO (clipMovingSpans
+ * sobre todo clipe ∩ efeito, sem depender da janela [a, b) pedida), com tolerância de FOLLOW_TOL do quadro medida na
+ * tela (poseError): um efeito rastreado que andou com o conteúdo antes do zoom não avisa. A região é a do quadro
+ * (effectRegionAt: ancorada a outro clipe, como o resolve a desenha).
+ * Custo O(keys): followCheckTimes uma vez só (ordenado; fatiado por trecho) e uma conferência de contato combinada.
  */
-function unfollowedAt(p: Project, fx: EffectItem, m: MediaItem, a: Us, b: Us): Us | null {
+function movingUnfollowedAt(p: Project, fx: EffectItem, m: MediaItem, a: Us, b: Us): Us | null {
+  const A = Math.max(m.startUs, fx.startUs), B = Math.min(itemEndUs(m), itemEndUs(fx))
+  const spans = clipMovingSpans(m, A, B).filter(([s, e]) => s < b && e > a)
+  if (!spans.length) return null
+  const all = followCheckTimes(fx, m, A, B) // ordenado
+  const lowerBound = (x: Us): number => {
+    let lo = 0, hi = all.length
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (all[mid] < x) lo = mid + 1; else hi = mid }
+    return lo
+  }
+  const cuts = spans.map(([s, e]) => ({ s, from: Math.max(s, a), to: Math.min(e, b) }))
+  // contato (um só para o clipe todo): amostras das keys dentro dos trechos, o começo de cada um e 30 uniformes sobre
+  // o comprimento somado — o mesmo critério de regionTouchesOver, restrito aos trechos
+  const touches = (): boolean => {
+    const hit = (at: Us): boolean => {
+      const cf = clipFrameAt(p, m, at)
+      return !!cf && regionTouchesClip(fx, effectRegionAt(p, fx, at), cf)
+    }
+    let total = 0
+    for (const c of cuts) {
+      total += c.to - c.from
+      if (hit(c.from) || hit(c.to - 1)) return true
+      for (let k = lowerBound(c.from); k < all.length && all[k] < c.to; k++) if (hit(all[k])) return true
+    }
+    for (let i = 0; i < 30; i++) {
+      let off = Math.round((total * i) / 30)
+      for (const c of cuts) {
+        const len = c.to - c.from
+        if (off < len) { if (hit(c.from + off)) return true; break }
+        off -= len
+      }
+    }
+    return false
+  }
+  if (!touches()) return null
   const tol = FOLLOW_TOL * Math.max(p.canvas.width, p.canvas.height)
-  const times = followCheckTimes(fx, m, a, b)
   const pose = (at: Us): ContentPose | null => {
     const cf = clipFrameAt(p, m, at)
     return cf ? contentPose(cf, effectRegionAt(p, fx, at)) : null // null = conteúdo invisível neste instante
@@ -157,28 +192,26 @@ function unfollowedAt(p: Project, fx: EffectItem, m: MediaItem, a: Us, b: Us): U
     const e = poseError(ref, c)
     return e.px > tol || e.deg > FOLLOW_TOL_DEG
   }
-  // referência: o início do trecho em comum (não o da consulta), para o resultado não depender da janela pedida
-  let ref: ContentPose | null = pose(Math.max(m.startUs, fx.startUs))
-  let ok = a
-  for (const at of times) {
-    const cur = pose(at)
-    if (!ref) {
-      ref = cur
-      ok = at
-      continue
+  // trechos em ordem: o primeiro com desvio dá o instante mais cedo
+  for (const c of cuts) {
+    const times = [c.from, c.to - 1]
+    for (let k = lowerBound(c.from); k < all.length && all[k] < c.to; k++) times.push(all[k])
+    const seq = [...new Set(times)].sort((x, y) => x - y)
+    let ref: ContentPose | null = pose(c.s)
+    let ok = c.from
+    for (const at of seq) {
+      const cur = pose(at)
+      if (!ref) { ref = cur; ok = at; continue }
+      if (!off(ref, cur)) { ok = at; continue }
+      // bisseção até ~1 ms: o instante em que a região começa a sair (o que "Revisar" mostra)
+      let lo = ok, hi = at
+      while (hi - lo > 1000) {
+        const mid = Math.round((lo + hi) / 2)
+        if (off(ref, pose(mid))) hi = mid
+        else lo = mid
+      }
+      return hi
     }
-    if (!off(ref, cur)) {
-      ok = at
-      continue
-    }
-    // bisseção até ~1 ms: o instante em que a região começa a sair (o que "Revisar" mostra)
-    let lo = ok, hi = at
-    while (hi - lo > 1000) {
-      const mid = Math.round((lo + hi) / 2)
-      if (off(ref, pose(mid))) hi = mid
-      else lo = mid
-    }
-    return hi
   }
   return null
 }
@@ -263,12 +296,7 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
           // onde o clipe se move (ex.: o trecho do zoom automático) a região precisa acompanhá-lo
           const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
           if (a >= b) continue
-          let at: Us | null = null
-          for (const [sa, sb] of clipMovingSpans(m, a, b)) {
-            if (!regionTouchesOver(p, it, m, sa, sb)) continue
-            const u = unfollowedAt(p, it, m, sa, sb)
-            if (u !== null && (at === null || u < at)) at = u
-          }
+          const at = movingUnfollowedAt(p, it, m, a, b)
           const kind = inGroup ? 'transformedUnderEffect' : 'unlinkedOverMoving'
           if (at !== null && (!moved[kind] || at < moved[kind]!.tUs)) moved[kind] = { tUs: at, mediaItemId: m.id }
         }

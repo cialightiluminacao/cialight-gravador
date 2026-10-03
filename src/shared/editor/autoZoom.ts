@@ -16,7 +16,7 @@
 // intervalo e insere keys presos onde a interpolação descobriria o quadro.
 import { easeValue, evalAnim, insertKeyExact } from './anim'
 import { clicksBetween, cursorAt, type CursorTrackV1 } from '../cursor'
-import { toScreen, type ClipFrame } from './contentPose'
+import { clipMovesIn, toScreen, type ClipFrame } from './contentPose'
 import { cursorTimeMap, type CursorTimeMap } from './cursorTime'
 import { defaultVisual } from './factory'
 import { layerBase, type LayerBase } from './layerGeometry'
@@ -309,7 +309,15 @@ export function applyAutoZoom(p: Project, itemId: string, track: CursorTrackV1, 
   // regra do F4 (efeitos sem âncora cujo tempo e região encostam no clipe: effectsOverClip); o detalhe (instante,
   // texto) vem do privacyWarnings quando ele atribui o aviso a este clipe — ele aponta só o 1º clipe que se move
   const found = privacyWarnings(project, item.startUs, itemEndUs(item))
-  const over = effectsOverClip(project, itemId)
+  const raw = effectsOverClip(project, itemId)
+  // só os efeitos que cruzam um trecho em que o clipe de fato se move (effectsOverClip testa o clipe inteiro: um blur
+  // rastreado sobre um trecho parado — "Seguir conteúdo" antes do zoom — não deve ganhar aviso)
+  const clip = findItem(project, itemId)!.item as MediaItem
+  const moves = (id: string): boolean => {
+    const fx = findItem(project, id)!.item
+    return clipMovesIn(clip, Math.max(clip.startUs, fx.startUs), Math.min(itemEndUs(clip), itemEndUs(fx)))
+  }
+  const over = { linked: raw.linked.filter(moves), unlinked: raw.unlinked.filter(moves) }
   const warnings: PrivacyWarning[] = [
     ...over.linked.map((id) => [id, 'transformedUnderEffect'] as const),
     ...over.unlinked.map((id) => [id, 'unlinkedOverMoving'] as const)

@@ -12,6 +12,7 @@ import { attachEffects } from './followTransform'
 import { layerBase } from './layerGeometry'
 import { EditError, findItem } from './ops'
 import type { Asset, MediaItem, Project, Us, VisualProps } from './project'
+import { privacyWarnings } from './privacy'
 import { clipFrameAt, effectRegionAt } from './resolve'
 import { coversFrame, sourceOf } from './zoom'
 
@@ -428,6 +429,24 @@ describe('privacidade (invariante 2)', () => {
     const w = res.privacyWarnings.find((x) => x.itemId === 'fx')
     expect(w).toMatchObject({ kind: 'unlinkedOverMoving', mediaItemId: 'm' })
     expect(w!.message.length).toBeGreaterThan(10)
+  })
+  it('blur rastreado (keys) sobre um trecho parado: sem aviso, nas duas ordens (Seguir conteúdo antes ou depois do zoom)', () => {
+    const tracked = { value: 0.3, keys: [{ tUs: 16 * S, value: 0.3, ease: 'linear' as const }, { tUs: 19 * S, value: 0.6, ease: 'linear' as const }] }
+    const withFx = (p: Project): Project => {
+      const fx = { ...createEffectItem('blur', 16 * S, 19 * S, { x: 0.3, y: 0.3, w: 0.2, h: 0.2 }), id: 'fx' }
+      fx.region = { ...fx.region, x: tracked }
+      return { ...p, tracks: [p.tracks[0], { id: 'tf', kind: 'video', name: 'Efeitos', role: 'effects', muted: false, hidden: false, locked: false, volume: 1, items: [fx] }] }
+    }
+    // rastreado antes do zoom
+    const before = applyAutoZoom(withFx(proj('16:9', D)), 'm', track, DEFAULT_AUTO_ZOOM)
+    expect(before.segments).toBeGreaterThan(0)
+    expect(before.privacyWarnings.filter((w) => w.itemId === 'fx')).toEqual([])
+    // rastreado depois do zoom
+    const zoomed = applyAutoZoom(proj('16:9', D), 'm', track, DEFAULT_AUTO_ZOOM).project
+    expect(privacyWarnings(withFx(zoomed), 0, D).filter((w) => w.itemId === 'fx')).toEqual([])
+    // efeito parado sobre um zoom continua avisando
+    const still = applyAutoZoom(scene(), 'm', track, DEFAULT_AUTO_ZOOM)
+    expect(still.privacyWarnings.some((w) => w.itemId === 'fx')).toBe(true)
   })
   it('blur sem âncora sobre o clipe: aviso (a região não acompanha o zoom)', () => {
     const res = applyAutoZoom(scene(), 'm', track, DEFAULT_AUTO_ZOOM)

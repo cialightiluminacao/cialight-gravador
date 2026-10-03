@@ -266,4 +266,46 @@ describe('privacyWarnings: movimento avaliado por intervalo (zoom automático + 
     expect(u).toHaveLength(1)
     expect(u[0].tUs).toBeLessThan(3 * S)
   })
+  it('blur rastreado em 0–10 s, zoom em 1–3 s: avisa só se a região não acompanha durante o zoom', () => {
+    // a região anda com o conteúdo (keys) fora do zoom; durante o zoom ela fica parada → avisa dentro de 1–3 s
+    const p = scene({ link: true, fxStart: 0, fxEnd: 10 * S, tracked: false })
+    const fx = p.tracks[1].items[0] as EffectItem
+    fx.region.x = lin([0, 0.3], [S, 0.35], [3 * S, 0.35], [10 * S, 0.5])
+    const w = of(p, 'transformedUnderEffect')
+    expect(w).toHaveLength(1)
+    expect(w[0].tUs).toBeGreaterThanOrEqual(S)
+    expect(w[0].tUs).toBeLessThan(3 * S)
+    // região que acompanha o zoom (centro e tamanho no mesmo ponto do conteúdo) e anda fora dele: sem aviso
+    const q = scene({ link: true, fxStart: 0, fxEnd: 10 * S, tracked: false })
+    const m = q.tracks[0].items[0] as MediaItem
+    const f2 = q.tracks[1].items[0] as EffectItem
+    m.visual!.transform.scale = lin([0, 1], [S, 1], [3 * S, 2], [3.5 * S, 2])
+    f2.region.x = lin([0, 0.3], [S, 0.3], [3 * S, 0.1], [10 * S, 0.1])
+    f2.region.y = lin([0, 0.3], [S, 0.3], [3 * S, 0.1], [10 * S, 0.1])
+    f2.region.w = lin([0, 0.1], [S, 0.1], [3 * S, 0.2], [10 * S, 0.2])
+    f2.region.h = lin([0, 0.1], [S, 0.1], [3 * S, 0.2], [10 * S, 0.2])
+    expect(of(q, 'transformedUnderEffect')).toEqual([])
+  })
+  it('desempenho: 200 trechos de zoom automático + blur parado longo', () => {
+    const p = createEmptyProject('t')
+    p.assets = [{ ...vid, durationUs: 3600 * S }]
+    const m = { ...createMediaItem(p.assets[0], 0, 'video'), id: 'm', durationUs: 3600 * S, linkId: 'l1' } as MediaItem
+    const ks: [number, number][] = []
+    for (let i = 0; i < 200; i++) ks.push([i * 18 * S, 1], [i * 18 * S + 2 * S, 1.8], [i * 18 * S + 5 * S, 1.8], [i * 18 * S + 7 * S, 1])
+    m.visual!.transform.scale = lin(...ks)
+    const base = createEffectItem('blur', 0, 3600 * S)
+    const fx: EffectItem = { ...base, id: 'fx', linkId: 'l1', region: { ...base.region, x: { value: 0.3 }, y: { value: 0.3 }, w: { value: 0.1 }, h: { value: 0.1 }, rotation: { value: 0 } } }
+    p.tracks = [
+      { id: 'tv', kind: 'video', name: 'V', muted: false, hidden: false, locked: false, volume: 1, items: [m] },
+      { id: 'tf', kind: 'video', name: 'E', role: 'effects', muted: false, hidden: false, locked: false, volume: 1, items: [fx] }
+    ]
+    let best = Infinity, n = 0
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now()
+      n = privacyWarnings(p, 0, 3600 * S).filter((w) => w.kind === 'transformedUnderEffect').length
+      best = Math.min(best, performance.now() - t0)
+    }
+    expect(n).toBe(1)
+    expect(best).toBeLessThan(500)
+  })
 })
