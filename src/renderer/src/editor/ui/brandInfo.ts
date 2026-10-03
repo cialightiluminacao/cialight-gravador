@@ -43,3 +43,13 @@ export function applyMessage(mode: ApplyMode, t: Pick<BrandTemplate, 'name' | 'd
       return { title: `“${t.name}” aplicado como marca d'água`, description: 'Do início ao fim do conteúdo, numa faixa própria no topo. Ctrl+Z desfaz.' }
   }
 }
+
+/**
+ * Marcas de Entrada/Saída e playhead depois de "Usar como abertura": a abertura desloca o projeto inteiro em
+ * `shiftUs`, então as marcas (tempos absolutos, fora do projeto) andam junto — uma exportação "Entrada/Saída" logo
+ * depois continua no mesmo trecho. Outros modos: inalterados.
+ */
+export function marksAfterApply(mode: ApplyMode, shiftUs: Us, m: { inUs: Us | null; outUs: Us | null; playheadUs: Us }): { inUs: Us | null; outUs: Us | null; playheadUs: Us } {
+  if (mode !== 'intro' || shiftUs <= 0) return m
+  return { inUs: m.inUs === null ? null : m.inUs + shiftUs, outUs: m.outUs === null ? null : m.outUs + shiftUs, playheadUs: m.playheadUs + shiftUs }
+}

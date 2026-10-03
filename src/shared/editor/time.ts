@@ -12,6 +12,17 @@ export const frameToUs = (frame: number, fps: number): Us => Math.round((frame *
 export const snapToFrame = (us: Us, fps: number): Us => frameToUs(Math.round((us * fps) / 1e6), fps)
 export const itemEndUs = (it: { startUs: Us; durationUs: Us }): Us => it.startUs + it.durationUs
 
+/** Primeiro índice cujo item termina depois de `us` (itens em ordem e sem sobreposição → fins em ordem). O(log n). */
+export function firstEndingAfter(items: readonly { startUs: Us; durationUs: Us }[], us: Us): number {
+  let lo = 0, hi = items.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (itemEndUs(items[mid]) <= us) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
 /** "HH:MM:SS:FF" (sem horas se < 1h → "MM:SS:FF"). */
 export function formatTimecodeUs(us: Us, fps: number): string {
   const totalFrames = Math.max(0, usToFrame(us, fps))

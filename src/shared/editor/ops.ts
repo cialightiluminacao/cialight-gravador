@@ -7,7 +7,7 @@ import { conservativeRegion, regionAabb } from './contentPose'
 import { effectRegionAt, sourceTimeUs, visualTrackBelow } from './resolve'
 import type { EffectPresetId, EffectRegionInit, ShapePresetId, TextPresetId } from './factory'
 import { newId } from './ids'
-import { frameDurUs, itemEndUs } from './time'
+import { firstEndingAfter, frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
 import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, ShapeItem, TextItem, TextStyle, Track, TrackKind, TransitionKind, Us } from './project'
 import { canTransition, DEFAULT_TRANSITION_US, maxTransitionUs, MIN_TRANSITION_US, transitionInOf, transitionPairOk } from './transitions'
@@ -397,7 +397,8 @@ function rippleShift(d: Project, pivotUs: Us, shift: Us, exclude: Set<string>, f
   return followed
 }
 
-function isFree(t: Track, s: Us, e: Us, exclude?: Set<string>): boolean {
+/** A faixa está livre em [s, e) (ignorando os itens de `exclude`)? */
+export function isFree(t: Track, s: Us, e: Us, exclude?: Set<string>): boolean {
   return !t.items.some((i) => !exclude?.has(i.id) && i.startUs < e && end(i) > s)
 }
 
@@ -2074,7 +2075,7 @@ export function setTransitionDuration(p: Project, rightItemId: string, durationU
 export const CAPTION_DEFAULT_US = 2_000_000
 
 /** Índice de uma faixa de sobreposição nova: no topo das de vídeo, logo abaixo da de legendas. */
-function overlayInsertIndex(p: Project): number {
+export function overlayInsertIndex(p: Project): number {
   const cap = p.tracks.findIndex(isCaptionsTrack)
   return cap >= 0 ? cap : aboveLastVideo(p)
 }
@@ -2212,16 +2213,6 @@ export function importCaptions(p: Project, cues: readonly Cue[], opts: { mode: '
   const keep = opts.mode === 'append' && existing ? existing.items : []
   const sorted = cues.map((c, i) => ({ c, i })).sort((a, b) => a.c.startUs - b.c.startUs || a.i - b.i)
   const add: TextItem[] = []
-  // primeira existente que termina depois de `t` (busca binária: as existentes estão em ordem e sem sobreposição)
-  const firstEndingAfter = (t: Us): number => {
-    let lo = 0, hi = keep.length
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (end(keep[mid]) <= t) lo = mid + 1
-      else hi = mid
-    }
-    return lo
-  }
   let lastEnd = 0
   for (const { c, i } of sorted) {
     const label = `Legenda ${i + 1} (${fmtS(Math.max(0, c.startUs + off))})`
@@ -2247,7 +2238,7 @@ export function importCaptions(p: Project, cues: readonly Cue[], opts: { mode: '
     }
     // empurra o início para depois das existentes que o cobrem (encostadas em sequência) e corta o fim na próxima; a
     // busca é refeita a cada cue — uma cue descartada nunca desloca o cursor das seguintes
-    let j = firstEndingAfter(s)
+    let j = firstEndingAfter(keep, s)
     while (j < keep.length && keep[j].startUs <= s) {
       s = end(keep[j])
       changed = true

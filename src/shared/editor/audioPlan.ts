@@ -144,7 +144,10 @@ function applyTransitions(p: Project, segs: AudioSegment[]): AudioSegment[] {
   for (const t of p.tracks) {
     for (const i of t.items) {
       items.set(i.id, i)
-      if (i.linkId) byLink.set(i.linkId, [...(byLink.get(i.linkId) ?? []), i])
+      if (!i.linkId) continue
+      const g = byLink.get(i.linkId)
+      if (g) g.push(i)
+      else byLink.set(i.linkId, [i])
     }
   }
   const envs = new Map<string, GainPoint[][]>()

@@ -15,7 +15,7 @@
 // "Salvar arquivo .srt ao lado" no intervalo I–O (tempos deslocados) e a escolha lembrada na sessão; (9) textos pt-BR.
 // Compara o sha256 do settings.json antes/depois. Screenshots em docs/qa/editor-f5/ (só mídia sintética).
 import { spawn, execFileSync } from 'child_process'
-import { createHash } from 'crypto'
+import { guardSettings } from './settingsGuard.mjs'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'fs'
 import { join, resolve } from 'path'
 import electronPath from 'electron'
@@ -49,10 +49,7 @@ const SRT_TEXT = [
 ].join('\r\n')
 writeFileSync(SRT_IN, cp1252(SRT_TEXT))
 
-const settingsBefore = existsSync(SETTINGS) ? readFileSync(SETTINGS) : null
-const sha = (b) => (b ? createHash('sha256').update(b).digest('hex') : 'ausente')
-const hashBefore = sha(settingsBefore)
-console.log(`settings.json sha256 antes: ${hashBefore}`)
+const settings = guardSettings(SETTINGS)
 
 let app = null
 if (!ATTACH) {
@@ -436,31 +433,7 @@ try {
   // Só `pip` mudando é tolerado (a tela Preparar regrava a geometria do PiP quando a emulação de viewport do CDP
   // redimensiona a janela — efeito do app, intermitente e igual nos outros scripts de QA): restaurado e só avisa.
   await sleep(800)
-  const now = existsSync(SETTINGS) ? readFileSync(SETTINGS) : null
-  const hashAfter = sha(now)
-  console.log(`settings.json sha256 depois: ${hashAfter}`)
-  if (hashAfter === hashBefore) console.log('  ✔ settings.json intocado (hash igual)')
-  else {
-    let keys = []
-    try {
-      const a = JSON.parse(settingsBefore?.toString() ?? '{}')
-      const b = JSON.parse(now?.toString() ?? '{}')
-      keys = Object.keys({ ...a, ...b }).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]))
-      for (const k of keys) console.log(`    ${k}: ${JSON.stringify(a[k])?.slice(0, 140)} → ${JSON.stringify(b[k])?.slice(0, 140)}`)
-    } catch {
-      keys = ['(ilegível)']
-    }
-    if (settingsBefore) writeFileSync(SETTINGS, settingsBefore)
-    const restored = sha(existsSync(SETTINGS) ? readFileSync(SETTINGS) : null)
-    const benign = keys.length > 0 && keys.every((k) => k === 'pip')
-    if (restored !== hashBefore) {
-      failures++
-      console.log(`  ✘ settings.json mudou (${keys.join(', ')}) e a restauração não devolveu o hash original`)
-    } else if (!benign) {
-      failures++
-      console.log(`  ✘ settings.json mudou durante o teste (chaves: ${keys.join(', ')}); restaurado (hash ${restored.slice(0, 12)}…)`)
-    } else console.log(`  ⚠ o app regravou só a geometria do PiP (pip) — restaurado; hash final igual ao de antes (${restored.slice(0, 12)}…)`)
-  }
+  failures += settings.finish() // settingsGuard.mjs: restaura e confere o hash; só `pip` (regravado pelo app) é tolerado
   console.log(failures ? `\n${failures} falha(s) em ${checks} verificações` : `\ntudo OK (${checks} verificações)`)
   process.exit(failures ? 1 : 0)
 }

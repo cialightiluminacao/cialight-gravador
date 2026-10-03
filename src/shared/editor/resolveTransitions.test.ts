@@ -110,7 +110,7 @@ describe('resolveFrame: TransitionLayer', () => {
     const t1 = performance.now()
     for (let i = 0; i < N; i++) resolveFrame(p, 51 * dur - 0.4 * S + (i % 800) * 1000)
     const msIn = (performance.now() - t1) / N
-    console.info(`resolveFrame: ${ms.toFixed(4)} ms/chamada espalhada (${inWin} em janela); ${msIn.toFixed(4)} ms/chamada em janela`)
+    if (process.env.PERF_LOG) console.info(`resolveFrame: ${ms.toFixed(4)} ms/chamada espalhada (${inWin} em janela); ${msIn.toFixed(4)} ms/chamada em janela`)
     expect(ms).toBeLessThan(1)
     expect(msIn).toBeLessThan(1)
   })

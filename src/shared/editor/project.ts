@@ -139,7 +139,8 @@ export interface EffectItem extends ItemBase {
   /**
    * Alvo gravado de um efeito ANTIGO (sem targetTrackId) cuja faixa-alvo tinha texto/forma: vale a regra do alvo antigo
    * — só mídia, anotações e transição da faixa contam (o texto dela não é afetado). Congela a ligação de hoje para que
-   * uma faixa nova entre o efeito e a faixa dele não roube o alvo. A v1.3 descarta o campo (ela não desenha texto).
+   * uma faixa nova entre o efeito e a faixa dele não roube o alvo. A v1.3 descarta o campo e o resultado é o
+   * mesmo: ela desenha texto, mas o efeito de escopo track dela nunca se liga a uma camada de texto.
    */
   targetMediaOnly?: true
   /**

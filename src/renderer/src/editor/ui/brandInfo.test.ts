@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyMessage, BRAND_KIND_LABEL, BRAND_MODE_LABEL, brandModes, formatBrandDuration } from './brandInfo'
+import { applyMessage, marksAfterApply, BRAND_KIND_LABEL, BRAND_MODE_LABEL, brandModes, formatBrandDuration } from './brandInfo'
 
 describe('brandInfo', () => {
   it('marca d’água só nos tipos marca d’água e sobreposição', () => {
@@ -21,5 +21,16 @@ describe('brandInfo', () => {
   })
   it('mensagem da abertura diz quanto o projeto andou', () => {
     expect(applyMessage('intro', { name: 'Vinheta', durationUs: 3_000_000 }).description).toMatch(/^O projeto foi para a frente 3 s/)
+  })
+})
+
+describe('marksAfterApply', () => {
+  it('abertura: Entrada/Saída e playhead andam junto com o projeto; marcas vazias continuam vazias', () => {
+    expect(marksAfterApply('intro', 2_000_000, { inUs: 1_000_000, outUs: 5_000_000, playheadUs: 3_000_000 })).toEqual({ inUs: 3_000_000, outUs: 7_000_000, playheadUs: 5_000_000 })
+    expect(marksAfterApply('intro', 2_000_000, { inUs: null, outUs: 5_000_000, playheadUs: 0 })).toEqual({ inUs: null, outUs: 7_000_000, playheadUs: 2_000_000 })
+  })
+  it('outros modos não mexem', () => {
+    const m = { inUs: 1, outUs: 2, playheadUs: 3 }
+    for (const mode of ['playhead', 'outro', 'watermark'] as const) expect(marksAfterApply(mode, 2_000_000, m)).toBe(m)
   })
 })

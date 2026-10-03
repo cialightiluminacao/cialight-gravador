@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { sanitizeFileName } from '../filenames'
 import { newId } from './ids'
-import { aboveGuard, addTrack, contentEndUs, EditError, ensureCaptionsTrack, freeTrackName, insertItems, isCaptionsTrack, isFxTrack, isOverlayTrack, linkItems, musicTrackName, shiftAllContent } from './ops'
+import { aboveGuard, addTrack, contentEndUs, EditError, ensureCaptionsTrack, freeTrackName, insertItems, isCaptionsTrack, isFree, isFxTrack, isOverlayTrack, linkItems, musicTrackName, overlayInsertIndex, shiftAllContent } from './ops'
 import { MIN_ITEM_US } from './project'
 import type { Asset, AssetKind, Item, MediaItem, Project, ShapeItem, TextItem, Track, Us } from './project'
 import { BrandItemSchema } from './schema'
@@ -151,16 +151,6 @@ function categoryOf(tt: BrandTemplateTrack): Category {
   return 'video'
 }
 
-const isFree = (t: Track, s: Us, e: Us): boolean => !t.items.some((i) => i.startUs < e && itemEndUs(i) > s)
-/** Índice de uma faixa de sobreposição nova: no topo das de vídeo, logo abaixo da de legendas. */
-function overlayIndex(p: Project): number {
-  const cap = p.tracks.findIndex(isCaptionsTrack)
-  if (cap >= 0) return cap
-  let last = -1
-  p.tracks.forEach((t, i) => { if (t.kind === 'video') last = i })
-  return last + 1
-}
-
 /** Cópia do item do modelo para o projeto: id novo, início absoluto, vínculo e asset mapeados. */
 function instantiate(it: BrandItem, startUs: Us, links: Map<string, string>, assetMap: Readonly<Record<string, Asset>>): BrandItem {
   const c = structuredClone(it) as BrandItem
@@ -226,7 +216,7 @@ function place(p0: Project, template: BrandTemplate, assetMap: Readonly<Record<s
       const lastFx = q.tracks.reduce((m, t, i) => (isFxTrack(t) ? i : m), -1)
       trackId = q.tracks.find((t, i) => i > floor && i > lastFx && isOverlayTrack(t) && ok(t))?.id
       if (!trackId) {
-        const r = addTrack(q, 'video', overlayIndex(q), freeTrackName(q, 'Texto'))
+        const r = addTrack(q, 'video', overlayInsertIndex(q), freeTrackName(q, 'Texto'))
         q = r.project
         trackId = r.trackId
       }
@@ -292,7 +282,7 @@ function placeWatermark(p0: Project, template: BrandTemplate, assetMap: Readonly
       }
     }
     for (const c of out) delete c.linkId
-    const r = addTrack(q, 'video', overlayIndex(q), freeTrackName(q, "Marca d'água"))
+    const r = addTrack(q, 'video', overlayInsertIndex(q), freeTrackName(q, "Marca d'água"))
     q = insertItems(r.project, r.trackId, out, 'overwrite')
     itemIds.push(...out.map((i) => i.id))
   }

@@ -1,6 +1,6 @@
 import { transitionWindowAt, canTransition, maxTransitionUs, MIN_TRANSITION_US, transitionPairOk, type TransitionWindow } from '@shared/editor/transitions'
 import type { Item, Project, Track, Us } from '@shared/editor/project'
-import { itemEndUs } from '@shared/editor/time'
+import { firstEndingAfter, itemEndUs } from '@shared/editor/time'
 import { isCaptionsTrack } from '@shared/editor/ops'
 import { usToPx } from '../../state/zoom'
 
@@ -11,17 +11,6 @@ import { usToPx } from '../../state/zoom'
 export const CUT_HIT_PX = 12
 /** Largura mínima (px) da faixa desenhada de uma transição: abaixo disso o ícone ainda precisa ser clicável. */
 export const MIN_MARK_W = 22
-
-/** Primeiro índice cujo item termina depois de `us` (itens ordenados, sem sobreposição). */
-function firstEndingAfter(items: Item[], us: Us): number {
-  let lo = 0, hi = items.length
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1
-    if (itemEndUs(items[mid]) <= us) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
 
 /** Janelas de transição da faixa que tocam [fromUs, toUs] (O(log n + visíveis)). */
 export function visibleTransitions(track: Track, fromUs: Us, toUs: Us): TransitionWindow[] {
