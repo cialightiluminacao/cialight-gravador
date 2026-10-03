@@ -94,6 +94,42 @@ describe('BrandStore', () => {
     expect(readdirSync(join(dir, 'ud')).filter((f) => f.startsWith('brand-templates.corrupt-'))).toHaveLength(2)
   })
 
+  it('um modelo inválido (ex.: de uma versão mais nova): só ele sai, os outros ficam; o original é guardado antes de regravar', () => {
+    store.save(tpl('bt_a', false), [])
+    store.save(tpl('bt_c', false), [])
+    const disk = JSON.parse(readFileSync(file(), 'utf8'))
+    const future = { ...disk.templates[0], id: 'bt_b', kind: 'transicaoNova' } // valor de enum que este build não conhece
+    disk.templates.splice(1, 0, future)
+    const original = JSON.stringify(disk, null, 2)
+    writeFileSync(file(), original)
+    const r = store.list()
+    expect(r.templates.map((t) => t.id)).toEqual(['bt_a', 'bt_c'])
+    expect(r.warning).toMatch(/^1 modelo de marca não pôde ser lido e ficou de fora .*os outros continuam.*brand-templates\.corrupt-2026-10-02T13-14-15-000Z\.json/)
+    // o original inteiro (com o modelo desconhecido) foi guardado; a lista foi regravada só com os válidos
+    expect(readFileSync(join(dir, 'ud', 'brand-templates.corrupt-2026-10-02T13-14-15-000Z.json'), 'utf8')).toBe(original)
+    expect(JSON.parse(readFileSync(file(), 'utf8')).templates.map((t: BrandTemplate) => t.id)).toEqual(['bt_a', 'bt_c'])
+    // a próxima leitura é limpa e editar continua funcionando
+    expect(store.list()).toEqual({ templates: r.templates })
+    store.rename('bt_c', 'C')
+    expect(store.list().templates.map((t) => t.name)).toEqual(['Modelo bt_a', 'C'])
+  })
+
+  it('vários inválidos: contagem no aviso; todos inválidos: lista vazia, original guardado, arquivo continua válido', () => {
+    store.save(tpl('bt_a', false), [])
+    const disk = JSON.parse(readFileSync(file(), 'utf8'))
+    writeFileSync(file(), JSON.stringify({ version: 1, templates: [{ id: '../fora' }, 42, disk.templates[0]] }))
+    const r = store.list()
+    expect(r.templates.map((t) => t.id)).toEqual(['bt_a'])
+    expect(r.warning).toMatch(/^2 modelos de marca não puderam ser lidos e ficaram de fora/)
+    writeFileSync(file(), JSON.stringify({ version: 1, templates: [{ nada: true }] }))
+    const s2 = new BrandStore(join(dir, 'ud'), { now: () => new Date('2026-10-02T13:14:16.000Z') })
+    expect(s2.list().templates).toEqual([])
+    expect(JSON.parse(readFileSync(file(), 'utf8'))).toEqual({ version: 1, templates: [] })
+    const backups = readdirSync(join(dir, 'ud')).filter((f) => f.startsWith('brand-templates.corrupt-'))
+    expect(backups).toHaveLength(2)
+    expect(backups.map((b) => readFileSync(join(dir, 'ud', b), 'utf8')).some((t) => t.includes('"nada":true'))).toBe(true)
+  })
+
   it('corrompido entre listar e salvar/renomear/excluir: lança com o aviso (não grava por cima calado)', () => {
     store.save(tpl('bt_a', false), [])
     writeFileSync(file(), 'quebrado')
