@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyMessage, marksAfterApply, BRAND_KIND_LABEL, BRAND_MODE_LABEL, brandModes, formatBrandDuration } from './brandInfo'
+import { applyMessage, marksAfterApply, marksMetaForApply, BRAND_KIND_LABEL, BRAND_MODE_LABEL, brandModes, formatBrandDuration } from './brandInfo'
 
 describe('brandInfo', () => {
   it('marca d’água só nos tipos marca d’água e sobreposição', () => {
@@ -32,5 +32,16 @@ describe('marksAfterApply', () => {
   it('outros modos não mexem', () => {
     const m = { inUs: 1, outUs: 2, playheadUs: 3 }
     for (const mode of ['playhead', 'outro', 'watermark'] as const) expect(marksAfterApply(mode, 2_000_000, m)).toBe(m)
+  })
+})
+
+describe('marksMetaForApply', () => {
+  const m = { inUs: 1_000_000, outUs: 3_000_000, playheadUs: 2_000_000 }
+  it('abertura leva before/after', () => {
+    expect(marksMetaForApply('intro', 2_000_000, m)).toEqual({ before: m, after: { inUs: 3_000_000, outUs: 5_000_000, playheadUs: 4_000_000 } })
+  })
+  it('outros modos e duração 0 não levam meta', () => {
+    for (const mode of ['overlay', 'outro', 'watermark'] as const) expect(marksMetaForApply(mode as never, 2_000_000, m)).toBeUndefined()
+    expect(marksMetaForApply('intro', 0, m)).toBeUndefined()
   })
 })

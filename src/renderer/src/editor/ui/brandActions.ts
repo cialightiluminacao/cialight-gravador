@@ -6,7 +6,7 @@ import { EditError } from '@shared/editor/ops'
 import type { Asset } from '@shared/editor/project'
 import { ipcErrorMessage } from '@/lib/ipcError'
 import { flushAutosave, useEditorStore } from '../state/editorStore'
-import { applyMessage, marksAfterApply } from './brandInfo'
+import { applyMessage, marksMetaForApply } from './brandInfo'
 import { enqueueAsset } from './mediaImport'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
@@ -74,17 +74,20 @@ export async function applyBrandTemplate(t: BrandTemplate, mode: ApplyMode): Pro
   let result: ReturnType<typeof applyTemplate> | null = null
   // marcas antes/depois no MESMO passo de histórico: desfazer a abertura devolve Entrada/Saída/playhead exatos
   const before = { inUs: st().inUs, outUs: st().outUs, playheadUs: st().playheadUs }
+  const marksMeta = marksMetaForApply(mode, t.durationUs, before)
   const ok = st().apply((q) => {
     result = applyTemplate(q, t, assetMap, mode, atUs)
     return result.project
-  }, { marks: { before, after: marksAfterApply(mode, t.durationUs, before) } })
+  }, { marks: marksMeta })
   if (!ok || !result) return false
   const r = result as ReturnType<typeof applyTemplate>
   // abertura: o projeto andou t.durationUs — Entrada/Saída e playhead andam junto (o mesmo trecho continua marcado)
-  const s = st()
-  const m = marksAfterApply(mode, t.durationUs, { inUs: s.inUs, outUs: s.outUs, playheadUs: s.playheadUs })
-  if (m.inUs !== s.inUs || m.outUs !== s.outUs) s.setInOut(m.inUs, m.outUs)
-  if (m.playheadUs !== s.playheadUs) s.setPlayhead(m.playheadUs)
+  if (marksMeta) {
+    const s = st()
+    const m = marksMeta.after
+    if (m.inUs !== s.inUs || m.outUs !== s.outUs) s.setInOut(m.inUs, m.outUs)
+    if (m.playheadUs !== s.playheadUs) s.setPlayhead(m.playheadUs)
+  }
   st().select(r.itemIds)
   const msg = applyMessage(mode, t)
   if (r.warnings.length) toast.warning(msg.title, { description: `${r.warnings.join(' ')} ${msg.description}` })

@@ -53,3 +53,9 @@ export function marksAfterApply(mode: ApplyMode, shiftUs: Us, m: { inUs: Us | nu
   if (mode !== 'intro' || shiftUs <= 0) return m
   return { inUs: m.inUs === null ? null : m.inUs + shiftUs, outUs: m.outUs === null ? null : m.outUs + shiftUs, playheadUs: m.playheadUs + shiftUs }
 }
+
+/** Metadado de marcas para o histórico: só a abertura (que desloca o projeto) o leva; demais modos/duração 0 = undefined. */
+export function marksMetaForApply(mode: ApplyMode, shiftUs: Us, before: { inUs: Us | null; outUs: Us | null; playheadUs: Us }): { before: typeof before; after: typeof before } | undefined {
+  if (mode !== 'intro' || shiftUs <= 0) return undefined
+  return { before, after: marksAfterApply(mode, shiftUs, before) }
+}

@@ -74,3 +74,28 @@ describe('history', () => {
     expect(undoMeta(h)).toBeUndefined()
   })
 })
+
+describe('history meta — casos extras', () => {
+  it('commit após undo descarta a meta do futuro', () => {
+    const m = { before: 'b', after: 'a' }
+    let h = commit(initHistory(0), 1, 300, m)
+    h = undo(h)
+    expect(redoMeta(h)).toEqual(m)
+    h = commit(h, 9)
+    expect(h.future).toEqual([])
+    expect(redoMeta(h)).toBeUndefined()
+    expect(h.futureMeta ?? []).toEqual([])
+  })
+  it('meta sobrevivente continua alinhada após o limite', () => {
+    const m = { before: 'b', after: 'a' }
+    let h = commit(initHistory(0), 1, 3)
+    h = commit(h, 2, 3, m)
+    h = commit(h, 3, 3)
+    h = commit(h, 4, 3)
+    expect(h.past).toEqual([1, 2, 3])
+    expect(h.pastMeta).toEqual([m, undefined, undefined])
+    h = undo(undo(undo(h)))
+    expect(h.present).toBe(1)
+    expect(redoMeta(h)).toEqual(m)
+  })
+})
