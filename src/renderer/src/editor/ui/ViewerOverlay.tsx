@@ -18,6 +18,7 @@ import { TextEditor } from './viewer/TextEditor'
 import { startZoomDraw, ZoomRectPreview } from './viewer/ZoomTool'
 import { markFocusPoint, ReframeOverlay } from './viewer/ReframeOverlay'
 import { useReframe } from '../state/reframe'
+import { useTextEditRequest } from '../state/textEditRequest'
 
 // Manipulação direta no visualizador: clique seleciona (Ctrl/Shift alterna) — regiões de efeito
 // primeiro (ficam sempre "por cima" para seleção), senão a mídia abaixo —, arrastar move; alças do
@@ -66,6 +67,20 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
       toast('A edição do texto foi encerrada: o texto saiu do quadro. O que foi digitado não foi aplicado.')
     }
   }, [editingId, boxes])
+  // Enter/F2 (editorActions.editText): abre a edição assim que a caixa do texto existe no quadro (o playhead pode
+  // ter acabado de andar até ele); se o item não aparece no quadro (ex.: totalmente transparente), o pedido é descartado
+  const editRequest = useTextEditRequest((s) => s.itemId)
+  useEffect(() => {
+    if (!editRequest || !project || playing) return
+    const found = findItem(project, editRequest)
+    if (!found) return void useTextEditRequest.getState().request(null)
+    if (boxes.some((b) => b.itemId === editRequest)) {
+      useTextEditRequest.getState().request(null)
+      if (!drawing && !zooming && !reframing) setEditingId(editRequest)
+    } else if (playheadUs >= found.item.startUs && playheadUs < found.item.startUs + found.item.durationUs) {
+      useTextEditRequest.getState().request(null)
+    }
+  }, [editRequest, project, boxes, playing, playheadUs, drawing, zooming, reframing])
   // saindo da tela no meio de um gesto: cancela; a ferramenta não fica ligada para o próximo projeto
   useEffect(
     () => () => {

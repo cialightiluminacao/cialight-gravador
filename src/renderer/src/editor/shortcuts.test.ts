@@ -138,4 +138,22 @@ describe('exportar (Ctrl+E)', () => {
     const labels = Object.entries(SHORTCUT_LABELS).filter(([, v]) => v === 'Ctrl+E')
     expect(labels).toEqual([['export', 'Ctrl+E']])
   })
+
+  it('Enter e F2 editam o texto selecionado; com modificadores ou em campos de texto, não', () => {
+    expect(shortcutFor(key('Enter'))).toBe('editText')
+    expect(shortcutFor(key('F2'))).toBe('editText')
+    expect(shortcutFor(key('Enter', { ctrlKey: true }))).toBeNull()
+    expect(shortcutFor(key('Enter', { shiftKey: true }))).toBeNull()
+    expect(shortcutFor(key('Enter', { altKey: true }))).toBeNull()
+    expect(shortcutFor(key('F2', { ctrlKey: true }))).toBeNull()
+    expect(shortcutFor(key('F2', { shiftKey: true }))).toBeNull()
+    for (const target of [{ tagName: 'TEXTAREA' }, { tagName: 'INPUT', type: 'text' }, { tagName: 'DIV', isContentEditable: true }]) {
+      expect(shortcutFor(key('Enter', { target: target as unknown as EventTarget }))).toBeNull()
+      expect(shortcutFor(key('F2', { target: target as unknown as EventTarget }))).toBeNull()
+    }
+    // Enter em botão/link/item de menu ativa o controle (acessibilidade): não é atalho
+    expect(shortcutFor(key('Enter', { target: { tagName: 'BUTTON' } as unknown as EventTarget }))).toBeNull()
+    expect(shortcutFor(key('Enter', { target: { tagName: 'DIV', getAttribute: () => 'menuitem' } as unknown as EventTarget }))).toBeNull()
+    expect(shortcutFor(key('Enter', { target: { tagName: 'DIV', getAttribute: () => null } as unknown as EventTarget }))).toBe('editText')
+  })
 })

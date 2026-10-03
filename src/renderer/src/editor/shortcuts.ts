@@ -43,6 +43,7 @@ export type ShortcutAction =
   | 'exportFrame' // Ctrl+Shift+E: exporta o quadro atual (cursor) como PNG
   | 'addTitle' // T: Título no playhead
   | 'addCrossfade' // Ctrl+T: Dissolver no corte mais próximo do playhead
+  | 'editText' // Enter / F2: edição direta do texto selecionado (como o duplo clique)
 
 /** Transporte (tocar/pausar, J/K/L, quadro a quadro, ±1 s, início/fim): o que passa com o painel não modal aberto. */
 export const TRANSPORT_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(['playPause', 'pause', 'shuttleBack', 'shuttleForward', 'prevFrame', 'nextFrame', 'back1s', 'fwd1s', 'home', 'end'])
@@ -93,7 +94,8 @@ export const SHORTCUT_LABELS: Partial<Record<ShortcutAction, string>> = {
   export: 'Ctrl+E',
   exportFrame: 'Ctrl+Shift+E',
   addTitle: 'T',
-  addCrossfade: 'Ctrl+T'
+  addCrossfade: 'Ctrl+T',
+  editText: 'Enter / F2'
 }
 
 /** Foco em campo editável: atalhos de uma tecla não podem roubar a digitação. */
@@ -105,6 +107,16 @@ export function isEditableTarget(t: EventTarget | null | undefined): boolean {
   if (tag === 'TEXTAREA' || tag === 'SELECT') return true
   if (tag === 'INPUT') return !['checkbox', 'radio', 'range', 'button'].includes((el.type ?? 'text').toLowerCase())
   return false
+}
+
+/** Controle que já usa Enter para ativar (botão, link, item de lista...): Enter ali não é atalho do editor. */
+function isActivatable(t: EventTarget | null | undefined): boolean {
+  if (!t || typeof t !== 'object') return false
+  const el = t as { tagName?: string; getAttribute?: (n: string) => string | null }
+  const tag = (el.tagName ?? '').toUpperCase()
+  if (tag === 'BUTTON' || tag === 'A' || tag === 'SUMMARY') return true
+  const role = el.getAttribute?.('role')
+  return !!role && ['button', 'link', 'menuitem', 'option', 'tab', 'checkbox', 'switch', 'radio', 'treeitem', 'gridcell'].includes(role)
 }
 
 /** Estado de teclas seguradas que muda o atalho (K segurado + J/L = quadro a quadro, como nos editores clássicos). */
@@ -188,6 +200,10 @@ export function shortcutFor(e: KeyLike, held: HeldKeys = {}): ShortcutAction | n
       return 'zoomOut'
     case 'Escape':
       return 'deselect'
+    case 'Enter':
+      return e.shiftKey || isActivatable(e.target) ? null : 'editText'
+    case 'F2':
+      return e.shiftKey ? null : 'editText'
     default:
       return null
   }

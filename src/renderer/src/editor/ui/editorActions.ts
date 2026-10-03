@@ -14,6 +14,8 @@ import { autoMusicLanding, moveToVoice } from './musicLanding'
 import { narrationActive } from './narrationFlow'
 import { planKeyframePaste } from './keyframePaste'
 import { exportCurrentFrame } from './frameExport'
+import { planTextEditEntry } from './viewer/textEditEntry'
+import { useTextEditRequest } from '../state/textEditRequest'
 import { nearestEligibleCut } from './timeline/transitionMath'
 import { formatTransitionDuration, transitionLabel } from './transitionInfo'
 
@@ -372,6 +374,19 @@ export function runShortcut(action: ShortcutAction, playback: PlaybackController
     case 'rippleTrimEnd': trimToPlayhead('end'); return true
     case 'delete': if (!removeSelectedTransition() && !deleteSelectedKeyframe()) deleteSelection(false); return true
     case 'addTitle': addTextAt('title', s.playheadUs); return true
+    case 'editText': {
+      // Enter/F2: um único texto selecionado entra na edição direta do visualizador (mesmo caminho do duplo clique)
+      const plan = planTextEditEntry(p, s.selection, s.playheadUs)
+      if (!plan) return false
+      if (plan.kind === 'locked') toast(`A faixa "${plan.trackName}" está bloqueada: desbloqueie para editar o texto.`)
+      else if (plan.kind === 'counter') toast('Este texto é uma contagem: ajuste “De” e “Até” no inspetor.')
+      else {
+        if (s.playing) playback?.pause()
+        if (plan.seekUs !== undefined) seekTo(playback, plan.seekUs)
+        useTextEditRequest.getState().request(plan.itemId)
+      }
+      return true
+    }
     case 'addCrossfade': addTransitionNearPlayhead('crossfade'); return true
     case 'rippleDelete': deleteSelection(true); return true
     case 'copy':
