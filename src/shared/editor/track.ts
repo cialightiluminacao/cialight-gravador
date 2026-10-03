@@ -723,13 +723,37 @@ function conservativeEdge(fx: EffectItem, a: Us, W: number, H: number): RegionVa
   if (kPrev < 0) return null
   const prev = valuesAt(r, kPrev), edge = valuesAt(r, a - 1)
   if (fx.invert) return Math.abs(prev.w) > 0 && Math.abs(prev.h) > 0 ? null : NO_HOLE
-  // retângulo/elipse de mesma rotação e forma: contém se, no referencial dela, a outra cabe nas meias-larguras
+  // mesma forma (a do efeito) e mesma rotação: no referencial da região de kPrev, a de a − 1 tem centro (lx, ly) e
+  // meias-larguras (ex, ey); a de kPrev, (px, py)
+  if (edge.rotation !== prev.rotation) return null
   const th = (prev.rotation * Math.PI) / 180
   const dx = (edge.x - prev.x) * W, dy = (edge.y - prev.y) * H
   const lx = Math.abs(Math.cos(th) * dx + Math.sin(th) * dy), ly = Math.abs(-Math.sin(th) * dx + Math.cos(th) * dy)
-  const k = r.shape === 'ellipse' ? Math.SQRT2 : 1
-  const fits = edge.rotation === prev.rotation && lx * k + (Math.abs(edge.w) * W) / 2 <= (Math.abs(prev.w) * W) / 2 && ly * k + (Math.abs(edge.h) * H) / 2 <= (Math.abs(prev.h) * H) / 2
+  const ex = (Math.abs(edge.w) * W) / 2, ey = (Math.abs(edge.h) * H) / 2
+  const px = (Math.abs(prev.w) * W) / 2, py = (Math.abs(prev.h) * H) / 2
+  const fits = r.shape === 'ellipse' ? ellipseInEllipse(lx, ly, ex, ey, px, py) : lx + ex <= px && ly + ey <= py
   return fits ? prev : null
+}
+
+/**
+ * A elipse de centro (cx, cy) e meias-larguras (ex, ey) cabe na elipse centrada na origem com meias-larguras (px, py),
+ * eixos alinhados? Conservador: só erra para "não cabe". f(t) = ((cx + ex·cos t)/px)² + ((cy + ey·sin t)/py)² na borda
+ * da interna; com |cx|, |cy| e |f'| ≤ L, o máximo entre amostras de passo h é ≤ o maior amostrado + L·h/2.
+ */
+export function ellipseInEllipse(cx: number, cy: number, ex: number, ey: number, px: number, py: number): boolean {
+  if (!(px > 0 && py > 0 && ex >= 0 && ey >= 0)) return false
+  cx = Math.abs(cx)
+  cy = Math.abs(cy)
+  // atalho suficiente e barato: os 4 cantos da caixa da interna dentro da externa (convexa) → a interna está dentro
+  if (((cx + ex) / px) ** 2 + ((cy + ey) / py) ** 2 <= 1) return true
+  const N = 1024, h = (2 * Math.PI) / N
+  const L = (2 * (cx + ex) * ex) / (px * px) + (2 * (cy + ey) * ey) / (py * py)
+  let m = 0
+  for (let i = 0; i < N; i++) {
+    const t = i * h
+    m = Math.max(m, ((cx + ex * Math.cos(t)) / px) ** 2 + ((cy + ey * Math.sin(t)) / py) ** 2)
+  }
+  return m + (L * h) / 2 <= 1 - 1e-12
 }
 
 /** Resultado do rastreamento → região com keys (ver o topo do arquivo: R4, R4b, degraus e mescla). */

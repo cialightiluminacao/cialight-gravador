@@ -9,6 +9,7 @@ import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
 import {
   analysisSize,
   DEFAULT_TRACK_OPTS,
+  ellipseInEllipse,
   formatTrackTime,
   grayFromRgba,
   layersBelowEffect,
@@ -374,6 +375,61 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
         if (invert) for (const t of [a - 1, a - 2, a - 1000]) expect(evalAnim(fx2.region.w, t)).toBe(0)
       }
     }
+  })
+  it('R21: na fronteira da nova passada, elipse de proporção diferente da anterior não é "contida" por engano — a cobertura não diminui (oráculo denso)', () => {
+    // 1ª passada confiante; o usuário reposiciona em `a` com uma elipse estreita e alta, deslocada de lado: ela NÃO cabe
+    // na elipse do último key antes de a, então a fronteira não pode segurar aquela região no lugar da interpolação
+    const sc: Scene = { path: linear, pw: 60, ph: 40 }
+    for (const shape of ['ellipse', 'rect'] as const) {
+      for (const hr of [0.9, 0.97]) {
+        const first = run(sc, 0, 2, { shape })
+        expect(first.lost).toEqual([])
+        const t2 = 1.0, a = usOf(t2)
+        const r1 = first.fx1.region
+        const kPrev = Math.max(...(['x', 'y', 'w', 'h'] as const).flatMap((ch) => r1[ch].keys!.filter((k) => k.tUs < a - 1).map((k) => k.tUs)))
+        const p = region(first.fx1, kPrev)
+        const w = p.w * 0.3, h = p.h * hr
+        const lx = (((p.w - w) / 2) * CW / Math.SQRT2) * 0.97 // passa no teste antigo (deslocamento × √2 + meia-largura)
+        const box = { x: p.x + lx / CW, y: p.y, w, h }
+        const user: EffectItem = { ...first.fx1, region: { ...r1, x: setValue(r1.x, a, box.x), y: setValue(r1.y, a, box.y), w: setValue(r1.w, a, box.w), h: setValue(r1.h, a, box.h) } }
+        const res2 = trackFrames(frames(sc, t2, 2), { x: box.x * AW, y: box.y * AH, w: box.w * AW, h: box.h * AH })
+        const fx2 = { ...user, region: trackToKeys(user, res2, GEO).region }
+        // denso (1/240 s, mais a − 1) entre o último key de antes e a nova partida: a região de antes da nova passada
+        // (a do usuário) ⊆ a de depois
+        const ts: Us[] = [a - 1]
+        for (let t = kPrev; t < a; t += Math.round(1e6 / 240)) ts.push(t)
+        const fails: string[] = []
+        for (const t of ts) {
+          const before = region(user, t), after = region(fx2, t)
+          const bad = outline(before, shape).find(([x, y]) => !inside(after, shape, x, y))
+          if (bad) fails.push(`t=${t} (${bad[0].toFixed(1)}, ${bad[1].toFixed(1)})`)
+        }
+        expect(fails, `${shape} h=${hr}·h anterior`).toEqual([])
+      }
+    }
+  })
+  it('ellipseInEllipse: só erra para "não cabe" (proporções diferentes, deslocada, degenerada)', () => {
+    // contida de verdade (concêntrica, menor) e por pouco fora (a do achado da revisão: estreita, alta, deslocada)
+    expect(ellipseInEllipse(0, 0, 50, 30, 100, 60)).toBe(true)
+    expect(ellipseInEllipse(74.1, 0, 23, 99.9, 154.4, 103)).toBe(false)
+    expect(ellipseInEllipse(0, 0, 10, 10, 0, 50)).toBe(false)
+    // aleatória: sempre que diz "cabe", 4096 pontos da borda da interna estão dentro da externa
+    let s = 12345
+    const rnd = (): number => ((s = (s * 1103515245 + 12345) % 2147483648) / 2147483648)
+    let yes = 0
+    for (let i = 0; i < 3000; i++) {
+      const px = 20 + rnd() * 200, py = 20 + rnd() * 200
+      const ex = rnd() * px, ey = rnd() * py, cx = (rnd() - 0.5) * px, cy = (rnd() - 0.5) * py
+      if (!ellipseInEllipse(cx, cy, ex, ey, px, py)) continue
+      yes++
+      let m = 0
+      for (let k = 0; k < 4096; k++) {
+        const t = (k * 2 * Math.PI) / 4096
+        m = Math.max(m, ((cx + ex * Math.cos(t)) / px) ** 2 + ((cy + ey * Math.sin(t)) / py) ** 2)
+      }
+      expect(m, JSON.stringify({ cx, cy, ex, ey, px, py })).toBeLessThanOrEqual(1 + 1e-12)
+    }
+    expect(yes).toBeGreaterThan(100)
   })
   it('mescla: keys fora do trecho rastreado ficam; antes do início a curva não muda', () => {
     const sc: Scene = { path: linear, pw: 60, ph: 40 }
