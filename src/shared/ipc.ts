@@ -17,6 +17,7 @@ import type {
 } from './types'
 
 import type { Asset, Project, Us } from './editor/project'
+import type { AssetToCopy, BrandTemplate } from './editor/brand'
 
 export type Unsubscribe = () => void
 
@@ -323,14 +324,15 @@ export interface IpcApi {
    * `writeStill` grava um PNG (atômico, nunca sobrescreve).
    */
   editorExport: {
-    open(outputDir: string, fileName: string, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
+    /** `reserveSrt`: o .srt vai ao lado — um `<nome>.srt` existente também ocupa o nome (numeração conjunta). */
+    open(outputDir: string, fileName: string, opts?: { estimateBytes?: number; reserveSrt?: boolean }): Promise<{ jobId: string; path: string }>
     write(jobId: string, data: Uint8Array, position: number): Promise<void | { cancelled: true }>
     close(jobId: string): Promise<void>
     finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string } | { cancelled: true }>
     cancel(jobId: string): Promise<void>
     /** Progresso do remux (0–1) do job em finalização (MP4: faststart; pipe: paleta do GIF). */
     onFinalizeProgress(cb: (p: { jobId: string; fraction: number }) => void): Unsubscribe
-    openPipe(outputDir: string, fileName: string, spec: PipeSpec, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
+    openPipe(outputDir: string, fileName: string, spec: PipeSpec, opts?: { estimateBytes?: number; reserveSrt?: boolean }): Promise<{ jobId: string; path: string }>
     /** { cancelled: true }: o job já tinha sido cancelado (cancelamento esperado, não erro). */
     pipeWrite(jobId: string, data: Uint8Array): Promise<void | { cancelled: true }>
     /** maxBytes (tamanho alvo): saída maior é apagada e volta `oversize` (como no finalize). */
@@ -340,6 +342,33 @@ export interface IpcApi {
     saveText(defaultPath: string, text: string): Promise<string | null>
     /** Estado da fila de exportações desta janela (a confirmação de saída conta os itens; a fila não é salva). */
     setQueueState(state: { running: boolean; pending: number }): Promise<void>
+  }
+  /**
+   * Modelos de marca (F5). Ficam em userData/brand-templates.json + brand-assets/<id>/ (em teste/QA, numa pasta de
+   * teste). `list`: `warning` quando o arquivo estava corrompido (foi renomeado; a lista começa vazia). `save`: copia os
+   * arquivos (`assetsToCopy`, assets do projeto `projectId` aberto, já salvo) — falha não deixa nada pela metade; limite
+   * de 500 MB por modelo. `materialize`: copia os arquivos do modelo para generated/ do projeto e devolve, por asset do
+   * modelo, o Asset `generated` pronto (probe; vídeo/áudio em 'processing', para media.enqueue), já resolvível no
+   * protocolo media/ — o renderer o passa a applyTemplate.
+   */
+  brand: {
+    list(): Promise<{ templates: BrandTemplate[]; warning?: string }>
+    save(template: BrandTemplate, assetsToCopy: AssetToCopy[], projectId: string): Promise<BrandTemplate>
+    remove(id: string): Promise<void>
+    rename(id: string, name: string): Promise<BrandTemplate>
+    materialize(templateId: string, projectId: string): Promise<{ assetId: string; asset: Asset }[]>
+  }
+  /**
+   * Legendas (SRT). `openSrt`: diálogo de abrir (*.srt) e o texto do arquivo (BOM UTF-8/UTF-16; sem BOM, UTF-8 se
+   * válido, senão Windows-1252); null se cancelado. `saveSrt`: diálogo de salvar, grava UTF-8 com BOM; caminho ou null.
+   * `writeSrtBeside`: grava `<mesmo nome>.srt` ao lado do vídeo — só aceita o arquivo final de uma exportação do
+   * editor concluída nesta sessão (o caminho devolvido pela exportação, que pode ser numerado), uma vez; nunca
+   * sobrescreve: com `<nome>.srt` já existente devolve `{ path: null, warning }`.
+   */
+  captions: {
+    openSrt(): Promise<{ text: string; name: string } | null>
+    saveSrt(text: string, defaultName: string): Promise<string | null>
+    writeSrtBeside(videoPath: string, text: string): Promise<{ path: string | null; warning?: string }>
   }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
@@ -464,6 +493,8 @@ export const IPC = {
     saveText: 'editorExport:saveText',
     setQueueState: 'editorExport:setQueueState'
   },
+  brand: { list: 'brand:list', save: 'brand:save', remove: 'brand:remove', rename: 'brand:rename', materialize: 'brand:materialize' },
+  captions: { openSrt: 'captions:openSrt', saveSrt: 'captions:saveSrt', writeSrtBeside: 'captions:writeSrtBeside' },
   recording: {
     setPhase: 'recording:setPhase',
     barUpdate: 'recording:barUpdate',

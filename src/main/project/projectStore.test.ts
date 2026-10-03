@@ -80,6 +80,16 @@ describe('ProjectStore', () => {
     expect(store.list().map((s) => s.id)).toEqual(['p-b', 'p-a'])
   })
 
+  it('list e sessionUsage não substituem o projeto em memória (assets só no cache continuam resolvíveis)', () => {
+    store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
+    const extra = { ...store.cached('p-a'), name: 'em memória' }
+    ;(store as unknown as { cache: Map<string, unknown> }).cache.set('p-a', extra)
+    expect(store.list().map((s) => s.name)).toEqual(['em memória'])
+    expect(store.cached('p-a').name).toBe('em memória')
+    store.sessionUsage()
+    expect(store.cached('p-a').name).toBe('em memória')
+  })
+
   it('cached resolve id em minúsculo após save', () => {
     store.create(mk('P-Abc', '2026-10-01T10:00:00.000Z'))
     expect(store.cached('p-abc').id).toBe('P-Abc')

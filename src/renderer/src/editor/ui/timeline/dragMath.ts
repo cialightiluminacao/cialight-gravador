@@ -1,4 +1,4 @@
-import { addTrack, defaultEffectDurationUs, EditError, effectTrackAllowed, isFxTrack, findItem, linkedIds, moveItems, moveKeyframes, moveKeys, trimItem, updateItem, type KeyRef } from '@shared/editor/ops'
+import { addTrack, defaultEffectDurationUs, isCaptionsTrack, EditError, effectTrackAllowed, isFxTrack, findItem, linkedIds, moveItems, moveKeyframes, moveKeys, trimItem, updateItem, type KeyRef } from '@shared/editor/ops'
 import type { MediaItem, Project, TrackKind, Us } from '@shared/editor/project'
 import { snapDelta, snapPoints, type SnapPoint } from '@shared/editor/snap'
 import { itemEndUs, snapToFrame } from '@shared/editor/time'
@@ -206,6 +206,21 @@ export function effectDropTrack(p: Project, zone: DropZone, atUs: Us): string | 
   const e = s + defaultEffectDurationUs(p, s)
   if (t.items.some((i) => i.startUs < e && itemEndUs(i) > s)) return undefined
   return effectTrackAllowed(p, t.id, s, e) ? t.id : undefined
+}
+
+/**
+ * Faixa para um texto/forma solto da biblioteca em [atUs, atUs + durationUs): a faixa de vídeo sob o ponteiro, se
+ * desbloqueada, visível, livre no trecho e que aceita o tipo (efeitos nunca; legendas só texto); senão undefined →
+ * addText/addShape escolhem a faixa de sobreposição (ou criam "Texto"/"Formas").
+ */
+export function overlayDropTrack(p: Project, zone: DropZone, atUs: Us, durationUs: Us, kind: 'text' | 'shape'): string | undefined {
+  if (!zone || zone.kind !== 'track') return undefined
+  const t = p.tracks.find((x) => x.id === zone.trackId)
+  if (!t || t.kind !== 'video' || t.locked || t.hidden || isFxTrack(t)) return undefined
+  if (isCaptionsTrack(t) && kind !== 'text') return undefined
+  const s = Math.max(0, Math.round(atUs))
+  const e = s + durationUs
+  return t.items.some((i) => i.startUs < e && itemEndUs(i) > s) ? undefined : t.id
 }
 
 export const EDGE_SCROLL_ZONE = 48

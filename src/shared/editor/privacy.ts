@@ -40,14 +40,18 @@ const MSG = {
 
 /**
  * Escopo `track`: primeiro instante de [a, b) em que a faixa-alvo (targetTrackId; projeto antigo: visualTrackBelow)
- * não tem camada que resolveFrame desenharia — faixa apagada ou oculta, ou sem mídia (com asset) / anotações ativas.
+ * não tem camada que resolveFrame desenharia — faixa apagada ou oculta, ou sem mídia (com asset) / anotações / texto /
+ * forma ativos.
  * Ali o efeito não acha camada e não esconde nada. null = coberto o trecho todo.
  */
 function noTargetAt(p: Project, fx: EffectItem, trackId: string, a: Us, b: Us): Us | null {
   const target = fx.targetTrackId ?? visualTrackBelow(p, trackId)
   const t = target ? p.tracks.find((x) => x.id === target) : undefined
   if (!t || t.hidden || t.kind !== 'video') return a
-  const drawn = (i: Item): boolean => i.enabled !== false && (i.type === 'annotations' || (i.type === 'media' && p.assets.some((x) => x.id === i.assetId)))
+  // alvo antigo (sem targetTrackId, ou gravado com targetMediaOnly): só mídia/anotações contam, como no resolve
+  // (EffectLayer.legacyTarget)
+  const legacy = !fx.targetTrackId || !!fx.targetMediaOnly
+  const drawn = (i: Item): boolean => i.enabled !== false && (i.type === 'annotations' || (!legacy && (i.type === 'text' || i.type === 'shape')) || (i.type === 'media' && p.assets.some((x) => x.id === i.assetId)))
   const items = t.items.filter((i) => drawn(i) && i.startUs < b && itemEndUs(i) > a).sort((x, y) => x.startUs - y.startUs)
   let cursor = a
   for (const i of items) {

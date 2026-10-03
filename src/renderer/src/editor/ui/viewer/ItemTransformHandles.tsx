@@ -1,16 +1,16 @@
 import { evalAnim, setValue } from '@shared/editor/anim'
 import { findItem, updateItem } from '@shared/editor/ops'
-import type { MediaItem, Project, VisualProps } from '@shared/editor/project'
+import type { MediaItem, Project, ShapeItem, TextItem, VisualProps } from '@shared/editor/project'
 import { cn } from '@/lib/cn'
 import { useEditorStore } from '../../state/editorStore'
 import { cornerScale, rotateAngle, snapCenter, type Corner, type Guides, type ItemBox, type Pt } from '../viewerGeometry'
 import { startViewerGesture } from './viewerGesture'
 
-// Manipulação direta de mídia no visualizador (F1): arrastar move, cantos escalam sempre na proporção (Alt: a
+// Manipulação direta de mídia, texto e forma no visualizador (F1/F5): arrastar move, cantos escalam sempre na proporção (Alt: a
 // partir do centro — o mesmo modificador das alças da região de efeito), alça de cima gira (Shift: 15°). Cada gesto é uma transação. Guias de centro com snap a
 // 0,5 ± 1 %. O contorno do selecionado é desenhado pelo render worker.
 
-type V = MediaItem & { visual: VisualProps }
+type V = (MediaItem | TextItem | ShapeItem) & { visual: VisualProps }
 export type ItemGesture = { kind: 'move' } | { kind: 'scale'; corner: Corner } | { kind: 'rotate' }
 
 export interface GestureCtx {
@@ -24,17 +24,24 @@ const NO_GUIDES: Guides = { v: [], h: [] }
 const CORNERS: Corner[] = ['tl', 'tr', 'bl', 'br']
 const CORNER_CURSOR: Record<Corner, string> = { tl: 'nwse-resize', br: 'nwse-resize', tr: 'nesw-resize', bl: 'nesw-resize' }
 
-/** Item editável por manipulação: mídia em faixa de vídeo desbloqueada. */
-export function editableMedia(p: Project, itemId: string): V | null {
+/** Item editável por manipulação: mídia, texto ou forma (com `visual`) em faixa de vídeo desbloqueada. */
+export function editableItem(p: Project, itemId: string): V | null {
   const f = findItem(p, itemId)
-  if (!f || f.track.locked || f.track.kind !== 'video' || f.item.type !== 'media' || !f.item.visual) return null
-  return f.item as V
+  if (!f || f.track.locked || f.track.kind !== 'video') return null
+  const it = f.item
+  return it.type === 'text' || it.type === 'shape' || (it.type === 'media' && it.visual) ? (it as V) : null
+}
+
+/** Só mídia (ferramenta Zoom, Ken Burns): texto e forma não têm conteúdo a enquadrar. */
+export function editableMedia(p: Project, itemId: string): (MediaItem & { visual: VisualProps }) | null {
+  const it = editableItem(p, itemId)
+  return it?.type === 'media' ? (it as MediaItem & { visual: VisualProps }) : null
 }
 
 export function startItemTransform(e: React.PointerEvent, box: ItemBox, g: ItemGesture, ctx: GestureCtx): void {
   const st = useEditorStore.getState()
   const p = st.project
-  const item = p && editableMedia(p, box.itemId)
+  const item = p && editableItem(p, box.itemId)
   if (!p || !item) return
   e.stopPropagation()
   e.preventDefault()

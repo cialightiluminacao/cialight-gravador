@@ -8,18 +8,23 @@ import { formatClock } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { useEditorStore } from '../state/editorStore'
 import { EffectLibrary } from './EffectLibrary'
+import { TextLibrary } from './TextLibrary'
+import { TransitionLibrary } from './TransitionLibrary'
+import { CaptionsPanel } from './CaptionsPanel'
+import { BrandLibrary } from './BrandLibrary'
+import type { PlaybackController } from '../engine/PlaybackController'
 import { MediaCard } from './MediaCard'
 import { addAssetAtPlayhead } from './editorActions'
 import { importPaths, importSession } from './mediaImport'
 import { relinkAsset } from './relinkFlow'
 import { stopAudioPreview } from './audioPreview'
 
-// Biblioteca (coluna esquerda): abas Mídia / Áudio / Gravações / Efeitos; importar por botão ou arrastando
+// Biblioteca (coluna esquerda): abas Mídia / Áudio / Gravações / Efeitos / Texto / Transições / Legendas / Modelos; importar por botão ou arrastando
 // arquivos do Explorer; cartões arrastáveis para a linha do tempo (efeitos também para o visualizador).
 // Aba Áudio: músicas com prévia no cartão; ao entrar na linha do tempo vão para a faixa "Música" (papel música,
 // abaixa sozinha sob a voz). A prévia para quando a linha do tempo toca, ao trocar de aba ou ao sair do editor.
 
-type Tab = 'media' | 'audio' | 'recordings' | 'effects'
+type Tab = 'media' | 'audio' | 'recordings' | 'effects' | 'text' | 'transitions' | 'captions' | 'brand'
 const NO_ASSETS: Asset[] = []
 
 const pad2 = (n: number): string => String(n).padStart(2, '0')
@@ -32,7 +37,7 @@ function hasFiles(e: React.DragEvent): boolean {
   return Array.from(e.dataTransfer.types).includes('Files')
 }
 
-export function MediaBin({ projectId }: { projectId: string }): React.JSX.Element {
+export function MediaBin({ projectId, playback }: { projectId: string; playback: PlaybackController | null }): React.JSX.Element {
   const assets = useEditorStore((s) => s.project?.assets ?? NO_ASSETS)
   const ingest = useEditorStore((s) => s.ingest)
   const [tab, setTab] = useState<Tab>('media')
@@ -97,8 +102,9 @@ export function MediaBin({ projectId }: { projectId: string }): React.JSX.Elemen
       }}
     >
       <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)} className="flex min-h-0 flex-1 flex-col">
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-2">
-          <TabsList className="h-7 gap-0.5 rounded-lg p-0.5">
+        <div className="flex min-h-9 shrink-0 items-start gap-2 border-b border-border px-2 py-1">
+          {/* 8 abas não cabem numa linha de 280 px: a lista quebra em duas */}
+          <TabsList className="h-auto min-w-0 flex-1 flex-wrap gap-0.5 rounded-lg p-0.5">
             <TabsTrigger value="media" className="h-6 rounded-md px-2 text-[11px]">
               Mídia
             </TabsTrigger>
@@ -111,10 +117,22 @@ export function MediaBin({ projectId }: { projectId: string }): React.JSX.Elemen
             <TabsTrigger value="effects" className="h-6 rounded-md px-2 text-[11px]">
               Efeitos
             </TabsTrigger>
+            <TabsTrigger value="text" className="h-6 rounded-md px-2 text-[11px]">
+              Texto
+            </TabsTrigger>
+            <TabsTrigger value="transitions" className="h-6 rounded-md px-2 text-[11px]">
+              Transições
+            </TabsTrigger>
+            <TabsTrigger value="captions" className="h-6 rounded-md px-2 text-[11px]">
+              Legendas
+            </TabsTrigger>
+            <TabsTrigger value="brand" className="h-6 rounded-md px-2 text-[11px]">
+              Modelos
+            </TabsTrigger>
           </TabsList>
           <Tip content="Importar vídeos, áudios e imagens">
             {/* só o ícone: com 4 abas a coluna de 280 px não comporta o rótulo */}
-            <Button variant="secondary" size="sm" className="ml-auto h-7 w-7 shrink-0 rounded-lg px-0" aria-label="Importar" onClick={() => void pick()} disabled={busy}>
+            <Button variant="secondary" size="sm" className="h-7 w-7 shrink-0 rounded-lg px-0" aria-label="Importar" onClick={() => void pick()} disabled={busy}>
               {busy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
             </Button>
           </Tip>
@@ -131,6 +149,18 @@ export function MediaBin({ projectId }: { projectId: string }): React.JSX.Elemen
         </TabsContent>
         <TabsContent value="effects" className="min-h-0 flex-1 overflow-y-auto">
           <EffectLibrary />
+        </TabsContent>
+        <TabsContent value="text" className="min-h-0 flex-1 overflow-y-auto">
+          <TextLibrary />
+        </TabsContent>
+        <TabsContent value="transitions" className="min-h-0 flex-1 overflow-y-auto">
+          <TransitionLibrary />
+        </TabsContent>
+        <TabsContent value="captions" className="min-h-0 flex-1 overflow-y-auto">
+          <CaptionsPanel playback={playback} />
+        </TabsContent>
+        <TabsContent value="brand" className="min-h-0 flex-1 overflow-y-auto">
+          <BrandLibrary />
         </TabsContent>
       </Tabs>
       {dropping ? (

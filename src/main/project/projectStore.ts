@@ -163,10 +163,19 @@ export class ProjectStore {
   }
 
   load(id: string): Project {
+    return this.remember(this.read(id))
+  }
+
+  /**
+   * Lê o project.json (ou a versão válida mais recente) SEM tocar no cache. Varreduras (list, sessionUsage) usam esta:
+   * reler o disco não pode substituir o projeto em memória de um editor aberto, que pode ter assets ainda não salvos
+   * (importados, copiados de um modelo de marca) — o protocolo media/ deixaria de achá-los até o próximo autosave.
+   */
+  private read(id: string): Project {
     const dir = this.dirOf(id)
     let firstError: unknown
     try {
-      return this.remember(parseProject(JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8'))))
+      return parseProject(JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')))
     } catch (e) {
       firstError = e
     }
@@ -177,7 +186,7 @@ export class ProjectStore {
         try {
           const p = parseProject(JSON.parse(readFileSync(join(vdir, n), 'utf8')))
           this.deps.log?.warn(`project.json inválido em ${id}; recuperado de versions/${n}`, firstError)
-          return this.remember(p)
+          return p
         } catch {
           // tenta a próxima mais antiga
         }
@@ -283,7 +292,9 @@ export class ProjectStore {
     for (const name of readdirSync(root)) {
       try {
         if (!statSync(join(root, name)).isDirectory()) continue
-        const p = this.load(name)
+        // o disco valida a pasta; o projeto em memória (editor aberto) é o mais novo
+        const disk = this.read(name)
+        const p = this.cache.get(name.toLowerCase()) ?? disk
         const thumb = join(this.dirOf(name), 'cache', 'thumb.jpg')
         out.push({ id: p.id, name: p.name, updatedAt: p.updatedAt, durationUs: projectDurationUs(p), thumb: existsSync(thumb) ? thumb : undefined, originSessionId: p.originSessionId })
       } catch {
@@ -312,7 +323,7 @@ export class ProjectStore {
       for (const name of readdirSync(root)) {
         try {
           if (!statSync(join(root, name)).isDirectory()) continue
-          add(this.load(name))
+          add(this.cache.get(name.toLowerCase()) ?? this.read(name))
         } catch {
           // pasta que não é projeto válido: ignora
         }

@@ -39,6 +39,7 @@ interface Params {
   denoiseProjectId: string
   duckingProjectId: string
   duckingHz: number
+  captionsProjectId: string
   /** blur/outside: regiões normalizadas (centro, largura, altura) do blur e de um trecho só de ruído. */
   effects: { projectId: string; width: number; height: number; tUs: number; block: number; blur: Region; outside: Region }
   /** F7: projeto de ~20 s (tamanho alvo personalizado) e projeto 1080×1080 (Feed 1:1). */
@@ -126,6 +127,21 @@ export async function runExportHarness(params: Params): Promise<void> {
     const duckProject = await window.api.project.load(params.duckingProjectId)
     report.ducking = await exportOnce(base(duckProject, 'ducking.mp4'))
     report.duckingPreview = await previewToneLevels(duckProject, params.duckingHz)
+
+    // legendas: queimar (padrão) × sem queimar + .srt ao lado; o mesmo nome de novo (numerado: o .srt acompanha)
+    const capProject = await window.api.project.load(params.captionsProjectId)
+    report.captionsBurn = await exportOnce({ ...base(capProject, 'legendas.mp4'), captions: { burn: true, srtBeside: false } })
+    report.captionsSrt = await exportOnce({ ...base(capProject, 'legendas-sem.mp4'), captions: { burn: false, srtBeside: true } })
+    report.captionsSrtAgain = await exportOnce({ ...base(capProject, 'legendas-sem.mp4'), captions: { burn: false, srtBeside: true } })
+    // um .srt do usuário com o nome pedido já está na pasta: o vídeo sai numerado e o .srt acompanha, sem sobrescrever
+    report.captionsPreexisting = await exportOnce({ ...base(capProject, 'legendas-pre.mp4'), captions: { burn: false, srtBeside: true } })
+    // o main só grava .srt ao lado de uma exportação concluída: um caminho qualquer é recusado
+    try {
+      await window.api.captions.writeSrtBeside(`${params.outputDir}/arbitrario.mp4`, 'x')
+      report.captionsArbitrary = { rejected: false }
+    } catch (e) {
+      report.captionsArbitrary = { rejected: true, error: e instanceof Error ? e.message : String(e) }
+    }
 
     if (!report.previewUntouched) {
       try {

@@ -52,6 +52,19 @@ describe('shortcutFor', () => {
     expect(shortcutFor(key('E', { shiftKey: true, altKey: true }))).toBe('toggleEnabledUnlinked') // Alt ignora o vínculo
   })
 
+  it('T adiciona o Título; Ctrl+T, o Dissolver no corte mais próximo (sem conflito com os demais)', () => {
+    expect(shortcutFor(key('t'))).toBe('addTitle')
+    expect(shortcutFor(key('T', { shiftKey: true }))).toBeNull()
+    expect(shortcutFor(key('t', { ctrlKey: true }))).toBe('addCrossfade')
+    expect(shortcutFor(key('t', { ctrlKey: true, shiftKey: true }))).toBeNull()
+    expect(shortcutFor(key('t', { altKey: true }))).toBeNull()
+    expect(SHORTCUT_LABELS.addTitle).toBe('T')
+    expect(SHORTCUT_LABELS.addCrossfade).toBe('Ctrl+T')
+    // digitando num campo (ex.: a edição direta do texto), T é só uma letra
+    expect(shortcutFor(key('t', { target: { tagName: 'TEXTAREA' } as unknown as EventTarget }))).toBeNull()
+    expect(shortcutFor(key('t', { ctrlKey: true, target: { tagName: 'TEXTAREA' } as unknown as EventTarget }))).toBeNull()
+  })
+
   it('teclas sem atalho e combinações com Alt não fazem nada', () => {
     expect(shortcutFor(key('a'))).toBeNull()
     expect(shortcutFor(key('s', { altKey: true }))).toBeNull()

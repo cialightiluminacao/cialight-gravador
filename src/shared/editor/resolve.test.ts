@@ -35,6 +35,32 @@ describe('sourceTimeUs', () => {
   })
 })
 
+describe('sourceTimeUs: nunca fora do trecho aparado (privacidade)', () => {
+  // até a v1.4 o reverso lia, no fim do clipe, até um quadro ANTES de inUs (− 1 quadro da fórmula): um quadro do
+  // trecho cortado aparecia. Denso: a cada 1/240 s, nos 3 µs das bordas e com início desalinhado ao quadro.
+  for (const speed of [0.5, 1, 2]) {
+    for (const reverse of [true, false]) {
+      it(`${reverse ? 'reverso' : 'normal'} a ${speed}×: srcUs em [inUs, inUs + ⌈dur·speed⌉ − 1] em todo instante`, () => {
+        const { p, v } = base()
+        for (const [startUs, durationUs, inUs] of [[0, 3 * S, 2 * S], [1_234_567, 2_345_679, 1_000_001], [S / 3, 33_333 * 7, 4 * S]] as const) {
+          const it = { ...media(p, v), startUs, durationUs, inUs, speed, reverse }
+          const lo = inUs, hi = inUs + Math.ceil(durationUs * speed) - 1
+          const ts: number[] = []
+          for (let t = startUs; t < startUs + durationUs; t += Math.round(S / 240)) ts.push(t)
+          for (let k = 0; k < 3; k++) ts.push(startUs + k, startUs + durationUs - 1 - k)
+          const bad = ts.map((t) => [t, sourceTimeUs(it, p.assets[0], t)]).filter(([, src]) => src < lo || src > hi)
+          expect(bad).toEqual([])
+          expect(sourceTimeUs(it, p.assets[0], startUs + durationUs - 1)).toBe(reverse ? lo : Math.min(hi, Math.round(inUs + (durationUs - 1) * speed)))
+          // resolveFrame usa a mesma trava (camada de mídia = preview = exportação)
+          const q = { ...p, tracks: p.tracks.map((tr) => ({ ...tr, items: tr.items.map((x) => (x.id === v ? it : x)) })) }
+          const l = resolveFrame(q, startUs + durationUs - 1).find((x) => x.kind === 'media') as MediaLayer
+          expect(l.srcUs! >= lo && l.srcUs! <= hi).toBe(true)
+        }
+      })
+    }
+  }
+})
+
 describe('resolveFrame', () => {
   it('duas faixas de vídeo: [fundo, topo]; áudio não gera camada', () => {
     let { p } = base()

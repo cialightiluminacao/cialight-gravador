@@ -1,8 +1,9 @@
 // Plano de áudio: segmentos com envelope de ganho em tempo absoluto de timeline. Puro.
 import { curveSampleTimesUs, evalAnim } from './anim'
 import { audioProcessKey, audioSourceKey, parseAudioProcessKey, type AudioProcessOpts } from './audioProcess'
-import type { AudioMix, Project, Us } from './project'
+import type { AudioMix, Item, Project, Track, Us } from './project'
 import type { SpeechInterval } from './speech'
+import { pairActive, transitionWindows, type TransitionWindow } from './transitions'
 
 export interface GainPoint { tUs: Us; gain: number } // linear entre pontos
 /**
@@ -45,6 +46,8 @@ export const audioMixOf = (p: Project): AudioMix => ({ ...AUDIO_MIX_DEFAULTS, ..
 const VOLUME_CURVE_STEP_US = 10_000
 /** Rampas de ducking nunca menores que isto (degrau = clique). */
 const MIN_RAMP_US = 10_000
+/** Distância máxima entre pontos das curvas de transição no envelope (que é linear entre pontos). */
+const TRANSITION_CURVE_STEP_US = 10_000
 
 /** O item pede pré-processamento que ainda não está pronto (o mixer toca o original enquanto isso). */
 export const audioProcessPending = (s: AudioSegment): boolean => s.processKey !== null && s.sourceKey === s.assetId
@@ -98,7 +101,68 @@ export function planAudio(p: Project, opts: PlanAudioOpts = {}): AudioSegment[] 
       })
     }
   }
-  return opts.speech ? applyDucking(p, out, opts.speech) : out
+  const mixed = applyTransitions(p, out)
+  return opts.speech ? applyDucking(p, mixed, opts.speech) : mixed
+}
+
+/** Curva `f` (x de 0 a 1) amostrada em [lo, hi] com pontos a ≤ TRANSITION_CURVE_STEP_US (µs inteiros, pontas exatas). */
+function curvePoints(lo: Us, hi: Us, f: (x: number) => number): GainPoint[] {
+  const n = Math.max(1, Math.ceil((hi - lo) / TRANSITION_CURVE_STEP_US))
+  const out: GainPoint[] = []
+  for (let k = 0; k <= n; k++) {
+    const t = lo + Math.round(((hi - lo) * k) / n)
+    out.push({ tUs: t, gain: f(hi > lo ? (t - lo) / (hi - lo) : 1) })
+  }
+  return out
+}
+
+/**
+ * Envelopes de saída (lado A) e entrada (lado B) de uma janela, sem handles: A some em [corte − half, corte) e B entra
+ * em [corte, corte + (d − half)). Mergulhos (dipBlack/dipWhite): rampas lineares até 0; os outros tipos: potência
+ * constante (cos/sin). Fora do intervalo o envelope vale a ponta (1 longe do corte).
+ */
+export function transitionGainCurves(w: TransitionWindow): { out: GainPoint[]; in: GainPoint[] } {
+  const half = Math.floor(w.durationUs / 2)
+  const dip = w.kind === 'dipBlack' || w.kind === 'dipWhite'
+  const fadeOut = dip ? (x: number): number => 1 - x : (x: number): number => (x >= 1 ? 0 : Math.cos((x * Math.PI) / 2))
+  const fadeIn = dip ? (x: number): number => x : (x: number): number => (x >= 1 ? 1 : Math.sin((x * Math.PI) / 2))
+  return { out: curvePoints(w.cutUs - half, w.cutUs, fadeOut), in: curvePoints(w.cutUs, w.cutUs + (w.durationUs - half), fadeIn) }
+}
+
+/**
+ * Áudio das transições ativas (pairActive; faixa de vídeo oculta não desliga — o áudio segue o mute da própria faixa):
+ * lado A = o próprio A e os itens vinculados a ele (mesmo linkId, qualquer faixa) que terminam no corte; lado B = B e
+ * os vinculados que começam no corte. O envelope da transição MULTIPLICA o do segmento (fades, volume, ducking); o
+ * trecho do segmento não muda (nenhum áudio fora do aparado).
+ */
+function applyTransitions(p: Project, segs: AudioSegment[]): AudioSegment[] {
+  const tracks = new Map<string, Track>(p.tracks.map((t) => [t.id, t]))
+  const wins = transitionWindows(p).filter((w) => pairActive(tracks.get(w.trackId)!, w))
+  if (!wins.length) return segs
+  const items = new Map<string, Item>()
+  const byLink = new Map<string, Item[]>()
+  for (const t of p.tracks) {
+    for (const i of t.items) {
+      items.set(i.id, i)
+      if (!i.linkId) continue
+      const g = byLink.get(i.linkId)
+      if (g) g.push(i)
+      else byLink.set(i.linkId, [i])
+    }
+  }
+  const envs = new Map<string, GainPoint[][]>()
+  const side = (id: string, edge: (i: Item) => boolean, env: GainPoint[]): void => {
+    const own = items.get(id)
+    if (!own) return
+    const group = new Set<Item>([own, ...(own.linkId ? (byLink.get(own.linkId) ?? []).filter(edge) : [])])
+    for (const i of group) envs.set(i.id, [...(envs.get(i.id) ?? []), env])
+  }
+  for (const w of wins) {
+    const c = transitionGainCurves(w)
+    side(w.fromId, (i) => i.startUs + i.durationUs === w.cutUs, c.out)
+    side(w.toId, (i) => i.startUs === w.cutUs, c.in)
+  }
+  return segs.map((s) => envs.get(s.itemId)?.reduce(multiplyGain, s) ?? s)
 }
 
 /** Segmentos de voz que soam (faixa `voice`, não mudos pela velocidade): a fonte da fala do ducking. */
@@ -233,6 +297,22 @@ function mergedTimes(a: readonly GainPoint[], b: readonly GainPoint[], lo: Us, h
   return out
 }
 
+/**
+ * O segmento com o envelope multiplicado por `env` (lista ordenada; vale as pontas fora dela). Pontos nos tempos das
+ * duas listas dentro do segmento e nas bordas dele. Varredura em ordem (merge das duas listas ordenadas): O(n + m).
+ */
+function multiplyGain(s: AudioSegment, env: readonly GainPoint[]): AudioSegment {
+  if (!env.length) return s
+  const end = s.startUs + s.durationUs
+  let i = 1, j = 1
+  const gain = mergedTimes(s.gain, env, s.startUs, end).map((t): GainPoint => {
+    while (i < s.gain.length - 1 && s.gain[i].tUs < t) i++
+    while (j < env.length - 1 && env[j].tUs < t) j++
+    return { tUs: t, gain: gainOf(s.gain, t, i - 1) * gainOf(env, t, j - 1) }
+  })
+  return { ...s, gain }
+}
+
 /** Envelope de ducking nas faixas de música pela fala das faixas de voz (puro: a fala chega como dado). */
 function applyDucking(p: Project, segs: AudioSegment[], speech: Readonly<Record<string, readonly SpeechInterval[]>>): AudioSegment[] {
   const mix = audioMixOf(p)
@@ -240,18 +320,8 @@ function applyDucking(p: Project, segs: AudioSegment[], speech: Readonly<Record<
   const env = duckEnvelope(voiceSegments(p, segs).flatMap((s) => speechOnTimeline(s, speech[s.assetId] ?? [])), mix)
   if (!env.length) return segs
   const music = new Set(p.tracks.filter((t) => t.role === 'music').map((t) => t.id))
-  return segs.map((s) => {
-    const end = s.startUs + s.durationUs
-    if (!music.has(s.trackId) || env[0].tUs >= end || env[env.length - 1].tUs <= s.startUs) return s
-    // varredura em ordem (merge das duas listas ordenadas): O(n + m)
-    let i = 1, j = 1
-    const gain = mergedTimes(s.gain, env, s.startUs, end).map((t): GainPoint => {
-      while (i < s.gain.length - 1 && s.gain[i].tUs < t) i++
-      while (j < env.length - 1 && env[j].tUs < t) j++
-      return { tUs: t, gain: gainOf(s.gain, t, i - 1) * gainOf(env, t, j - 1) }
-    })
-    return { ...s, gain }
-  })
+  // o envelope de ducking vale 1 nas duas pontas: segmento fora dele fica como está
+  return segs.map((s) => (!music.has(s.trackId) || env[0].tUs >= s.startUs + s.durationUs || env[env.length - 1].tUs <= s.startUs ? s : multiplyGain(s, env)))
 }
 
 /**

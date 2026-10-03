@@ -99,6 +99,11 @@ export function exportMediaIssues(p: Project, fromUs: Us, toUs: Us): ExportMedia
   return out
 }
 
+/** Fontes de texto que não carregaram a tempo (o texto saiu com a fonte padrão): avisos da tela de concluído. */
+export function missingFontWarnings(families: readonly string[] | undefined): string[] {
+  return (families ?? []).map((f) => `A fonte “${f}” não carregou a tempo: os textos com ela saíram com uma fonte padrão.`)
+}
+
 /** Avisos da tela de concluído para as mídias que não puderam ser lidas durante a exportação. */
 export function missingMediaWarnings(p: Pick<Project, 'assets'> | { assets: { id: string; name: string }[] }, missing: { assetId: string; frames: number }[]): string[] {
   return missing.map(({ assetId, frames }) => {

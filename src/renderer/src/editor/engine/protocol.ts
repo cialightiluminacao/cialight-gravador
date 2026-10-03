@@ -68,7 +68,8 @@ export type RenderIn =
 
 export type RenderOut =
   | { t: 'ready' }
-  | { t: 'rendered'; seq: number; tUs: Us; ms: number; missing: string[] }
+  // fontsPending: algum texto saiu com a fonte de reserva (ainda carregando); o worker redesenha quando ela carregar
+  | { t: 'rendered'; seq: number; tUs: Us; ms: number; missing: string[]; fontsPending?: boolean }
   // seq: erro ao renderizar esse pedido de quadro (encerra os pedidos até ele); sem seq: erro de outra mensagem
   | { t: 'error'; message: string; fatal: boolean; seq?: number }
   | { t: 'disposed' }
@@ -77,15 +78,17 @@ export type RenderOut =
   | { t: 'exportChunk'; jobId: string; seq: number; data: Uint8Array; position: number }
   // missing: assets desenhados como "mídia indisponível" (quadros por asset); missingAnnotations: gravações
   // cujas anotações não puderam ser lidas — viram avisos na tela de concluído
-  | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; audioBitrate: number; hardware: HwPref; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }
+  | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; audioBitrate: number; hardware: HwPref; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[] }
   // encoderError: a falha veio do codificador; beforeFirstPacket: antes de qualquer pacote de vídeo
   // (só as duas juntas justificam tentar outro modo de hardware)
   | { t: 'exportError'; jobId: string; message: string; cancelled: boolean; beforeFirstPacket: boolean; encoderError: boolean }
   // quadro n = seq − 1 de `total`: RGBA w×h linha a linha de cima para baixo (buffer transferido); responder chunkAck
   | { t: 'exportFrame'; jobId: string; seq: number; total: number; rgba: ArrayBuffer; w: number; h: number }
-  | { t: 'exportFramesDone'; jobId: string; frames: number; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }
+  | { t: 'exportFramesDone'; jobId: string; frames: number; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts?: string[] }
   // png null: falhou (error)
-  | { t: 'still'; id: number; png: ArrayBuffer | null; error?: string; missing: string[]; missingAnnotations: string[] }
+  | { t: 'still'; id: number; png: ArrayBuffer | null; error?: string; missing: string[]; missingAnnotations: string[]; missingFonts?: string[] }
+  // fontes de texto que não carregaram (erro ou prazo de 10 s): o texto aparece com a fonte padrão; o editor avisa
+  | { t: 'fontWarning'; families: string[] }
   // testes: RGBA linha a linha de cima para baixo
   | { t: 'pixels'; id: number; data: Uint8Array }
   // testes: drawMs = compositor (desenho + espera da GPU); frameMs = quadro inteiro (decodificação inclusa)

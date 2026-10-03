@@ -36,7 +36,8 @@ export function startZoomDraw(e: React.PointerEvent, ctx: GestureCtx, setPreview
   const from = ctx.toCanvas(e)
   const tUs = st.playheadUs
   // caixas no playhead (o visualizador pode ter acabado de pausar: as do overlay ainda estariam vazias)
-  const id = hitTest(itemBoxes(p, tUs), from.x, from.y)
+  // só clipes de mídia têm conteúdo a enquadrar: texto e forma por cima não contam
+  const id = hitTest(itemBoxes(p, tUs).filter((b) => findItem(p, b.itemId)?.item.type === 'media'), from.x, from.y)
   if (!id) {
     toast('Comece o retângulo sobre um clipe de vídeo ou imagem.')
     return

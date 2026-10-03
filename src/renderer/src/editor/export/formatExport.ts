@@ -13,7 +13,7 @@ import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { FramesJobSpec, RenderOut } from '../engine/protocol'
-import { missingMediaWarnings } from './exportPlan'
+import { missingFontWarnings, missingMediaWarnings } from './exportPlan'
 import { audioBlocks, audioOnlyBlocker, audioPipeSpec, gifPipeSpec, type AudioFormat } from './formatPlan'
 import { EditorExportCancelled, isCancelledReply, settleOrCancel } from './finalize'
 import { withExportLock } from './exportLock'
@@ -213,7 +213,7 @@ export function pipeFrames(
           if (m.jobId !== jobId) return
           void idle().then(() => {
             const ann = m.missingAnnotations.length ? [`As anotações de ${m.missingAnnotations.length === 1 ? 'uma gravação' : `${m.missingAnnotations.length} gravações`} não puderam ser lidas e ficaram de fora.`] : []
-            finish({ ok: true, value: { frames: m.frames, warnings: [...missingMediaWarnings(req.project, m.missing), ...ann] } })
+            finish({ ok: true, value: { frames: m.frames, warnings: [...missingMediaWarnings(req.project, m.missing), ...ann, ...missingFontWarnings(m.missingFonts)] } })
           })
           break
         case 'exportError':
@@ -365,7 +365,7 @@ export async function renderStill(project: Project, tUs: Us, opts: StillOpts = {
     const r = await abortable(withTimeout(work(), timeoutMs, `O quadro não ficou pronto em ${Math.max(1, Math.round(timeoutMs / 1000))} s (o render parou de responder). Tente de novo.`), signal)
     if (!r.png) throw new Error(`Não foi possível gerar o quadro (${r.error ?? 'erro desconhecido'}).`)
     const ann = r.missingAnnotations.length ? ['As anotações não puderam ser lidas e ficaram de fora.'] : []
-    return { png: new Uint8Array(r.png), warnings: [...missingMediaWarnings(project, r.missing.map((assetId) => ({ assetId, frames: 1 }))), ...ann] }
+    return { png: new Uint8Array(r.png), warnings: [...missingMediaWarnings(project, r.missing.map((assetId) => ({ assetId, frames: 1 }))), ...ann, ...missingFontWarnings(r.missingFonts)] }
   } finally {
     render.dispose()
   }

@@ -117,6 +117,18 @@ const api: IpcApi = {
     saveText: (defaultPath, text) => ipcRenderer.invoke(IPC.editorExport.saveText, defaultPath, text),
     setQueueState: (state) => ipcRenderer.invoke(IPC.editorExport.setQueueState, state)
   },
+  brand: {
+    list: () => ipcRenderer.invoke(IPC.brand.list),
+    save: (template, assetsToCopy, projectId) => ipcRenderer.invoke(IPC.brand.save, template, assetsToCopy, projectId),
+    remove: (id) => ipcRenderer.invoke(IPC.brand.remove, id),
+    rename: (id, name) => ipcRenderer.invoke(IPC.brand.rename, id, name),
+    materialize: (templateId, projectId) => ipcRenderer.invoke(IPC.brand.materialize, templateId, projectId)
+  },
+  captions: {
+    openSrt: () => ipcRenderer.invoke(IPC.captions.openSrt),
+    saveSrt: (text, defaultName) => ipcRenderer.invoke(IPC.captions.saveSrt, text, defaultName),
+    writeSrtBeside: (videoPath, text) => ipcRenderer.invoke(IPC.captions.writeSrtBeside, videoPath, text)
+  },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),
     barUpdate: (state) => ipcRenderer.send(IPC.recording.barUpdate, state),

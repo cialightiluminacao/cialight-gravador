@@ -72,9 +72,61 @@ export interface MediaItem extends ItemBase {
   freeze?: { atUs: Us }
   audio: AudioProps; visual?: VisualProps; transitionIn?: Transition
 }
-export interface TextStyle { font: string; size: Anim<number>; weight: number; color: string; background?: string; stroke?: { width: number; color: string }; shadow?: boolean; align: 'left' | 'center' | 'right'; lineHeight: number }
-export interface TextItem extends ItemBase { type: 'text'; text: string; style: TextStyle; visual: VisualProps; transitionIn?: Transition }
-export interface ShapeItem extends ItemBase { type: 'shape'; shape: 'rect' | 'ellipse' | 'arrow'; fill: string; stroke: string; strokeWidth: number; visual: VisualProps }
+/** Sombra do texto: cor `#rrggbb`/`#rrggbbaa`; desfoque e deslocamento em "em" (fração do tamanho da fonte). */
+export interface TextShadow { color: string; blur: number; dx: number; dy: number }
+/** Sombra de um projeto antigo que só tem `shadow: true` (e a de quem liga a sombra sem escolher). */
+export const DEFAULT_TEXT_SHADOW: TextShadow = { color: '#000000b3', blur: 0.08, dx: 0.04, dy: 0.04 }
+/**
+ * Estilo do texto. Cores: `#rrggbb` ou `#rrggbbaa`.
+ * - `size`: px num quadro cujo LADO MENOR mede 1080 (referência, como o desfoque das camadas): o compositor desenha
+ *   `size × min(W, H) / 1080` px na saída W×H. Assim o texto mantém a proporção em qualquer canvas/resolução de
+ *   exportação. (O reenquadrar mantém o lado menor do canvas, então a escala que ele aplica é 1.)
+ * - `maxWidth`: largura máxima da linha, fração 0–1 da LARGURA do quadro; quebra automática por palavra. Ausente = sem
+ *   quebra automática (só `\n`).
+ * - `padding`: margem do fundo em "em" (fração de `size`); ausente com `background` = 0,3.
+ * - `backgroundRadius`: raio dos cantos do fundo em "em".
+ * - `shadow` (o que a v1.3 conhece) é SEMPRE `!!shadowStyle`; `shadowStyle` guarda os parâmetros (a v1.3 o descarta e
+ *   o parse devolve DEFAULT_TEXT_SHADOW a quem só tem `shadow: true`).
+ * Campos opcionais da v1.5: a v1.3 os descarta sem recusar o projeto.
+ */
+export interface TextStyle {
+  font: string; size: Anim<number>; weight: number; color: string; background?: string; stroke?: { width: number; color: string }
+  shadow?: boolean; align: 'left' | 'center' | 'right'; lineHeight: number
+  italic?: boolean; maxWidth?: number; padding?: number; backgroundRadius?: number; shadowStyle?: TextShadow
+}
+/** Contagem (preset Contagem): o texto exibido é o inteiro que vai de `from` a `to` ao longo do item (textContentAt). */
+export interface TextCounter { from: number; to: number }
+export interface TextItem extends ItemBase { type: 'text'; text: string; style: TextStyle; visual: VisualProps; transitionIn?: Transition; counter?: TextCounter }
+/**
+ * Texto exibido no instante local: sem contagem, `text`; com contagem, v = from + (to − from)·local/dur (local limitado
+ * a [0, dur]) arredondado para o lado de `from` (Math.ceil quando from > to, senão Math.floor).
+ */
+export function textContentAt(item: TextItem, localUs: Us): string {
+  const c = item.counter
+  if (!c) return item.text
+  const dur = item.durationUs
+  const local = Math.min(dur, Math.max(0, localUs))
+  const raw = dur > 0 ? c.from + ((c.to - c.from) * local) / dur : c.from
+  // contagem rebaseada num corte (from/to fracionários): resíduo de ponto flutuante num inteiro exato não vira ±1
+  const v = Math.abs(raw - Math.round(raw)) < 1e-9 ? Math.round(raw) : raw
+  const n = c.from > c.to ? Math.ceil(v) : Math.floor(v)
+  return String(n === 0 ? 0 : n) // sem "-0"
+}
+/** Caixa padrão de uma forma sem `box` (frações da largura/altura do quadro). */
+export const DEFAULT_SHAPE_BOX = { w: 0.3, h: 0.2 } as const
+/**
+ * Forma. `shape` fica em rect/elipse/seta (a v1.3 recusa valores novos); Destaque e Holofote são presets disso.
+ * - `box`: tamanho em frações da largura/altura do quadro (centro = transform x/y); ausente = DEFAULT_SHAPE_BOX.
+ * - `cornerRadius`: só rect; fração 0–0,5 do lado menor da caixa.
+ * - `spotlight`: só rect/elipse; escurece com preto·dim (0–1) TUDO fora da forma; dentro fica intacto.
+ * - Seta: da borda esquerda-centro à direita-centro da caixa, cabeça proporcional a `strokeWidth`.
+ * - `fill`/`stroke`: `#rrggbb`, `#rrggbbaa` ou `'none'`. `strokeWidth`: px na mesma referência de `TextStyle.size`
+ *   (lado menor do quadro = 1080).
+ */
+export interface ShapeItem extends ItemBase {
+  type: 'shape'; shape: 'rect' | 'ellipse' | 'arrow'; fill: string; stroke: string; strokeWidth: number; visual: VisualProps
+  box?: { w: number; h: number }; cornerRadius?: number; spotlight?: { dim: number }
+}
 export interface EffectRegion { shape: 'rect' | 'ellipse'; x: Anim<number>; y: Anim<number>; w: Anim<number>; h: Anim<number>; rotation: Anim<number> }
 export interface EffectItem extends ItemBase {
   type: 'effect'; effect: 'blur' | 'pixelate' | 'solid'; region: EffectRegion
@@ -84,6 +136,13 @@ export interface EffectItem extends ItemBase {
    * (projetos antigos) = faixa de vídeo visível logo abaixo do efeito; qualquer edição grava a faixa atual aqui.
    */
   targetTrackId?: string
+  /**
+   * Alvo gravado de um efeito ANTIGO (sem targetTrackId) cuja faixa-alvo tinha texto/forma: vale a regra do alvo antigo
+   * — só mídia, anotações e transição da faixa contam (o texto dela não é afetado). Congela a ligação de hoje para que
+   * uma faixa nova entre o efeito e a faixa dele não roube o alvo. A v1.3 descarta o campo e o resultado é o
+   * mesmo: ela desenha texto, mas o efeito de escopo track dela nunca se liga a uma camada de texto.
+   */
+  targetMediaOnly?: true
   /**
    * Ancorado a um clipe de mídia: a região (anims de `region`) fica no ESPAÇO DO CONTEÚDO dele — centro e tamanho em
    * fração da fonte exibida, rotação relativa à do clipe — e o resolve a leva ao quadro em cada instante
@@ -98,8 +157,12 @@ export interface EffectAttach { mediaItemId: string; fallback?: { x: number; y: 
 export interface AnnotationsItem extends ItemBase { type: 'annotations'; sessionId: string; inUs: Us; autoFadeMs?: number | null }
 export type Item = MediaItem | TextItem | ShapeItem | EffectItem | AnnotationsItem
 export type TrackKind = 'video' | 'audio'
-/** role 'effects': faixa de efeitos de privacidade (só recebe efeitos; identificada pelo papel, não pelo nome). */
-export interface Track { id: string; kind: TrackKind; name: string; muted: boolean; hidden: boolean; locked: boolean; volume: number; role?: 'voice' | 'music' | 'sfx' | 'effects'; items: Item[] }
+/**
+ * role 'effects': faixa de efeitos de privacidade (só recebe efeitos; identificada pelo papel, não pelo nome).
+ * role 'captions': faixa de legendas (de vídeo, só itens de texto; no máximo uma, sempre a faixa de vídeo do topo). A
+ * v1.3 recusa o papel: no disco vai sem `role` e com `captionsV15: true` (schema.ts).
+ */
+export interface Track { id: string; kind: TrackKind; name: string; muted: boolean; hidden: boolean; locked: boolean; volume: number; role?: 'voice' | 'music' | 'sfx' | 'effects' | 'captions'; items: Item[] }
 export interface Marker { id: string; tUs: Us; label: string; color: string }
 export interface ProjectCanvas { width: number; height: number; fps: number; background: string }
 /**

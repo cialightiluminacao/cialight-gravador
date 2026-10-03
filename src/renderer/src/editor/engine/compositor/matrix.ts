@@ -47,6 +47,30 @@ export function layerMatrix(layer: LayerGeometryInput, src: { w: number; h: numb
   return { mat: new Float32Array([m00, m10, 0, m01, m11, 0, m02, m12, 1]), uv, size: [sx, sy] }
 }
 
+/**
+ * Quad de w×h px do canvas cujo ponto `anchor` (px dentro do quad, y para baixo) fica no centro (cx, cy) do rect;
+ * `scale` e `rotation` (graus, horária) em torno dele. Texto e formas (F5): a rasterização tem margem em volta da
+ * caixa, e é o centro da caixa que fica no centro do transform.
+ */
+export function anchoredMatrix(rect: LayerGeometryInput['rect'], w: number, h: number, anchor: { x: number; y: number }, canvas: { w: number; h: number }): Mat3 {
+  const W = canvas.w
+  const H = canvas.h
+  const s = rect.scale
+  const th = (rect.rotation * Math.PI) / 180
+  const cos = Math.cos(th) * s
+  const sin = Math.sin(th) * s
+  const cx = rect.cx * W
+  const cy = rect.cy * H
+  // pixel p = c + s·R·(a·(w,h) − anchor); clip = (2p.x/W − 1, 1 − 2p.y/H)
+  const m00 = (2 / W) * cos * w
+  const m01 = (-2 / W) * sin * h
+  const m02 = (2 / W) * (cx - cos * anchor.x + sin * anchor.y) - 1
+  const m10 = (-2 / H) * sin * w
+  const m11 = (-2 / H) * cos * h
+  const m12 = 1 - (2 / H) * (cy - sin * anchor.x - cos * anchor.y)
+  return new Float32Array([m00, m10, 0, m01, m11, 0, m02, m12, 1])
+}
+
 /** Aplica a matriz (coluna-maior) a um ponto do quad local. */
 export function applyMat3(m: Mat3, x: number, y: number): [number, number] {
   return [m[0] * x + m[3] * y + m[6], m[1] * x + m[4] * y + m[7]]

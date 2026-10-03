@@ -203,3 +203,58 @@ textarea,
 [contenteditable] {
   user-select: text;
 }
+
+/* biblioteca de Texto e Transições (F5): prévias em CSS, só rodam com o ponteiro/foco no cartão e param com "reduzir movimento" */
+@keyframes ct-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes ct-slideL { from { opacity: 0; transform: translateX(-60%) } to { opacity: 1; transform: none } }
+@keyframes ct-slideR { from { opacity: 0; transform: translateX(60%) } to { opacity: 1; transform: none } }
+@keyframes ct-slideU { from { opacity: 0; transform: translateY(-60%) } to { opacity: 1; transform: none } }
+@keyframes ct-slideD { from { opacity: 0; transform: translateY(60%) } to { opacity: 1; transform: none } }
+@keyframes ct-zoom { from { opacity: 0; transform: scale(0.8) } to { opacity: 1; transform: none } }
+@keyframes ct-pop { 0% { opacity: 0; transform: scale(0.6) } 60% { opacity: 1; transform: scale(1.08) } 100% { transform: none } }
+.ct-prev { opacity: 1 }
+.ct-card:hover .ct-prev[data-in], .ct-card:focus-visible .ct-prev[data-in] { animation: var(--ct-anim) 0.9s ease-out both }
+@media (prefers-reduced-motion: reduce) {
+  .ct-card:hover .ct-prev[data-in], .ct-card:focus-visible .ct-prev[data-in] { animation: none }
+}
+
+@keyframes tr-fade-b { from { opacity: 0 } to { opacity: 1 } }
+@keyframes tr-dip-a { 0%, 5% { opacity: 1 } 45%, 100% { opacity: 0 } }
+@keyframes tr-dip-b { 0%, 55% { opacity: 0 } 95%, 100% { opacity: 1 } }
+@keyframes tr-sl-a { from { transform: none } to { transform: translateX(-100%) } }
+@keyframes tr-sl-b { from { transform: translateX(100%) } to { transform: none } }
+@keyframes tr-sr-a { from { transform: none } to { transform: translateX(100%) } }
+@keyframes tr-sr-b { from { transform: translateX(-100%) } to { transform: none } }
+@keyframes tr-su-a { from { transform: none } to { transform: translateY(-100%) } }
+@keyframes tr-su-b { from { transform: translateY(100%) } to { transform: none } }
+@keyframes tr-sd-a { from { transform: none } to { transform: translateY(100%) } }
+@keyframes tr-sd-b { from { transform: translateY(-100%) } to { transform: none } }
+@keyframes tr-wl-b { from { clip-path: inset(0 0 0 100%) } to { clip-path: inset(0) } }
+@keyframes tr-wr-b { from { clip-path: inset(0 100% 0 0) } to { clip-path: inset(0) } }
+@keyframes tr-zoom-a { from { transform: none; opacity: 1 } to { transform: scale(2); opacity: 0 } }
+@keyframes tr-blur-a { from { filter: blur(0); opacity: 1 } to { filter: blur(6px); opacity: 0 } }
+@keyframes tr-fade-a { from { opacity: 1 } to { opacity: 0 } }
+.tr-thumb .tr-a, .tr-thumb .tr-b { position: absolute; inset: 0; animation-duration: 1.6s; animation-iteration-count: infinite; animation-direction: alternate; animation-timing-function: ease-in-out; animation-fill-mode: both; animation-play-state: paused; animation-delay: -0.8s }
+.ct-card:hover .tr-thumb .tr-a, .ct-card:hover .tr-thumb .tr-b, .ct-card:focus-visible .tr-thumb .tr-a, .ct-card:focus-visible .tr-thumb .tr-b { animation-play-state: running; animation-delay: 0s }
+@media (prefers-reduced-motion: reduce) {
+  .ct-card:hover .tr-thumb .tr-a, .ct-card:hover .tr-thumb .tr-b, .ct-card:focus-visible .tr-thumb .tr-a, .ct-card:focus-visible .tr-thumb .tr-b { animation-play-state: paused; animation-delay: -0.8s }
+}
+.tr-thumb[data-tr="crossfade"] .tr-b { animation-name: tr-fade-b }
+.tr-thumb[data-tr="dipBlack"] { background: #000 }
+.tr-thumb[data-tr="dipWhite"] { background: #fff }
+.tr-thumb[data-tr="dipBlack"] .tr-a, .tr-thumb[data-tr="dipWhite"] .tr-a { animation-name: tr-dip-a }
+.tr-thumb[data-tr="dipBlack"] .tr-b, .tr-thumb[data-tr="dipWhite"] .tr-b { animation-name: tr-dip-b }
+.tr-thumb[data-tr="slideL"] .tr-a { animation-name: tr-sl-a }
+.tr-thumb[data-tr="slideL"] .tr-b { animation-name: tr-sl-b }
+.tr-thumb[data-tr="slideR"] .tr-a { animation-name: tr-sr-a }
+.tr-thumb[data-tr="slideR"] .tr-b { animation-name: tr-sr-b }
+.tr-thumb[data-tr="slideU"] .tr-a { animation-name: tr-su-a }
+.tr-thumb[data-tr="slideU"] .tr-b { animation-name: tr-su-b }
+.tr-thumb[data-tr="slideD"] .tr-a { animation-name: tr-sd-a }
+.tr-thumb[data-tr="slideD"] .tr-b { animation-name: tr-sd-b }
+.tr-thumb[data-tr="wipeL"] .tr-b { animation-name: tr-wl-b }
+.tr-thumb[data-tr="wipeR"] .tr-b { animation-name: tr-wr-b }
+.tr-thumb[data-tr="zoomIn"] .tr-a { animation-name: tr-zoom-a }
+.tr-thumb[data-tr="zoomIn"] .tr-b { animation-name: tr-fade-b }
+.tr-thumb[data-tr="blur"] .tr-a { animation-name: tr-blur-a }
+.tr-thumb[data-tr="blur"] .tr-b { animation-name: tr-fade-b }

@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
 import { evalAnim } from './anim'
 import { screenToContent, toScreen, type ClipFrame, type RegionValues } from './contentPose'
-import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
+import { createEffectItem, createEmptyProject, createMediaItem, createShapeItem } from './factory'
 import { attachEffects } from './followTransform'
 import { findItem } from './ops'
 import { privacyWarnings } from './privacy'
-import type { AnnotationsItem, Asset, EffectItem, Item, MediaItem, Project, TextItem, Track, Us } from './project'
+import type { AnnotationsItem, Asset, EffectItem, Item, MediaItem, Project, ShapeItem, TextItem, Track, Us } from './project'
 import { layerBase } from './layerGeometry'
 import { clipFrameAt, effectRegionAt } from './resolve'
 import { parseProject, toDiskProject } from './schema'
@@ -248,6 +248,30 @@ describe('reframeProject: sobreposições e textos', () => {
     expect(t.visual.transform.x).toEqual({ value: 0.3 })
     expect(t.visual.transform.y).toEqual({ value: 0.9 })
     expect(t.style.size).toEqual({ value: 48 })
+  })
+
+  it('forma: a caixa mantém a proporção visual (px pelo lado menor), com e sem `box`', () => {
+    const p = single()
+    const withBox: ShapeItem = { ...createShapeItem('rect', 0, { durationUs: 5 * S }), id: 'sb', box: { w: 0.3, h: 0.2 } }
+    const noBox: ShapeItem = { ...createShapeItem('rect', 0, { durationUs: 5 * S }), id: 'sn' }
+    delete noBox.box
+    p.tracks.push(track('ts', [withBox, { ...noBox, startUs: 5 * S }]))
+    const r = reframeProject(p, '9:16', { mode: 'cover' })
+    // 16:9 1920×1080 → 9:16 1080×1920: lado menor 1080 nos dois; 0,3×1920 = 576 px e 0,2×1080 = 216 px continuam
+    for (const id of ['sb', 'sn']) {
+      const s = findItem(r.project, id)!.item as ShapeItem
+      expect(s.box!.w * 1080).toBeCloseTo(576, 6)
+      expect(s.box!.h * 1920).toBeCloseTo(216, 6)
+      expect(s.strokeWidth).toBe(withBox.strokeWidth) // já na referência do lado menor
+    }
+    // quadrado 1:1 a partir de 1280×720: lado menor 720 → 1080 (escala 1,5) — a caixa cresce junto com o texto
+    const q = { ...single(), canvas: { ...single().canvas, width: 1280, height: 720 } }
+    q.tracks.push(track('ts', [withBox]))
+    const r2 = reframeProject(q, '1:1', { mode: 'cover' })
+    const s2 = findItem(r2.project, 'sb')!.item as ShapeItem
+    const short = Math.min(r2.project.canvas.width, r2.project.canvas.height) / 720
+    expect(s2.box!.w * r2.project.canvas.width).toBeCloseTo(0.3 * 1280 * short, 6)
+    expect(s2.box!.h * r2.project.canvas.height).toBeCloseTo(0.2 * 720 * short, 6)
   })
 })
 

@@ -45,6 +45,53 @@ describe('EditorExportJobs', () => {
     expect(runFfmpeg.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
   })
 
+  it('isCompletedOutput: só o arquivo de uma exportação concluída (nem o previsto, nem o cortado pelo alvo, nem outro)', async () => {
+    const jobs = new EditorExportJobs(plenty)
+    const a = await jobs.open(dir, 'a.mp4')
+    expect(jobs.isCompletedOutput(a.path)).toBe(false) // em andamento
+    await jobs.write(a.jobId, new Uint8Array([1, 2, 3]), 0)
+    const r = await jobs.finalize(a.jobId)
+    expect(jobs.isCompletedOutput(r.path)).toBe(true)
+    expect(jobs.isCompletedOutput(r.path.toUpperCase())).toBe(process.platform === 'win32')
+    expect(jobs.isCompletedOutput(join(dir, 'sub', '..', 'a.mp4'))).toBe(true)
+    expect(jobs.isCompletedOutput(join(dir, 'b.mp4'))).toBe(false)
+    expect(jobs.isCompletedOutput('')).toBe(false)
+    const big = await jobs.open(dir, 'grande.mp4')
+    await jobs.write(big.jobId, new Uint8Array(100), 0)
+    const o = await jobs.finalize(big.jobId, { maxBytes: 10 })
+    expect(o.oversize).toBe(true)
+    expect(jobs.isCompletedOutput(o.path)).toBe(false)
+    const c = await jobs.open(dir, 'cancelada.mp4')
+    await jobs.cancel(c.jobId)
+    expect(jobs.isCompletedOutput(c.path)).toBe(false)
+  })
+
+  it('reserveSrt (".srt ao lado"): um <nome>.srt existente também ocupa o nome; sem reserveSrt, não', async () => {
+    writeFileSync(join(dir, 'Aula.srt'), 'do usuário')
+    writeFileSync(join(dir, 'Aula (2).srt'), 'do usuário')
+    const jobs = new EditorExportJobs(plenty)
+    const a = await jobs.open(dir, 'Aula.mp4', 0, 0, true)
+    expect(a.path).toBe(join(dir, 'Aula (3).mp4'))
+    writeFileSync(join(dir, 'Aula (3).srt'), 'apareceu durante a exportação')
+    await jobs.write(a.jobId, new Uint8Array([1]), 0)
+    const r = await jobs.finalize(a.jobId)
+    expect(r.path).toBe(join(dir, 'Aula (4).mp4')) // o finalize também respeita o .srt
+    const b = await jobs.open(dir, 'Aula.mp4')
+    expect(b.path).toBe(join(dir, 'Aula.mp4'))
+    await jobs.cancel(b.jobId)
+    expect(readFileSync(join(dir, 'Aula.srt'), 'utf8')).toBe('do usuário')
+  })
+
+  it('consumeCompletedOutput: o .srt ao lado é aceito uma vez por exportação', async () => {
+    const jobs = new EditorExportJobs(plenty)
+    const a = await jobs.open(dir, 'u.mp4')
+    await jobs.write(a.jobId, new Uint8Array([1]), 0)
+    const r = await jobs.finalize(a.jobId)
+    expect(jobs.isCompletedOutput(r.path)).toBe(true)
+    jobs.consumeCompletedOutput(r.path)
+    expect(jobs.isCompletedOutput(r.path)).toBe(false)
+  })
+
   it('nunca sobrescreve: nome ocupado ganha " (2)", " (3)"', async () => {
     writeFileSync(join(dir, 'x.mp4'), 'antigo')
     writeFileSync(join(dir, 'x (2).mp4'), 'antigo')
@@ -425,6 +472,27 @@ describe('EditorExportJobs — fallback libx264 (x264)', () => {
     await jobs.pipeWrite(jobId, new Uint8Array(32))
     await expect(jobs.pipeFinish(jobId)).resolves.toMatchObject({ path: join(dir, 'mudo.mp4'), size: 32 })
     expect(readdirSync(dir)).toEqual(['mudo.mp4'])
+  })
+
+  it('legendas (.srt ao lado) pelo codificador de reserva: <nome>.srt existente ocupa o nome e a saída aceita o .srt uma vez', async () => {
+    writeFileSync(join(dir, 'leg.srt'), 'do usuário')
+    const jobs = new EditorExportJobs(deps())
+    const { jobId, path } = await jobs.openPipe(dir, 'leg', { ...x264, audio: null }, 0, 0, true)
+    expect(path).toBe(join(dir, 'leg (2).mp4'))
+    await jobs.pipeWrite(jobId, new Uint8Array(32))
+    const r = await jobs.pipeFinish(jobId)
+    expect(r.path).toBe(join(dir, 'leg (2).mp4'))
+    expect(jobs.isCompletedOutput(r.path)).toBe(true)
+    // sem reserveSrt, o .srt não conta; GIF/áudio nunca reservam nem aceitam .srt
+    const g = await jobs.openPipe(dir, 'leg', { ...x264, audio: null }, 0, 0, false)
+    expect(g.path).toBe(join(dir, 'leg.mp4'))
+    await jobs.cancel(g.jobId)
+    const w = await jobs.openPipe(dir, 'leg', { kind: 'audio', format: 'wav', sampleRate: 48000, channels: 2 }, 0, 0, true)
+    expect(w.path).toBe(join(dir, 'leg.wav'))
+    await jobs.pipeWrite(w.jobId, new Uint8Array(4))
+    const wr = await jobs.pipeFinish(w.jobId)
+    expect(jobs.isCompletedOutput(wr.path)).toBe(false)
+    expect(readFileSync(join(dir, 'leg.srt'), 'utf8')).toBe('do usuário')
   })
 
   it('pedaço que atravessa o fim do áudio declarado é recusado; áudio incompleto no fim é erro (sem sobras)', async () => {

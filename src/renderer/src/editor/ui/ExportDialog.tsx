@@ -1,8 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { ChevronDown, CircleCheckBig, Copy, FolderOpen, ListPlus, LoaderCircle, ShieldAlert, SlidersHorizontal, TriangleAlert, Upload, X } from 'lucide-react'
+import { Captions, ChevronDown, CircleCheckBig, Copy, FolderOpen, ListPlus, LoaderCircle, ShieldAlert, SlidersHorizontal, TriangleAlert, Upload, X } from 'lucide-react'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
-import { contentEndUs, findItem } from '@shared/editor/ops'
+import { captionCues, contentEndUs, findItem, isCaptionsTrack } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
 import { planAudio } from '@shared/editor/audioPlan'
 import type { Project } from '@shared/editor/project'
@@ -113,6 +113,8 @@ function doneOf(it: QueueItem): Done | null {
 function defaultName(p: Project, f: ExportFormat, audio: AudioFormat, tUs: number): string {
   return f === 'png' ? stillFileName(p.name, tUs) : outputFileName(fileNameFromTitle(p.name) || 'Vídeo', formatExt(f, audio))
 }
+/** Última escolha das legendas (só nesta sessão do app): queimar ligado e .srt desligado por padrão. */
+let captionChoice = { burn: true, srtBeside: false }
 
 export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { open: boolean; onOpenChange: (open: boolean) => void; onBeforeExport: () => void; onSeek: (us: number) => void }): React.JSX.Element | null {
   const project = useEditorStore((s) => s.project)
@@ -136,6 +138,11 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const [folder, setFolder] = useState<string | null>(null)
   // quadro (PNG): o instante do cursor; lido só com o diálogo aberto (fechado não re-renderiza a cada quadro)
   const playheadUs = useEditorStore((s) => (open ? s.playheadUs : 0))
+  const [captions, setCaptionsState] = useState(captionChoice)
+  const setCaptions = (patch: Partial<typeof captionChoice>): void => {
+    captionChoice = { ...captionChoice, ...patch }
+    setCaptionsState(captionChoice)
+  }
   const abortRef = useRef<AbortController | null>(null)
   const ids = useId()
   // item da fila acompanhado aqui ("Exportar" com a fila parada) e se a fila está ocupada
@@ -174,6 +181,7 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
       const id = presetAvailability(base, project.canvas, contentEndUs(project)).ok ? base : DEFAULT_PRESET
       return { settings: settingsForPreset(id, project.canvas), canvas: key }
     })
+    setCaptionsState(captionChoice)
   }, [open])
 
   // diálogo desmontado (editor fechado) no meio do quadro PNG: cancela (a fila segue sozinha)
@@ -187,6 +195,10 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     else if (watched.state === 'done') {
       const done = doneOf(watched)
       setPhase(done ? { kind: 'done', done } : { kind: 'form' })
+      if (done?.kind === 'video') {
+        if (done.result.srtPath) toast.success('Legendas salvas ao lado do vídeo', { description: done.result.srtPath })
+        else if (done.result.srtWarning) toast.warning('O arquivo .srt não foi gravado', { description: done.result.srtWarning })
+      }
     } else if (watched.state === 'error') setPhase({ kind: 'error', message: watched.message ?? 'Falha desconhecida' })
   }, [phase.kind, watchedState])
 
@@ -223,6 +235,10 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
   const audioEstimate = audioEstimateBytes(audioFormat, durationUs)
   // pré-checagem: mídia do intervalo que sairia como "mídia indisponível" exige confirmação explícita
   const issues = checkTo > checkFrom && (isPng || durationUs > 0) ? exportMediaIssues(project, checkFrom, checkTo) : []
+  // legendas habilitadas (o projeto tem legendas: mostra "Queimar no vídeo" / "Salvar arquivo .srt ao lado")
+  const hasCaptions = captionCues(project).length > 0
+  // faixa Legendas oculta: nada seria queimado — a opção fica desligada e explicada (o .srt continua com as legendas)
+  const captionsHidden = !!project.tracks.find(isCaptionsTrack)?.hidden
   // "Revisar": seleciona o efeito, leva o playhead ao instante do aviso (o mais fraco, o início da mídia por
   // cima…, sempre dentro do intervalo) e fecha o diálogo
   const review = (w: PrivacyWarning): void => {
@@ -264,7 +280,16 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
     const presetLabel = format === 'video' ? `${base.label}${customized ? ' (personalizado)' : ''}` : format === 'gif' ? `GIF ${gif.width}×${gif.height}, ${gifOpts.fps} fps` : AUDIO_QUEUE_LABEL[audioFormat]
     const job: EnqueueInput['job'] =
       format === 'video'
-        ? { kind: 'video', request: { ...common, ...exportRequestFor(s, durationUs), estimateBytes: estimate } }
+        ? {
+            kind: 'video',
+            request: {
+              ...common,
+              ...exportRequestFor(s, durationUs),
+              estimateBytes: estimate,
+              // legendas: queimar (desligado com a faixa oculta) e/ou .srt ao lado do arquivo final (também pela fila)
+              ...(captionCues(snapshot).length ? { captions: { ...captions, burn: captions.burn && !snapshot.tracks.find(isCaptionsTrack)?.hidden } } : {})
+            }
+          }
         : format === 'gif'
           ? { kind: 'gif', request: { ...common, ...gif, fps: gifOpts.fps, estimateBytes: gifDiskBytes(gif.width, gif.height, gifOpts.fps, range.fromUs, range.toUs) } }
           : { kind: 'audio', request: { ...common, format: audioFormat, estimateBytes: audioEstimate } }
@@ -637,6 +662,27 @@ export function ExportDialog({ open, onOpenChange, onBeforeExport, onSeek }: { o
               </div>
             ) : null}
 
+            {format === 'video' && hasCaptions ? (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5" role="group" aria-label="Legendas" data-export-captions="">
+                <span className="flex items-center gap-1.5 text-[12px] font-medium text-fg-2">
+                  <Captions className="h-3.5 w-3.5" /> Legendas
+                </span>
+                <label className={cn('flex items-center gap-1.5 text-[12px] text-fg', captionsHidden ? 'cursor-not-allowed opacity-50' : 'cursor-pointer')} title={captionsHidden ? 'A faixa Legendas está oculta: mostre-a para queimar as legendas no vídeo' : undefined}>
+                  <input type="checkbox" className="h-3.5 w-3.5 accent-accent" checked={captions.burn && !captionsHidden} disabled={captionsHidden} onChange={(e) => setCaptions({ burn: e.target.checked })} data-caption-burn="" aria-describedby={captionsHidden ? 'caption-burn-hint' : undefined} />
+                  Queimar no vídeo
+                </label>
+                <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-fg">
+                  <input type="checkbox" className="h-3.5 w-3.5 accent-accent" checked={captions.srtBeside} onChange={(e) => setCaptions({ srtBeside: e.target.checked })} data-caption-srt="" />
+                  Salvar arquivo .srt ao lado
+                </label>
+                {captionsHidden ? (
+                  <span id="caption-burn-hint" className="basis-full text-[11px] text-muted" data-caption-hidden-hint="">
+                    A faixa Legendas está oculta, então nada é queimado no vídeo. Mostre a faixa (ícone do olho) para queimar; o arquivo .srt continua com as legendas.
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+
             {privacy.length ? <PrivacySection warnings={privacy} onReview={review} /> : null}
 
             <div className="flex justify-end gap-2">
@@ -809,6 +855,11 @@ function VideoDoneInfo({ result }: { result: EditorExportResult }): React.JSX.El
         <span className="block text-[11px] text-muted">Codificado com o codificador de reserva (libx264): os codificadores de vídeo do sistema falharam.</span>
       ) : result.fellBackToSoftware ? (
         <span className="block text-[11px] text-muted">Codificado em software (o encoder de hardware falhou).</span>
+      ) : null}
+      {result.srtPath ? (
+        <span className="block truncate text-[11px] text-muted" title={result.srtPath} data-export-srt="">
+          Legendas: {result.srtPath.split(/[\\/]/).pop()}
+        </span>
       ) : null}
     </>
   )

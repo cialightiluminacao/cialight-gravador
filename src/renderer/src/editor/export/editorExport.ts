@@ -7,14 +7,18 @@
 // 1º pacote (ou o H.264 não existe no tamanho) → codificador de reserva: libx264 no main, alimentado por pipe com o
 // PCM do trecho (antes) e os quadros RGBA do mesmo compositor (encodeChain.ts). Tamanho-alvo (qualquer): saída acima do alvo
 // é refeita uma vez com bitrate × (alvo/obtido) × 0,97 ("Ajustando tamanho…"). Uma exportação por vez.
+// Legendas: sem "queimar", a faixa de legendas sai escondida (o preview continua mostrando); com ".srt ao lado", o
+// SRT do trecho exportado é gravado junto do arquivo FINAL (nome numerado) só depois da exportação concluir.
 import { canEncodeVideo, Quality } from 'mediabunny'
 import { planAudio } from '@shared/editor/audioPlan'
+import { captionCues, withCaptionsHidden } from '@shared/editor/ops'
+import { cuesForRange, serializeSrt } from '@shared/editor/srt'
 import type { Project, Us } from '@shared/editor/project'
 import { RenderClient } from '../engine/RenderClient'
 import { AudioClient } from '../engine/audio/AudioClient'
 import { mediaUrlsFor } from '../engine/mediaUrls'
 import type { ExportJobSpec, HwPref, RenderOut } from '../engine/protocol'
-import { audioRateWarning, KEYFRAME_INTERVAL_S, missingMediaWarnings, resizeBitrate } from './exportPlan'
+import { audioRateWarning, KEYFRAME_INTERVAL_S, missingFontWarnings, missingMediaWarnings, resizeBitrate } from './exportPlan'
 import type { VideoCodecChoice } from './exportPresets'
 import { EditorExportCancelled, finalizeOrCancel, isCancelledReply, settleOrCancel, type Finalized } from './finalize'
 import { firstEncodeStep, needsAvcCheck, nextEncodeStep, X264_FALLBACK_WARNING, X264_VIDEO_CODEC, x264PipeSpec, type EncodeStep } from './encodeChain'
@@ -49,6 +53,8 @@ export interface EditorExportRequest {
   simulateHevcFailure?: boolean
   /** Testes: a 1ª passada usa 4× o bitrate pedido (passa do tamanho alvo → exercita a 2ª passada). */
   simulateFirstPassOvershoot?: boolean
+  /** Legendas: desenhar no vídeo (padrão: sim) e/ou gravar `<nome>.srt` ao lado do arquivo final (padrão: não). */
+  captions?: { burn: boolean; srtBeside: boolean }
 }
 
 export interface EditorExportProgress {
@@ -90,6 +96,10 @@ export interface EditorExportResult {
   passes: number
   /** Avisos para a tela de concluído (mídia de áudio que falhou, alvo de tamanho não atingido). */
   warnings: string[]
+  /** .srt gravado ao lado do vídeo (captions.srtBeside). */
+  srtPath?: string
+  /** .srt pedido e não gravado (já existia um com o nome, nada no trecho, falha): o motivo, para um toast. */
+  srtWarning?: string
 }
 
 export { EditorExportCancelled }
@@ -111,8 +121,9 @@ export async function runEditorExport(req: EditorExportRequest, opts: { onProgre
   return withExportLock(() => runLocked(req, opts))
 }
 
-async function runLocked(req: EditorExportRequest, opts: { onProgress?: OnProgress; signal?: AbortSignal }): Promise<EditorExportResult> {
+async function runLocked(input: EditorExportRequest, opts: { onProgress?: OnProgress; signal?: AbortSignal }): Promise<EditorExportResult> {
   const api = window.api
+  const req = input.captions && !input.captions.burn ? { ...input, project: withCaptionsHidden(input.project) } : input
   const signal = opts.signal ?? new AbortController().signal
   const durationUs = req.toUs - req.fromUs
   let videoBitrate = req.simulateFirstPassOvershoot ? req.videoBitrate * 4 : req.videoBitrate
@@ -151,6 +162,9 @@ async function runLocked(req: EditorExportRequest, opts: { onProgress?: OnProgre
     }
     if (out.warning) warnings.add(out.warning)
     if (req.targetBytes && out.size > req.targetBytes) warnings.add(`O vídeo ficou com ${formatMB(out.size)}, acima do alvo de ${formatMB(req.targetBytes)}.`)
+    // legendas: o .srt do trecho ao lado do arquivo FINAL (nome numerado), só depois da exportação concluir
+    const srt = input.captions?.srtBeside ? await writeSrtBeside(input, out.path) : null
+    if (srt?.warning) warnings.add(srt.warning)
     opts.onProgress?.({ stage: 'finalize', frame: enc.total, total: enc.total, percent: 100, speed: null, etaS: null })
     return {
       path: out.path,
@@ -167,8 +181,22 @@ async function runLocked(req: EditorExportRequest, opts: { onProgress?: OnProgre
       fellBackFromHevc,
       fellBackToX264: step.kind === 'x264',
       passes: pass,
-      warnings: [...warnings]
+      warnings: [...warnings],
+      ...(srt?.path ? { srtPath: srt.path } : {}),
+      ...(srt?.warning ? { srtWarning: srt.warning } : {})
     }
+  }
+}
+
+/** SRT do trecho exportado ao lado do vídeo final; falha ou nada para gravar vira aviso (o vídeo já está pronto). */
+async function writeSrtBeside(req: EditorExportRequest, videoPath: string): Promise<{ path?: string; warning?: string }> {
+  const cues = cuesForRange(captionCues(req.project), req.fromUs, req.toUs)
+  if (!cues.length) return { warning: 'Nenhuma legenda no trecho exportado: o arquivo .srt não foi gravado.' }
+  try {
+    const r = await window.api.captions.writeSrtBeside(videoPath, serializeSrt(cues))
+    return r.path ? { path: r.path } : { warning: r.warning ?? 'O arquivo .srt não foi gravado.' }
+  } catch (e) {
+    return { warning: `Não foi possível gravar o arquivo .srt ao lado do vídeo (${ipcErrorMessage(e)}).` }
   }
 }
 
@@ -238,7 +266,7 @@ async function encode(req: EditorExportRequest, start: EncodeStep, stage: 'rende
         throw new Error(`Não foi possível codificar o vídeo neste computador, nem com o codificador de reserva (${ipcErrorMessage(e)}).`)
       }
     }
-    const { jobId } = await api.editorExport.open(req.outputDir, req.fileName, { estimateBytes: req.estimateBytes })
+    const { jobId } = await api.editorExport.open(req.outputDir, req.fileName, { estimateBytes: req.estimateBytes, reserveSrt: req.captions?.srtBeside === true })
     try {
       const done = await attempt(req, jobId, step.codec, step.hw, stage, signal, onProgress)
       return withFlags({ jobId, ...done })
@@ -269,7 +297,7 @@ async function encodeX264(req: EditorExportRequest, stage: 'render' | 'resize', 
   if (signal.aborted) throw new EditorExportCancelled()
   // espaço: + o PCM temporário (f32 estéreo)
   const estimateBytes = req.estimateBytes ? req.estimateBytes + (spec.audio?.samples ?? 0) * 8 : undefined
-  const { jobId } = await api.openPipe(req.outputDir, req.fileName, spec, { estimateBytes })
+  const { jobId } = await api.openPipe(req.outputDir, req.fileName, spec, { estimateBytes, reserveSrt: req.captions?.srtBeside === true })
   try {
     const warnings: string[] = []
     if (spec.audio) {
@@ -412,8 +440,9 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
             () => {
               const media = missingMediaWarnings(req.project, m.missing)
               const ann = m.missingAnnotations.length ? [`As anotações de ${m.missingAnnotations.length === 1 ? 'uma gravação' : `${m.missingAnnotations.length} gravações`} não puderam ser lidas e ficaram de fora.`] : []
+              const fonts = missingFontWarnings(m.missingFonts)
               const rate = audioRateWarning(req.audioBitrate, m.audioBitrate, m.audioCodec)
-              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, audioBitrate: m.audioBitrate, warnings: [...media, ...ann, ...audioWarnings, ...(rate ? [rate] : [])] } })
+              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, audioBitrate: m.audioBitrate, warnings: [...media, ...ann, ...fonts, ...audioWarnings, ...(rate ? [rate] : [])] } })
             },
             () => {}
           )

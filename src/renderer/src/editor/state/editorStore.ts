@@ -4,6 +4,7 @@ import { refreshAttachments, withDeferredFallbacks } from '@shared/editor/attach
 import { EditError, updateAsset } from '@shared/editor/ops'
 import type { Asset, Project, Us } from '@shared/editor/project'
 import { withProcessedAudio } from '@shared/editor/audioProcess'
+import { droppedTransitions } from '@shared/editor/transitions'
 import { commit, initHistory, redo as redoH, undo as undoH, type History } from './history'
 import { clampZoom, usToPx, ZOOM_DEFAULT, zoomAround } from './zoom'
 import { ipcErrorMessage } from '@/lib/ipcError'
@@ -22,6 +23,8 @@ export interface EditorState {
   saving: boolean
   lastSavedAt: number | null
   selection: string[]
+  /** Transição selecionada (id do clipe B, dono do `transitionIn`); exclusiva com a seleção de itens (select() a limpa). */
+  selectedTransition: string | null
   playheadUs: Us
   playing: boolean
   /** Taxa da reprodução (shuttle J/K/L: ±1, ±2, ±4, ±8); 1 quando parado. */
@@ -44,8 +47,12 @@ export interface EditorState {
 
   open(p: Project): void
   close(): void
-  /** transient = dentro de transação (não grava histórico). EditError → toast + false. */
-  apply(fn: (p: Project) => Project, opts?: { transient?: boolean }): boolean
+  /**
+   * transient = dentro de transação (não grava histórico). EditError → toast + false. No commit, transição que sumiu
+   * porque os clipes deixaram de estar encostados vira toast (nunca silêncio); quietTransitions = a remoção é o pedido
+   * (removeTransition).
+   */
+  apply(fn: (p: Project) => Project, opts?: { transient?: boolean; quietTransitions?: boolean }): boolean
   /** Aplica patch em asset SEM entrada de histórico (resultado de ingest); corrige past/present/future. */
   applyAssetPatch(assetId: string, patch: Partial<Asset>): void
   setIngest(assetId: string, progress: IngestProgress | null): void
@@ -61,6 +68,8 @@ export interface EditorState {
   redo(): void
   markSaved(): void
   select(ids: string[], mode?: 'set' | 'add' | 'toggle'): void
+  /** Seleciona a transição de entrada do clipe `toId` (limpa a seleção de itens); null desmarca. */
+  selectTransition(toId: string | null): void
   setPlayhead(us: Us): void
   setPlaying(b: boolean, rate?: number): void
   setZoom(pxPerSec: number, anchorUs?: Us): void
@@ -72,6 +81,16 @@ export interface EditorState {
 const HISTORY_LIMIT = 300
 
 const touch = (p: Project): Project => ({ ...p, updatedAt: new Date().toISOString() })
+
+/**
+ * Commit que tirou transições sem o usuário pedir (aparar/mover/apagar separou os clipes; normalizeTransitions): avisa
+ * uma vez, no commit (nunca nos quadros transitórios do arraste).
+ */
+function warnDroppedTransitions(base: Project, next: Project): void {
+  const n = droppedTransitions(base, next)
+  if (!n) return
+  toast(n === 1 ? 'Transição removida porque os clipes não estão mais encostados' : `${n} transições removidas porque os clipes não estão mais encostados`, { description: 'Ctrl+Z desfaz.' })
+}
 
 /** Campos derivados do histórico (project, canUndo, canRedo). */
 function derive(h: History<Project>): Pick<EditorState, 'history' | 'project' | 'canUndo' | 'canRedo'> {
@@ -87,6 +106,7 @@ const INITIAL = {
   saving: false,
   lastSavedAt: null,
   selection: [] as string[],
+  selectedTransition: null as string | null,
   playheadUs: 0,
   playing: false,
   playRate: 1,
@@ -136,6 +156,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     const fresh = txBase ? refreshAttachments(next, txBase) : next.canvas !== history.present.canvas ? refreshAttachments(next, history.present) : next
     const h = commit(txBase ? { ...history, present: txBase } : history, touch(fresh), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
+    if (!opts?.quietTransitions) warnDroppedTransitions(txBase ?? history.present, fresh)
     return true
   },
 
@@ -197,6 +218,7 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
     }
     const h = commit({ ...history, present: txBase }, touch(refreshAttachments(history.present, txBase)), HISTORY_LIMIT)
     set({ ...derive(h), dirty: true, txBase: null })
+    warnDroppedTransitions(txBase, history.present)
   },
 
   cancelTx: () => {
@@ -213,24 +235,26 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       return
     }
     if (history.past.length === 0) return
-    set({ ...derive(undoH(history)), dirty: true })
+    set({ ...derive(undoH(history)), dirty: true, selectedTransition: null })
   },
 
   redo: () => {
     const { history, txBase } = get()
     if (txBase || history.future.length === 0) return
-    set({ ...derive(redoH(history)), dirty: true })
+    set({ ...derive(redoH(history)), dirty: true, selectedTransition: null })
   },
 
   markSaved: () => set({ dirty: false, lastSavedAt: Date.now() }),
 
   select: (ids, mode = 'set') =>
     set((s) => {
-      if (mode === 'set') return { selection: [...ids] }
-      if (mode === 'add') return { selection: [...s.selection, ...ids.filter((i) => !s.selection.includes(i))] }
+      if (mode === 'set') return { selection: [...ids], selectedTransition: null }
+      if (mode === 'add') return { selection: [...s.selection, ...ids.filter((i) => !s.selection.includes(i))], selectedTransition: null }
       const toggled = new Set(ids)
-      return { selection: [...s.selection.filter((i) => !toggled.has(i)), ...ids.filter((i) => !s.selection.includes(i))] }
+      return { selection: [...s.selection.filter((i) => !toggled.has(i)), ...ids.filter((i) => !s.selection.includes(i))], selectedTransition: null }
     }),
+
+  selectTransition: (toId) => set((s) => (toId === null ? (s.selectedTransition === null ? s : { selectedTransition: null }) : { selectedTransition: toId, selection: [] })),
 
   setPlayhead: (us) => set({ playheadUs: Math.max(0, Math.round(us)) }),
   setPlaying: (b, rate = 1) => set({ playing: b, playRate: b ? rate : 1 }),

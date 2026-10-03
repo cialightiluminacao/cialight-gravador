@@ -4,8 +4,9 @@ import { easeValue, evalAnim } from './anim'
 import { ATTACH_PAD_PX, conservativeRegion, contentToScreen, type ClipFrame, type RegionValues } from './contentPose'
 import { defaultVisual } from './factory'
 import { layerBase } from './layerGeometry'
-import type { Anim, AnimPreset, Asset, EffectItem, Item, MediaItem, PresetAnim, PresetEase, Project, ShapeItem, TextStyle, Track, TransitionKind, Us, VisualProps } from './project'
+import { textContentAt, type Anim, type AnimPreset, type Asset, type EffectItem, type Item, type MediaItem, type PresetAnim, type PresetEase, type Project, type ShapeItem, type TextStyle, type Track, type TransitionKind, type Us, type VisualProps } from './project'
 import { frameDurUs } from './time'
+import { frozenTimes, pairActive, transitionAt, windowProgress, type TransitionWindow } from './transitions'
 
 export interface Rect { cx: number; cy: number; scale: number; rotation: number }
 /** Corte e ajuste já avaliados no instante (o modelo guarda Anim). */
@@ -33,24 +34,52 @@ export interface EffectLayer {
    * visível logo abaixo); null = nenhuma. resolveFrame põe o efeito `track` logo depois da camada dessa faixa.
    */
   targetTrackId: string | null
+  /**
+   * Escopo `track` SEM targetTrackId gravado (projeto antigo, ou "só a faixa abaixo" sem mídia abaixo): o alvo é a faixa
+   * de vídeo logo abaixo, mas só a mídia/anotações/transição dela contam (como até a v1.4) — texto/forma não, para o
+   * aviso noTarget continuar valendo. Ausente = ligação explícita (qualquer camada da faixa).
+   */
+  legacyTarget?: true
   region: { shape: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; rotation: number }
   strength: number; feather: number; color: string; invert: boolean; scope: 'below' | 'track'
 }
-export interface TextLayer { kind: 'text'; itemId: string; text: string; style: ResolvedTextStyle; rect: Rect; opacity: number; blur?: number }
-export interface ShapeLayer { kind: 'shape'; itemId: string; item: ShapeItem; rect: Rect; opacity: number; blur?: number }
-// Em F1 só o tipo existe; a geração de transições vem na F5.
-export interface TransitionLayer { kind: 'transition'; transition: TransitionKind; progress: number; from: Layer[]; to: Layer[] }
+/** Texto (F5): `trackId` = faixa dele (escopo `track` com alvo nela; o golden v1.3 é comparado sem esse campo). */
+export interface TextLayer { kind: 'text'; itemId: string; trackId: string; text: string; style: ResolvedTextStyle; rect: Rect; opacity: number; blur?: number }
+export interface ShapeLayer { kind: 'shape'; itemId: string; trackId: string; item: ShapeItem; rect: Rect; opacity: number; blur?: number }
+/**
+ * Transição em andamento numa faixa de vídeo (substitui, na mesma posição da pilha, a camada normal da faixa).
+ * `from`/`to`: as camadas de A/B exatamente como resolveFrame as produziria sem a transição nos instantes congelados
+ * tA = min(t, corte − 1) e tB = max(t, corte), SEGUIDAS dos efeitos que, sem a transição, cobririam a faixa nesses
+ * instantes (escopo `track` com alvo nesta faixa e `below` acima dela), na ordem de pilha. O compositor desenha cada
+ * sub-pilha à parte (efeitos agindo só sobre ela) e mistura as duas com o shader do tipo.
+ */
+export interface TransitionLayer {
+  kind: 'transition'; itemId: string /* id de B (dono do transitionIn) */; fromId: string; toId: string; trackId: string
+  transition: TransitionKind
+  progress: number      // 0–1 JÁ suavizado (easeInOut cúbico) — o shader usa direto
+  linear: number        // 0–1 linear (testes/depuração)
+  from: Layer[]         // camadas de A avaliadas em tA, em ordem de desenho
+  to: Layer[]           // camadas de B avaliadas em tB
+}
 export type Layer = MediaLayer | AnnotationsLayer | EffectLayer | TextLayer | ShapeLayer | TransitionLayer
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
 
-/** Tempo na fonte (µs) para o instante tUs da timeline. */
+/**
+ * Tempo na fonte (µs) para o instante tUs da timeline. Sempre dentro do trecho aparado [inUs, inUs + ⌈dur·speed⌉ − 1]
+ * (congelado: o próprio freeze.atUs): o que foi cortado pode ser sigiloso. Até a v1.4 o reverso lia, no fim do clipe,
+ * até um quadro ANTES de inUs (− 1 quadro da fórmula) — um quadro do trecho cortado aparecia; a trava corrige isso (F5).
+ */
 export function sourceTimeUs(item: MediaItem, asset: Asset, tUs: Us): Us {
   const local = tUs - item.startUs
   let src: number
   if (item.freeze) src = item.freeze.atUs
-  else if (item.reverse) src = item.inUs + (item.durationUs - local) * item.speed - frameDurUs(asset.video?.fps || 30)
-  else src = item.inUs + local * item.speed
+  else {
+    src = item.reverse
+      ? item.inUs + (item.durationUs - local) * item.speed - frameDurUs(asset.video?.fps || 30)
+      : item.inUs + local * item.speed
+    src = clamp(Math.round(src), item.inUs, item.inUs + Math.max(0, Math.ceil(item.durationUs * item.speed) - 1))
+  }
   const max = asset.durationUs != null ? Math.max(0, asset.durationUs - 1) : Infinity
   return Math.round(clamp(src, 0, max))
 }
@@ -221,8 +250,8 @@ const adjustAt = (a: NonNullable<VisualProps['adjust']>, local: Us): AdjustValue
 
 /**
  * O efeito layers[i] age no quadro? Escopo `below`: sempre. Escopo `track`: só se, pulando os outros efeitos `track`
- * do mesmo alvo logo antes dele, a camada anterior for a mídia/anotações da faixa `targetTrackId` (a mesma condição do
- * compositor; sem ela o efeito não esconde nada).
+ * do mesmo alvo logo antes dele, a camada anterior for a camada (mídia, anotações, texto, forma ou transição) da faixa
+ * `targetTrackId` (a mesma condição do compositor; sem ela o efeito não esconde nada).
  */
 export function effectBound(layers: Layer[], i: number): boolean {
   const fx = layers[i]
@@ -235,7 +264,16 @@ export function effectBound(layers: Layer[], i: number): boolean {
     j--
   }
   const prev = layers[j]
-  return !!prev && (prev.kind === 'media' || prev.kind === 'annotations') && prev.trackId === fx.targetTrackId
+  return !!prev && bindsTo(prev, fx)
+}
+
+/** Camada que representa o conteúdo de uma faixa para o escopo `track`: tudo menos efeito (inclui texto/forma, F5). */
+const isTrackLayer = (l: Layer): l is Exclude<Layer, EffectLayer> => l.kind !== 'effect'
+
+/** A camada `l` é a da faixa-alvo do efeito `track` fx? Alvo antigo (legacyTarget): só mídia/anotações/transição. */
+function bindsTo(l: Layer, fx: EffectLayer): boolean {
+  if (!isTrackLayer(l) || l.trackId !== fx.targetTrackId) return false
+  return !fx.legacyTarget || l.kind === 'media' || l.kind === 'annotations' || l.kind === 'transition'
 }
 
 /** Faixa de vídeo não oculta imediatamente abaixo de trackId (faixas de áudio e ocultas são puladas). */
@@ -248,51 +286,55 @@ export function visualTrackBelow(p: Project, trackId: string): string | null {
   return null
 }
 
-/** Camadas visíveis no instante tUs, da mais ao fundo (faixa 0) à mais ao topo. */
-export function resolveFrame(p: Project, tUs: Us): Layer[] {
+/** Camada normal do item ativo na faixa (sem transição), ou null se não desenha nada. */
+function itemLayer(p: Project, track: Track, item: Item, tUs: Us): Layer | null {
+  const local = tUs - item.startUs
+  switch (item.type) {
+    case 'media': {
+      if (track.kind !== 'video') return null
+      const asset = p.assets.find((a) => a.id === item.assetId)
+      if (!asset) return null
+      const v = item.visual ?? defaultVisual()
+      const s = visualStateAt(v, item.durationUs, local)
+      return {
+        kind: 'media', itemId: item.id, trackId: track.id, assetId: asset.id,
+        srcUs: asset.kind === 'image' ? null : sourceTimeUs(item, asset, tUs),
+        rect: s.rect, opacity: s.opacity, crop: cropAt(v.crop, local), fit: v.fit,
+        shape: v.shape ?? 'rect', radius: v.radius ? Math.max(0, ev(v.radius, local)) : 0,
+        ...(v.border ? { border: v.border } : {}), ...(v.adjust ? { adjust: adjustAt(v.adjust, local) } : {}),
+        mirror: v.mirror ?? false, ...(s.blur > 0 ? { blur: s.blur } : {})
+      }
+    }
+    case 'annotations':
+      return { kind: 'annotations', itemId: item.id, trackId: track.id, sessionId: item.sessionId, sessionMs: (item.inUs + local) / 1000, autoFadeMs: item.autoFadeMs ?? null }
+    case 'text': {
+      const s = visualStateAt(item.visual, item.durationUs, local)
+      return { kind: 'text', itemId: item.id, trackId: track.id, text: textContentAt(item, local), style: { ...item.style, size: Math.max(0, ev(item.style.size, local)) }, rect: s.rect, opacity: s.opacity, ...(s.blur > 0 ? { blur: s.blur } : {}) }
+    }
+    case 'shape': {
+      const s = visualStateAt(item.visual, item.durationUs, local)
+      return { kind: 'shape', itemId: item.id, trackId: track.id, item, rect: s.rect, opacity: s.opacity, ...(s.blur > 0 ? { blur: s.blur } : {}) }
+    }
+    case 'effect':
+      return {
+        kind: 'effect', itemId: item.id, trackId: track.id, effect: item.effect, targetTrackId: item.targetTrackId ?? visualTrackBelow(p, track.id),
+        ...(item.scope === 'track' && (!item.targetTrackId || item.targetMediaOnly) ? { legacyTarget: true as const } : {}),
+        region: { shape: item.region.shape, ...effectRegionAt(p, item, tUs) },
+        strength: ev(item.strength, local), feather: item.feather, color: item.color, invert: item.invert, scope: item.scope
+      }
+  }
+}
+
+/**
+ * Pilha do instante tUs. `transitions`: camada que substitui a da faixa (por id da faixa); ausente = resolve sem
+ * transições (o que os lados A/B de uma transição usam).
+ */
+function stackAt(p: Project, tUs: Us, transitions?: ReadonlyMap<string, TransitionLayer>): Layer[] {
   const layers: Layer[] = []
   for (const { track, item } of activeItemsAt(p, tUs)) {
     if (track.hidden || item.enabled === false) continue
-    const local = tUs - item.startUs
-    switch (item.type) {
-      case 'media': {
-        if (track.kind !== 'video') break
-        const asset = p.assets.find((a) => a.id === item.assetId)
-        if (!asset) break
-        const v = item.visual ?? defaultVisual()
-        const s = visualStateAt(v, item.durationUs, local)
-        layers.push({
-          kind: 'media', itemId: item.id, trackId: track.id, assetId: asset.id,
-          srcUs: asset.kind === 'image' ? null : sourceTimeUs(item, asset, tUs),
-          rect: s.rect, opacity: s.opacity, crop: cropAt(v.crop, local), fit: v.fit,
-          shape: v.shape ?? 'rect', radius: v.radius ? Math.max(0, ev(v.radius, local)) : 0,
-          ...(v.border ? { border: v.border } : {}), ...(v.adjust ? { adjust: adjustAt(v.adjust, local) } : {}),
-          mirror: v.mirror ?? false, ...(s.blur > 0 ? { blur: s.blur } : {})
-        })
-        break
-      }
-      case 'annotations':
-        layers.push({ kind: 'annotations', itemId: item.id, trackId: track.id, sessionId: item.sessionId, sessionMs: (item.inUs + local) / 1000, autoFadeMs: item.autoFadeMs ?? null })
-        break
-      case 'text': {
-        const s = visualStateAt(item.visual, item.durationUs, local)
-        layers.push({ kind: 'text', itemId: item.id, text: item.text, style: { ...item.style, size: Math.max(0, ev(item.style.size, local)) }, rect: s.rect, opacity: s.opacity, ...(s.blur > 0 ? { blur: s.blur } : {}) })
-        break
-      }
-      case 'shape': {
-        const s = visualStateAt(item.visual, item.durationUs, local)
-        layers.push({ kind: 'shape', itemId: item.id, item, rect: s.rect, opacity: s.opacity, ...(s.blur > 0 ? { blur: s.blur } : {}) })
-        break
-      }
-      case 'effect': {
-        layers.push({
-          kind: 'effect', itemId: item.id, trackId: track.id, effect: item.effect, targetTrackId: item.targetTrackId ?? visualTrackBelow(p, track.id),
-          region: { shape: item.region.shape, ...effectRegionAt(p, item, tUs) },
-          strength: ev(item.strength, local), feather: item.feather, color: item.color, invert: item.invert, scope: item.scope
-        })
-        break
-      }
-    }
+    const l = transitions?.get(track.id) ?? itemLayer(p, track, item, tUs)
+    if (l) layers.push(l)
   }
   // escopo `track`: o efeito vai para logo depois da camada da faixa-alvo (e dos outros efeitos dela), seja qual for a
   // posição da faixa do próprio efeito; sem camada da faixa-alvo neste instante ele fica no fim, sem efeito
@@ -300,10 +342,57 @@ export function resolveFrame(p: Project, tUs: Us): Layer[] {
   if (trackFx.length === 0) return layers
   const out = layers.filter((l) => !(l.kind === 'effect' && l.scope === 'track'))
   for (const fx of trackFx) {
-    let at = out.findIndex((l) => (l.kind === 'media' || l.kind === 'annotations') && l.trackId === fx.targetTrackId)
+    let at = out.findIndex((l) => bindsTo(l, fx))
     if (at < 0) { out.push(fx); continue }
     while (out[at + 1]?.kind === 'effect' && (out[at + 1] as EffectLayer).scope === 'track' && (out[at + 1] as EffectLayer).targetTrackId === fx.targetTrackId) at++
     out.splice(at + 1, 0, fx)
   }
   return out
+}
+
+/**
+ * Um lado da transição: a camada do item em `at` (resolve sem transições) seguida dos efeitos que agem sobre a faixa
+ * dele ali — `below` acima dela e `track` ligados a ela (effectBound) —, na ordem de pilha. Item sem camada: [].
+ */
+function transitionSide(p: Project, itemId: string, trackId: string, at: Us): Layer[] {
+  const stack = stackAt(p, at)
+  const i = stack.findIndex((l) => l.kind !== 'effect' && l.itemId === itemId)
+  if (i < 0) return []
+  // srcUs já vem preso ao trecho aparado (sourceTimeUs): congelar o último quadro de um reverso por d/2 não mostra
+  // conteúdo cortado
+  const out: Layer[] = [stack[i]]
+  for (let j = i + 1; j < stack.length; j++) {
+    const l = stack[j]
+    if (l.kind === 'effect' && (l.scope === 'below' || (l.targetTrackId === trackId && effectBound(stack, j)))) out.push(l)
+  }
+  return out
+}
+
+/** Camada da transição `w` no instante tUs (dentro da janela). */
+function transitionLayer(p: Project, w: TransitionWindow, tUs: Us): TransitionLayer {
+  const frozen = frozenTimes(w)
+  const linear = windowProgress(w, tUs)
+  return {
+    kind: 'transition', itemId: w.toId, fromId: w.fromId, toId: w.toId, trackId: w.trackId, transition: w.kind,
+    progress: easeValue('inOut', linear), linear,
+    from: transitionSide(p, w.fromId, w.trackId, Math.min(tUs, frozen.fromUs)),
+    to: transitionSide(p, w.toId, w.trackId, Math.max(tUs, frozen.toUs))
+  }
+}
+
+/**
+ * Camadas visíveis no instante tUs, da mais ao fundo (faixa 0) à mais ao topo. Faixa de vídeo visível dentro da janela
+ * de uma transição ativa (pairActive): uma TransitionLayer no lugar da camada normal. Fora das janelas o custo extra é
+ * só transitionAt (O(log n)) por faixa de vídeo.
+ */
+export function resolveFrame(p: Project, tUs: Us): Layer[] {
+  let transitions: Map<string, TransitionLayer> | undefined
+  for (const track of p.tracks) {
+    if (track.hidden || track.kind !== 'video') continue
+    const w = transitionAt(track, tUs)
+    if (!w || !pairActive(track, w)) continue
+    if (!transitions) transitions = new Map()
+    transitions.set(track.id, transitionLayer(p, w, tUs))
+  }
+  return stackAt(p, tUs, transitions)
 }

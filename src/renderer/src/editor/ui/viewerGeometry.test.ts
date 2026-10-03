@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { attachEffects } from '@shared/editor/followTransform'
-import { EditError, addAsset, addEffect, insertItems, setAnimValue, setItemEnabled, toggleKeyframe, updateItem, updateTrack } from '@shared/editor/ops'
+import { EditError, addAsset, addEffect, addMediaFromAsset, addShape, addText, addTransition, insertItems, setAnimValue, setItemEnabled, toggleKeyframe, updateItem, updateTrack } from '@shared/editor/ops'
 import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/project'
-import { cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionBoxOf, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, writeRegionValues, type RegionBox } from './viewerGeometry'
+import { transitionSidePose, cornerScale, dragToRegion, effectBoxes, hitTest, hitTestRegions, itemBoxes, keyframeAt, regionBoxOf, regionHit, resizeRegion, rotateAngle, snapCenter, snapRegion, snapResize, writeRegion, writeRegionValues, type RegionBox } from './viewerGeometry'
 
 const asset = (id: string, w: number, h: number): Asset => ({ id, name: id, kind: 'video', source: { type: 'generated', file: `${id}.mp4` }, durationUs: 5_000_000, status: 'ready', video: { width: w, height: h, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: 1_000_000 } })
 
@@ -234,5 +234,88 @@ describe('viewerGeometry — regiões de efeito', () => {
     expect(keyframeAt(fx(), 1_050_000, 16_666)).toBe(false)
     p = toggleKeyframe(p, a.itemId, 'strength', 3_000_000)
     expect(keyframeAt(fx(), 2_000_000, 16_666)).toBe(false)
+  })
+})
+
+describe('viewerGeometry — texto, forma e transição (F5)', () => {
+  // medidor sem Canvas: caixa 400×100 px no centro do transform (a do compositor é testada em textRaster)
+  const measure = (l: { rect: { cx: number; cy: number; scale: number; rotation: number } }, f: { W: number; H: number }) => ({ cx: l.rect.cx * f.W, cy: l.rect.cy * f.H, w: 400 * l.rect.scale, h: 100 * l.rect.scale, rotation: l.rect.rotation })
+
+  it('texto e forma têm caixa (a forma = box × quadro × escala) e entram no hit-test', () => {
+    let p = project()
+    const t = addText(p, 'title', 0)
+    p = addShape(t.project, 'rect', 0).project
+    const shapeId = p.tracks.flatMap((x) => x.items).find((i) => i.type === 'shape')!.id
+    p = updateItem(p, t.itemId, (d) => { if (d.type === 'text') d.visual.transform.scale = { value: 2 } })
+    const boxes = itemBoxes(p, 1_000_000, measure)
+    const tb = boxes.find((b) => b.itemId === t.itemId)!
+    expect(tb).toMatchObject({ cx: 960, cy: 540, w: 800, h: 200, rotation: 0 })
+    const sb = boxes.find((b) => b.itemId === shapeId)!
+    expect(sb).toMatchObject({ cx: 960, cy: 540 })
+    expect(sb.w).toBeCloseTo(0.3 * 1920)
+    expect(sb.h).toBeCloseTo(0.2 * 1080)
+    expect(hitTest(boxes, 960 + 390, 540)).toBe(t.itemId) // texto (maior) por cima? a forma entra depois (mais ao topo)
+  })
+
+  it('texto vazio não tem caixa; fora do intervalo do item também não', () => {
+    const t = addText(project(), 'title', 0, { text: '' })
+    expect(itemBoxes(t.project, 1_000_000, measure).some((b) => b.itemId === t.itemId)).toBe(false)
+    const u = addText(project(), 'title', 0)
+    expect(itemBoxes(u.project, 4_000_000, measure).some((b) => b.itemId === u.itemId)).toBe(false) // título dura 3 s
+  })
+
+  it('durante a transição, A e B são selecionáveis; a caixa à frente é A na 1ª metade e B na 2ª', () => {
+    let p = addAsset(createEmptyProject('t'), asset('v', 1920, 1080))
+    const a = addMediaFromAsset(p, 'v', 0)
+    const b = addMediaFromAsset(a.project, 'v', 5_000_000)
+    const idA = a.itemIds[0], idB = b.itemIds[0]
+    p = addTransition(b.project, idB, 'crossfade', 1_000_000) // janela 4,5 s – 5,5 s
+    const early = itemBoxes(p, 4_800_000, measure).map((x) => x.itemId)
+    expect(early).toEqual(expect.arrayContaining([idA, idB]))
+    expect(early.lastIndexOf(idA)).toBeGreaterThan(early.lastIndexOf(idB)) // A na frente
+    const late = itemBoxes(p, 5_200_000, measure).map((x) => x.itemId)
+    expect(late).toEqual(expect.arrayContaining([idA, idB]))
+    expect(late.lastIndexOf(idB)).toBeGreaterThan(late.lastIndexOf(idA)) // B na frente
+    const outside = itemBoxes(p, 3_000_000, measure).map((x) => x.itemId)
+    expect(outside).toEqual([idA])
+    const boxes = itemBoxes(p, 4_800_000, measure)
+    expect(hitTest(boxes, 960, 540)).toBe(idA)
+  })
+
+  it('texto dentro da transição (texto → mídia) também tem caixa', () => {
+    let p = addAsset(createEmptyProject('t'), asset('v', 1920, 1080))
+    const m = addMediaFromAsset(p, 'v', 3_000_000)
+    p = m.project
+    const t = addText(p, 'title', 0, { trackId: p.tracks[0].id })
+    const q = addTransition(t.project, m.itemIds[0], 'crossfade', 1_000_000)
+    const ids = itemBoxes(q, 3_100_000, measure).map((x) => x.itemId)
+    expect(ids).toEqual(expect.arrayContaining([t.itemId, m.itemIds[0]]))
+  })
+
+  it('a seleção acompanha o clipe que desliza (deslizar ←) e o que cresce (zoom) dentro da janela', () => {
+    expect(transitionSidePose('slideL', 'from', 0.5, 1920, 1080)).toMatchObject({ dx: -960, s: 1 })
+    expect(transitionSidePose('slideL', 'to', 0.5, 1920, 1080)).toMatchObject({ dx: 960, s: 1 })
+    expect(transitionSidePose('slideU', 'from', 0.25, 1920, 1080)).toMatchObject({ dx: 0, dy: -270, s: 1 })
+    expect(transitionSidePose('slideD', 'to', 0.25, 1920, 1080)).toMatchObject({ dx: 0, dy: -810, s: 1 })
+    expect(transitionSidePose('zoomIn', 'from', 1, 1920, 1080).s).toBeCloseTo(1.5)
+    expect(transitionSidePose('zoomIn', 'to', 0, 1920, 1080).s).toBeCloseTo(0.85)
+    expect(transitionSidePose('crossfade', 'from', 0.5, 1920, 1080)).toEqual({ dx: 0, dy: 0, s: 1 })
+    const p0 = addAsset(createEmptyProject('t'), asset('v', 1920, 1080))
+    const a = addMediaFromAsset(p0, 'v', 0)
+    const b = addMediaFromAsset(a.project, 'v', 5_000_000)
+    const p = addTransition(b.project, b.itemIds[0], 'slideL', 1_000_000) // janela 4,5 s – 5,5 s
+    // meio da janela (progress 0,5): A deslocado −½ quadro, B +½
+    const boxes = itemBoxes(p, 5_000_000, measure)
+    const ba = boxes.find((x) => x.itemId === a.itemIds[0])!
+    const bb = boxes.find((x) => x.itemId === b.itemIds[0])!
+    expect(ba.cx).toBeCloseTo(0)
+    expect(bb.cx).toBeCloseTo(1920)
+    // cada um é selecionável onde o shader o desenha: A na metade esquerda, B na direita
+    expect(hitTest(boxes, 480, 540)).toBe(a.itemIds[0])
+    expect(hitTest(boxes, 1440, 540)).toBe(b.itemIds[0])
+    // zoom perto do fim da janela: A cresceu mais de 1,3×
+    const z = addTransition(b.project, b.itemIds[0], 'zoomIn', 1_000_000)
+    const zb = itemBoxes(z, 5_400_000, measure).find((x) => x.itemId === a.itemIds[0])!
+    expect(zb.w).toBeGreaterThan(1920 * 1.3)
   })
 })

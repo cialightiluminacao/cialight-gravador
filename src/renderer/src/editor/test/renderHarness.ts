@@ -14,6 +14,8 @@ import { followCheck } from './followHarness'
 import { animCheck } from './animHarness'
 import { reframeCheck } from './reframeHarness'
 import { memoryCheck } from './memoryHarness'
+import { transitionCheck } from './transitionHarness'
+import { textCheck } from './textHarness'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>?out=<pasta>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -96,6 +98,8 @@ export async function runRenderHarness(projectId: string, outDir: string | null 
     report.anim = await animCheck(outDir)
     report.reframe = await reframeCheck(outDir)
     report.memory = await memoryCheck()
+    report.transition = await transitionCheck(outDir)
+    report.text = await textCheck(outDir)
     // por último: decodificação 1080p contínua (a CPU desta máquina estrangula depois de alguns segundos de carga)
     report.speed = await speedCheck()
     ok = true
