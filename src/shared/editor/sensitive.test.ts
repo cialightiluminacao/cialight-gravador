@@ -55,6 +55,18 @@ function expectBox(a: OcrBox, b: OcrBox): void {
   expect(a.w).toBeCloseTo(b.w, 9)
   expect(a.h).toBeCloseTo(b.h, 9)
 }
+/** Monoespaçada com caixas justas ao tinteiro (WinRT): vão ≈ 1 avanço + folgas (≈ 1,3 × largura mediana). */
+function monoLine(text: string, y = 0.1): OcrLine {
+  const adv = 0.008
+  let x = 0.05
+  const words = text.split(' ').filter(Boolean).map((t) => {
+    const w = t.length * adv - 0.002
+    const box = { x, y, w, h: H }
+    x += (t.length + 1) * adv
+    return { text: t, box }
+  })
+  return { words }
+}
 const kindsOf = (ds: Detection[]): SensitiveKind[] => ds.map((d) => d.kind)
 const only = (ds: Detection[], k: SensitiveKind): Detection[] => ds.filter((d) => d.kind === k)
 
@@ -688,8 +700,8 @@ describe('negativos: corpus fixo de 200 linhas', () => {
   it('tem 200 linhas', () => {
     expect(NEGATIVE_CORPUS).toHaveLength(200)
   })
-  for (const gap of [0.03, 0.002]) {
-    it(`zero falsos positivos (vão ${gap === 0.03 ? 'grande: só passada 1' : 'pequeno: palavras coladas'})`, () => {
+  for (const gap of [0.03, 0.012, 0.0075, 0.004, 0.003, 0.002]) {
+    it(`zero falsos positivos (vão ${gap})`, () => {
       const bad: string[] = []
       NEGATIVE_CORPUS.forEach((t) => {
         const ds = detectSensitive([line(t, gap)], { customTerms: [] })
@@ -698,6 +710,14 @@ describe('negativos: corpus fixo de 200 linhas', () => {
       expect(bad).toEqual([])
     })
   }
+  it('zero falsos positivos com geometria monoespaçada de caixa justa (Consolas)', () => {
+    const bad: string[] = []
+    NEGATIVE_CORPUS.forEach((t) => {
+      const ds = detectSensitive([monoLine(t)])
+      if (ds.length) bad.push(`${t} -> ${ds.map((d) => d.kind).join(',')}`)
+    })
+    expect(bad).toEqual([])
+  })
   it('negativos pontuais', () => {
     for (const t of ['12/03/2024', '14:35:20', 'R$ 1.234.567,89', '1.2.3.400', 'v10.0.19045', '978-3-16-148410-0', 'Pedido 12345']) {
       expect(detectSensitive([line(t)]), t).toEqual([])
@@ -967,7 +987,7 @@ describe('Task 2b: emenda do spike de OCR (recall primeiro)', () => {
       expect(kindsOf(detectSensitive([line('00.000.000/0000-00')]))).not.toContain('cnpj')
     })
     it('cartão agrupado com Luhn inválido: pattern só com espaçamento de cartão; corrido inválido: nada', () => {
-      const bad = ['4111 1111 1111 1112', '5500 0000 0000 0005', '3782 822463 10006', '4111 1111 1111 1111 123']
+      const bad = ['4111 1111 1111 1112', '5105 1051 0510 5106', '3782 822463 10006']
       let n = 0
       for (const t of bad) {
         if (luhnValid(t.replace(/ /g, ''))) continue
@@ -1018,7 +1038,7 @@ describe('Task 2b: emenda do spike de OCR (recall primeiro)', () => {
     const tok = (t: string, gap = 0.03): Detection[] => only(detectSensitive([line(t, gap)]), 'token')
     it('prefixos com >= 8 caracteres depois', () => {
       for (const w of ['sk-abcdefgh', 'sk_abcdefgh', 'ghp_abcdefgh', 'ghP_abcdefgh', 'gho_abcdefgh', 'ghs_abcdefgh', 'ghu_abcdefgh',
-        'ghr_abcdefgh', 'github_pat_abcdefgh', 'xoxb-abcdefgh', 'xoxp-abcdefgh', 'AKIAABCDEFGH', 'AIzaabcdefgh', 'eyJabcdefgh', 'ey3abcdefgh', 'eyjabcdefgh']) {
+        'ghr_abcdefgh', 'github_pat_abcdefgh', 'xoxb-abcdefgh', 'xoxp-abcdefgh', 'AKIAABCDEFGH', 'AIzaabcdefgh', 'eyJabcdefgh', 'ey3Abcdefgh', 'eyjAbcdefgh']) {
         const l = line(`key ${w} fim`)
         const ds = only(detectSensitive([l]), 'token')
         expect(ds, w).toHaveLength(1)
@@ -1095,6 +1115,86 @@ describe('Task 2b: emenda do spike de OCR (recall primeiro)', () => {
     })
     it('máscara do rotulado', () => {
       expect(lab('CPF 529.982.247-26')[0]!.masked).toBe('CPF: ••••••')
+    })
+  })
+})
+
+describe('Task 2b fix round 1', () => {
+  describe('1: cartão pattern não pode ser tabela/ano', () => {
+    it('linhas de tabela e prosa numérica em espaçamento normal', () => {
+      for (const t of ['Jan 15 2300 4100 3200 1100 900 450 1200', 'Anos 2021 2022 2023 2024 foram bons', 'Vendas 3000 4000 5000 6000 unidades',
+        'Qtd 3456 5017 1939 2177 12', '12 3456 5017 1939 2177', 'Q 1111 2222 3333 4444 fim']) {
+        const g16 = /\d{4} \d{4} \d{4} \d{4}/.exec(t)
+        if (g16 && luhnValid(g16[0].replace(/ /g, ''))) continue // Luhn válido por acaso: é cartão
+        for (const gap of [0.003, 0.004, 0.0075, 0.012]) expect(only(detectSensitive([line(t, gap)]), 'card'), `${t} ${gap}`).toHaveLength(0)
+        expect(only(detectSensitive([monoLine(t)]), 'card'), t).toHaveLength(0)
+      }
+    })
+    it('só 4-4-4-4 e 4-6-5 viram pattern; 4-4-4-4-3 e 4-4-4-N só validados', () => {
+      expect(only(detectSensitive([line('4111 1111 1111 1112 123', 0.004)]), 'card')).toHaveLength(0)
+      expect(only(detectSensitive([line('4111 1111 1111 123', 0.004)]), 'card')).toHaveLength(0)
+      expect(only(detectSensitive([line('4111 1111 1111 1112', 0.004)]), 'card')).toHaveLength(1)
+    })
+    it('cartão com Luhn válido não muda', () => {
+      for (const t of ['4111 1111 1111 1111', '5555 5555 5555 4444']) {
+        const d = t.replace(/ /g, '')
+        const ds = only(detectSensitive([line(`Jan 15 ${t} 900`, 0.004)]), 'card')
+        expect(luhnValid(d)).toBe(true)
+        expect(ds[0]!.confidence).toBe('validated')
+        expect(ds[0]!.value).toBe(d)
+      }
+    })
+  })
+  describe('2: monoespaçada de caixa justa', () => {
+    it('cartão pattern', () => {
+      const ds = only(detectSensitive([monoLine('Cartao 4111 1111 1111 1112')]), 'card')
+      expect(ds).toHaveLength(1)
+      expect(ds[0]!.confidence).toBe('pattern')
+    })
+    it('token partido: ghp + resto, ghp_ + resto, sk- + resto', () => {
+      const rest = 'a8Kd92LmQz0Pw3Xv71Rt'
+      for (const pre of ['ghp', 'ghp_', 'sk-']) {
+        const l = monoLine(`${pre} ${rest}`)
+        const ds = only(detectSensitive([l]), 'token')
+        expect(ds, pre).toHaveLength(1)
+        expect(ds[0]!.box.x + ds[0]!.box.w).toBeCloseTo(l.words[1]!.box.x + l.words[1]!.box.w, 9)
+      }
+      expect(only(detectSensitive([monoLine('sk- proj8Kd92LmQz')]), 'token')).toHaveLength(1)
+    })
+    it('coluna larga continua separada', () => {
+      expect(only(detectSensitive([line('ghp a8Kd92LmQz0Pw3Xv71Rt', 0.03)]), 'token')).toHaveLength(0)
+    })
+  })
+  describe('3–5: rótulos', () => {
+    const lab = (t: string): Detection[] => only(detectSensitive([line(t)]), 'labeled')
+    it('rótulo fraco descartado não trunca o valor do anterior', () => {
+      for (const [t, last] of [['Senha: minha rg', 2], ['Senha: abc pix', 2], ['Token: abc cep', 2], ['Senha: correto cavalo bateria grampo email 7', 6]] as const) {
+        const l = line(t)
+        const ds = lab(t)
+        expect(ds.length, t).toBeGreaterThanOrEqual(1)
+        const right = Math.max(...ds.map((d) => d.box.x + d.box.w))
+        expect(right, t).toBeGreaterThanOrEqual(l.words[last]!.box.x + l.words[last]!.box.w - 1e-9)
+      }
+    })
+    it('rótulos antigos com "." ou sem separador: valem como fracos', () => {
+      for (const t of ['Senha. hunter2x', 'Token. abc123', 'Senha hunter2x', 'Conta 12345-6', 'CVV 123']) expect(lab(t).length, t).toBeGreaterThanOrEqual(1)
+      for (const t of ['Senha forte exigida', 'Troque a senha. Depois saia', 'o token expirou']) expect(lab(t), t).toHaveLength(0)
+    })
+    it('sem separador: dígito ou @ na 1ª palavra do valor', () => {
+      for (const t of ['Validade de 12 meses', 'Enviar email para 3 pessoas', 'Pagamento via PIX em 2 dias', 'Configure o Authorization header 2x',
+        'Validade expirada em breve para 2026']) expect(lab(t), t).toHaveLength(0)
+      expect(lab('Validade 12/2030').length).toBeGreaterThanOrEqual(1)
+      expect(lab('RG nº 12.345.678-9').length).toBeGreaterThanOrEqual(1)
+      expect(lab('Endereço Rua das Flores 123').length).toBeGreaterThanOrEqual(1)
+    })
+  })
+  describe('6: eyj/ey3', () => {
+    it('exigem dígito ou maiúscula no resto', () => {
+      expect(only(detectSensitive([line('eyjafjallajokull')]), 'token')).toHaveLength(0)
+      expect(only(detectSensitive([line('ey3afjallajokull')]), 'token')).toHaveLength(0)
+      expect(only(detectSensitive([line('eyjhbGciOiJIUzI1')]), 'token')).toHaveLength(1)
+      expect(only(detectSensitive([line('ey3hbGciOiJIUzI1')]), 'token')).toHaveLength(1)
+      expect(only(detectSensitive([line('eyJafjallajokull')]), 'token')).toHaveLength(1)
     })
   })
 })
