@@ -30,7 +30,10 @@ export async function createQaEditorFixture(projects: ProjectStore, outDir: stri
   const logo = join(dir, 'logo.png')
   const music = join(dir, 'trilha.m4a')
   const gen = (args: string[], label: string): Promise<unknown> => runFfmpeg(['-hide_banner', '-nostdin', '-y', ...args, '-progress', 'pipe:1', '-nostats'], { label })
-  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-f', 'lavfi', '-i', VOICE, '-t', '12', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', video], 'qa: vídeo')
+  // medição de desempenho (scripts/qa/bench-export.mjs): duração e tamanho do vídeo ajustáveis; o padrão dos QAs fica igual
+  const seconds = String(Number(process.env.CIALIGHT_QA_FIXTURE_SECONDS) || 12)
+  const size = /^\d+x\d+$/.test(process.env.CIALIGHT_QA_FIXTURE_SIZE ?? '') ? process.env.CIALIGHT_QA_FIXTURE_SIZE : '1280x720'
+  await gen(['-f', 'lavfi', '-i', `testsrc2=size=${size}:rate=30`, '-f', 'lavfi', '-i', VOICE, '-t', seconds, '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', video], 'qa: vídeo')
   await gen(['-f', 'lavfi', '-i', 'color=c=0xff4d4f:s=480x480,drawbox=x=60:y=60:w=360:h=360:color=white@0.9:t=24', '-frames:v', '1', '-update', '1', logo], 'qa: logo')
   await gen(['-f', 'lavfi', '-i', BURSTS, '-t', '9', '-c:a', 'aac', music], 'qa: trilha')
 
