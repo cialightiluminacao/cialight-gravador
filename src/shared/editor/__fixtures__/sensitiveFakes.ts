@@ -276,13 +276,23 @@ function buildNegativeCorpus(): string[] {
   const code = ['const total = items.length * 2;', 'for (let i = 0; i < 100; i++) {', 'return a + b - c;', 'width: 480px; height: 270px;',
     'let x = 0.75 * 1920;', 'if (ratio > 1.777) scale(1.25);', 'import { ref } from "vue";', 'const ms = 1500 + 250;']
   for (let i = 0; i < 16; i++) out.push(code[i % code.length]!)
+  // tabelas/planilhas: linhas de células de 3–4 dígitos (fonte comum de falsos positivos)
+  const meses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+  const tr = rng(2024)
+  for (let i = 0; i < 20; i++) {
+    // células alternando 3 e 4 dígitos: quatro células seguidas de 4 dígitos com Luhn válido são
+    // indistinguíveis de um cartão (limite conhecido, ver relatório), então não entram no corpus
+    const cells = Array.from({ length: 8 }, (_, k) => String(k % 2 === i % 2 ? 100 + Math.floor(tr() * 900) : 1000 + Math.floor(tr() * 9000)))
+    out.push(`${meses[i % 12]} ${1 + i} ${cells.join(' ')}`)
+  }
+  out.push('Jan 15 2300 4100 3200 1100 900 450 1200', 'Qtd 41 11 11 11 21 31 11')
   // completa até 200 com variações de prosa numerada
   let k = 0
   while (out.length < 200) {
     out.push(`Passo ${k + 1}: revise o clipe ${k + 3} e confirme a duração de ${k + 2} segundos.`)
     k++
   }
-  return out
+  return out.slice(0, 200)
 }
 
 export const NEGATIVE_CORPUS: readonly string[] = buildNegativeCorpus()

@@ -198,6 +198,13 @@ interface Pass {
   wordOf: Int32Array
   /** Índice "colado" (só chars de palavras) de cada char; -1 em separadores. */
   glued: Int32Array
+  /** Variante do mapeado em que '|' vira '\' (barra do CNPJ lida como '|'); null se não há '|'. */
+  mAlt: string | null
+  /** Texto e início (em t) de cada palavra. */
+  words: readonly string[]
+  wordStart: readonly number[]
+  /** Número da passada (1 = espaço único; 2 = vãos pequenos colados). */
+  n: 1 | 2
 }
 
 function foldChar(ch: string): string {
@@ -253,6 +260,8 @@ function mapDigits(t: string): string {
       else if (!(ch in CONFUSABLE)) nl = false
       i++
     }
+    // '|' ou '!' sozinhos entre separadores (ex.: barra do CNPJ lida como '|') não viram '1'
+    if (i - s === 1 && (t[s] === '|' || t[s] === '!')) nl = false
     starts.push(s)
     ends.push(i)
     numLike.push(nl)
@@ -299,16 +308,18 @@ function mapDigits(t: string): string {
   return out ? out.join('') : t
 }
 
-function buildPass(texts: readonly string[], join: readonly boolean[]): Pass {
+function buildPass(texts: readonly string[], join: readonly boolean[], n: 1 | 2): Pass {
   // join[i] = true => sem separador entre a palavra i e i+1
   let t = ''
   const wo: number[] = []
+  const wordStart: number[] = []
   for (let i = 0; i < texts.length; i++) {
     if (i > 0 && !join[i - 1]) {
       t += ' '
       wo.push(-1)
     }
     const w = texts[i]!
+    wordStart.push(t.length)
     t += w
     for (let k = 0; k < w.length; k++) wo.push(i)
   }
@@ -316,7 +327,7 @@ function buildPass(texts: readonly string[], join: readonly boolean[]): Pass {
   const glued = new Int32Array(wordOf.length)
   let g = 0
   for (let i = 0; i < wordOf.length; i++) glued[i] = wordOf[i]! < 0 ? -1 : g++
-  return { t, f: fold(t), m: mapDigits(t), wordOf, glued }
+  return { t, f: fold(t), m: mapDigits(t), mAlt: t.includes('|') ? mapDigits(t.replace(/\|/g, '\\')) : null, wordOf, glued, words: texts, wordStart, n }
 }
 
 // ───────────────────────── candidatos ─────────────────────────
@@ -329,36 +340,45 @@ interface Cand {
   ge: number // fim colado (exclusivo)
   wa: number // primeira palavra
   wb: number // última palavra
+  pass: 1 | 2 // 2 = só a passada de palavras coladas achou (nunca suprime tipo diferente achado na 1)
 }
 
 function emit(out: Cand[], p: Pass, kind: SensitiveKind, value: string, conf: Cand['conf'], s: number, e: number): void {
   while (s < e && p.wordOf[s]! < 0) s++
   while (e > s && p.wordOf[e - 1]! < 0) e--
   if (s >= e) return
-  out.push({ kind, value, conf, gs: p.glued[s]!, ge: p.glued[e - 1]! + 1, wa: p.wordOf[s]!, wb: p.wordOf[e - 1]! })
+  out.push({ kind, value, conf, gs: p.glued[s]!, ge: p.glued[e - 1]! + 1, wa: p.wordOf[s]!, wb: p.wordOf[e - 1]!, pass: p.n })
 }
 
 // DDDs válidos (ANATEL): 11–19, 21,22,24,27,28, 31–35,37,38, 41–49, 51,53–55, 61–69, 71,73–75,77,79, 81–89, 91–99
 const DDD = '(?:1[1-9]|2[12478]|3[1-578]|4[1-9]|5[1345]|6[1-9]|7[134579]|8[1-9]|9[1-9])'
-const PH_NUM = '(?:9\\d{4}|[2-5]\\d{3})[\\s-]{0,2}\\d{4}'
+// "9" pode vir separado ("9 8765-4321"). Só números COM parênteses aceitam espaço entre as
+// metades ("(41) 3456 7890"); sem parênteses exige hífen/colado, senão linhas de tabela
+// ("41 3456 7890") viram telefone.
+const PH_NUM_P = '(?:9\\s?\\d{4}|[2-5]\\d{3})[\\s-]{0,2}\\d{4}'
+const PH_NUM = '(?:9\\s?\\d{4}|[2-5]\\d{3})(?:\\s?[-–]\\s?)?\\d{4}'
 // Telefone: com parênteses OU número "solto" com fronteira estrita; DDD + (9XXXX|[2-5]XXX) + 4 dígitos
 const RE_PHONE = new RegExp(
-  `(?:(?<!\\d)(?:\\+?55[\\s-]?)?\\(0?${DDD}\\)[\\s-]{0,2}${PH_NUM}` +
+  `(?:(?<!\\d)(?:\\+?55[\\s-]?)?\\(0?${DDD}\\)[\\s-]{0,2}${PH_NUM_P}` +
     `|(?<![A-Za-z0-9])(?<!\\d[.,\\-/])(?:\\+?55[\\s-]?)?0?${DDD}[\\s-]{0,2}${PH_NUM})(?!\\d|[.,]\\d)`,
   'g'
 )
 const NB = '(?<!\\d)(?<!\\d[.,\\-/])' // fronteira p/ tipos validados (checksum protege contra ruído)
 const END = '(?!\\d|[.,]\\d)'
-const RE_CPF = new RegExp(`${NB}\\d{3}[.\\s]{0,2}\\d{3}[.\\s]{0,2}\\d{3}[-–—.\\s]{0,3}\\d{2}${END}`, 'g')
-const RE_CNPJ = new RegExp(`${NB}\\d{2}[.\\s]{0,2}\\d{3}[.\\s]{0,2}\\d{3}[/\\s]{0,2}\\d{4}[-–—.\\s]{0,3}\\d{2}${END}`, 'g')
+// ',' é leitura errada comum de '.'; '\' e '|' de '/' no CNPJ (o checksum continua protegendo)
+const RE_CPF = new RegExp(`${NB}\\d{3}[.,\\s]{0,2}\\d{3}[.,\\s]{0,2}\\d{3}[-–—.,\\s]{0,3}\\d{2}${END}`, 'g')
+const RE_CNPJ = new RegExp(`${NB}\\d{2}[.,\\s]{0,2}\\d{3}[.,\\s]{0,2}\\d{3}[/\\\\|\\s]{0,2}\\d{4}[-–—.,\\s]{0,3}\\d{2}${END}`, 'g')
+// Cartão: agrupamentos regulares 4-4-4-4[-3], Amex 4-6-5, Diners 4-6-4, ou corrido de 13–19 dígitos
 const RE_CARD = new RegExp(
-  `${NB}(?:\\d{4}[ -]\\d{4}[ -]\\d{4}[ -]\\d{1,7}|\\d{4}[ -]\\d{6}[ -]\\d{5}|\\d{4}[ -]\\d{6}[ -]\\d{4}|\\d{13,19})${END}`,
+  `${NB}(?:\\d{4}[ -]\\d{4}[ -]\\d{4}[ -]\\d{4}(?:[ -]\\d{3})?|\\d{4}[ -]\\d{6}[ -]\\d{5}|\\d{4}[ -]\\d{6}[ -]\\d{4}|\\d{13,19})${END}`,
   'g'
 )
 const RE_CEP = /(?:(?<=(?<![A-Za-z])cep[\s:.\-]{0,3})\d{5}-?\d{3}|(?<![A-Za-z0-9])(?<!\d[.,\-/])\d{5}-\d{3})(?!\d|[.,]\d)/gi
 const RE_IP = /(?<![A-Za-z0-9.])(?<!\d[,\-/])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9]|\.\d)/g
 const RE_EMAIL =
   /[A-Za-z0-9._%+\-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}/g
+const RE_EMAIL_FULL = new RegExp(`^${RE_EMAIL.source}$`)
+const PLATE_DENY: ReadonlySet<string> = new Set(['CVE', 'ISO', 'NFE', 'WIN', 'RFC', 'PCI', 'SKU'])
 const RE_PLATE = /(?<![A-Za-z0-9])(?:[A-Za-z]{3}-?\d{4}|[A-Za-z]{3}\d[A-Za-z]\d{2})(?![A-Za-z0-9])/g
 const H = '[0-9a-fA-F]'
 const RE_PIX = new RegExp(`(?<![0-9A-Za-z])${H}{8}-${H}{4}-${H}{4}-${H}{4}-${H}{12}(?![0-9A-Za-z])`, 'g')
@@ -383,13 +403,15 @@ function detectDigitKinds(p: Pass, out: Cand[]): void {
     const d = digitsOnly(x[0])
     if (isValidCpf(d)) emit(out, p, 'cpf', d, 'validated', x.index, x.index + x[0].length)
   }
-  for (const x of m.matchAll(RE_CNPJ)) {
-    const d = digitsOnly(x[0])
-    if (isValidCnpj(d)) emit(out, p, 'cnpj', d, 'validated', x.index, x.index + x[0].length)
+  for (const mm of p.mAlt ? [m, p.mAlt] : [m]) {
+    for (const x of mm.matchAll(RE_CNPJ)) {
+      const d = digitsOnly(x[0])
+      if (isValidCnpj(d)) emit(out, p, 'cnpj', d, 'validated', x.index, x.index + x[0].length)
+    }
   }
   for (const x of m.matchAll(RE_CARD)) {
     const d = digitsOnly(x[0])
-    if (luhnValid(d) && !allSame(d)) emit(out, p, 'card', d, 'validated', x.index, x.index + x[0].length)
+    if (luhnValid(d) && !allSame(d) && d[0]! >= '2' && d[0]! <= '6') emit(out, p, 'card', d, 'validated', x.index, x.index + x[0].length)
   }
   for (const x of m.matchAll(RE_PHONE)) {
     let d = digitsOnly(x[0])
@@ -413,10 +435,29 @@ function detectTextKinds(p: Pass, out: Cand[]): void {
   const t = p.t
   if (t.includes('@')) {
     for (const x of t.matchAll(RE_EMAIL)) {
-      emit(out, p, 'email', x[0].toLowerCase(), 'pattern', x.index, x.index + x[0].length)
+      let s = x.index
+      let e = x.index + x[0].length
+      // Palavras coladas só continuam o e-mail quando a quebra é plausível: palavra anterior
+      // terminando em . _ - + (ou "@" em palavra própria) e, no domínio, terminando em . ou -.
+      const at = t.indexOf('@', s)
+      const wAt = p.wordOf[at]!
+      const wa = p.wordOf[s]!
+      const wb = p.wordOf[e - 1]!
+      let lo = wAt
+      while (lo > wa && (/[._+-]$/.test(p.words[lo - 1]!) || (lo === wAt && p.words[wAt]!.startsWith('@')))) lo--
+      if (lo > wa) s = p.wordStart[lo]!
+      let hi = wAt
+      while (hi < wb && (/[.-]$/.test(p.words[hi]!) || (hi === wAt && p.words[wAt]!.endsWith('@')))) hi++
+      if (hi < wb) e = p.wordStart[hi]! + p.words[hi]!.length
+      const txt = t.slice(s, e)
+      if (!RE_EMAIL_FULL.test(txt)) continue
+      emit(out, p, 'email', txt.toLowerCase(), 'pattern', s, e)
     }
   }
   for (const x of t.matchAll(RE_PLATE)) {
+    // Prefixos de 3 letras de códigos comuns (não placas): a lista é um trade-off consciente — uma
+    // placa real com esses prefixos deixa de ser achada, em troca de menos ruído em texto técnico.
+    if (PLATE_DENY.has(x[0].slice(0, 3).toUpperCase())) continue
     emit(out, p, 'plate', x[0].replace('-', '').toUpperCase(), 'pattern', x.index, x.index + x[0].length)
   }
   if (t.includes('-')) {
@@ -481,8 +522,9 @@ const DIGIT_PRIORITY: readonly SensitiveKind[] = ['cpf', 'cnpj', 'card', 'phone'
 const STRONG: ReadonlySet<SensitiveKind> = new Set(['email', 'token', 'pix'])
 const SUPPRESSIBLE: ReadonlySet<SensitiveKind> = new Set(['cpf', 'cnpj', 'card', 'phone', 'ip', 'cep', 'plate'])
 
+/** a está contido em b; um achado só da passada 2 nunca suprime um achado da passada 1. */
 function contained(a: Cand, b: Cand): boolean {
-  return a.gs >= b.gs && a.ge <= b.ge
+  return a.gs >= b.gs && a.ge <= b.ge && !(b.pass === 2 && a.pass === 1)
 }
 
 function resolve(all: Cand[]): Cand[] {
@@ -501,10 +543,11 @@ function resolve(all: Cand[]): Cand[] {
     for (const c of arr) {
       if (cur && c.gs < curEnd) {
         if (c.ge - c.gs > cur.ge - cur.gs) {
-          cur = { ...c, wa: Math.min(c.wa, cur.wa), wb: Math.max(c.wb, cur.wb), gs: Math.min(c.gs, cur.gs) }
+          cur = { ...c, wa: Math.min(c.wa, cur.wa), wb: Math.max(c.wb, cur.wb), gs: Math.min(c.gs, cur.gs), pass: Math.min(c.pass, cur.pass) as 1 | 2 }
         } else {
           cur.wa = Math.min(cur.wa, c.wa)
           cur.wb = Math.max(cur.wb, c.wb)
+          cur.pass = Math.min(cur.pass, c.pass) as 1 | 2
         }
         curEnd = Math.max(curEnd, c.ge)
         cur.ge = Math.max(cur.ge, c.ge)
@@ -570,27 +613,28 @@ export function detectSensitive(lines: readonly OcrLine[], opts?: DetectOpts): D
     const texts = words.map((w) => w.text.trim())
     const cands: Cand[] = []
     const none = new Array<boolean>(Math.max(0, words.length - 1)).fill(false)
-    const p1 = buildPass(texts, none)
+    const p1 = buildPass(texts, none, 1)
     detectDigitKinds(p1, cands)
     detectTextKinds(p1, cands)
     detectCustom(p1, terms, cands)
     if (words.length > 1) {
-      const thr = 0.6 * median(words.map((w) => w.box.h))
+      // limiar no eixo x (x comparado com x): 0,3 × largura mediana de um caractere da linha
+      const thr = 0.3 * median(words.map((w, i) => w.box.w / texts[i]!.length))
       const join = none.map((_, i) => {
         const a = words[i]!.box
         const b = words[i + 1]!.box
         return b.x - (a.x + a.w) < thr
       })
       if (join.some(Boolean)) {
-        const p2 = buildPass(texts, join)
+        const p2 = buildPass(texts, join, 2)
         detectDigitKinds(p2, cands)
         detectTextKinds(p2, cands)
         detectCustom(p2, terms, cands)
       }
     }
-    if (cands.length === 0) continue
-    for (const c of resolve(cands)) {
-      if (enabled && !enabled.has(c.kind)) continue
+    // filtra por tipo ANTES de resolver: tipo desligado não pode suprimir tipo ligado
+    const kept = enabled ? cands.filter((c) => enabled.has(c.kind)) : cands
+    for (const c of resolve(kept)) {
       result.push({
         kind: c.kind,
         value: c.value,
