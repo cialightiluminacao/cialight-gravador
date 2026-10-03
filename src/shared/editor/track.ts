@@ -714,15 +714,17 @@ function merged(prev: Anim<number>, a: Us, fresh: Keyframe<number>[], edge?: num
  * invertido "sairia do canto" crescendo fora do conteúdo. O estado do último key antes de `a` vale então até a − 1
  * (degrau conservador, como os da perda): invertido fechado → buraco nulo em a − 1; normal → a região de lá, se ela
  * contém a interpolada (ampliada). Senão (ou sem keys antes de a), a curva antiga fica como estava. null = nada a mudar.
+ * `kPrev` vai junto: cada canal ganha um key exato nele antes do degrau (canal sem key em kPrev — keys por propriedade
+ * do F4 — teria a curva mudada desde o último key dele, antes de kPrev; revisão final da F6, I1).
  */
-function conservativeEdge(fx: EffectItem, a: Us, W: number, H: number): RegionValues | null {
+function conservativeEdge(fx: EffectItem, a: Us, W: number, H: number): { v: RegionValues; kPrev: Us } | null {
   if (a <= 0) return null
   const r = fx.region
   let kPrev = -1
   for (const an of [r.x, r.y, r.w, r.h]) for (const k of an.keys ?? []) if (k.tUs < a - 1 && k.tUs > kPrev) kPrev = k.tUs
   if (kPrev < 0) return null
   const prev = valuesAt(r, kPrev), edge = valuesAt(r, a - 1)
-  if (fx.invert) return Math.abs(prev.w) > 0 && Math.abs(prev.h) > 0 ? null : NO_HOLE
+  if (fx.invert) return Math.abs(prev.w) > 0 && Math.abs(prev.h) > 0 ? null : { v: NO_HOLE, kPrev }
   // mesma forma (a do efeito) e mesma rotação: no referencial da região de kPrev, a de a − 1 tem centro (lx, ly) e
   // meias-larguras (ex, ey); a de kPrev, (px, py)
   if (edge.rotation !== prev.rotation) return null
@@ -732,7 +734,7 @@ function conservativeEdge(fx: EffectItem, a: Us, W: number, H: number): RegionVa
   const ex = (Math.abs(edge.w) * W) / 2, ey = (Math.abs(edge.h) * H) / 2
   const px = (Math.abs(prev.w) * W) / 2, py = (Math.abs(prev.h) * H) / 2
   const fits = r.shape === 'ellipse' ? ellipseInEllipse(lx, ly, ex, ey, px, py) : lx + ex <= px && ly + ey <= py
-  return fits ? prev : null
+  return fits ? { v: prev, kPrev } : null
 }
 
 /**
@@ -818,7 +820,10 @@ export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: Tr
   const r = fx.region
   const rotation = (r.rotation.keys ?? []).some((k) => k.tUs >= a) ? merged(r.rotation, a, [{ tUs: a, value: R0.rotation, ease: 'linear' }]) : r.rotation
   const edge = conservativeEdge(fx, a, W, H)
-  const region: EffectRegion = { shape, x: merged(r.x, a, keysOf('x'), edge?.x), y: merged(r.y, a, keysOf('y'), edge?.y), w: merged(r.w, a, keysOf('w'), edge?.w), h: merged(r.h, a, keysOf('h'), edge?.h), rotation }
+  // com degrau: cada canal cortado exatamente em kPrev (a curva antiga não muda até lá; [kPrev, a − 1] = o estado de
+  // kPrev, o que a conferência de conservativeEdge viu)
+  const at = (an: Anim<number>): Anim<number> => (edge && an.keys?.length ? insertKeyExact(an, edge.kPrev) : an)
+  const region: EffectRegion = { shape, x: merged(at(r.x), a, keysOf('x'), edge?.v.x), y: merged(at(r.y), a, keysOf('y'), edge?.v.y), w: merged(at(r.w), a, keysOf('w'), edge?.v.w), h: merged(at(r.h), a, keysOf('h'), edge?.v.h), rotation }
   const lost: { tUs: Us }[] = []
   for (let i = 0; i < n; i++) if (!conf(i) && conf(i - 1)) lost.push({ tUs: results[i].tUs })
   return { region, lost, samples: results.map((x) => ({ tUs: x.tUs - fx.startUs, confidence: x.confidence, state: x.state })) }

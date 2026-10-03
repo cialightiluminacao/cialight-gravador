@@ -214,3 +214,60 @@ describe('oráculo adversarial (R21: sem recuperação automática)', () => {
     }
   }
 })
+
+describe('fronteira da nova passada com canais de keys em instantes diferentes (revisão final da F6, I1)', () => {
+  // Layout do F4 (keyframes por propriedade) ou de um ajuste manual antes da nova passada: x {1 s, 3 s}, y {2 s, 8 s},
+  // w e h {3 s, 8 s}. kPrev = 3 s (o último key antes de a − 1 em qualquer canal), mas y não tem key em 3 s: o key de
+  // a − 1 com o valor de kPrev mudava a curva de y desde 2 s — antes de kPrev, fora do que a conferência "cabe" vê.
+  // Oráculo denso (1/240 s, mais a − 1): em [0, a − 1] a região de depois da nova passada ⊇ a de antes (invertido: o
+  // buraco de depois ⊆ o de antes, ou nulo).
+  const key = (tS: number, value: number): { tUs: Us; value: number; ease: 'linear' } => ({ tUs: usOf(tS), value, ease: 'linear' })
+  for (const invert of [false, true]) {
+    for (const shape of ['rect', 'ellipse'] as const) {
+      it(`${shape}${invert ? ' — invertido' : ''}: a curva antes da nova passada não muda até kPrev e a cobertura não diminui`, () => {
+        const base = createEffectItem('blur', 0, usOf(10), { x: 0.5, y: 0.5, w: 0.5, h: 0.5 })
+        const fx: EffectItem = {
+          ...base,
+          invert,
+          region: invert
+            ? { ...base.region, shape, x: { value: 0.5, keys: [key(1, 0.5), key(3, 0.5)] }, y: { value: 0.45, keys: [key(2, 0.45), key(8, 0.55)] }, w: { value: 0.3, keys: [key(3, 0.3), key(8, 0.9)] }, h: { value: 0.3, keys: [key(3, 0.3), key(8, 0.9)] } }
+            : { ...base.region, shape, x: { value: 0.5, keys: [key(1, 0.5), key(3, 0.5)] }, y: { value: 0.45, keys: [key(2, 0.45), key(8, 0.55)] }, w: { value: 0.9, keys: [key(3, 0.9), key(8, 0.3)] }, h: { value: 0.9, keys: [key(3, 0.9), key(8, 0.3)] } }
+        }
+        const a = usOf(5)
+        // nova passada de 5 s a 6 s, confiante, conteúdo parado no centro da região de `a`
+        const results: TrackResult[] = []
+        for (let n = 0; n <= FPS; n++) results.push({ tUs: a + Math.round((n * 1e6) / FPS), x: AW / 2, y: AH / 2, w: 40, h: 30, scale: 1, scaleLo: 1, scaleHi: 1, confidence: 0.99, state: 'ok', reach: 0 })
+        const out = trackToKeys(fx, results, GEO).region
+        const at = (r: EffectItem['region'], t: Us): { x: number; y: number; w: number; h: number } => ({ x: evalAnim(r.x, t), y: evalAnim(r.y, t), w: evalAnim(r.w, t), h: evalAnim(r.h, t) })
+        const ts: Us[] = [a - 1]
+        for (let t = 0; t < a; t += Math.round(1e6 / 240)) ts.push(t)
+        const fails: string[] = []
+        for (const t of ts) {
+          const before = at(fx.region, t), after = at(out, t)
+          if (t <= usOf(3)) {
+            // até kPrev a curva é a mesma
+            for (const c of ['x', 'y', 'w', 'h'] as const) if (Math.abs(after[c] - before[c]) > 1e-9) fails.push(`t=${t} ${c}: ${before[c]} → ${after[c]}`)
+            continue
+          }
+          // depois de kPrev: normal → contém; invertido → contido (ou nulo)
+          const [big, small] = invert ? [before, after] : [after, before]
+          if (invert && !(small.w > 0 && small.h > 0)) continue
+          const ok = Math.abs(small.x - big.x) * CW + (small.w * CW) / 2 <= (big.w * CW) / 2 + 1e-6 && Math.abs(small.y - big.y) * CH + (small.h * CH) / 2 <= (big.h * CH) / 2 + 1e-6
+          if (!ok && shape === 'rect') fails.push(`t=${t} ${JSON.stringify(before)} → ${JSON.stringify(after)}`)
+          if (shape === 'ellipse') {
+            // amostra 64 pontos da borda da menor e confere dentro da maior
+            for (let i = 0; i < 64; i++) {
+              const th = (i / 64) * 2 * Math.PI
+              const px = (small.x - big.x) * CW + Math.cos(th) * (small.w * CW) / 2, py = (small.y - big.y) * CH + Math.sin(th) * (small.h * CH) / 2
+              if ((px / ((big.w * CW) / 2)) ** 2 + (py / ((big.h * CH) / 2)) ** 2 > 1 + 1e-9) {
+                fails.push(`t=${t} ponto ${i}`)
+                break
+              }
+            }
+          }
+        }
+        expect(fails.slice(0, 5), `${fails.length} falhas`).toEqual([])
+      })
+    }
+  }
+})
