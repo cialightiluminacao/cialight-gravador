@@ -88,6 +88,10 @@ describe('frameChanged / regionChanged / carryDetections', () => {
     const [u] = carryDetections([p], [part], base, a, w, h)
     expect(u.box).toEqual(box)
     expect(u.value).toBe('antigo')
+    // mesmo valor em OUTRO lugar não conta como releitura: p (perdido, região igual) fica e nada é unido
+    const copy = det({ ...box, y: 80 / h }, 'antigo')
+    const two = carryDetections([p], [copy], base, a, w, h)
+    expect(two).toEqual([copy, p])
     // região mudou: não fica
     const q = det({ x: 195 / w, y: 95 / h, w: 20 / w, h: 20 / h }, 'q')
     expect(carryDetections([q], [], base, a, w, h)).toEqual([])

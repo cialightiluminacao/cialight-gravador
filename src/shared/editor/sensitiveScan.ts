@@ -169,13 +169,20 @@ export function regionChanged(prev: Uint8Array, cur: Uint8Array, w: number, h: n
 
 /**
  * União entre leituras (spike §7.3): detecções da leitura anterior que a nova leitura do OCR perdeu (nenhuma do mesmo
- * tipo com o mesmo valor ou IoU ≥ 0,3) continuam valendo se os pixels da região delas não mudaram entre os dois quadros —
- * o mesmo conteúdo continua lá e o OCR só oscilou. E uma releitura que achou o mesmo dado com caixa MENOR (palavra
- * partida, caractere perdido) sobre pixels iguais fica com a união das duas caixas: a cobertura nunca encolhe porque
- * outra parte da tela mudou. Devolve as novas (talvez ampliadas) + as mantidas.
+ * tipo NO MESMO LUGAR) continuam valendo se os pixels da região delas não mudaram entre os dois quadros — o mesmo
+ * conteúdo continua lá e o OCR só oscilou. E uma releitura no mesmo lugar com caixa MENOR (palavra partida, caractere
+ * perdido) sobre pixels iguais fica com a união das duas caixas: a cobertura nunca encolhe porque outra parte da tela
+ * mudou. "Mesmo lugar" é por posição (≥ 50 % da menor caixa em comum), não pelo valor: duas cópias do mesmo dado em
+ * lugares diferentes são duas detecções.
  */
 export function carryDetections(prev: readonly Detection[], next: readonly Detection[], prevFrame: Uint8Array, curFrame: Uint8Array, w: number, h: number): Detection[] {
-  const same = (n: Detection, p: Detection): boolean => n.kind === p.kind && (n.value === p.value || iou(n.box, p.box) >= GROUP_MIN_IOU)
+  const same = (n: Detection, p: Detection): boolean => {
+    if (n.kind !== p.kind) return false
+    const ix = Math.max(0, Math.min(n.box.x + n.box.w, p.box.x + p.box.w) - Math.max(n.box.x, p.box.x))
+    const iy = Math.max(0, Math.min(n.box.y + n.box.h, p.box.y + p.box.h) - Math.max(n.box.y, p.box.y))
+    const minArea = Math.min(n.box.w * n.box.h, p.box.w * p.box.h)
+    return minArea > 0 && ix * iy >= 0.5 * minArea
+  }
   const unchanged = new Map<Detection, boolean>()
   const still = (p: Detection): boolean => {
     let u = unchanged.get(p)
