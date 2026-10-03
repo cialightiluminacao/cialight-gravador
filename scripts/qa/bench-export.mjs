@@ -132,11 +132,13 @@ try {
   }
   const total = (Date.now() - t0) / 1000
   const profile = await ev(`return globalThis.__exportProfile ?? null`)
+  // camadas que subiram pelo caminho YUV (G1): > 0 só com o decoder em software; 0 com --decoder hardware
+  const yuvFrames = await ev(`const it = window.__qaEditor?.queue?.items ?? []; return it[it.length - 1]?.result?.yuvFrames ?? null`)
   const file = readdirSync(OUT).find((f) => f.endsWith('.mp4'))
   const result = {
     seconds: SECONDS, blur: BLUR, decoder: DECODER, ok: text.includes('Vídeo exportado'), totalS: Math.round(total * 10) / 10,
     speedX: Math.round((SECONDS / total) * 100) / 100, fps: Math.round(((SECONDS * 30) / total) * 10) / 10,
-    profile, sizeMB: file ? Math.round(statSync(join(OUT, file)).size / 1e5) / 10 : null, done: text.replace(/\s+/g, ' ').slice(0, 220), samples
+    profile, yuvFrames, sizeMB: file ? Math.round(statSync(join(OUT, file)).size / 1e5) / 10 : null, done: text.replace(/\s+/g, ' ').slice(0, 220), samples
   }
   console.log(JSON.stringify(result, null, 2))
   writeFileSync(join(ROOT, 'test-out', `bench-export-${SECONDS}s${BLUR ? '-blur' : ''}-${DECODER === 'hardware' ? 'hw' : 'auto'}${TAG}.json`), JSON.stringify(result, null, 2))
