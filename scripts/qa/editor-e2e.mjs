@@ -1,7 +1,7 @@
 // E2E do editor F1 via CDP (eventos sintéticos despachados nos elementos; nunca entrada do sistema
 // operacional): grava pelo caminho do `test:capture`, abre a gravação no editor pelo Histórico, divide no meio,
 // apaga 2 s (I/O + Ctrl+Shift+X), move a webcam no visualizador, importa mp3 e png gerados, ajusta o volume,
-// exporta "Alta 1080p" e confere o arquivo com ffprobe (faixas, duração, faststart).
+// exporta "YouTube 1080p" e confere o arquivo com ffprobe (faixas, duração, faststart).
 //
 // uso (depois de `npm run build`):
 //   node scripts/qa/editor-e2e.mjs                 → grava (CIALIGHT_TEST=capture) e roda o fluxo
@@ -300,13 +300,13 @@ async function main() {
   check('volume −6 dB (ganho ≈ 0,501) em 1 passo', Math.abs(gain - 10 ** (-6 / 20)) < 0.002 && vol.dp === 1, vol)
   await shot('e2e-07-volume.png')
 
-  console.log('exportar Alta 1080p')
+  console.log('exportar YouTube 1080p')
   const expected = await ev(`T.st().select([]); return T.duration()`)
   await ev(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Exportar' && !b.closest('[role="dialog"]')).click(); return 1`)
   await sleep(600)
-  await ev(`T.button('Alta 1080p', document.querySelector('[role="dialog"]')).click(); await T.settle(); return 1`)
+  await ev(`T.button('YouTube 1080p', document.querySelector('[role="dialog"]')).click(); await T.settle(); return 1`)
   const dlg = await ev(`return document.querySelector('[role="dialog"]')?.textContent ?? ''`)
-  check('diálogo com Alta 1080p (1920×1080)', dlg.includes('1920×1080'), dlg.slice(0, 300))
+  check('diálogo com YouTube 1080p (1920×1080)', dlg.includes('1920×1080'), dlg.slice(0, 300))
   await shot('e2e-08-exportar.png')
   await ev(`[...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === 'Exportar').click(); return 1`)
   let text = ''

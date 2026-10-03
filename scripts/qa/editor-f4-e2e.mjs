@@ -8,8 +8,8 @@
 // intensidade 80); com a ferramenta Zoom (Z: ida 0,5 s, volta depois de 1 s) arrasta o enquadramento 2× em volta do
 // texto aos 2 s → o aviso de privacidade oferece "Ancorar efeito ao clipe", que ancora o blur; no inspetor do vídeo
 // põe Pop na entrada e Desfoque na saída; no editor de curvas (botão direito no losango da escala aos 2 s) arrasta uma
-// alça → curva personalizada (bezier); exporta "Alta 1080p". Depois "Reenquadrar" → 9:16, ponto de foco no marcador,
-// "Criar cópia" (padrão) e exporta a cópia em "Vertical 9:16". Com o ffmpeg: dimensões e durações das duas
+// alça → curva personalizada (bezier); exporta "YouTube 1080p". Depois "Reenquadrar" → 9:16, ponto de foco no marcador,
+// "Criar cópia" (padrão) e exporta a cópia em "Instagram Reels/Stories (9:16)". Com o ffmpeg: dimensões e durações das duas
 // exportações; o marcador no centro horizontal do 9:16 (fora do zoom); e o texto sob o blur ilegível durante todo o
 // zoom (ida com a curva personalizada, parado, volta) nas DUAS exportações — métrica de legibilidade do F2 (contraste
 // local p99−p1 após caixa 3 px < 0,15 × o da fonte; variância do laplaciano < 0,2 × a da fonte), na caixa do texto
@@ -428,9 +428,9 @@ async function main() {
     await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await T.settle(); await T.wait(250); return 1`)
   }
 
-  console.log('exportar o projeto horizontal (Alta 1080p)')
+  console.log('exportar o projeto horizontal (YouTube 1080p)')
   const outlH = await outlines(fx, [...ZOOM_FRAMES, ...OTHER_FRAMES])
-  const outH = await exportWith('Alta 1080p', OUT_H, 'e2e-f4-05-exportar-horizontal.png')
+  const outH = await exportWith('YouTube 1080p', OUT_H, 'e2e-f4-05-exportar-horizontal.png')
 
   console.log('Reenquadrar → 9:16, foco no marcador, criar cópia')
   let copyId = null
@@ -459,7 +459,7 @@ async function main() {
     await shot('e2e-f4-07-copia-vertical.png')
   }
   const outlV = await outlines(fx, [...ZOOM_FRAMES, ...OTHER_FRAMES])
-  const outV = await exportWith('Vertical 9:16', OUT_V, 'e2e-f4-08-exportar-vertical.png')
+  const outV = await exportWith('Instagram Reels/Stories (9:16)', OUT_V, 'e2e-f4-08-exportar-vertical.png')
   if (!outH || !outV) return
 
   console.log('conferência com o ffmpeg')
