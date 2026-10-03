@@ -134,6 +134,8 @@ function mediaBox(p: Project, it: MediaItem, W: number, H: number): Box | null {
 
 /** Desvio tolerado da região em relação ao conteúdo: 1 % do maior lado do quadro (px) e 1° de rotação. */
 const FOLLOW_TOL = 0.01
+/** Amostras uniformes do teste de contato por trecho em movimento (como regionTouchesOver). */
+const TOUCH_SAMPLES = 30
 const FOLLOW_TOL_DEG = 1
 
 /**
@@ -158,26 +160,20 @@ function movingUnfollowedAt(p: Project, fx: EffectItem, m: MediaItem, a: Us, b: 
     return lo
   }
   const cuts = spans.map(([s, e]) => ({ s, from: Math.max(s, a), to: Math.min(e, b) }))
-  // contato (um só para o clipe todo): amostras das keys dentro dos trechos, o começo de cada um e 30 uniformes sobre
-  // o comprimento somado — o mesmo critério de regionTouchesOver, restrito aos trechos
+  // contato (um só para o clipe todo): amostras das keys dentro dos trechos, as pontas de cada um e TOUCH_SAMPLES
+  // uniformes POR TRECHO — nunca menos densas que regionTouchesOver sobre a janela (que contém o trecho). Dividir as
+  // 30 pelo comprimento somado deixava um contato curto num de vários trechos sem aviso (invariante 2). Custo
+  // O(trechos + keys): os trechos vêm das keys do clipe.
   const touches = (): boolean => {
     const hit = (at: Us): boolean => {
       const cf = clipFrameAt(p, m, at)
       return !!cf && regionTouchesClip(fx, effectRegionAt(p, fx, at), cf)
     }
-    let total = 0
     for (const c of cuts) {
-      total += c.to - c.from
       if (hit(c.from) || hit(c.to - 1)) return true
       for (let k = lowerBound(c.from); k < all.length && all[k] < c.to; k++) if (hit(all[k])) return true
-    }
-    for (let i = 0; i < 30; i++) {
-      let off = Math.round((total * i) / 30)
-      for (const c of cuts) {
-        const len = c.to - c.from
-        if (off < len) { if (hit(c.from + off)) return true; break }
-        off -= len
-      }
+      const len = c.to - c.from
+      for (let i = 1; i < TOUCH_SAMPLES; i++) if (hit(c.from + Math.round((len * i) / TOUCH_SAMPLES))) return true
     }
     return false
   }

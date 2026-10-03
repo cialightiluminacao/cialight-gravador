@@ -309,3 +309,40 @@ describe('privacyWarnings: movimento avaliado por intervalo (zoom automático + 
     expect(best).toBeLessThan(500)
   })
 })
+
+describe('privacyWarnings: contato breve num de vários trechos em movimento (30 amostras POR trecho)', () => {
+  const vid: Asset = { id: 'v', name: 'v', kind: 'video', source: { type: 'file', path: 'C:/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 10 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, status: 'ready' }
+  const lin = (...ks: [number, number][]) => ({ value: ks[0][1], keys: ks.map(([tUs, value]) => ({ tUs, value, ease: 'linear' as const })) })
+  /**
+   * Miniatura (5 %) na altura do centro: trecho A (0–8 s) anda devagar longe da região; parada em 8–9 s; trecho B
+   * (9–10 s) atravessa o quadro e passa pela região central (0,02×0,02, parada, não vinculada) só ~40 ms (≈ 9,21–9,25 s),
+   * entre as amostras das keys (9, 9,25, 9,5…). 30 amostras divididas pelos 9 s somados dão 3 no trecho B e perdem o
+   * contato; 30 por trecho (33 ms) o acham.
+   */
+  function scene(): Project {
+    const p = createEmptyProject('t')
+    p.assets = [vid]
+    const m = { ...createMediaItem(vid, 0, 'video'), id: 'm' } as MediaItem
+    m.visual!.transform.scale = { value: 0.05 }
+    m.visual!.transform.y = { value: 0.5 }
+    m.visual!.transform.x = lin([0, 0.05], [8 * S, 0.07], [9 * S, 0.07], [10 * S, 2])
+    const base = createEffectItem('blur', 0, 10 * S)
+    const fx: EffectItem = { ...base, id: 'fx', feather: 0, region: { ...base.region, x: { value: 0.5 }, y: { value: 0.5 }, w: { value: 0.02 }, h: { value: 0.02 }, rotation: { value: 0 } } }
+    p.tracks = [
+      { id: 'tv', kind: 'video', name: 'Vídeo 1', muted: false, hidden: false, locked: false, volume: 1, items: [m] },
+      { id: 'tf', kind: 'video', name: 'Efeitos', role: 'effects', muted: false, hidden: false, locked: false, volume: 1, items: [fx] }
+    ]
+    return p
+  }
+  it('o contato curto no trecho B gera o aviso (unlinkedOverMoving)', () => {
+    const w = privacyWarnings(scene(), 0, 10 * S).filter((x) => x.kind === 'unlinkedOverMoving')
+    expect(w).toHaveLength(1)
+    expect(w[0].mediaItemId).toBe('m')
+  })
+  it('controle: sem o contato (trecho B passa longe da região) não avisa', () => {
+    const p = scene()
+    const m = p.tracks[0].items[0] as MediaItem
+    m.visual!.transform.y = { value: 0.1 }
+    expect(privacyWarnings(p, 0, 10 * S).filter((x) => x.kind === 'unlinkedOverMoving')).toEqual([])
+  })
+})
