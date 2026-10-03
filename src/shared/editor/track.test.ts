@@ -341,15 +341,39 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
     const out2 = trackToKeys(user, res2, GEO)
     expect(out2.lost).toEqual([])
     const fx2 = { ...user, region: out2.region }
-    // antes de 1,7 s a curva (1ª passada + a edição do usuário) é a mesma, e os keys de antes ficam iguais
+    // os keys de antes ficam iguais e a curva não muda até o último deles; de lá até a − 1 vale o estado dele (a região
+    // ampliada da perda: degrau conservador da fronteira), não a interpolação até a caixa reposicionada
+    const kPrev = Math.max(...(['x', 'y', 'w', 'h'] as const).flatMap((ch) => user.region[ch].keys!.filter((k) => k.tUs < a - 1).map((k) => k.tUs)))
     for (const ch of ['x', 'y', 'w', 'h'] as const) {
       expect(fx2.region[ch].keys!.filter((k) => k.tUs < a - 1)).toEqual(user.region[ch].keys!.filter((k) => k.tUs < a - 1))
-      for (let t = 0; t < a; t += 7_919) expect(evalAnim(fx2.region[ch], t)).toBeCloseTo(evalAnim(user.region[ch], t), 12)
+      for (let t = 0; t <= kPrev; t += 7_919) expect(evalAnim(fx2.region[ch], t)).toBeCloseTo(evalAnim(user.region[ch], t), 12)
+      expect(evalAnim(fx2.region[ch], a - 1)).toBe(evalAnim(user.region[ch], kPrev))
       const ts = fx2.region[ch].keys!.map((k) => k.tUs)
       for (let i = 1; i < ts.length; i++) expect(ts[i]).toBeGreaterThan(ts[i - 1])
     }
     // de 1,7 s ao fim, o conteúdo está coberto (oráculo denso)
     expect(oracle(sc, effectOn(sc, t2, 2), fx2, t2, 2)).toEqual([])
+  })
+  it('R21: na fronteira da nova passada, o estado anterior vale até a − 1 (invertido: buraco fechado; normal: ampliada) — oráculo denso', () => {
+    const sc: Scene = { path: occludedPath, pw: 60, ph: 40, occluder: OCCLUDER }
+    for (const invert of [true, false]) {
+      for (const t2 of [1.7, 1.71, 1.75, 1.8]) {
+        const first = run(sc, 0, 2, { invert })
+        const firstLost = first.results.find((r) => r.state !== 'ok')!.tUs / 1e6
+        const a = usOf(t2), c = sc.path(t2)
+        const box = { x: c.x / AW, y: c.y / AH, w: sc.pw / AW, h: sc.ph / AH }
+        const r1 = first.fx1.region
+        // o usuário reposiciona a região no quadro da nova partida
+        const user: EffectItem = { ...first.fx1, region: { ...r1, x: setValue(r1.x, a, box.x), y: setValue(r1.y, a, box.y), w: setValue(r1.w, a, box.w), h: setValue(r1.h, a, box.h) } }
+        const fx2 = { ...user, region: trackToKeys(user, trackFrames(frames(sc, t2, 2), boxAt(sc, t2)), GEO).region }
+        // denso, da perda ao fim: invertido → buraco ⊆ conteúdo ou nulo; normal → conteúdo ⊆ região (a referência do
+        // conteúdo é a caixa dele no início de cada trecho: a perda, e a nova partida)
+        const tag = `${invert ? 'invertido' : 'normal'} t2=${t2}`
+        expect(oracle(sc, effectOn(sc, firstLost, 2, { invert }), fx2, firstLost, t2), `${tag} antes da nova partida`).toEqual([])
+        expect(oracle(sc, effectOn(sc, t2, 2, { invert }), fx2, t2, 2), `${tag} depois`).toEqual([])
+        if (invert) for (const t of [a - 1, a - 2, a - 1000]) expect(evalAnim(fx2.region.w, t)).toBe(0)
+      }
+    }
   })
   it('mescla: keys fora do trecho rastreado ficam; antes do início a curva não muda', () => {
     const sc: Scene = { path: linear, pw: 60, ph: 40 }

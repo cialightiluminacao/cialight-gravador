@@ -268,7 +268,6 @@ export interface Tracker {
   readonly scale: number
   /** Movimento por quadro entre os dois últimos quadros 'ok' seguidos (px da análise); null = desconhecido. */
   readonly v: { x: number; y: number } | null
-  readonly lastOk: boolean
   /** Perdido (R21: até o fim do trecho) e o alcance da cobertura (raio, px da análise) do último quadro. */
   readonly lost: boolean
   readonly reach: number
@@ -514,7 +513,7 @@ export function startTracker(first: GrayImage, box: TrackBox, tUs: Us, opts: Par
   if (std(patch) < o.minStd) throw new EditError('invalid', 'A região está sobre uma área lisa, sem detalhe para seguir: posicione-a sobre o conteúdo a esconder.')
   const tracker: Tracker = {
     opts: o, box, c0x: x0 + patch.w / 2, c0y: y0 + patch.h / 2, patch, set: tplSet(patch, 1),
-    pos: { x: box.x, y: box.y }, scale: 1, v: null, lastOk: true, lost: false, reach: 0
+    pos: { x: box.x, y: box.y }, scale: 1, v: null, lost: false, reach: 0
   }
   return { tracker, result: { tUs, x: box.x, y: box.y, w: box.w, h: box.h, scale: 1, scaleLo: 1, scaleHi: 1, confidence: 1, state: 'ok', reach: 0 } }
 }
@@ -531,7 +530,7 @@ export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Trac
   const vx = tr.v?.x ?? 0, vy = tr.v?.y ?? 0, vlen = Math.hypot(vx, vy)
   const res = (x: number, y: number, scale: number, lo: number, hi: number, state: TrackState, reach: number, confidence: number): TrackResult => ({ tUs, x, y, w: tr.box.w * scale, h: tr.box.h * scale, scale, scaleLo: lo, scaleHi: hi, confidence, state, reach })
   const lose = (reach: number, conf: number, state: TrackState): { tracker: Tracker; result: TrackResult } => ({
-    tracker: { ...tr, lost: true, lastOk: false, reach },
+    tracker: { ...tr, lost: true, reach },
     result: res(tr.pos.x, tr.pos.y, tr.scale, tr.scale, tr.scale, state, reach, conf)
   })
 
@@ -552,9 +551,9 @@ export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Trac
   const gate = tr.v ? 2 * o.gateMinPx + 2 * vlen : Infinity
   if (!ambiguous && conf >= o.okAbove && d <= gate && rigid(L0, f)) {
     const x = f.ix - offX, y = f.iy - offY
-    // movimento recente: entre dois quadros 'ok' seguidos
-    const v = tr.lastOk ? { x: x - tr.pos.x, y: y - tr.pos.y } : tr.v
-    return { tracker: { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v, lastOk: true }, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
+    // movimento recente: entre dois quadros 'ok' seguidos (sem perda no meio: R21)
+    const v = { x: x - tr.pos.x, y: y - tr.pos.y }
+    return { tracker: { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v }, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
   }
   // o 1º quadro da perda: âmbar se havia um pico plausível perto da previsão (abaixo do 'ok'), senão vermelho
   return lose(reach0, conf, !ambiguous && d <= o.gateMinPx && conf >= o.lostBelow ? 'weak' : 'lost')
@@ -694,16 +693,43 @@ function inflate(v: RegionValues, shape: EffectRegion['shape'], D: number, W: nu
   return { ...v, w: (2 * ex) / W, h: (2 * ey) / H }
 }
 
-/** Keys antigos antes de `a` (com um key exato em a − 1: a curva anterior não muda) + os novos. */
-function merged(prev: Anim<number>, a: Us, fresh: Keyframe<number>[]): Anim<number> {
+/**
+ * Keys antigos antes de `a` (com um key exato em a − 1: a curva anterior não muda) + os novos. `edge`: valor do key de
+ * a − 1 quando a fronteira precisa segurar o estado anterior (degrau conservador, ver conservativeEdge).
+ */
+function merged(prev: Anim<number>, a: Us, fresh: Keyframe<number>[], edge?: number): Anim<number> {
   let kept: Keyframe<number>[] = []
   if (a > 0) {
     const withEdge = prev.keys?.length ? insertKeyExact(prev, a - 1) : { ...prev, keys: [{ tUs: a - 1, value: prev.value, ease: 'linear' as const }] }
     kept = withEdge.keys!.filter((k) => k.tUs < a)
-    if (kept.length) kept[kept.length - 1] = { ...kept[kept.length - 1], ease: 'linear' }
+    if (kept.length) kept[kept.length - 1] = { ...kept[kept.length - 1], ease: 'linear', ...(edge !== undefined && kept[kept.length - 1].tUs === a - 1 ? { value: edge } : {}) }
   }
   const keys = [...kept, ...fresh]
   return { value: keys[0].value, keys }
+}
+
+/**
+ * Fronteira de uma nova passada em `a` (o fluxo da R21: perdeu, o usuário reposiciona em `a` e roda de novo): a edição
+ * em `a` faria o trecho [último key antes de a, a) interpolar do estado anterior até a caixa nova — o buraco nulo do
+ * invertido "sairia do canto" crescendo fora do conteúdo. O estado do último key antes de `a` vale então até a − 1
+ * (degrau conservador, como os da perda): invertido fechado → buraco nulo em a − 1; normal → a região de lá, se ela
+ * contém a interpolada (ampliada). Senão (ou sem keys antes de a), a curva antiga fica como estava. null = nada a mudar.
+ */
+function conservativeEdge(fx: EffectItem, a: Us, W: number, H: number): RegionValues | null {
+  if (a <= 0) return null
+  const r = fx.region
+  let kPrev = -1
+  for (const an of [r.x, r.y, r.w, r.h]) for (const k of an.keys ?? []) if (k.tUs < a - 1 && k.tUs > kPrev) kPrev = k.tUs
+  if (kPrev < 0) return null
+  const prev = valuesAt(r, kPrev), edge = valuesAt(r, a - 1)
+  if (fx.invert) return Math.abs(prev.w) > 0 && Math.abs(prev.h) > 0 ? null : NO_HOLE
+  // retângulo/elipse de mesma rotação e forma: contém se, no referencial dela, a outra cabe nas meias-larguras
+  const th = (prev.rotation * Math.PI) / 180
+  const dx = (edge.x - prev.x) * W, dy = (edge.y - prev.y) * H
+  const lx = Math.abs(Math.cos(th) * dx + Math.sin(th) * dy), ly = Math.abs(-Math.sin(th) * dx + Math.cos(th) * dy)
+  const k = r.shape === 'ellipse' ? Math.SQRT2 : 1
+  const fits = edge.rotation === prev.rotation && lx * k + (Math.abs(edge.w) * W) / 2 <= (Math.abs(prev.w) * W) / 2 && ly * k + (Math.abs(edge.h) * H) / 2 <= (Math.abs(prev.h) * H) / 2
+  return fits ? prev : null
 }
 
 /** Resultado do rastreamento → região com keys (ver o topo do arquivo: R4, R4b, degraus e mescla). */
@@ -767,10 +793,11 @@ export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: Tr
   const keysOf = (c: 'x' | 'y' | 'w' | 'h'): Keyframe<number>[] => samples.map((s) => ({ tUs: s.t, value: s.v[c], ease: 'linear' }))
   const r = fx.region
   const rotation = (r.rotation.keys ?? []).some((k) => k.tUs >= a) ? merged(r.rotation, a, [{ tUs: a, value: R0.rotation, ease: 'linear' }]) : r.rotation
-  const region: EffectRegion = { shape, x: merged(r.x, a, keysOf('x')), y: merged(r.y, a, keysOf('y')), w: merged(r.w, a, keysOf('w')), h: merged(r.h, a, keysOf('h')), rotation }
+  const edge = conservativeEdge(fx, a, W, H)
+  const region: EffectRegion = { shape, x: merged(r.x, a, keysOf('x'), edge?.x), y: merged(r.y, a, keysOf('y'), edge?.y), w: merged(r.w, a, keysOf('w'), edge?.w), h: merged(r.h, a, keysOf('h'), edge?.h), rotation }
   const lost: { tUs: Us }[] = []
   for (let i = 0; i < n; i++) if (!conf(i) && conf(i - 1)) lost.push({ tUs: results[i].tUs })
-  return { region, lost, samples: results.map((x, i) => ({ tUs: x.tUs - fx.startUs, confidence: x.confidence, state: x.state })) }
+  return { region, lost, samples: results.map((x) => ({ tUs: x.tUs - fx.startUs, confidence: x.confidence, state: x.state })) }
 }
 
 // ---------------------------------------------------------------- textos
