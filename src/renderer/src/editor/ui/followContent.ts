@@ -66,7 +66,7 @@ export async function followContent(itemId: string): Promise<void> {
         action: { label: 'Ir para', onClick: () => useEditorStore.getState().setPlayhead(first.tUs) }
       })
     } else {
-      toast.success('Conteúdo seguido', { description: `${keys === 1 ? '1 quadro analisado' : `${keys} quadros analisados`}: keyframes de posição e tamanho criados — edite-os como quiser. Ctrl+Z desfaz.` })
+      toast.success('Conteúdo seguido', { description: `${keys === 1 ? '1 quadro analisado' : `${keys} quadros analisados`}: keyframes de posição e tamanho criados — edite-os como quiser. Se depois mudar o tempo ou a velocidade do clipe (deslizar o conteúdo, velocidade, mover só o clipe ou só o efeito), rode “Seguir conteúdo” de novo: a região não acompanha essas mudanças. Ctrl+Z desfaz.` })
     }
   } catch (e) {
     if (e instanceof TrackingCancelled) toast.info('Rastreamento cancelado: nada foi aplicado')
