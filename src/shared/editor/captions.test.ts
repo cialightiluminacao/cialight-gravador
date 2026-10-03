@@ -206,3 +206,30 @@ describe('withCaptionsHidden (exportação sem queimar)', () => {
     expect(capTrack(p).hidden).toBe(false)
   })
 })
+
+describe('texto da biblioteca solto na faixa de legendas vira legenda', () => {
+  it('“Título” na faixa Legendas: estilo/altura comuns das legendas, texto e duração do modelo; o .srt mostra uma legenda', () => {
+    let p = ops.addCaption(withClip(), 0, 'Primeira').project
+    p = ops.setCaptionStyle(p, { color: '#ffee00' })
+    p = ops.setCaptionPosition(p, 0.8)
+    const r = ops.addText(p, 'title', 5 * S, { trackId: capTrack(p).id })
+    const it = ops.findItem(r.project, r.itemId)!.item as TextItem
+    expect(ops.isCaptionsTrack(ops.findItem(r.project, r.itemId)!.track)).toBe(true)
+    expect(it.style).toEqual(caps(p)[0].style) // não o estilo de título (fonte grande, centro da tela)
+    expect(it.style).not.toEqual(TEXT_PRESETS.title.style)
+    expect(it.visual.transform.y).toEqual(caps(p)[0].visual.transform.y)
+    expect([it.text, it.durationUs]).toEqual([TEXT_PRESETS.title.text, TEXT_PRESETS.title.durationUs])
+    expect(ops.captionCues(r.project).map((c) => c.text)).toEqual(['Primeira', 'Título'])
+  })
+  it('“Contagem” na faixa Legendas perde a contagem (a legenda é texto fixo); fora dela continua título/contagem', () => {
+    const p = ops.addCaption(withClip(), 0, 'A').project
+    const r = ops.addText(p, 'countdown', 5 * S, { trackId: capTrack(p).id })
+    const it = ops.findItem(r.project, r.itemId)!.item as TextItem
+    expect(it.counter).toBeUndefined()
+    expect(it.visual.animIn).toBeUndefined()
+    const free = ops.addText(p, 'countdown', 5 * S)
+    const f = ops.findItem(free.project, free.itemId)!.item as TextItem
+    expect(f.counter).toEqual({ from: 3, to: 0 })
+    expect(ops.isCaptionsTrack(ops.findItem(free.project, free.itemId)!.track)).toBe(false)
+  })
+})

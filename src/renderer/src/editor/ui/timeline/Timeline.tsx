@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MousePointerClick } from 'lucide-react'
 import { toast } from 'sonner'
 import { TEXT_DEFAULT_US, TEXT_PRESETS, type ShapePresetId, type TextPresetId } from '@shared/editor/factory'
-import { projectDurationUs } from '@shared/editor/ops'
+import { isCaptionsTrack, projectDurationUs } from '@shared/editor/ops'
 import type { Marker } from '@shared/editor/project'
 import { snapDelta, snapPoints } from '@shared/editor/snap'
 import { formatTimecodeUs } from '@shared/editor/time'
@@ -231,7 +231,11 @@ export function Timeline({ playback }: { playback: PlaybackController | null }):
       else addTransitionTo(tgt.toId, tKind)
     } else if (textPreset) {
       const trackId = s.project ? overlayDropTrack(s.project, zone, atUs, TEXT_PRESETS[textPreset as TextPresetId].durationUs, 'text') : undefined
-      addTextAt(textPreset, atUs, trackId ? { trackId } : undefined)
+      const added = addTextAt(textPreset, atUs, trackId ? { trackId } : undefined)
+      // na faixa Legendas o texto vira legenda (ops.addText): avisa quando o modelo pedido era outro
+      if (added && textPreset !== 'caption' && trackId && s.project?.tracks.some((t) => t.id === trackId && isCaptionsTrack(t))) {
+        toast(`“${TEXT_PRESETS[textPreset as TextPresetId].label}” virou legenda`, { description: 'Na faixa Legendas tudo é legenda: estilo das legendas e entra no .srt. Para um título, solte numa faixa de texto. Ctrl+Z desfaz.' })
+      }
     } else if (shapePreset) {
       const trackId = s.project ? overlayDropTrack(s.project, zone, atUs, SHAPE_DROP_US, 'shape') : undefined
       addShapeAt(shapePreset as ShapePresetId, atUs, trackId ? { trackId } : undefined)

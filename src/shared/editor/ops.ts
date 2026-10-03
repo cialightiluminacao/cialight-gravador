@@ -2,7 +2,7 @@ import { produce } from 'immer'
 import { copyKeys, evalAnim, insertKeyExact, pasteKeys, removeKey, setEase, setKey, setValue, sliceKeys } from './anim'
 import { ANIM_PATHS, assignAnim, getAnim, mapItemAnims as mapAnims, mapVisualAnims as mapVisual, type AnimPath } from './animPaths'
 import { maintainAttachments } from './attachment'
-import { createEffectItem, createMediaItem, createShapeItem, createTextItem, patchTextStyle } from './factory'
+import { createEffectItem, createMediaItem, createShapeItem, createTextItem, patchTextStyle, TEXT_PRESETS } from './factory'
 import { conservativeRegion, regionAabb } from './contentPose'
 import { effectRegionAt, sourceTimeUs, visualTrackBelow } from './resolve'
 import type { EffectPresetId, EffectRegionInit, ShapePresetId, TextPresetId } from './factory'
@@ -2107,13 +2107,23 @@ function addOverlayItem(p: Project, item: TextItem | ShapeItem, baseName: string
   return { project, itemId: item.id }
 }
 
-/** Texto novo a partir de um modelo em atUs (TEXT_PRESETS; duração padrão do modelo). Faixa: ver addOverlayItem. */
+/**
+ * Texto novo a partir de um modelo em atUs (TEXT_PRESETS; duração padrão do modelo). Faixa: ver addOverlayItem.
+ * Na faixa de legendas o texto VIRA LEGENDA (modelo 'caption' com o estilo e a altura comuns das legendas; texto e
+ * duração do modelo pedido, sem contagem/animação): tudo o que está nessa faixa é legenda — lista, .srt e "Queimar".
+ */
 export function addText(p: Project, preset: TextPresetId, atUs: Us, opts?: { trackId?: string; text?: string; durationUs?: Us }): { project: Project; itemId: string } {
   const at = Math.max(0, Math.round(atUs))
-  const item = createTextItem(preset, at, {
-    ...(opts?.text !== undefined ? { text: opts.text } : {}),
-    ...(opts?.durationUs !== undefined ? { durationUs: Math.max(MIN_ITEM_US, Math.round(opts.durationUs)) } : {})
+  const cap = opts?.trackId ? p.tracks.find((t) => t.id === opts.trackId && isCaptionsTrack(t)) : undefined
+  const item = createTextItem(cap ? 'caption' : preset, at, {
+    text: opts?.text ?? TEXT_PRESETS[preset].text,
+    durationUs: opts?.durationUs !== undefined ? Math.max(MIN_ITEM_US, Math.round(opts.durationUs)) : TEXT_PRESETS[preset].durationUs
   })
+  if (cap) {
+    const { style, y } = commonCaption(cap)
+    item.style = structuredClone(style)
+    item.visual.transform.y = structuredClone(y)
+  }
   return addOverlayItem(p, item, 'Texto', opts?.trackId)
 }
 
