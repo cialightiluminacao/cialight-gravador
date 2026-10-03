@@ -18,7 +18,7 @@ import { runEditorExport } from '../export/editorExport'
 // - o centro do anel (centróide dos pixels magenta) fica onde a geometria do clipe põe o ponto clicado (±2 px) — na
 //   identidade, num zoom 2× deslocado e num projeto reenquadrado para 9:16;
 // - o anel some depois de durationMs; um blur por cima do ponto deixa o anel irreconhecível (privacidade);
-// - a seta (cursor ampliado) tem a ponta no ponto do cursor;
+// - a seta (cursor ampliado) tem a ponta no ponto do cursor; o mesmo blur por cima dela a deixa irreconhecível;
 // - a exportação do cenário da identidade: o main mede o mesmo anel no quadro de 1,0 s (preview = exportação).
 
 export const CURSOR_FX_PROJECT_ID = 'p-editor-cursorfx-test'
@@ -40,6 +40,8 @@ export interface CursorFxReport {
   privacy?: { plain: number; blurred: number }
   /** Seta: ponta (menor x/y dos pixels brancos perto do ponto), altura da seta branca e pixels pretos do contorno. */
   sprite?: { tip: { x: number; y: number } | null; expected: { x: number; y: number } | null; whiteH: number; dark: number }
+  /** Seta (pixels brancos e do contorno preto perto do ponto) sem e com o blur sobre o ponto do cursor. */
+  spritePrivacy?: { plainWhite: number; blurredWhite: number; plainDark: number; blurredDark: number }
   exportPath?: string
   exportError?: string
 }
@@ -114,20 +116,26 @@ export async function cursorFxCheck(outDir: string | null): Promise<CursorFxRepo
 
     // seta: só o cursor ampliado (o anel desligado)
     const arrow = updateItem<MediaItem>(p, itemId, (d) => { d.cursorFx = { highlight: { ...FX.highlight, enabled: false }, cursor: { ...FX.cursor, enabled: true, smoothing: 0 } } })
-    const img = await frame(wide.client, arrow, at)
     const ex = expectedAt(arrow, itemId, at)
-    let minX = Infinity, minY = Infinity, maxY = -Infinity, dark = 0
-    if (ex) {
-      for (let y = Math.max(0, Math.round(ex.y) - 20); y < Math.min(H, Math.round(ex.y) + 80); y++) {
-        for (let x = Math.max(0, Math.round(ex.x) - 20); x < Math.min(W, Math.round(ex.x) + 60); x++) {
-          const i = (y * W + x) * 4
-          if (img[i] >= 225 && img[i + 1] >= 225 && img[i + 2] >= 225) {
-            minX = Math.min(minX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y)
-          } else if (Math.max(img[i], img[i + 1], img[i + 2]) <= 12) dark++
+    const arrowPixels = (img: Uint8Array): { minX: number; minY: number; maxY: number; white: number; dark: number } => {
+      let minX = Infinity, minY = Infinity, maxY = -Infinity, white = 0, dark = 0
+      if (ex) {
+        for (let y = Math.max(0, Math.round(ex.y) - 20); y < Math.min(H, Math.round(ex.y) + 80); y++) {
+          for (let x = Math.max(0, Math.round(ex.x) - 20); x < Math.min(W, Math.round(ex.x) + 60); x++) {
+            const i = (y * W + x) * 4
+            if (img[i] >= 225 && img[i + 1] >= 225 && img[i + 2] >= 225) {
+              minX = Math.min(minX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); white++
+            } else if (Math.max(img[i], img[i + 1], img[i + 2]) <= 12) dark++
+          }
         }
       }
+      return { minX, minY, maxY, white, dark }
     }
-    report.sprite = { tip: Number.isFinite(minX) ? { x: minX, y: minY } : null, expected: ex, whiteH: Number.isFinite(maxY) ? maxY - minY + 1 : 0, dark }
+    const a0 = arrowPixels(await frame(wide.client, arrow, at))
+    report.sprite = { tip: Number.isFinite(a0.minX) ? { x: a0.minX, y: a0.minY } : null, expected: ex, whiteH: Number.isFinite(a0.maxY) ? a0.maxY - a0.minY + 1 : 0, dark: a0.dark }
+    // privacidade da seta: o mesmo blur forte sobre o ponto do cursor (a seta é desenhada na camada, antes dos efeitos)
+    const a1 = arrowPixels(await frame(wide.client, { ...arrow, tracks: [...arrow.tracks, fxTrack] }, at))
+    report.spritePrivacy = { plainWhite: a0.white, blurredWhite: a1.white, plainDark: a0.dark, blurredDark: a1.dark }
 
     if (outDir) {
       try {

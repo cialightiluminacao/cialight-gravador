@@ -132,6 +132,7 @@ interface CursorFxReport {
   error?: string; identity?: RingShot; zoom?: RingShot; reframed?: RingShot & { width: number; height: number }; afterDuration?: number
   privacy?: { plain: number; blurred: number }
   sprite?: { tip: { x: number; y: number } | null; expected: { x: number; y: number } | null; whiteH: number; dark: number }
+  spritePrivacy?: { plainWhite: number; blurredWhite: number; plainDark: number; blurredDark: number }
   exportPath?: string; exportError?: string
 }
 interface TrackingReport {
@@ -716,6 +717,8 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!cf?.privacy && cf.privacy.plain > 200 && cf.privacy.blurred <= cf.privacy.plain * 0.02, `realce de cliques (privacidade): um blur sobre o ponto deixa o anel irreconhecível — pixels magenta ${cf?.privacy?.plain} → ${cf?.privacy?.blurred} (≤ 2 %)`, failures)
   const arrow = cf?.sprite
   check(!!arrow?.tip && !!arrow.expected && Math.abs(arrow.tip.x - arrow.expected.x) <= 3 && Math.abs(arrow.tip.y - arrow.expected.y) <= 4 && arrow.whiteH >= 22 && arrow.whiteH <= 40 && arrow.dark > 20, `cursor ampliado: ponta da seta em (${arrow?.tip?.x}, ${arrow?.tip?.y}) × ponto do cursor (${arrow?.expected?.x.toFixed(2)}, ${arrow?.expected?.y.toFixed(2)}) (±3/±4 px), seta branca de ${arrow?.whiteH} px de altura (22–40 com escala 1,8), ${arrow?.dark} px de contorno preto`, failures)
+  const spr = cf?.spritePrivacy
+  check(!!spr && spr.plainWhite > 100 && spr.plainDark > 20 && spr.blurredWhite <= spr.plainWhite * 0.02 && spr.blurredDark <= spr.plainDark * 0.02, `cursor ampliado (privacidade): um blur sobre o ponto deixa a seta irreconhecível — pixels brancos ${spr?.plainWhite} → ${spr?.blurredWhite}, contorno preto ${spr?.plainDark} → ${spr?.blurredDark} (≤ 2 %)`, failures)
   const ip = cf?.identity?.ring
   check(!!ringExported && !!ip && Math.hypot(ringExported.cx - ip.cx, ringExported.cy - ip.cy) <= 1.5 && Math.abs(ringExported.w - ip.w) <= 3, `realce de cliques: exportação = preview no quadro do clique — anel exportado ${at(ringExported)} (${ringExported?.w} px; preview ${at(ip ?? null)}, ${ip?.w} px) ±1,5 px ${cf?.exportError ?? ''}`, failures)
 

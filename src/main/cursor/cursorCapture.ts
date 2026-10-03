@@ -27,6 +27,8 @@ export interface CursorTestHooks {
   disableNativeClicks?: boolean
   /** Recebe a trilha e o gravador na parada (relógio/pausas para conferência). */
   onStopped?: (track: CursorTrackV1, rec: CursorRecorder) => void
+  /** Custo (ms de parede, performance.now) de cada tick do timer — a fonte e os cliques continuam os reais. */
+  onTickCost?: (ms: number) => void
 }
 
 let active: Active | null = null
@@ -84,6 +86,21 @@ export function cursorBegin(info: CursorBeginInfo, dir: string, owner?: WebConte
     const clicksWanted = !testHooks?.disableNativeClicks
     const edges = new ButtonEdges()
     const pollClicks: CursorRecorderDeps['pollClicks'] = () => (native && clicksWanted ? edges.update(native.readButtons(), native.buttonsSwapped()) : [])
+    const tickCost = testHooks?.onTickCost
+    // teste de CPU: mede o trabalho de cada tick (amostra + botões) no próprio timer
+    const timed: Pick<CursorRecorderDeps, 'setInterval'> = tickCost
+      ? {
+          setInterval: (fn, ms) =>
+            setInterval(() => {
+              const t0 = performance.now()
+              try {
+                fn()
+              } finally {
+                tickCost(performance.now() - t0)
+              }
+            }, ms)
+        }
+      : {}
     const rec = new CursorRecorder(
       {
         now: () => performance.now(),
@@ -91,7 +108,8 @@ export function cursorBegin(info: CursorBeginInfo, dir: string, owner?: WebConte
         readFrame,
         pollClicks,
         onClickSourceError: (e) => logNativeFailure('leitura dos botões falhou', e),
-        onTickError: (e) => log.warn('cursor: falha numa amostra do cursor (as próximas seguem)', e)
+        onTickError: (e) => log.warn('cursor: falha numa amostra do cursor (as próximas seguem)', e),
+        ...timed
       },
       { width: info.width, height: info.height },
       // modo janela: o encoder encaixa a janela redimensionada no tamanho inicial com 'contain' (RecordingEngine)

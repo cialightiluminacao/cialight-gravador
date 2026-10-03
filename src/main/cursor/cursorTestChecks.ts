@@ -58,8 +58,10 @@ function cpuPct(c: NodeJS.CpuUsage, wallMs: number): number {
 
 /**
  * Antes da gravação: o binding nativo real carrega, lê os botões e os limites de uma janela; a trilha real (cursor do
- * SO via screen.getCursorScreenPoint + botões via GetAsyncKeyState) começa e para sem erro, e o custo de CPU do main
- * (process.cpuUsage, 10 s, menos 10 s ociosos) fica < 1 % de um núcleo. Devolve as medições.
+ * SO via screen.getCursorScreenPoint + botões via GetAsyncKeyState) começa e para sem erro, e o custo da amostragem
+ * fica < 1 % de um núcleo. O custo é medido no próprio tick (onTickCost: parede de cada tick, que é ≥ a CPU dele) ×
+ * ticks por segundo — não depende do resto do processo nem da carga da máquina (process.cpuUsage do main inteiro,
+ * ocioso × com trilha, flutuava com outros testes rodando: fica só no relatório). Devolve as medições.
  */
 export async function checkCursorRealSourceAndOverhead(win: BrowserWindow, outDir: string, ok: Ok): Promise<Record<string, unknown>> {
   const report: Record<string, unknown> = {}
@@ -106,7 +108,10 @@ export async function checkCursorRealSourceAndOverhead(win: BrowserWindow, outDi
     await sleep(ms)
     return cpuPct(process.cpuUsage(c0), performance.now() - t0)
   }
-  setCursorTestHooks(null)
+  // fonte e cliques reais; só o custo de cada tick é anotado
+  const tickMs: number[] = []
+  setCursorTestHooks({ onTickCost: (ms) => tickMs.push(ms) })
+  let trackWallMs = 0
   const primary = screen.getPrimaryDisplay()
   let startErr: unknown = null
   // ociosa e com trilha alternadas (2 × 10 s cada) depois de 2 s de aquecimento: o começo do app é ruidoso
@@ -117,20 +122,33 @@ export async function checkCursorRealSourceAndOverhead(win: BrowserWindow, outDi
     idle.push(await measure(10_000))
     try {
       cursorBegin({ sessionId: 'cursor-cpu-probe', width: 1920, height: 1080, source: { kind: 'screen', id: 'screen:probe', displayId: String(primary.id) } }, probeDir)
+      const w0 = performance.now()
       withTrack.push(await measure(10_000))
+      trackWallMs += performance.now() - w0
     } catch (e) {
       startErr = e
     } finally {
       cursorDiscard('cursor-cpu-probe')
     }
   }
+  setCursorTestHooks(null)
   ok(startErr === null, `cursor: trilha real (cursor do SO + botões nativos) começou e parou sem erro${startErr ? ` (${String(startErr)})` : ''}`)
   ok(!existsSync(join(probeDir, CURSOR_FILE)), 'cursor: descartar não grava cursor.json')
   rmSync(probeDir, { recursive: true, force: true })
   const mean = (a: number[]): number => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length)
   const overhead = mean(withTrack) - mean(idle)
-  report.cpu = { idlePct: idle.map((v) => +v.toFixed(3)), withTrackPct: withTrack.map((v) => +v.toFixed(3)), overheadPct: +overhead.toFixed(3) }
-  ok(withTrack.length === 2 && overhead < 1, `cursor: custo da amostragem a ~60 Hz + botões < 1 % de um núcleo (ocioso ${idle.map((v) => v.toFixed(2)).join('/')} %, com trilha ${withTrack.map((v) => v.toFixed(2)).join('/')} %, custo ${overhead.toFixed(2)} %)`)
+  // custo por tick: a mediana (um tick preemptado pela carga da máquina não representa o trabalho dele) × ticks/s
+  const sorted = [...tickMs].sort((a, b) => a - b)
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : Infinity
+  const p95 = sorted.length ? sorted[Math.floor(sorted.length * 0.95)] : Infinity
+  const hz = trackWallMs > 0 ? tickMs.length / (trackWallMs / 1000) : 0
+  const tickPct = ((median * hz) / 1000) * 100
+  const totalPct = trackWallMs > 0 ? (tickMs.reduce((a, b) => a + b, 0) / trackWallMs) * 100 : Infinity
+  report.cpu = {
+    idlePct: idle.map((v) => +v.toFixed(3)), withTrackPct: withTrack.map((v) => +v.toFixed(3)), processDeltaPct: +overhead.toFixed(3),
+    ticks: tickMs.length, tickHz: +hz.toFixed(1), tickMedianMs: +median.toFixed(4), tickP95Ms: +p95.toFixed(4), tickCostPct: +tickPct.toFixed(4), tickTotalPct: +totalPct.toFixed(4)
+  }
+  ok(withTrack.length === 2 && hz >= 50 && tickPct < 1, `cursor: custo da amostragem a ~60 Hz + botões < 1 % de um núcleo (medido no tick: ${tickMs.length} ticks a ${hz.toFixed(1)} Hz, mediana ${median.toFixed(3)} ms, p95 ${p95.toFixed(3)} ms → ${tickPct.toFixed(3)} %; soma de todos os ticks ${totalPct.toFixed(3)} %; processo inteiro, só informativo: ocioso ${idle.map((v) => v.toFixed(2)).join('/')} %, com trilha ${withTrack.map((v) => v.toFixed(2)).join('/')} %)`)
   return report
 }
 

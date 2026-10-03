@@ -22,6 +22,10 @@
 // nenhum antes/depois; seta branca do cursor ampliado; (b) bordas do quadro nunca no fundo preto do projeto durante
 // o zoom (e o zoom de fato amplia a caixa verde ~1,8×); (c) o CPF ilegível em TODO quadro em que aparece na fonte
 // (métrica do F2/T5: contraste local p99−p1 após caixa 3×3 < 0,15 × o da fonte e variância do laplaciano < 0,2 ×).
+// C1 (revisão final): zoom automático DEPOIS do "Seguir conteúdo" (Intensidade 1,25×, Duração 6 s: o zoom cobre o
+// trecho rastreado e o texto continua no quadro) → toast → "Ancorar" / "Vincular e ancorar" (na pose de antes do zoom e refaz
+// o zoom: um passo) → Ctrl+Z / Ctrl+Shift+Z → exporta de novo → o CPF ilegível em TODO quadro, medido na caixa do texto
+// levada pela geometria do clipe com o zoom (window.__qaEditor.clipPoint).
 //
 // uso (depois de `npm run build`, sob o lock):  node scripts/qa/editor-f6-e2e.mjs
 // Tudo em test-out/e2e-f6 (CIALIGHT_RAW_DIR=test-out/e2e-f6/raw → projetos em test-out/e2e-f6/Projetos, exportação
@@ -561,6 +565,70 @@ async function main() {
     console.log(`  📷 ${name}`)
   }
   writeFileSync(join(E2E, 'e2e-f6-result.json'), JSON.stringify({ out, po, yellow, arrow, darkest, g60, gSrc, ...result }, null, 2))
+
+  console.log('C1: zoom automático depois do "Seguir conteúdo" → ancorar pelo toast → exportar → CPF ilegível em todo quadro')
+  {
+    await ev(`T.st().select(['${v}']); await T.settle(); await T.wait(300); await T.videoTab(); return 1`)
+    // Intensidade no mínimo (1,25×) e Duração no máximo (6 s) pelo teclado do slider (Home / End: valor + commit)
+    const sl = await ev(`const s = T.section('Zoom automático nos cliques'); s.scrollIntoView({ block: 'center' }); await T.wait(200)
+      const thumb = (label) => { const r = T.el('[aria-label="' + label + '"]', s); return r.getAttribute('role') === 'slider' ? r : r.querySelector('[role="slider"]') }
+      for (const [label, key] of [['Intensidade', 'Home'], ['Duração', 'End']]) { const t = thumb(label); t.focus(); t.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); await T.settle(); await T.wait(100) }
+      return { intensity: thumb('Intensidade').getAttribute('aria-valuenow'), hold: thumb('Duração').getAttribute('aria-valuenow') }`)
+    check('C1: Intensidade 1,25× e Duração 6 s pelo teclado dos sliders', Number(sl.intensity) === 1.25 && Number(sl.hold) === 6000, sl)
+    const pre = await ev(`await T.wait(300); return { json: JSON.stringify(T.st().project), past: T.past() }`)
+    const ap = await ev(`const s = T.section('Zoom automático nos cliques'); await T.click(T.button('Aplicar', s)); await T.wait(700)
+      const k = T.item('${v}').visual.transform.scale.keys || []
+      return { past: T.past(), keys: k.map((x) => [x.tUs, +x.value.toFixed(4)]), json: JSON.stringify(T.st().project), toast: T.toasts().find((t) => /zooms? automáticos? aplicados?/.test(t)) ?? null, offer: document.querySelector('[data-follow-toast="anchor"]') ? 'anchor' : document.querySelector('[data-follow-toast="link"]') ? 'link' : null }`)
+    const maxS = Math.max(...ap.keys.map((k) => k[1])), lastK = ap.keys[ap.keys.length - 1]?.[0] ?? 0
+    check(`C1: zoom aplicado (até ${maxS}×, último key em ${(lastK / S).toFixed(2)} s: cobre o trecho rastreado de 4 s), um passo, toast com o aviso de privacidade e a oferta de ancorar (${ap.offer})`, ap.past === pre.past + 1 && near(maxS, 1.25, 0.01) && lastK > 6.5 * S && !!ap.toast && ap.toast.includes('Privacidade:') && !!ap.offer, { ...ap, json: undefined })
+    await shot('e2e-f6-13-c1-toast-ancorar.png')
+    const lk = await ev(`await T.click(T.el('[data-follow-toast="${ap.offer}"]')); await T.wait(700); const f = T.item('${fx}'); const sc = T.item('${v}')
+      return { past: T.past(), attach: f.attach?.mediaItemId ?? null, link: f.linkId ?? null, mlink: sc.linkId ?? null, keys: (sc.visual.transform.scale.keys || []).map((x) => [x.tUs, +x.value.toFixed(4)]), json: JSON.stringify(T.st().project), toasts: T.toasts(), canRedo: T.st().canRedo }`)
+    check(`C1: "${ap.offer === 'anchor' ? 'Ancorar efeito ao clipe' : 'Vincular e ancorar'}" troca o passo do zoom por um só (zoom + âncora), efeito ancorado e no grupo do clipe, o mesmo zoom`, lk.past === ap.past && !lk.canRedo && lk.attach === v && !!lk.link && lk.link === lk.mlink && JSON.stringify(lk.keys) === JSON.stringify(ap.keys) && lk.toasts.some((t) => t.includes('ancorado ao clipe')), { ...lk, json: undefined })
+    const u = await ev(`await T.key('z', { ctrlKey: true }); await T.wait(300); return { json: JSON.stringify(T.st().project), past: T.past() }`)
+    check('C1: um Ctrl+Z desfaz zoom e âncora juntos (projeto de antes do zoom)', u.json === pre.json && u.past === pre.past, { same: u.json === pre.json, past: u.past })
+    const rd = await ev(`await T.key('z', { ctrlKey: true, shiftKey: true }); await T.wait(300); return { json: JSON.stringify(T.st().project), past: T.past() }`)
+    check('C1: Ctrl+Shift+Z refaz zoom + âncora', rd.json === lk.json && rd.past === lk.past, { same: rd.json === lk.json, past: rd.past })
+    await ev(`T.st().select([]); for (let i = 0; i < 80 && T.toasts().length; i++) await T.wait(250); return 1`)
+    const OUT2 = join(E2E, 'export-c1')
+    mkdirSync(OUT2, { recursive: true })
+    const out2 = await exportWith('Original', OUT2, 'e2e-f6-14-c1-exportar.png')
+    if (out2) {
+      // caixa do texto em cada quadro da fonte (absoluta) levada ao quadro exportado pela geometria do clipe com o zoom
+      const first = TEXT.appear * FPS
+      const boxes = []
+      for (let n = first; n < NFRAMES; n++) {
+        const b = textBox(src[n], W, ROW.h)
+        boxes.push(b ? { n, tUs: Math.round((n * S) / FPS), b: { x0: b.x0, y0: b.y0 + ROW.y, x1: b.x1 + 1, y1: b.y1 + 1 + ROW.y } } : { n, b: null })
+      }
+      const mapped = await ev(`const q = window.__qaEditor; return ${JSON.stringify(boxes)}.map((r) => { if (!r.b) return null; const a = q.clipPoint('${v}', r.tUs, r.b.x0 / ${W}, r.b.y0 / ${H}); const c = q.clipPoint('${v}', r.tUs, r.b.x1 / ${W}, r.b.y1 / ${H}); return a && c ? { x0: Math.min(a.x, c.x), y0: Math.min(a.y, c.y), x1: Math.max(a.x, c.x), y1: Math.max(a.y, c.y) } : null })`)
+      const full = frames(out2, `select=gte(n\\,${first})`, W, H)
+      const rows2 = []
+      let offscreen = 0, occl = 0, zoomed = 0
+      for (let i = 0; i < boxes.length; i++) {
+        const { n, b } = boxes[i]
+        if (occluded(n) !== 'no') { occl++; continue }
+        const m = mapped[i]
+        if (!b || !m) { rows2.push({ n, error: 'sem texto na fonte ou clipe invisível' }); continue }
+        const cb = { x0: Math.max(6, Math.ceil(m.x0)), y0: Math.max(6, Math.ceil(m.y0)), x1: Math.min(W - 7, Math.floor(m.x1) - 1), y1: Math.min(H - 7, Math.floor(m.y1) - 1) }
+        if (cb.x1 - cb.x0 < 12 || cb.y1 - cb.y0 < 12) { offscreen++; continue }
+        const k = (m.x1 - m.x0) / (b.x1 - b.x0)
+        if (k > 1.1) zoomed++
+        const sb = { x0: b.x0, y0: b.y0 - ROW.y, x1: b.x1 - 1, y1: b.y1 - 1 - ROW.y }
+        const c0 = localContrast(src[n], W, ROW.h, sb), c1 = localContrast(full[n - first], W, H, cb)
+        const l0 = lapVar(src[n], W, ROW.h, sb), l1 = lapVar(full[n - first], W, H, cb)
+        rows2.push({ n, k: +k.toFixed(3), cSrc: +c0.toFixed(1), c: +(c1 / c0).toFixed(4), lap: +(l1 / l0).toFixed(5) })
+      }
+      const bad2 = rows2.filter((r) => r.error || !(r.c < 0.15 && r.lap < 0.2 && r.cSrc >= 120))
+      const worst2 = rows2.filter((r) => !r.error).reduce((a, r) => (!a || r.c > a.c ? r : a), null)
+      console.log(`  C1 CPF: ${rows2.length} quadros medidos (${zoomed} com zoom), ${occl} na oclusão, ${offscreen} fora do quadro; pior ${JSON.stringify(worst2)}`)
+      check(`C1: CPF ilegível em TODOS os ${rows2.length} quadros medidos depois de zoom + ancorar pelo toast (${zoomed} com o zoom; caixa do texto levada pela geometria do clipe)`, bad2.length === 0 && rows2.length > 120 && zoomed > 60, bad2.slice(0, 10))
+      result.c1 = { sliders: sl, zoomKeys: ap.keys, measured: rows2.length, zoomed, occluded: occl, offscreen, worst: worst2, bad: bad2.length }
+      execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', out2, '-vf', 'select=eq(n\\,165),scale=-2:540', '-frames:v', '1', '-update', '1', join(SHOTS, 'e2e-f6-15-quadro-c1-zoom-ancorado.png')])
+      console.log('  📷 e2e-f6-15-quadro-c1-zoom-ancorado.png')
+    }
+    writeFileSync(join(E2E, 'e2e-f6-result.json'), JSON.stringify({ out, po, yellow, arrow, darkest, g60, gSrc, ...result }, null, 2))
+  }
 }
 
 try {
