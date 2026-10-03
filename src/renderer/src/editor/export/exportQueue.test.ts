@@ -96,6 +96,34 @@ describe('ExportQueue', () => {
     expect(t.q.active()).toBe(false)
   })
 
+  it('resumo final (onIdle) que lança não deixa o main "rodando": o estado parado é avisado antes', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const unhandled: unknown[] = []
+    const onUnhandled = (e: unknown): void => void unhandled.push(e)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const t = setup({
+        onIdle: () => {
+          throw new Error('toast quebrou')
+        }
+      })
+      t.add('a.mp4')
+      t.calls[0].resolve(t.result('a.mp4'))
+      await t.flush()
+      await t.flush()
+      expect(t.states.at(-1)).toEqual({ running: false, pending: 0 })
+      expect(t.q.active()).toBe(false)
+      expect(unhandled).toEqual([])
+      // e a fila continua utilizável
+      t.add('b.mp4')
+      expect(t.calls).toHaveLength(2)
+      expect(t.states.at(-1)).toEqual({ running: true, pending: 0 })
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      errors.mockRestore()
+    }
+  })
+
   it('posição na fila ao adicionar (a que está rodando conta como 1)', () => {
     const t = setup()
     expect(t.q.enqueue({ job: videoJob('a'), label: 'a', durationUs: 1, privacy: [] }).position).toBe(1)

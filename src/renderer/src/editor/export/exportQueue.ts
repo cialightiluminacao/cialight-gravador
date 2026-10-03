@@ -173,7 +173,14 @@ export class ExportQueue {
       const b = this.batch
       if (b.items.length) {
         this.batch = { done: 0, error: 0, cancelled: 0, items: [] }
-        this.deps.onIdle?.(b)
+        // estado parado ao main/UI antes do resumo: um onIdle que lance não deixa o main "rodando" (falsa
+        // confirmação de saída) nem vira rejeição solta
+        this.emit()
+        try {
+          this.deps.onIdle?.(b)
+        } catch (e) {
+          console.error('fila de exportações: falha no resumo final', e)
+        }
       }
       return
     }
