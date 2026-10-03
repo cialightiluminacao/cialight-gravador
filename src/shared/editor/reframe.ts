@@ -8,7 +8,7 @@
 //   movimento do Ken Burns/zoom).
 // - Sobreposições (PiP, logos): mesmo tamanho em px relativo ao lado menor do quadro, posição proporcional, presas
 //   dentro do quadro se estavam dentro.
-// - Textos/formas: posição proporcional (normalizada), tamanho do texto pelo lado menor.
+// - Textos/formas: posição proporcional (normalizada), tamanho do texto e caixa da forma pelo lado menor.
 // - Privacidade: todo efeito continua cobrindo o MESMO conteúdo. "Clipes" sob o efeito, para essa decisão: a mídia de
 //   vídeo das faixas que ele esconde — também desativada ou em faixa oculta (pode voltar a aparecer) — e as anotações
 //   da gravação (camada parada no quadro inteiro: o conteúdo delas fica no mesmo ponto normalizado). Ancorado ou solto
@@ -25,7 +25,7 @@ import { contentToScreen, NO_HOLE, regionAabb, regionTouchesClip, screenToConten
 import { FIT_TOL, simplifyRegionSamples, toContentRegion, type RegionSample } from './followTransform'
 import { newId } from './ids'
 import { layerBase } from './layerGeometry'
-import type { Anim, AnnotationsItem, EffectItem, Item, Keyframe, MediaItem, Project, TextItem, Us, VisualProps } from './project'
+import { DEFAULT_SHAPE_BOX, type Anim, type AnnotationsItem, type EffectItem, type Item, type Keyframe, type MediaItem, type Project, type ShapeItem, type TextItem, type Us, type VisualProps } from './project'
 import { attachedMedia, clipFrameAt, effectRegionAt, visualStateAt, visualTrackBelow } from './resolve'
 import { frameToUs, itemEndUs } from './time'
 import { coverRange, coversFrame, sourceOf } from './zoom'
@@ -67,6 +67,8 @@ const MSG: Record<ReframeWarningKind, string> = {
 
 /** Curva entre dois pontos de foco (a câmera anda suave). */
 const FOCUS_EASE = 'inOut' as const
+/** Aproximação mínima (pico ÷ base) para um trecho contar como zoom: acima do Ken Burns (1,15), que segue os pontos. */
+const ZOOM_FOCUS_MIN = 1.2
 /** Amostragem mínima das partes assadas (como o desancorar): 60 por segundo. */
 const MIN_SAMPLE_FPS = 60
 
@@ -127,6 +129,21 @@ export function focusToScreen(p: Project, m: MediaItem, f: FocusPoint): { tUs: U
   return cf ? { tUs, ...screenAt(cf, f) } : null
 }
 
+/**
+ * Escala "de repouso" do clipe principal: a menor dele, mas nunca abaixo de 1 (ou da inicial, se menor) — afastar
+ * (escala abaixo do repouso) não é zoom e não pode transformar o trecho normal em "zoom".
+ */
+const restScale = (sc: number[], first: number): number => Math.max(Math.min(...sc), Math.min(1, first))
+
+/** O clipe tem zoom (keys de escala com aproximação ≥ ZOOM_FOCUS_MIN): no reenquadrar, o alvo dele manda nesses trechos. */
+export function hasZoomKeys(m: MediaItem): boolean {
+  const s = m.visual?.transform.scale
+  if (!s?.keys?.length) return false
+  const vs = s.keys.map((k) => k.value)
+  const base = restScale(vs, evalAnim(s, 0))
+  return base > 0 && Math.max(...vs) >= base * ZOOM_FOCUS_MIN
+}
+
 /** Clipe principal de cima ativo no instante (o que recebe os pontos de foco no visualizador); null = nenhum. */
 export function mainClipAt(p: Project, tUs: Us): MediaItem | null {
   for (let i = p.tracks.length - 1; i >= 0; i--) {
@@ -171,11 +188,30 @@ function simplifyXY(s: { t: Us; x: number; y: number; r: { x0: number; x1: numbe
 }
 
 /**
+ * Peso do alvo do zoom em cada amostra (escalas em ordem de tempo): trechos contíguos com a escala acima da de repouso
+ * (restScale) e pico ≥ ZOOM_FOCUS_MIN × repouso; peso = (s/base − 1)/(pico/base − 1) — 1 na espera do zoom, 0 fora.
+ */
+function zoomWeights(sc: number[]): number[] {
+  const base = restScale(sc, sc[0])
+  const w = sc.map(() => 0)
+  if (!(base > 0)) return w
+  for (let i = 0; i < sc.length; ) {
+    if (sc[i] <= base * (1 + 1e-6)) { i++; continue }
+    let j = i, peak = sc[i]
+    while (j < sc.length && sc[j] > base * (1 + 1e-6)) peak = Math.max(peak, sc[j++])
+    if (peak >= base * ZOOM_FOCUS_MIN) for (let k = i; k < j; k++) w[k] = Math.min(1, (sc[k] / base - 1) / (peak / base - 1))
+    i = j
+  }
+  return w
+}
+
+/**
  * x/y do clipe principal em 'cover' no quadro novo (`q1`: o projeto só com o quadro novo, para a geometria): o ponto de
  * foco no centro, preso à faixa sem bordas (coverRange) em cada instante. Geometria parada (escala, giro, corte sem
  * keys) e pontos do usuário → um key por ponto com Suavizar ambos (exatos: x/y são afins no ponto e a faixa é fixa,
  * então a curva entre dois pontos válidos fica válida). Senão → amostras em cada quadro (e nos keys) simplificadas com
- * keys lineares, a ≤ FIT_TOL do quadro e sempre dentro da faixa.
+ * keys lineares, a ≤ FIT_TOL do quadro e sempre dentro da faixa. Com pontos do usuário e zoom já no clipe: nos trechos
+ * do zoom o foco vai ao alvo dele (zoomWeights) — o detalhe ampliado continua no quadro novo; fora deles, os pontos.
  */
 function focusTransform(p0: Project, q1: Project, m0: MediaItem, points: FocusPoint[]): { x: Anim<number>; y: Anim<number> } {
   const v0 = m0.visual!, t0 = v0.transform, c0 = v0.crop
@@ -226,7 +262,17 @@ function focusTransform(p0: Project, q1: Project, m0: MediaItem, points: FocusPo
     if (l >= D) break
     times.add(l)
   }
-  const samples = [...times].sort((a, b) => a - b).map((l) => ({ t: l, ...desired(l, focusAt(l)), must: must.has(l) }))
+  const ts = [...times].sort((a, b) => a - b)
+  const zw = pts.length ? zoomWeights(ts.map((l) => evalAnim(t0.scale, l))) : null
+  const samples = ts.map((l, i) => {
+    let f = focusAt(l)
+    // trecho de zoom: o alvo dele (o conteúdo no centro do quadro antigo) é o foco; entra e sai junto com a escala
+    if (zw && zw[i] > 0) {
+      const z = contentAt(clipFrameAt(p0, rest0, m0.startUs + l, true)!, 0.5, 0.5)
+      f = { x: f.x + (z.x - f.x) * zw[i], y: f.y + (z.y - f.y) * zw[i] }
+    }
+    return { t: l, ...desired(l, f), must: must.has(l) }
+  })
   const tol = FIT_TOL * Math.max(W1, H1)
   return simplifyXY(samples, tol / W1, tol / H1)
 }
@@ -267,17 +313,32 @@ function overlayVisual(p0: Project, q1: Project, m: MediaItem): VisualProps {
 type Under = MediaItem | AnnotationsItem
 type Placed = { it: Under; ti: number; drawn: boolean }
 
+// índice id → item e faixa, por lista de faixas (projeto imutável): as buscas por id dentro dos laços por efeito
+// varriam o projeto inteiro (O(itens²) em projetos de 1 h com centenas de cortes)
+const locByTracks = new WeakMap<Project['tracks'], Map<string, { it: Item; ti: number }>>()
+function locOf(p: Project, id: string): { it: Item; ti: number } | undefined {
+  let idx = locByTracks.get(p.tracks)
+  if (!idx) {
+    idx = new Map()
+    for (let ti = 0; ti < p.tracks.length; ti++) for (const it of p.tracks[ti].items) if (!idx.has(it.id)) idx.set(it.id, { it, ti })
+    locByTracks.set(p.tracks, idx)
+  }
+  return idx.get(id)
+}
+
 /** Itens sobre os quais o efeito age (faixas abaixo; escopo `track`: a faixa-alvo) no tempo dele, do topo para o fundo. */
 function actedClips(p: Project, fx: EffectItem): Placed[] {
-  const fti = p.tracks.findIndex((t) => t.items.some((i) => i.id === fx.id))
+  const fti = locOf(p, fx.id)?.ti ?? -1
   const target = fx.scope === 'track' ? (fx.targetTrackId ?? visualTrackBelow(p, p.tracks[fti].id)) : null
   const out: Placed[] = []
+  const assets = new Set(p.assets.map((a) => a.id))
   p.tracks.forEach((t, ti) => {
     if (t.kind !== 'video') return
     if (target ? t.id !== target : ti >= fti) return
     for (const it of t.items) {
-      const ok = it.type === 'annotations' || (it.type === 'media' && !!it.visual && p.assets.some((a) => a.id === it.assetId))
-      if (!ok || it.startUs >= itemEndUs(fx) || itemEndUs(it) <= fx.startUs) continue
+      if (it.startUs >= itemEndUs(fx) || itemEndUs(it) <= fx.startUs) continue
+      const ok = it.type === 'annotations' || (it.type === 'media' && !!it.visual && assets.has(it.assetId))
+      if (!ok) continue
       out.push({ it: it as Under, ti, drawn: !t.hidden && it.enabled !== false })
     }
   })
@@ -347,12 +408,12 @@ function effectTimes(p0: Project, p1: Project, fx: EffectItem, acted: Placed[]):
   const r = fx.region
   addKeys(fx.startUs, [r.x, r.y, r.w, r.h, r.rotation])
   // ancorado: a região segue o clipe dele (keys e animações dele contam)
-  const anchor = fx.attach ? p0.tracks.flatMap((t) => t.items).find((i) => i.id === fx.attach!.mediaItemId) : undefined
+  const anchor = fx.attach ? locOf(p0, fx.attach.mediaItemId)?.it : undefined
   const items: Under[] = [...acted.map((x) => x.it), ...(anchor?.type === 'media' ? [anchor] : [])]
   for (const it of items) {
     if (it.type === 'media') {
       for (const q of [p0, p1]) {
-        const v = (q.tracks.flatMap((t) => t.items).find((i) => i.id === it.id) as MediaItem | undefined)?.visual
+        const v = (locOf(q, it.id)?.it as MediaItem | undefined)?.visual
         if (!v) continue
         addKeys(it.startUs, [v.transform.x, v.transform.y, v.transform.scale, v.transform.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b])
         if (v.animIn) must.add(it.startUs + v.animIn.durationUs)
@@ -371,7 +432,7 @@ function effectTimes(p0: Project, p1: Project, fx: EffectItem, acted: Placed[]):
   return { times: [...set].sort((x, y) => x - y), must: kept }
 }
 
-const fxIn = (p: Project, id: string): EffectItem => p.tracks.flatMap((t) => t.items).find((i) => i.id === id) as EffectItem
+const fxIn = (p: Project, id: string): EffectItem => locOf(p, id)!.it as EffectItem
 const sameIds = (a: { it: Under }[], b: { it: Under }[]): boolean => a.every((x) => b.some((y) => y.it.id === x.it.id))
 
 /** Ids dos itens que a região do efeito (como o resolve a desenha em `p`) toca — buraco: os visíveis nele — ao longo dele. */
@@ -499,6 +560,9 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
     if (fx.attach) {
       const own = attachedMedia(p, fx)
       if (!own) continue // âncora perdida: a caixa de reserva fica (aviso attachLost da privacidade)
+      // só o próprio clipe sob ele no tempo (o caso do corte de silêncios): não há outro item para tocar — exato, sem
+      // amostrar (touchedIds só devolve itens de `acted`)
+      if (acted.every((x) => x.it.id === own.id)) continue
       const { ids } = touchedIds(p, fx, acted)
       if ([...ids].some((id) => id !== own.id)) unanchor.push(fx.id)
       continue
@@ -538,6 +602,11 @@ export function reframeProject(p: Project, aspect: ReframeAspect, opts: ReframeO
           return { ...it, visual: { ...it.visual, fit: 'cover', transform: { ...it.visual.transform, ...xy } } }
         }
         if (it.type === 'text') return { ...it, style: { ...it.style, size: mapAnim(it.style.size, (s) => s * short) } } satisfies TextItem
+        if (it.type === 'shape') {
+          // caixa em frações de W e H separadas: mantém w e h em px proporcionais ao lado menor (a forma não estica)
+          const b = it.box ?? DEFAULT_SHAPE_BOX
+          return { ...it, box: { w: (b.w * p.canvas.width * short) / canvas.width, h: (b.h * p.canvas.height * short) / canvas.height } } satisfies ShapeItem
+        }
         if (it.type === 'annotations') warnings.push({ itemId: it.id, kind: 'annotations', message: MSG.annotations, tUs: it.startUs })
         return it
       })

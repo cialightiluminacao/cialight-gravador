@@ -1,7 +1,7 @@
 import { hasKeys } from '@shared/editor/anim'
 import { itemAnimEntries, type AnimPath } from '@shared/editor/animPaths'
 import type { Item, Track, TrackKind, Us } from '@shared/editor/project'
-import { itemEndUs } from '@shared/editor/time'
+import { firstEndingAfter } from '@shared/editor/time'
 
 // Geometria vertical da linha do tempo (pura): faixas de vídeo em cima — a da frente (maior índice)
 // no topo —, um separador e as de áudio na ordem do modelo. Acima da 1ª de vídeo e abaixo da
@@ -87,16 +87,6 @@ export function zoneAt(L: Layout, y: number): DropZone {
   return row ? { kind: 'track', trackId: row.track.id } : null
 }
 
-/** Primeiro índice com fim > fromUs (itens ordenados e sem sobreposição → fins também ordenados). */
-function firstEndingAfter(items: Item[], fromUs: Us): number {
-  let lo = 0, hi = items.length
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1
-    if (itemEndUs(items[mid]) > fromUs) hi = mid
-    else lo = mid + 1
-  }
-  return lo
-}
 
 /** Virtualização: só os itens que cruzam [fromUs, toUs). */
 export function visibleItems(items: Item[], fromUs: Us, toUs: Us): Item[] {

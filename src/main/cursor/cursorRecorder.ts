@@ -1,4 +1,5 @@
-import { existsSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, rmSync, writeFileSync } from 'fs'
+import { renameSyncRetry } from '../fs/renameRetry'
 import { join } from 'path'
 import { MediaClock } from '@shared/mediaClock'
 import { CURSOR_FILE, normalizeContain, normalizeToFrame, type CursorButton, type CursorClick, type CursorSample, type CursorTrackV1, type Rect } from '@shared/cursor'
@@ -216,7 +217,7 @@ export function writeCursorTrack(dir: string, track: CursorTrackV1): boolean {
   const tmp = `${file}.tmp`
   try {
     writeFileSync(tmp, JSON.stringify(track), 'utf8')
-    renameSync(tmp, file)
+    renameSyncRetry(tmp, file)
   } catch (e) {
     try {
       rmSync(tmp, { force: true })

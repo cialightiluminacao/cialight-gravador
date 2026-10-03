@@ -9,6 +9,7 @@ import { KeyframeLanes } from './KeyframeLanes'
 import { KeyframeMarks } from './KeyframeMarks'
 import { TrackStripView } from './TrackStripView'
 import { filmstripSlots } from './itemMedia'
+import { filmstripBytes, useFilmstripAdmission } from './filmstripBudget'
 import { usePeaks } from './peaks'
 import { Waveform } from './Waveform'
 import { useExpandedItems } from '../../state/keyframeLanes'
@@ -73,11 +74,18 @@ function itemName(item: Item, asset: Asset | undefined): string {
   return ITEM_TYPE_LABEL[item.type]
 }
 
+// sprite fora do orçamento de memória (filmstripBudget): listras discretas sobre a cor do item até ser admitida
+const NO_SPRITE_BG = 'repeating-linear-gradient(135deg, rgba(255,255,255,0.05) 0 6px, transparent 6px 12px)'
+
 function Filmstrip({ item, asset, projectId, h, pxPerSec, clipFrom, clipTo }: { item: MediaItem; asset: Asset; projectId: string; h: number; pxPerSec: number; clipFrom: number; clipTo: number }): React.JSX.Element | null {
   const fs = asset.filmstripInfo
-  if (!asset.filmstrip || !fs) return null
+  const file = asset.filmstrip && fs ? projectFileUrl(projectId, asset.filmstrip) : null
+  // admissão pela URL da sprite (itens do mesmo asset dividem a imagem decodificada); só muda ao montar/trocar a sprite
+  const shown = useFilmstripAdmission(file, fs ? filmstripBytes(fs) : 0)
+  if (!file || !fs) return null
+  if (!shown) return <span data-filmstrip="sem-memoria" className="absolute inset-0 block" style={{ backgroundImage: NO_SPRITE_BG }} />
   const slotW = Math.max(8, (fs.tileW * h) / fs.tileH)
-  const url = `url("${projectFileUrl(projectId, asset.filmstrip)}")`
+  const url = `url("${file}")`
   return (
     <>
       {filmstripSlots(item, fs, slotW, pxPerSec, clipFrom, clipTo).map((s) => (

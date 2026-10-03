@@ -52,6 +52,19 @@ describe('shortcutFor', () => {
     expect(shortcutFor(key('E', { shiftKey: true, altKey: true }))).toBe('toggleEnabledUnlinked') // Alt ignora o vínculo
   })
 
+  it('T adiciona o Título; Ctrl+T, o Dissolver no corte mais próximo (sem conflito com os demais)', () => {
+    expect(shortcutFor(key('t'))).toBe('addTitle')
+    expect(shortcutFor(key('T', { shiftKey: true }))).toBeNull()
+    expect(shortcutFor(key('t', { ctrlKey: true }))).toBe('addCrossfade')
+    expect(shortcutFor(key('t', { ctrlKey: true, shiftKey: true }))).toBeNull()
+    expect(shortcutFor(key('t', { altKey: true }))).toBeNull()
+    expect(SHORTCUT_LABELS.addTitle).toBe('T')
+    expect(SHORTCUT_LABELS.addCrossfade).toBe('Ctrl+T')
+    // digitando num campo (ex.: a edição direta do texto), T é só uma letra
+    expect(shortcutFor(key('t', { target: { tagName: 'TEXTAREA' } as unknown as EventTarget }))).toBeNull()
+    expect(shortcutFor(key('t', { ctrlKey: true, target: { tagName: 'TEXTAREA' } as unknown as EventTarget }))).toBeNull()
+  })
+
   it('teclas sem atalho e combinações com Alt não fazem nada', () => {
     expect(shortcutFor(key('a'))).toBeNull()
     expect(shortcutFor(key('s', { altKey: true }))).toBeNull()
@@ -96,5 +109,33 @@ describe('CURVE_EDITOR_ACTIONS', () => {
   it('com o editor de curvas aberto passam o transporte e desfazer/refazer; editar não', () => {
     for (const a of ['playPause', 'prevFrame', 'undo', 'redo'] as const) expect(CURVE_EDITOR_ACTIONS.has(a)).toBe(true)
     for (const a of ['delete', 'split', 'paste', 'copy'] as const) expect(CURVE_EDITOR_ACTIONS.has(a)).toBe(false)
+  })
+})
+
+describe('exportar (Ctrl+E)', () => {
+  it('Ctrl+E abre a exportação; E, Shift+E, Alt+Shift+E e Ctrl+Shift+E continuam como estavam', () => {
+    expect(shortcutFor(key('e', { ctrlKey: true }))).toBe('export')
+    expect(shortcutFor(key('E', { ctrlKey: true }))).toBe('export')
+    expect(shortcutFor(key('e', { metaKey: true }))).toBe('export')
+    expect(shortcutFor(key('e'))).toBeNull()
+    expect(shortcutFor(key('E', { shiftKey: true }))).toBe('toggleEnabled')
+    expect(shortcutFor(key('E', { shiftKey: true, altKey: true }))).toBe('toggleEnabledUnlinked')
+    expect(shortcutFor(key('e', { ctrlKey: true, altKey: true }))).toBeNull()
+    // digitando num campo não abre
+    expect(shortcutFor(key('e', { ctrlKey: true, target: { tagName: 'INPUT', type: 'text' } as unknown as EventTarget }))).toBeNull()
+    expect(SHORTCUT_LABELS.export).toBe('Ctrl+E')
+  })
+  it('Ctrl+Shift+E exporta o quadro atual como PNG (sem conflito com Shift+E / Alt+Shift+E / Ctrl+E)', () => {
+    expect(shortcutFor(key('E', { ctrlKey: true, shiftKey: true }))).toBe('exportFrame')
+    expect(shortcutFor(key('e', { ctrlKey: true, shiftKey: true }))).toBe('exportFrame')
+    expect(shortcutFor(key('E', { metaKey: true, shiftKey: true }))).toBe('exportFrame')
+    expect(shortcutFor(key('E', { ctrlKey: true, shiftKey: true, altKey: true }))).toBeNull()
+    expect(shortcutFor(key('E', { ctrlKey: true, shiftKey: true, target: { tagName: 'INPUT', type: 'text' } as unknown as EventTarget }))).toBeNull()
+    expect(SHORTCUT_LABELS.exportFrame).toBe('Ctrl+Shift+E')
+    expect(Object.entries(SHORTCUT_LABELS).filter(([, v]) => v === 'Ctrl+Shift+E')).toEqual([['exportFrame', 'Ctrl+Shift+E']])
+  })
+  it('nenhum outro atalho usa Ctrl+E', () => {
+    const labels = Object.entries(SHORTCUT_LABELS).filter(([, v]) => v === 'Ctrl+E')
+    expect(labels).toEqual([['export', 'Ctrl+E']])
   })
 })

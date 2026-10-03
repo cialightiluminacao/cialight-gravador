@@ -2,14 +2,16 @@ import { produce } from 'immer'
 import { copyKeys, evalAnim, insertKeyExact, pasteKeys, removeKey, setEase, setKey, setValue, sliceKeys } from './anim'
 import { ANIM_PATHS, assignAnim, getAnim, mapItemAnims as mapAnims, mapVisualAnims as mapVisual, type AnimPath } from './animPaths'
 import { maintainAttachments } from './attachment'
-import { createEffectItem, createMediaItem } from './factory'
+import { createEffectItem, createMediaItem, createShapeItem, createTextItem, patchTextStyle, TEXT_PRESETS } from './factory'
 import { conservativeRegion, regionAabb } from './contentPose'
 import { effectRegionAt, sourceTimeUs, visualTrackBelow } from './resolve'
-import type { EffectPresetId, EffectRegionInit } from './factory'
+import type { EffectPresetId, EffectRegionInit, ShapePresetId, TextPresetId } from './factory'
 import { newId } from './ids'
-import { frameDurUs, itemEndUs } from './time'
+import { firstEndingAfter, frameDurUs, itemEndUs } from './time'
 import { MAX_SPEED, MIN_ITEM_US, MIN_SPEED } from './project'
-import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, Track, TrackKind, Us } from './project'
+import type { Anim, Asset, Ease, EffectItem, Item, Keyframe, MediaItem, Project, ShapeItem, TextItem, TextStyle, Track, TrackKind, TransitionKind, Us } from './project'
+import { canTransition, DEFAULT_TRANSITION_US, maxTransitionUs, MIN_TRANSITION_US, transitionInOf, transitionPairOk } from './transitions'
+import type { Cue } from './srt'
 
 export { getAnim, type AnimPath } from './animPaths'
 
@@ -31,17 +33,42 @@ const end = itemEndUs
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
 /** Faixa de efeitos (role 'effects': só recebe efeitos; mídia nunca entra nela)? Pelo papel, nunca pelo nome. */
 export const isFxTrack = (t: Track): boolean => t.kind === 'video' && t.role === 'effects'
+/** Faixa de legendas (role 'captions': só textos; no máximo uma, sempre a faixa de vídeo do topo)? */
+export const isCaptionsTrack = (t: Track): boolean => t.kind === 'video' && t.role === 'captions'
+/**
+ * Faixa de sobreposição: de vídeo, sem papel, com itens e todos texto/forma. Fica acima das faixas de efeitos (o texto
+ * não é desfocado pelos efeitos de privacidade) e abaixo da de legendas. Vazia não conta (como a de anotações).
+ */
+export const isOverlayTrack = (t: Track): boolean =>
+  t.kind === 'video' && t.role === undefined && t.items.length > 0 && t.items.every((i) => i.type === 'text' || i.type === 'shape')
+/** Faixa de vídeo com conteúdo visual (mídia, anotações ou vazia) — nem efeitos, nem legendas, nem sobreposição. */
+const isContentTrack = (t: Track): boolean => t.kind === 'video' && !isFxTrack(t) && !isCaptionsTrack(t) && !isOverlayTrack(t)
+/**
+ * A faixa no índice i está acima de alguma faixa de efeitos ou da de legendas? Colocação AUTOMÁTICA de mídia nunca usa
+ * nem cria faixa nessa posição (ficaria por cima dos efeitos de privacidade) — inclusive uma faixa "Texto" que ficou
+ * vazia. Mover explicitamente continua livre (privacyWarnings 'covered' avisa).
+ */
+export function aboveGuard(p: Project, i: number): boolean {
+  const g = p.tracks.findIndex((t) => isFxTrack(t) || isCaptionsTrack(t))
+  return g >= 0 && i > g
+}
 
 /**
  * Efeito "só a faixa abaixo" sem targetTrackId (projeto antigo): grava a faixa a que ele está ligado agora pela
- * posição (visualTrackBelow), antes de qualquer edição mexer na ordem das faixas. Daí em diante a ligação é explícita.
+ * posição (visualTrackBelow), antes de qualquer edição mexer na ordem das faixas — inclusive criar uma faixa de vídeo
+ * entre o efeito e a faixa dele (createTrack, addMediaFromAsset, modelos de marca), que roubaria o alvo. Daí em diante a
+ * ligação é explícita. Faixa-alvo com texto/forma: grava com `targetMediaOnly` (a regra do alvo antigo continua: só
+ * mídia/anotações/transição contam — resolve legacyTarget), então o texto não passa a ser afetado. Sem faixa abaixo:
+ * fica sem alvo (aviso noTarget).
  */
 function stampLegacyTargets(d: Project): void {
   for (const t of d.tracks) {
     for (const it of t.items) {
       if (it.type !== 'effect' || it.scope !== 'track' || it.targetTrackId) continue
       const below = visualTrackBelow(d, t.id)
-      if (below) it.targetTrackId = below
+      if (!below) continue
+      it.targetTrackId = below
+      if (d.tracks.find((x) => x.id === below)!.items.some((x) => x.type === 'text' || x.type === 'shape')) it.targetMediaOnly = true
     }
   }
 }
@@ -51,10 +78,46 @@ function stampLegacyTargets(d: Project): void {
  * efeitos mantidas depois (maintainAttachments: pedaço certo do clipe e caixa de reserva).
  */
 function edit(p: Project, recipe: (d: Project) => void): Project {
-  return produce(p, (d) => {
+  const next = produce(p, (d) => {
     stampLegacyTargets(d)
     recipe(d)
     maintainAttachments(d)
+  })
+  return normalizeTransitions(p, next)
+}
+
+/**
+ * Passada única O(itens) depois de toda edição (via edit/deleteRanges): nas faixas que a edição mudou (e não
+ * bloqueadas), a transição de entrada de cada item sai se o anterior não estiver encostado/elegível ou se o máximo do
+ * par ficar abaixo do mínimo, e é limitada ao máximo (floor(min/2)). Cobre split/trim/move/apagar/velocidade/congelar/
+ * ripple/duplicar sem lógica em cada op. Faixas não mudadas ficam intactas (o mesmo objeto). `enabled` não conta
+ * (desativar é reversível; quem desenha pula o par). Efeito colateral aceito: qualquer mudança no objeto da faixa —
+ * inclusive só de propriedades dela (desbloquear, ocultar, renomear) — normaliza a faixa toda, então uma transição
+ * inválida gravada fora do editor (ex.: arquivo editado na v1.3) é corrigida/removida nessa hora.
+ */
+function normalizeTransitions(prev: Project, next: Project): Project {
+  if (prev === next) return next
+  const before = new Map(prev.tracks.map((t) => [t.id, t]))
+  const fixes: { ti: number; ii: number; d: Us | null }[] = []
+  next.tracks.forEach((t, ti) => {
+    if (t.locked || before.get(t.id) === t) return
+    for (let ii = 0; ii < t.items.length; ii++) {
+      const b = t.items[ii]
+      const tr = transitionInOf(b)
+      if (!tr) continue
+      const a = ii > 0 ? t.items[ii - 1] : undefined
+      const max = transitionPairOk(t, a, b) ? maxTransitionUs(a, b) : -1
+      if (max < MIN_TRANSITION_US) fixes.push({ ti, ii, d: null })
+      else if (tr.durationUs > max) fixes.push({ ti, ii, d: max })
+    }
+  })
+  if (!fixes.length) return next
+  return produce(next, (d) => {
+    for (const f of fixes) {
+      const it = d.tracks[f.ti].items[f.ii] as MediaItem
+      if (f.d === null) delete it.transitionIn
+      else it.transitionIn!.durationUs = f.d
+    }
   })
 }
 
@@ -201,6 +264,12 @@ function sliceItem<T extends Item>(it: T, from: Us, to: Us, clearCut: boolean): 
     out = { ...out, inUs: Math.max(0, m.inUs + Math.round(off * m.speed)) }
   } else if (out.type === 'annotations') {
     out = { ...out, inUs: Math.max(0, out.inUs + (from - s)) }
+  } else if (out.type === 'text' && out.counter && clearCut) {
+    // pedaço de um corte (dividir/apagar trecho): a contagem continua de onde estava no ponto do corte (valores exatos,
+    // sem arredondar — não é tempo). Aparar (clearCut false) mantém from/to: a contagem cobre a nova duração.
+    const c = out.counter, dur = it.durationUs
+    const at = (t: Us): number => (t <= s ? c.from : t >= e ? c.to : c.from + ((c.to - c.from) * (t - s)) / dur)
+    out = { ...out, counter: { from: at(from), to: at(to) } }
   }
   return (clearCut ? clearEdges(out, from > s, to < e) : out) as T
 }
@@ -328,7 +397,8 @@ function rippleShift(d: Project, pivotUs: Us, shift: Us, exclude: Set<string>, f
   return followed
 }
 
-function isFree(t: Track, s: Us, e: Us, exclude?: Set<string>): boolean {
+/** A faixa está livre em [s, e) (ignorando os itens de `exclude`)? */
+export function isFree(t: Track, s: Us, e: Us, exclude?: Set<string>): boolean {
   return !t.items.some((i) => !exclude?.has(i.id) && i.startUs < e && end(i) > s)
 }
 
@@ -348,9 +418,30 @@ function nextFxName(p: Project): string {
 function placeEffect(d: Project, it: Item, prefer?: Track): void {
   const s = it.startUs, e = end(it)
   if (prefer && !prefer.locked && isFree(prefer, s, e)) { prefer.items.push(it); return }
-  const lastMedia = d.tracks.reduce((m, t, i) => (t.kind === 'video' && !isFxTrack(t) ? i : m), -1)
-  const t = d.tracks.find((x, i) => i > lastMedia && isFxTrack(x) && !x.locked && !x.hidden && isFree(x, s, e))
-  ;(t ?? mustTrack(d, createTrack(d, 'video', aboveLastVideo(d), nextFxName(d), 'effects'))).items.push(it)
+  const t = fxTrackFor(d, s, e)
+  ;(t ?? mustTrack(d, createTrack(d, 'video', fxInsertIndex(d), nextFxName(d), 'effects'))).items.push(it)
+}
+
+/**
+ * Bloco de efeitos: entre a última faixa de conteúdo visual (lo) e a primeira de sobreposição/legendas acima dela (hi,
+ * exclusivo). Sem texto nem legendas, o bloco vai até o topo (como antes da F5).
+ */
+function fxBlock(p: Project): { lo: number; hi: number } {
+  const lo = p.tracks.reduce((m, t, i) => (isContentTrack(t) ? i : m), -1)
+  const hi = p.tracks.findIndex((t, i) => i > lo && (isOverlayTrack(t) || isCaptionsTrack(t)))
+  return { lo, hi: hi < 0 ? Infinity : hi }
+}
+
+/** Faixa de efeitos do bloco (acima de toda a mídia, abaixo de texto/legendas) visível, desbloqueada e livre em [s, e). */
+function fxTrackFor(p: Project, s: Us, e: Us): Track | undefined {
+  const { lo, hi } = fxBlock(p)
+  return p.tracks.find((t, i) => i > lo && i < hi && isFxTrack(t) && !t.locked && !t.hidden && isFree(t, s, e))
+}
+
+/** Índice de uma faixa de efeitos nova: logo abaixo da 1ª de sobreposição/legendas acima da mídia; sem elas, o topo. */
+function fxInsertIndex(p: Project): number {
+  const { hi } = fxBlock(p)
+  return hi === Infinity ? aboveLastVideo(p) : hi
 }
 
 /** Faixa do clipe de vídeo do grupo do efeito (o que cruza o intervalo dele, se houver); null = sem clipe vinculado. */
@@ -404,6 +495,7 @@ export function setEffectScope(p: Project, itemId: string, scope: EffectItem['sc
   return edit(p, (d) => {
     const it = mustFind(d, itemId).item as EffectItem
     it.scope = scope
+    delete it.targetMediaOnly // ligação escolhida agora: regra nova (texto/forma da faixa contam)
     if (target) it.targetTrackId = target
     else delete it.targetTrackId
   })
@@ -430,6 +522,7 @@ function overwriteIn(d: Project, t: Track, s: Us, e: Us): Item[] {
 /** Mídia (não-efeito) não entra em faixa "Efeitos": ficaria por cima dos efeitos das faixas de baixo. */
 function assertNotFxTrackFor(it: Item, t: Track): void {
   if (it.type !== 'effect' && isFxTrack(t)) throw new EditError('invalid', `A faixa "${t.name}" é só para efeitos`)
+  if (it.type !== 'text' && isCaptionsTrack(t)) throw new EditError('invalid', `A faixa "${t.name}" é só para legendas (textos)`)
 }
 
 /**
@@ -489,7 +582,7 @@ export function musicTrackName(p: Project): string {
 }
 
 /** `base`, "`base` 2", "`base` 3"… — o primeiro nome que nenhuma faixa usa. */
-function freeTrackName(p: Project, base: string): string {
+export function freeTrackName(p: Project, base: string): string {
   if (!p.tracks.some((t) => t.name === base)) return base
   let n = 2
   while (p.tracks.some((t) => t.name === `${base} ${n}`)) n++
@@ -530,10 +623,16 @@ function createTrack(d: Project, kind: TrackKind, index?: number, name?: string,
   if (at === undefined) {
     if (kind === 'audio') at = d.tracks.length
     else {
+      // abaixo do bloco do topo: efeitos, sobreposições (texto/forma), legendas e qualquer faixa de vídeo acima de
+      // efeitos/legendas (ex.: "Texto" vazia)
       at = aboveLastVideo(d)
-      while (at > 0 && isFxTrack(d.tracks[at - 1])) at--
+      const up = (t: Track, i: number): boolean => isFxTrack(t) || isOverlayTrack(t) || isCaptionsTrack(t) || (t.kind === 'video' && aboveGuard(d, i))
+      while (at > 0 && up(d.tracks[at - 1], at - 1)) at--
     }
   }
+  // nenhuma faixa de vídeo acima da de legendas
+  const cap = d.tracks.findIndex(isCaptionsTrack)
+  if (kind === 'video' && role !== 'captions' && cap >= 0 && at > cap) at = cap
   const id = newId('t_')
   d.tracks.splice(clamp(at, 0, d.tracks.length), 0, {
     id, kind, name: name ?? defaultTrackName(d, kind), muted: false, hidden: false, locked: false, volume: 1, ...(role ? { role } : {}), items: []
@@ -591,6 +690,13 @@ export function moveTrack(p: Project, trackId: string, toIndex: number): Project
   if (from < 0) throw new EditError('notFound', `Faixa não encontrada: ${trackId}`)
   const to = clamp(Math.round(toIndex), 0, p.tracks.length - 1)
   if (to === from) return p
+  // só a relação da faixa movida com a de legendas (um projeto já fora da regra não trava todos os movimentos)
+  const order = [...p.tracks]
+  const [moved] = order.splice(from, 1)
+  order.splice(to, 0, moved)
+  const cap = order.findIndex(isCaptionsTrack)
+  const bad = isCaptionsTrack(moved) ? order.some((t, i) => i > to && t.kind === 'video') : moved.kind === 'video' && cap >= 0 && to > cap
+  if (bad) throw new EditError('invalid', 'A faixa de legendas fica sempre no topo')
   return edit(p, (d) => {
     const [t] = d.tracks.splice(from, 1)
     d.tracks.splice(to, 0, t)
@@ -601,6 +707,8 @@ export function moveTrack(p: Project, trackId: string, toIndex: number): Project
 export function updateTrack(p: Project, trackId: string, patch: Partial<Omit<Track, 'id' | 'items' | 'kind'>>): Project {
   const i = p.tracks.findIndex((t) => t.id === trackId)
   if (i < 0) throw new EditError('notFound', `Faixa não encontrada: ${trackId}`)
+  // o papel de legendas só nasce em ensureCaptionsTrack (uma faixa, no topo, só textos)
+  if (patch.role === 'captions' && !isCaptionsTrack(p.tracks[i])) throw new EditError('invalid', 'Use "Legendas" para criar a faixa de legendas')
   return edit(p, (d) => { Object.assign(d.tracks[i], patch) })
 }
 
@@ -654,7 +762,7 @@ function pickTrack(p: Project, kind: TrackKind, explicitId: string | undefined, 
     if (t.kind !== kind) throw new EditError('invalid', `Faixa ${t.name} não é de ${kind === 'video' ? 'vídeo' : 'áudio'}`)
     return { project: p, trackId: t.id, mode: mode ?? 'overwrite' }
   }
-  const candidates = p.tracks.filter((t) => t.kind === kind && !t.locked && !isFxTrack(t) && (kind !== 'audio' || (t.role === 'music') === music))
+  const candidates = p.tracks.filter((t, i) => t.kind === kind && !t.locked && !isFxTrack(t) && !isCaptionsTrack(t) && !isOverlayTrack(t) && !(kind === 'video' && aboveGuard(p, i)) && (kind !== 'audio' || (t.role === 'music') === music))
   const chosen = mode ? candidates[0] : candidates.find((t) => isFree(t, s, e))
   if (chosen) return { project: p, trackId: chosen.id, mode: mode ?? 'overwrite' }
   const r = music ? addTrack(p, 'audio', undefined, musicTrackName(p), 'music') : addTrack(p, kind)
@@ -1050,7 +1158,7 @@ export function deleteRanges(p: Project, ranges: readonly { fromUs: Us; toUs: Us
     }
     return removedBefore[lo]
   }
-  return produce(base, (d) => {
+  const out = produce(base, (d) => {
     base.tracks.forEach((t, ti) => {
       const cut = cutTracks.has(t.id)
       const nodes = [...done[ti], ...pending[ti]]
@@ -1070,6 +1178,7 @@ export function deleteRanges(p: Project, ranges: readonly { fromUs: Us; toUs: Us
     finalize(d)
     maintainAttachments(d)
   })
+  return normalizeTransitions(p, out)
 }
 
 // ---------------------------------------------------------------- vínculo / áudio
@@ -1173,7 +1282,8 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
     const dur = Math.round(f.item.durationUs * ratio)
     if (dur < MIN_ITEM_US) throw new EditError('invalid', 'Duração resultante menor que o mínimo')
     const scaled = mapAnims(f.item, (a) => (a.keys ? { ...a, keys: a.keys.map((k) => ({ ...k, tUs: Math.round(k.tUs * ratio) })) } : a))
-    // fades, animações e transição acompanham a escala de tempo, limitados à nova duração
+    // fades e animações acompanham a escala de tempo, limitados à nova duração (a transição de entrada é da timeline:
+    // não escala; normalizeTransitions a limita ao novo máximo do par)
     const fit = (us: Us, max: Us): Us => Math.min(max, Math.round(us * ratio))
     // fadeIn + fadeOut nunca passam da duração (o arredondamento de cada um poderia somar 1 µs a mais)
     const fades = (fin: Us, fout: Us): { fadeInUs: Us; fadeOutUs: Us } => {
@@ -1193,7 +1303,6 @@ export function setSpeed(p: Project, itemId: string, speed: number, opts?: { rip
         }
       }
     }
-    if (n.transitionIn) n = { ...n, transitionIn: { ...n.transitionIn, durationUs: fit(n.transitionIn.durationUs, Math.floor(dur / 2)) } }
     changes.push({ id, item: n, oldEnd: end(f.item) })
   }
   if (!changes.some((c) => !c.fx)) return p
@@ -1528,6 +1637,24 @@ export function closeGaps(p: Project, trackId: string): Project {
   })
 }
 
+/**
+ * Desloca TODO o conteúdo para a direita por `deltaUs`: itens de todas as faixas (inclusive efeitos, legendas e faixas
+ * ocultas) e marcadores — o projeto inteiro anda junto, então efeitos vinculados/ancorados/`scope:'track'` continuam
+ * sobre o mesmo conteúdo em cada instante deslocado. Faixa bloqueada com itens → EditError('locked') (ela ficaria para
+ * trás, fora de sincronia). Abre [0, deltaUs) livre em todas as faixas (abertura de um modelo de marca).
+ */
+export function shiftAllContent(p: Project, deltaUs: Us): Project {
+  const delta = Math.round(deltaUs)
+  if (delta < 0) throw new EditError('invalid', 'Deslocamento negativo')
+  if (delta === 0) return p
+  const locked = p.tracks.filter((t) => t.locked && t.items.length > 0)
+  if (locked.length) throw new EditError('locked', `Faixa bloqueada: ${locked.map((t) => `"${t.name}"`).join(', ')}. Desbloqueie para deslocar o projeto sem perder a sincronia.`)
+  return edit(p, (d) => {
+    for (const t of d.tracks) for (const it of t.items) it.startUs += delta
+    for (const m of d.markers) m.tUs += delta
+  })
+}
+
 export function addMarker(p: Project, tUs: Us, label = ''): Project {
   return edit(p, (d) => {
     d.markers.push({ id: newId('m_'), tUs: Math.max(0, Math.round(tUs)), label, color: '#f59e0b' })
@@ -1859,7 +1986,8 @@ function clipUnder(p: Project, atUs: Us): { track: Track; item: Item } | null {
   for (let i = p.tracks.length - 1; i >= 0; i--) {
     const t = p.tracks[i]
     if (t.kind !== 'video' || t.hidden) continue
-    const under = t.items.find((it) => it.type !== 'effect' && it.type !== 'annotations' && it.enabled !== false && it.startUs <= atUs && atUs < end(it))
+    // só mídia: texto/forma não são conteúdo a esconder (ficam acima dos efeitos)
+    const under = t.items.find((it) => it.type === 'media' && it.enabled !== false && it.startUs <= atUs && atUs < end(it))
     if (under) return { track: t, item: under }
   }
   return null
@@ -1881,7 +2009,8 @@ export function effectTrackAllowed(p: Project, trackId: string, s: Us, e: Us): b
   const ti = p.tracks.findIndex((t) => t.id === trackId)
   const t = p.tracks[ti]
   if (!t || t.kind !== 'video' || t.hidden || t.locked) return false
-  return !p.tracks.some((o, i) => i > ti && o.kind === 'video' && !o.hidden && o.items.some((it) => it.type !== 'effect' && it.enabled !== false && it.startUs < e && end(it) > s))
+  // texto/forma por cima não contam: são sobreposições do usuário, não conteúdo a esconder
+  return !p.tracks.some((o, i) => i > ti && o.kind === 'video' && !o.hidden && o.items.some((it) => it.type !== 'effect' && it.type !== 'text' && it.type !== 'shape' && it.enabled !== false && it.startUs < e && end(it) > s))
 }
 
 /**
@@ -1901,12 +2030,10 @@ export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { d
     if (mustTrack(p, opts.trackId).kind !== 'video') throw new EditError('invalid', 'Efeitos só podem ficar em faixas de vídeo')
     if (effectTrackAllowed(p, opts.trackId, atUs, atUs + durationUs)) trackId = opts.trackId
   }
+  if (!trackId) trackId = fxTrackFor(p, atUs, atUs + durationUs)?.id
   if (!trackId) {
-    const lastMedia = p.tracks.reduce((m, t, i) => (t.kind === 'video' && !isFxTrack(t) ? i : m), -1)
-    trackId = p.tracks.find((t, i) => i > lastMedia && isFxTrack(t) && !t.locked && !t.hidden && isFree(t, atUs, atUs + durationUs))?.id
-  }
-  if (!trackId) {
-    const r = addTrack(p, 'video', aboveLastVideo(p), nextFxName(p), 'effects')
+    // acima da última faixa com mídia, abaixo das de texto/forma e da de legendas
+    const r = addTrack(p, 'video', fxInsertIndex(p), nextFxName(p), 'effects')
     q = r.project
     trackId = r.trackId
   }
@@ -1926,4 +2053,307 @@ export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { d
     fx.linkId = linkId
   })
   return { project: q, itemId: item.id }
+}
+
+// ---------------------------------------------------------------- transições
+
+/** B (o item da direita, que guarda a transição) e o anterior A na faixa; lança se a faixa estiver bloqueada. */
+function transitionPair(p: Project, rightItemId: string): { track: Track; a: Item | undefined; b: Item } {
+  const f = mustFind(p, rightItemId)
+  assertUnlocked(f.track)
+  // itens ficam ordenados por startUs (finalize)
+  return { track: f.track, a: f.itemIndex > 0 ? f.track.items[f.itemIndex - 1] : undefined, b: f.item }
+}
+
+/**
+ * Transição de entrada em B (rightItemId) a partir do item anterior encostado na mesma faixa de vídeo (modelo em
+ * transitions.ts). durationUs ausente = DEFAULT_TRANSITION_US; sempre limitada a [MIN_TRANSITION_US, máximo do par].
+ * Substituir uma transição existente é esta mesma operação.
+ */
+export function addTransition(p: Project, rightItemId: string, kind: TransitionKind, durationUs?: Us): Project {
+  if (durationUs !== undefined && !Number.isFinite(durationUs)) throw new EditError('invalid', 'Duração de transição inválida')
+  const { track, a, b } = transitionPair(p, rightItemId)
+  const why = canTransition(p, track.id, a?.id, b.id)
+  if (why) throw new EditError('invalid', why)
+  const d = clamp(Math.round(durationUs ?? DEFAULT_TRANSITION_US), MIN_TRANSITION_US, maxTransitionUs(a!, b))
+  return edit(p, (dr) => {
+    const it = mustFind(dr, rightItemId).item as MediaItem
+    it.transitionIn = { kind, durationUs: d }
+  })
+}
+
+/** Remove a transição de entrada de B (nada a fazer = o mesmo projeto). */
+export function removeTransition(p: Project, rightItemId: string): Project {
+  const { b } = transitionPair(p, rightItemId)
+  if (!transitionInOf(b)) return p
+  return edit(p, (d) => {
+    delete (mustFind(d, rightItemId).item as MediaItem).transitionIn
+  })
+}
+
+/** Nova duração da transição de B, limitada a [MIN_TRANSITION_US, máximo do par] (gesto de arrastar: em transação). */
+export function setTransitionDuration(p: Project, rightItemId: string, durationUs: Us): Project {
+  if (!Number.isFinite(durationUs)) throw new EditError('invalid', 'Duração de transição inválida')
+  const { track, a, b } = transitionPair(p, rightItemId)
+  const tr = transitionInOf(b)
+  if (!tr) throw new EditError('invalid', 'Este clipe não tem transição de entrada')
+  // regra estrutural (como a normalização): ajustar a duração de uma transição com um lado desativado é permitido
+  if (!transitionPairOk(track, a, b)) throw new EditError('invalid', 'Transição só entre dois clipes encostados na mesma faixa')
+  if (maxTransitionUs(a, b) < MIN_TRANSITION_US) throw new EditError('invalid', 'Clipes curtos demais para a transição')
+  const d = clamp(Math.round(durationUs), MIN_TRANSITION_US, maxTransitionUs(a, b))
+  if (d === tr.durationUs) return p
+  return edit(p, (dr) => {
+    ;(mustFind(dr, rightItemId).item as MediaItem).transitionIn!.durationUs = d
+  })
+}
+
+// ---------------------------------------------------------------- texto, formas e legendas
+
+/** Duração padrão de uma legenda nova (addCaption). */
+export const CAPTION_DEFAULT_US = 2_000_000
+
+/** Índice de uma faixa de sobreposição nova: no topo das de vídeo, logo abaixo da de legendas. */
+export function overlayInsertIndex(p: Project): number {
+  const cap = p.tracks.findIndex(isCaptionsTrack)
+  return cap >= 0 ? cap : aboveLastVideo(p)
+}
+
+/**
+ * Põe um texto/forma novo: na faixa dada (de vídeo, desbloqueada, não de efeitos, livre; a de legendas só aceita
+ * texto) ou na faixa de sobreposição mais alta, visível, desbloqueada e livre no trecho; senão cria "`baseName`" no
+ * topo das de vídeo (abaixo da de legendas). Um passo de desfazer.
+ */
+function addOverlayItem(p: Project, item: TextItem | ShapeItem, baseName: string, trackId: string | undefined): { project: Project; itemId: string } {
+  const s = item.startUs, e = end(item)
+  if (trackId) {
+    const t = mustTrack(p, trackId)
+    if (t.kind !== 'video') throw new EditError('invalid', `Textos e formas só podem ficar em faixas de vídeo ("${t.name}" é de áudio)`)
+    assertUnlocked(t)
+    assertNotFxTrackFor(item, t)
+    if (!isFree(t, s, e)) throw new EditError('overlap', `Já há um item na faixa "${t.name}" nesse trecho`)
+  }
+  const project = edit(p, (d) => {
+    let t = trackId ? mustTrack(d, trackId) : undefined
+    for (let i = d.tracks.length - 1; !t && i >= 0; i--) {
+      const x = d.tracks[i]
+      // só sobreposições sem faixa de efeitos acima (abaixo de uma, o texto novo seria desfocado)
+      if (isOverlayTrack(x) && !x.locked && !x.hidden && isFree(x, s, e) && !d.tracks.some((y, j) => j > i && isFxTrack(y))) t = x
+    }
+    if (!t) t = mustTrack(d, createTrack(d, 'video', overlayInsertIndex(d), freeTrackName(d, baseName)))
+    t.items.push(item)
+    finalize(d)
+  })
+  return { project, itemId: item.id }
+}
+
+/**
+ * Texto novo a partir de um modelo em atUs (TEXT_PRESETS; duração padrão do modelo). Faixa: ver addOverlayItem.
+ * Na faixa de legendas o texto VIRA LEGENDA (modelo 'caption' com o estilo e a altura comuns das legendas; texto e
+ * duração do modelo pedido, sem contagem/animação): tudo o que está nessa faixa é legenda — lista, .srt e "Queimar".
+ */
+export function addText(p: Project, preset: TextPresetId, atUs: Us, opts?: { trackId?: string; text?: string; durationUs?: Us }): { project: Project; itemId: string } {
+  const at = Math.max(0, Math.round(atUs))
+  const cap = opts?.trackId ? p.tracks.find((t) => t.id === opts.trackId && isCaptionsTrack(t)) : undefined
+  const item = createTextItem(cap ? 'caption' : preset, at, {
+    text: opts?.text ?? TEXT_PRESETS[preset].text,
+    durationUs: opts?.durationUs !== undefined ? Math.max(MIN_ITEM_US, Math.round(opts.durationUs)) : TEXT_PRESETS[preset].durationUs
+  })
+  if (cap) {
+    const { style, y } = commonCaption(cap)
+    item.style = structuredClone(style)
+    item.visual.transform.y = structuredClone(y)
+  }
+  return addOverlayItem(p, item, 'Texto', opts?.trackId)
+}
+
+/** Forma nova a partir de um modelo em atUs (SHAPE_PRESETS; 3 s). Faixa: ver addOverlayItem (legendas não aceitam). */
+export function addShape(p: Project, preset: ShapePresetId, atUs: Us, opts?: { trackId?: string; durationUs?: Us }): { project: Project; itemId: string } {
+  const at = Math.max(0, Math.round(atUs))
+  const item = createShapeItem(preset, at, opts?.durationUs !== undefined ? { durationUs: Math.max(MIN_ITEM_US, Math.round(opts.durationUs)) } : undefined)
+  return addOverlayItem(p, item, 'Formas', opts?.trackId)
+}
+
+/** A faixa de legendas do projeto; sem ela, cria "Legendas" no topo das faixas de vídeo. */
+export function ensureCaptionsTrack(p: Project): { project: Project; trackId: string } {
+  const found = p.tracks.find(isCaptionsTrack)
+  if (found) return { project: p, trackId: found.id }
+  let trackId = ''
+  const project = edit(p, (d) => { trackId = createTrack(d, 'video', aboveLastVideo(d), freeTrackName(d, 'Legendas'), 'captions') })
+  return { project, trackId }
+}
+
+/**
+ * Legenda nova em atUs (cria a faixa de legendas se preciso). Estilo: o da legenda mais próxima no tempo, senão o do
+ * modelo 'caption'. Duração: `durationUs` (padrão CAPTION_DEFAULT_US) limitada ao espaço até a próxima legenda; menos
+ * que MIN_ITEM_US (ou atUs dentro de uma legenda) → EditError.
+ */
+export function addCaption(p: Project, atUs: Us, text: string, opts?: { durationUs?: Us }): { project: Project; itemId: string } {
+  const at = Math.max(0, Math.round(atUs))
+  const r = ensureCaptionsTrack(p)
+  const t = mustTrack(r.project, r.trackId)
+  assertUnlocked(t)
+  if (t.items.some((i) => i.startUs <= at && at < end(i))) throw new EditError('overlap', 'Já há uma legenda neste ponto')
+  const next = Math.min(Infinity, ...t.items.filter((i) => i.startUs > at).map((i) => i.startUs))
+  const want = opts?.durationUs === undefined ? CAPTION_DEFAULT_US : Math.max(MIN_ITEM_US, Math.round(opts.durationUs))
+  const dur = Math.min(want, next - at)
+  if (dur < MIN_ITEM_US) throw new EditError('overlap', 'Não há espaço para uma legenda aqui: a próxima começa logo em seguida')
+  const dist = (i: Item): number => (i.startUs > at ? i.startUs - at : at - end(i))
+  const near = t.items.filter((i): i is TextItem => i.type === 'text').reduce<TextItem | null>((b, i) => (!b || dist(i) < dist(b) ? i : b), null)
+  const item = createTextItem('caption', at, { text, durationUs: dur })
+  if (near) {
+    item.style = structuredClone(near.style)
+    item.visual.transform.y = structuredClone(near.visual.transform.y)
+  }
+  const project = edit(r.project, (d) => {
+    mustTrack(d, r.trackId).items.push(item)
+    finalize(d)
+  })
+  return { project, itemId: item.id }
+}
+
+/**
+ * Aplica `patch` ao estilo de TODAS as legendas (um passo de desfazer; `undefined` numa chave remove o campo; sombra
+ * coerente, ver patchTextStyle). Sem faixa de legendas ou sem legendas: o mesmo projeto.
+ */
+export function setCaptionStyle(p: Project, patch: Partial<TextStyle>): Project {
+  const t = p.tracks.find(isCaptionsTrack)
+  if (!t || !t.items.some((i) => i.type === 'text')) return p
+  assertUnlocked(t)
+  const styles = new Map(t.items.filter((i): i is TextItem => i.type === 'text').map((i) => [i.id, patchTextStyle(i.style, structuredClone(patch))]))
+  return edit(p, (d) => {
+    for (const it of mustTrack(d, t.id).items) if (it.type === 'text') it.style = styles.get(it.id)!
+  })
+}
+
+/** Estilo e posição vertical comuns das legendas (os da primeira legenda; sem legendas, os do modelo 'caption'). */
+function commonCaption(t: Track | undefined): { style: TextStyle; y: Anim<number> } {
+  const first = t?.items.find((i): i is TextItem => i.type === 'text')
+  if (first) return { style: first.style, y: first.visual.transform.y }
+  const base = createTextItem('caption', 0)
+  return { style: base.style, y: base.visual.transform.y }
+}
+
+const fmtS = (us: Us): string => `${(us / 1e6).toLocaleString('pt-BR', { minimumFractionDigits: 3, maximumFractionDigits: 3 })} s`
+
+/**
+ * Importa legendas (cues de um SRT) para a faixa de legendas (criada se preciso), num único passo de desfazer.
+ * `replace` limpa a faixa antes; `append` mantém as existentes e encaixa as novas nos vãos (cue que colide é
+ * encurtada; sem espaço ≥ MIN_ITEM_US, descartada — com aviso). `offsetUs` desloca todas; o que ficar antes de 0 é
+ * cortado. Estilo e posição vertical = os comuns atuais das legendas (ou os do modelo). Faixa bloqueada → EditError.
+ */
+export function importCaptions(p: Project, cues: readonly Cue[], opts: { mode: 'replace' | 'append'; offsetUs?: Us }): { project: Project; count: number; warnings: string[] } {
+  const existing = p.tracks.find(isCaptionsTrack)
+  if (existing) assertUnlocked(existing)
+  const warnings: string[] = []
+  const off = Math.round(opts.offsetUs ?? 0)
+  const { style, y } = commonCaption(existing)
+  // ocupado: as legendas que ficam (append), em ordem; as novas entram depois de `lastEnd`
+  const keep = opts.mode === 'append' && existing ? existing.items : []
+  const sorted = cues.map((c, i) => ({ c, i })).sort((a, b) => a.c.startUs - b.c.startUs || a.i - b.i)
+  const add: TextItem[] = []
+  let lastEnd = 0
+  for (const { c, i } of sorted) {
+    const label = `Legenda ${i + 1} (${fmtS(Math.max(0, c.startUs + off))})`
+    let s = Math.round(c.startUs) + off
+    let e = Math.round(c.endUs) + off
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) {
+      warnings.push(`${label}: o fim não é depois do início — descartada`)
+      continue
+    }
+    if (e <= 0) {
+      warnings.push(`${label}: fica antes do início do vídeo — descartada`)
+      continue
+    }
+    let changed = false
+    if (s < 0) {
+      s = 0
+      changed = true
+    }
+    // as novas já postas (em ordem de início) ocupam até lastEnd
+    if (s < lastEnd) {
+      s = lastEnd
+      changed = true
+    }
+    // empurra o início para depois das existentes que o cobrem (encostadas em sequência) e corta o fim na próxima; a
+    // busca é refeita a cada cue — uma cue descartada nunca desloca o cursor das seguintes
+    let j = firstEndingAfter(keep, s)
+    while (j < keep.length && keep[j].startUs <= s) {
+      s = end(keep[j])
+      changed = true
+      j++
+    }
+    if (j < keep.length && keep[j].startUs < e) {
+      e = keep[j].startUs
+      changed = true
+    }
+    if (e - s < MIN_ITEM_US) {
+      warnings.push(`${label}: ${changed ? 'sem espaço entre as legendas existentes' : 'curta demais'} — descartada`)
+      continue
+    }
+    if (changed) warnings.push(`${label}: colidia com outra legenda — ajustada para ${fmtS(s)}–${fmtS(e)}`)
+    const item = createTextItem('caption', s, { text: c.text, durationUs: e - s })
+    item.style = structuredClone(style)
+    item.visual.transform.y = structuredClone(y)
+    add.push(item)
+    lastEnd = e
+  }
+  const project = edit(p, (d) => {
+    let t = d.tracks.find(isCaptionsTrack)
+    if (!t) t = mustTrack(d, createTrack(d, 'video', aboveLastVideo(d), freeTrackName(d, 'Legendas'), 'captions'))
+    t.items = opts.mode === 'replace' ? add : [...t.items, ...add]
+    finalize(d)
+  })
+  return { project, count: add.length, warnings }
+}
+
+/** Legendas habilitadas da faixa de legendas, em ordem (para exportar SRT). */
+export function captionCues(p: Project): Cue[] {
+  const t = p.tracks.find(isCaptionsTrack)
+  if (!t) return []
+  return t.items
+    .filter((i): i is TextItem => i.type === 'text' && i.enabled !== false)
+    .map((i) => ({ startUs: i.startUs, endUs: end(i), text: i.text }))
+    .sort((a, b) => a.startUs - b.startUs)
+}
+
+/**
+ * Novo início e fim (µs) de uma legenda (lista de legendas). Fim ≤ início + MIN_ITEM_US ou início < 0 → 'invalid';
+ * sobrepor outra legenda → 'overlap'. Sem mudança: o mesmo projeto.
+ */
+export function setCaptionTimes(p: Project, itemId: string, startUs: Us, endUs: Us): Project {
+  const f = mustFind(p, itemId)
+  if (!isCaptionsTrack(f.track)) throw new EditError('invalid', 'Este item não é uma legenda')
+  assertUnlocked(f.track)
+  const s = Math.round(startUs), e = Math.round(endUs)
+  if (!Number.isFinite(s) || !Number.isFinite(e) || s < 0) throw new EditError('invalid', 'Tempo de legenda inválido')
+  if (e - s < MIN_ITEM_US) throw new EditError('invalid', 'O fim da legenda precisa ser depois do início')
+  if (s === f.item.startUs && e === end(f.item)) return p
+  const other = f.track.items.find((i) => i.id !== itemId && i.startUs < e && end(i) > s)
+  if (other) throw new EditError('overlap', `A legenda sobreporia a ${other.startUs < f.item.startUs ? 'anterior' : 'seguinte'}`)
+  return edit(p, (d) => {
+    const it = mustFind(d, itemId).item
+    it.startUs = s
+    it.durationUs = e - s
+    finalize(d)
+  })
+}
+
+/** Posição vertical (centro, 0–1) de TODAS as legendas, num passo. Sem legendas: o mesmo projeto. */
+export function setCaptionPosition(p: Project, y: number): Project {
+  const t = p.tracks.find(isCaptionsTrack)
+  if (!t || !t.items.some((i) => i.type === 'text')) return p
+  assertUnlocked(t)
+  const v = clamp(y, 0, 1)
+  return edit(p, (d) => {
+    for (const it of mustTrack(d, t.id).items) if (it.type === 'text') it.visual.transform.y = { value: v }
+  })
+}
+
+/**
+ * Cópia do projeto com a faixa de legendas escondida (exportação sem "queimar" as legendas). Não é uma edição: não
+ * entra no histórico. A faixa de legendas é sempre a de vídeo do topo — escondê-la não muda o que os efeitos cobrem.
+ */
+export function withCaptionsHidden(p: Project): Project {
+  if (!p.tracks.some((t) => isCaptionsTrack(t) && !t.hidden)) return p
+  return { ...p, tracks: p.tracks.map((t) => (isCaptionsTrack(t) ? { ...t, hidden: true } : t)) }
 }

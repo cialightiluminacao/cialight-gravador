@@ -39,6 +39,10 @@ export type ShortcutAction =
   | 'nextKeyframe' // ]
   | 'toggleEnabled' // Shift+E (com os vinculados)
   | 'toggleEnabledUnlinked' // Alt+Shift+E (Alt ignora o vínculo, como mover/aparar)
+  | 'export' // Ctrl+E: abre o diálogo de exportação
+  | 'exportFrame' // Ctrl+Shift+E: exporta o quadro atual (cursor) como PNG
+  | 'addTitle' // T: Título no playhead
+  | 'addCrossfade' // Ctrl+T: Dissolver no corte mais próximo do playhead
 
 /** Transporte (tocar/pausar, J/K/L, quadro a quadro, ±1 s, início/fim): o que passa com o painel não modal aberto. */
 export const TRANSPORT_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(['playPause', 'pause', 'shuttleBack', 'shuttleForward', 'prevFrame', 'nextFrame', 'back1s', 'fwd1s', 'home', 'end'])
@@ -85,7 +89,11 @@ export const SHORTCUT_LABELS: Partial<Record<ShortcutAction, string>> = {
   toggleKeyframe: 'Alt+K',
   prevKeyframe: '[',
   nextKeyframe: ']',
-  toggleEnabled: 'Shift+E'
+  toggleEnabled: 'Shift+E',
+  export: 'Ctrl+E',
+  exportFrame: 'Ctrl+Shift+E',
+  addTitle: 'T',
+  addCrossfade: 'Ctrl+T'
 }
 
 /** Foco em campo editável: atalhos de uma tecla não podem roubar a digitação. */
@@ -117,6 +125,8 @@ export function shortcutFor(e: KeyLike, held: HeldKeys = {}): ShortcutAction | n
     if (k === 'v' && !e.shiftKey) return 'paste'
     if (k === 'd' && !e.shiftKey) return 'duplicate'
     if (k === 'x' && e.shiftKey) return 'deleteRange'
+    if (k === 'e') return e.shiftKey ? 'exportFrame' : 'export'
+    if (k === 't' && !e.shiftKey) return 'addCrossfade'
     return null
   }
   if (e.altKey) {
@@ -160,6 +170,8 @@ export function shortcutFor(e: KeyLike, held: HeldKeys = {}): ShortcutAction | n
       return 'toggleSnap'
     case 'b':
       return 'drawRegion'
+    case 't':
+      return e.shiftKey ? null : 'addTitle'
     case '[':
       return 'prevKeyframe'
     case ']':

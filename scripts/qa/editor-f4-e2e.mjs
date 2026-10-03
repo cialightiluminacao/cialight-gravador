@@ -3,14 +3,14 @@
 //
 // Gera um vídeo 1920×1080 de 8 s (mídia sintética): fundo liso escuro, um "CPF 123.456" branco parado em (1180, 400)
 // e um quadrado verde (marcador do foco) de 100 px centrado em (1400, 540), logo abaixo do texto (no 9:16 o foco fica
-// no centro também durante o zoom e o texto continua no quadro). No app: cria um projeto pela tela de
+// no centro fora do zoom; durante o zoom, o alvo do zoom fica no centro e o texto continua no quadro). No app: cria um projeto pela tela de
 // Projetos, importa o vídeo e o solta na linha do tempo; desenha (B) um blur sobre o CPF (vinculado ao clipe,
 // intensidade 80); com a ferramenta Zoom (Z: ida 0,5 s, volta depois de 1 s) arrasta o enquadramento 2× em volta do
 // texto aos 2 s → o aviso de privacidade oferece "Ancorar efeito ao clipe", que ancora o blur; no inspetor do vídeo
 // põe Pop na entrada e Desfoque na saída; no editor de curvas (botão direito no losango da escala aos 2 s) arrasta uma
-// alça → curva personalizada (bezier); exporta "Alta 1080p". Depois "Reenquadrar" → 9:16, ponto de foco no marcador,
-// "Criar cópia" (padrão) e exporta a cópia em "Vertical 9:16". Com o ffmpeg: dimensões e durações das duas
-// exportações; o marcador no centro horizontal do 9:16 (fora do zoom); e o texto sob o blur ilegível durante todo o
+// alça → curva personalizada (bezier); exporta "YouTube 1080p". Depois "Reenquadrar" → 9:16, ponto de foco no marcador,
+// "Criar cópia" (padrão) e exporta a cópia em "Instagram Reels/Stories (9:16)". Com o ffmpeg: dimensões e durações das duas
+// exportações; o marcador no centro do 9:16 fora do zoom e, no meio do zoom, onde o alvo do zoom no centro o leva; e o texto sob o blur ilegível durante todo o
 // zoom (ida com a curva personalizada, parado, volta) nas DUAS exportações — métrica de legibilidade do F2 (contraste
 // local p99−p1 após caixa 3 px < 0,15 × o da fonte; variância do laplaciano < 0,2 × a da fonte), na caixa do texto
 // levada à tela pela região do efeito ancorado no instante (o contorno do visualizador, effectRegionAt).
@@ -345,6 +345,7 @@ async function main() {
   await ev(HELPERS + '; return 1')
 
   console.log('Projetos → Novo projeto, importar e soltar o vídeo')
+  for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`)); i++) await sleep(500)
   await ev(`localStorage.setItem('editor.timelineHeight', '300'); window.__navigate('projects'); return 1`)
   await sleep(800)
   await ev(`await T.click(T.button('Novo projeto')); await T.wait(300); const d = T.dialog(); T.setValue(d.querySelector('input'), 'E2E movimento'); await T.settle(); await T.click(T.button('Criar e abrir', d)); return 1`)
@@ -428,9 +429,9 @@ async function main() {
     await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await T.settle(); await T.wait(250); return 1`)
   }
 
-  console.log('exportar o projeto horizontal (Alta 1080p)')
+  console.log('exportar o projeto horizontal (YouTube 1080p)')
   const outlH = await outlines(fx, [...ZOOM_FRAMES, ...OTHER_FRAMES])
-  const outH = await exportWith('Alta 1080p', OUT_H, 'e2e-f4-05-exportar-horizontal.png')
+  const outH = await exportWith('YouTube 1080p', OUT_H, 'e2e-f4-05-exportar-horizontal.png')
 
   console.log('Reenquadrar → 9:16, foco no marcador, criar cópia')
   let copyId = null
@@ -441,7 +442,13 @@ async function main() {
       const d = document.querySelector('[data-reframe-dialog]'); return { open: !!d, text: d?.textContent ?? '', points: window.__qaEditor.reframe.getState().points['${v}'] ?? [] }`)
     check('painel em 9:16 (1080×1920), Criar cópia, ponto de foco no marcador em 1 s', r0.open && r0.text.includes('1080×1920') && r0.points.length === 1 && near(r0.points[0].x, 1400 / W, 0.003) && near(r0.points[0].y, 540 / H, 0.003), r0)
     await shot('e2e-f4-06-reenquadrar.png')
-    await ev(`await T.click(T.el('[data-reframe-apply]')); return 1`)
+    // o botão fica no rodapé do painel (a nota do zoom o alonga): sem toast por cima e com a prévia pronta
+    // toast parado (o sonner pausa o tempo com a janela sem foco) por cima do rodapé do painel: fecha pelo X
+    await ev(`for (const b of document.querySelectorAll('[data-sonner-toast] [data-close-button]')) b.click()
+      for (let i = 0; i < 60 && T.toasts().length; i++) await T.wait(250)
+      for (let i = 0; i < 100 && document.querySelector('[data-reframe-pending]'); i++) await T.wait(50)
+      T.el('[data-reframe-apply]').scrollIntoView({ block: 'nearest' }); await T.wait(100)
+      await T.click(T.el('[data-reframe-apply]')); return 1`)
     let c = null
     for (let i = 0; i < 60; i++) {
       c = await ev(`const p = window.__qaEditor?.store.getState()?.project; return p ? { id: p.id, name: p.name, w: p.canvas.width, h: p.canvas.height } : null`)
@@ -459,7 +466,7 @@ async function main() {
     await shot('e2e-f4-07-copia-vertical.png')
   }
   const outlV = await outlines(fx, [...ZOOM_FRAMES, ...OTHER_FRAMES])
-  const outV = await exportWith('Vertical 9:16', OUT_V, 'e2e-f4-08-exportar-vertical.png')
+  const outV = await exportWith('Instagram Reels/Stories (9:16)', OUT_V, 'e2e-f4-08-exportar-vertical.png')
   if (!outH || !outV) return
 
   console.log('conferência com o ffmpeg')
@@ -470,7 +477,10 @@ async function main() {
 
   const marks = [...OTHER_FRAMES, 90].map((n) => ({ n, blob: greenBlob(frame(outV, n, 'rgb24'), 1080, 1920) }))
   console.log(`  marcador no 9:16: ${JSON.stringify(marks)}`)
-  check('9:16: o marcador (ponto de foco) no centro do quadro (540, 960) ± 4 px, 178 px de lado ± 4, fora do zoom; 356 ± 6 no meio do zoom', marks.every((m) => m.blob && near(m.blob.cx, 540, 4) && near(m.blob.cy, 960, 4) && near(m.blob.w, m.n === 90 ? 355.6 : 177.8, m.n === 90 ? 6 : 4)), marks)
+  // no meio do zoom (2×), o alvo dele (centro do retângulo arrastado) fica no centro do 9:16: o marcador, deslocado dele
+  const K = (1920 / 1080) * 2, zc = [(ZOOM_RECT[0][0] + ZOOM_RECT[1][0]) / 2, (ZOOM_RECT[0][1] + ZOOM_RECT[1][1]) / 2]
+  const at = (m) => (m.n === 90 ? [540 + (1400 - zc[0]) * K, 960 + (540 - zc[1]) * K, 8] : [540, 960, 4])
+  check('9:16: o marcador (ponto de foco) no centro do quadro (540, 960) ± 4 px, 178 px de lado ± 4, fora do zoom; no meio do zoom, o alvo do zoom no centro (marcador deslocado dele ± 8 px), 356 ± 6', marks.every((m) => m.blob && near(m.blob.cx, at(m)[0], at(m)[2]) && near(m.blob.cy, at(m)[1], at(m)[2]) && near(m.blob.w, m.n === 90 ? 355.6 : 177.8, m.n === 90 ? 6 : 4)), marks)
 
   for (const [tag, out, w, h, outl] of [['horizontal', outH, W, H, outlH], ['vertical', outV, 1080, 1920, outlV]]) {
     const rows = legibility(video, out, w, h, rSrc, outl, [...ZOOM_FRAMES, ...OTHER_FRAMES])

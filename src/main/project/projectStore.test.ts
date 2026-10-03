@@ -99,6 +99,16 @@ describe('ProjectStore', () => {
     expect(store.list().map((s) => s.id)).toEqual(['p-b', 'p-a'])
   })
 
+  it('list e sessionUsage não substituem o projeto em memória (assets só no cache continuam resolvíveis)', () => {
+    store.create(mk('p-a', '2026-10-01T10:00:00.000Z'))
+    const extra = { ...store.cached('p-a'), name: 'em memória' }
+    ;(store as unknown as { cache: Map<string, unknown> }).cache.set('p-a', extra)
+    expect(store.list().map((s) => s.name)).toEqual(['em memória'])
+    expect(store.cached('p-a').name).toBe('em memória')
+    store.sessionUsage()
+    expect(store.cached('p-a').name).toBe('em memória')
+  })
+
   it('cached resolve id em minúsculo após save', () => {
     store.create(mk('P-Abc', '2026-10-01T10:00:00.000Z'))
     expect(store.cached('p-abc').id).toBe('P-Abc')
@@ -256,6 +266,15 @@ describe('ProjectStore', () => {
     store.cacheAssets('P-A', [{ ...a, name: 'b' }])
     expect(store.cached('p-a').assets).toEqual([{ ...a, name: 'b' }])
     expect(store.load('p-a').assets).toEqual([]) // disco intocado
+  })
+
+  it('cacheAssetPatch aplica o resultado da ingestão só na memória (protocolo resolve o proxy antes do autosave)', () => {
+    const a: Asset = { id: 'a1', name: 'a', kind: 'video', source: { type: 'file', path: 'C:/m/a.mp4', size: 1, mtimeMs: 1 }, durationUs: 1, status: 'processing' }
+    store.create({ ...mk('p-a', '2026-10-01T10:00:00.000Z'), assets: [a] })
+    store.cacheAssetPatch('P-A', 'a1', { proxy: 'proxies/a1.mp4', status: 'ready' })
+    expect(store.cached('p-a').assets[0]).toMatchObject({ proxy: 'proxies/a1.mp4', status: 'ready' })
+    expect(store.load('p-a').assets[0].proxy).toBeUndefined() // disco intocado (o renderer é quem grava)
+    store.cacheAssetPatch('p-a', 'nao-existe', { status: 'ready' }) // asset de outra versão do projeto: ignora
   })
 
   it('applyAssetPatch grava no disco mesclando assets só do cache e atualiza o cache', () => {

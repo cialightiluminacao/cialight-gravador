@@ -18,8 +18,25 @@ import type {
 
 import type { Asset, Project, Us } from './editor/project'
 import type { CursorTrackV1 } from './cursor'
+import type { AssetToCopy, BrandTemplate } from './editor/brand'
 
 export type Unsubscribe = () => void
+
+/**
+ * Saída "bytes → stdin do ffmpeg" da exportação do editor. O renderer descreve O QUE quer; o main valida e
+ * monta os argumentos do ffmpeg (o renderer nunca passa argumentos crus).
+ * gif: quadros RGBA width×height (linha a linha, de cima para baixo) a `fps`, em loop infinito.
+ * audio: PCM float 32 intercalado, estéreo 48 kHz; kbps só para mp3/m4a (padrão 192).
+ */
+export type PipeSpec =
+  | { kind: 'gif'; width: number; height: number; fps: number; loop: true }
+  | { kind: 'audio'; format: 'wav' | 'mp3' | 'm4a'; sampleRate: 48000; channels: 2; kbps?: number }
+  /**
+   * Fallback libx264 da exportação de vídeo: com `audio`, o job recebe PRIMEIRO exatamente `samples` quadros de
+   * PCM f32 estéreo 48 kHz (temporário no main) e, depois, os quadros RGBA width×height a `fps` (fps do projeto;
+   * o main usa a forma racional, ex.: 29,97 → 30000/1001). videoBitrate em bps; keyFrameInterval em quadros.
+   */
+  | { kind: 'x264'; width: number; height: number; fps: number; videoBitrate: number; keyFrameInterval: number; audio: { kbps: number; samples: number } | null }
 
 export interface ProjectSummary {
   id: string
@@ -35,6 +52,8 @@ export interface ProjectSummary {
  * item entra. Some quando o renderer salva o projeto com o asset; se a janela/o app cair antes, o arquivo parcial é
  * recuperado ao abrir o projeto.
  */
+/** Relink automático: arquivo achado para a mídia ausente `assetId` (mesmo nome + tamanho; nunca aplicado sem confirmar). */
+export interface RelinkCandidate { assetId: string; path: string; confidence: 'exact' }
 export interface GeneratedMeta { kind: 'narration'; startUs: Us; inUs: Us; createdAt: string }
 export interface PendingGenerated { rel: string; meta: GeneratedMeta; bytes: number }
 export type GeneratedExt = 'm4a'
@@ -238,6 +257,12 @@ export interface IpcApi {
     /** Diálogo de abrir arquivos de mídia (multi-seleção); [] se cancelado. */
     pickMedia(): Promise<string[]>
     /**
+     * Relink automático: procura no disco as mídias importadas ausentes do projeto (mesmo nome + tamanho; pasta original,
+     * irmãs, pasta-mãe, pastas dos outros assets, `extraRoots`). Nada é reapontado: o renderer confirma e aplica cada uma
+     * por media.relink. `extraRoots` só vale para pastas de assets presentes do projeto (ex.: a do arquivo localizado).
+     */
+    findRelinks(projectId: string, opts?: { extraRoots?: string[] }): Promise<RelinkCandidate[]>
+    /**
      * Gravação direto em generated/ (narração), no padrão de session.write*: `writeGeneratedOpen` cria
      * `generated/<base>-<n>.<ext>` (n livre) e o marcador com `meta`; `writeGenerated` grava por posição;
      * `writeGeneratedMeta` atualiza o meta (o início exato só se sabe depois que a reprodução começa);
@@ -302,15 +327,57 @@ export interface IpcApi {
    * com `estimateBytes`, exige estimativa × 2,1 livres), `write` grava bytes por posição, `close` fecha,
    * `finalize` fecha + remuxa com faststart no nome final (apaga o .part; com `maxBytes`, saída maior é
    * apagada e volta `oversize`) e `cancel` apaga o parcial (interrompendo o remux, se houver). Uma por vez.
+   * Formatos por pipe (GIF, só áudio, fallback libx264 do vídeo): `openPipe` abre o ffmpeg lendo bytes crus (PipeSpec validado no main),
+   * `pipeWrite` resolve quando o ffmpeg aceitou os bytes (contrapressão: espere cada um), `pipeFinish` termina
+   * (GIF: paleta; progresso em onFinalizeProgress) e `cancel` mata o ffmpeg e apaga parcial e temporários.
+   * `writeStill` grava um PNG (atômico, nunca sobrescreve).
    */
   editorExport: {
-    open(outputDir: string, fileName: string, opts?: { estimateBytes?: number }): Promise<{ jobId: string; path: string }>
-    write(jobId: string, data: Uint8Array, position: number): Promise<void>
+    /** `reserveSrt`: o .srt vai ao lado — um `<nome>.srt` existente também ocupa o nome (numeração conjunta). */
+    open(outputDir: string, fileName: string, opts?: { estimateBytes?: number; reserveSrt?: boolean }): Promise<{ jobId: string; path: string }>
+    write(jobId: string, data: Uint8Array, position: number): Promise<void | { cancelled: true }>
     close(jobId: string): Promise<void>
-    finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string }>
+    finalize(jobId: string, opts?: { durationUs?: number; maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string } | { cancelled: true }>
     cancel(jobId: string): Promise<void>
-    /** Progresso do remux (0–1) do job em finalização. */
+    /** Progresso do remux (0–1) do job em finalização (MP4: faststart; pipe: paleta do GIF). */
     onFinalizeProgress(cb: (p: { jobId: string; fraction: number }) => void): Unsubscribe
+    openPipe(outputDir: string, fileName: string, spec: PipeSpec, opts?: { estimateBytes?: number; reserveSrt?: boolean }): Promise<{ jobId: string; path: string }>
+    /** { cancelled: true }: o job já tinha sido cancelado (cancelamento esperado, não erro). */
+    pipeWrite(jobId: string, data: Uint8Array): Promise<void | { cancelled: true }>
+    /** maxBytes (tamanho alvo): saída maior é apagada e volta `oversize` (como no finalize). */
+    pipeFinish(jobId: string, opts?: { maxBytes?: number }): Promise<{ path: string; size: number; oversize?: boolean; warning?: string } | { cancelled: true }>
+    writeStill(outputDir: string, fileName: string, png: Uint8Array): Promise<{ path: string; size: number }>
+    /** "Salvar como" de um .txt (capítulos): UTF-8 sem BOM, CRLF. Devolve o caminho ou null se o usuário cancelou. */
+    saveText(defaultPath: string, text: string): Promise<string | null>
+    /** Estado da fila de exportações desta janela (a confirmação de saída conta os itens; a fila não é salva). */
+    setQueueState(state: { running: boolean; pending: number }): Promise<void>
+  }
+  /**
+   * Modelos de marca (F5). Ficam em userData/brand-templates.json + brand-assets/<id>/ (em teste/QA, numa pasta de
+   * teste). `list`: `warning` quando o arquivo estava corrompido (foi renomeado; a lista começa vazia). `save`: copia os
+   * arquivos (`assetsToCopy`, assets do projeto `projectId` aberto, já salvo) — falha não deixa nada pela metade; limite
+   * de 500 MB por modelo. `materialize`: copia os arquivos do modelo para generated/ do projeto e devolve, por asset do
+   * modelo, o Asset `generated` pronto (probe; vídeo/áudio em 'processing', para media.enqueue), já resolvível no
+   * protocolo media/ — o renderer o passa a applyTemplate.
+   */
+  brand: {
+    list(): Promise<{ templates: BrandTemplate[]; warning?: string }>
+    save(template: BrandTemplate, assetsToCopy: AssetToCopy[], projectId: string): Promise<BrandTemplate>
+    remove(id: string): Promise<void>
+    rename(id: string, name: string): Promise<BrandTemplate>
+    materialize(templateId: string, projectId: string): Promise<{ assetId: string; asset: Asset }[]>
+  }
+  /**
+   * Legendas (SRT). `openSrt`: diálogo de abrir (*.srt) e o texto do arquivo (BOM UTF-8/UTF-16; sem BOM, UTF-8 se
+   * válido, senão Windows-1252); null se cancelado. `saveSrt`: diálogo de salvar, grava UTF-8 com BOM; caminho ou null.
+   * `writeSrtBeside`: grava `<mesmo nome>.srt` ao lado do vídeo — só aceita o arquivo final de uma exportação do
+   * editor concluída nesta sessão (o caminho devolvido pela exportação, que pode ser numerado), uma vez; nunca
+   * sobrescreve: com `<nome>.srt` já existente devolve `{ path: null, warning }`.
+   */
+  captions: {
+    openSrt(): Promise<{ text: string; name: string } | null>
+    saveSrt(text: string, defaultName: string): Promise<string | null>
+    writeSrtBeside(videoPath: string, text: string): Promise<{ path: string | null; warning?: string }>
   }
   recording: {
     setPhase(phase: RecorderPhase, ctx?: RecordingPhaseContext): Promise<void>
@@ -418,6 +485,7 @@ export const IPC = {
     duplicate: 'project:duplicate',
     fromSession: 'project:fromSession',
     pickMedia: 'project:pickMedia',
+    findRelinks: 'project:findRelinks',
     writeGeneratedOpen: 'project:writeGeneratedOpen',
     writeGenerated: 'project:writeGenerated',
     writeGeneratedMeta: 'project:writeGeneratedMeta',
@@ -442,8 +510,16 @@ export const IPC = {
     close: 'editorExport:close',
     finalize: 'editorExport:finalize',
     cancel: 'editorExport:cancel',
-    finalizeProgress: 'editorExport:finalizeProgress'
+    finalizeProgress: 'editorExport:finalizeProgress',
+    openPipe: 'editorExport:openPipe',
+    pipeWrite: 'editorExport:pipeWrite',
+    pipeFinish: 'editorExport:pipeFinish',
+    writeStill: 'editorExport:writeStill',
+    saveText: 'editorExport:saveText',
+    setQueueState: 'editorExport:setQueueState'
   },
+  brand: { list: 'brand:list', save: 'brand:save', remove: 'brand:remove', rename: 'brand:rename', materialize: 'brand:materialize' },
+  captions: { openSrt: 'captions:openSrt', saveSrt: 'captions:saveSrt', writeSrtBeside: 'captions:writeSrtBeside' },
   recording: {
     setPhase: 'recording:setPhase',
     barUpdate: 'recording:barUpdate',

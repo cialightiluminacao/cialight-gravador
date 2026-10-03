@@ -8,6 +8,8 @@ import { addAsset, addMediaFromAsset } from '@shared/editor/ops'
 import { laplacianVar, localContrast, magentaBlob, redBlob, type PxBox, type RedBlob } from '@shared/testing/pixels'
 import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShots'
 import { occludedFrame, TEXT_X_EXPR, textX, TRACK_SCENE } from '@shared/testing/trackingScene'
+import { meanDiffPerChannel, paritySample, type TransitionReport } from '@shared/testing/transitionOracle'
+import type { PxBounds, TextReport } from '@shared/testing/textReport'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -44,6 +46,12 @@ const CURSOR_FX_PROJECT_ID = 'p-editor-cursorfx-test'
 // "Seguir conteúdo" (F6): o texto "CPF…" andando com pausa e oclusão (trackingScene.ts); o harness rastreia e exporta
 // (trackingHarness.ts) e aqui cada quadro exportado é medido
 const TRACKING_PROJECT_ID = 'p-editor-tracking-test'
+// memória do compositor (F7): 12 imagens 1920×1080 distintas em sequência + 4 vídeos 1080p (memoryHarness.ts)
+const MEMORY_PROJECT_ID = 'p-editor-memory-test'
+// transições (F5): vermelho e azul puros, com e sem quadrado branco, 2 s cada; o harness monta as cenas (transitionHarness.ts)
+const TRANSITION_PROJECT_ID = 'p-editor-transition-test'
+// texto e formas (F5 Task 4): imagens cinza 128, listras de 2 px e vermelha; o harness monta as cenas (textHarness.ts)
+const TEXT_PROJECT_ID = 'p-editor-text-test'
 const SESSION_ID = 'editor-render-test-session'
 type Rgba = [number, number, number, number]
 type Rendered = { t: 'rendered'; seq: number; tUs: number; ms: number; missing: string[] } | { t: 'error'; message: string }
@@ -69,6 +77,9 @@ interface HarnessReport {
   reframe?: ReframeReport
   cursorFx?: CursorFxReport
   tracking?: TrackingReport
+  memory?: MemoryReport
+  transition?: TransitionReport
+  text?: TextReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -144,6 +155,12 @@ interface TrackingReport {
 interface AnimReport { error?: string; preview?: Record<AnimKey, AnimShot>; half?: { rest: number; blur10: number; restDown: number; blur10Down: number }; exportPath?: string; exportError?: string; exported?: Partial<Record<AnimKey, AnimShot>>; pip?: PipBlurReport }
 type PxRect4 = { x0: number; y0: number; x1: number; y1: number }
 interface PipBlurReport { error?: string; box?: PxRect4; scissor?: PxRect4; inside?: { rest: number; blur: number }; outsideScissorMaxDiff?: number; haloMean?: number; marginMaxDiff?: number; marginStep?: number }
+
+interface MemoryReport {
+  error?: string; budget?: number; maxDefault?: number; maxLow?: number; imageMaxDiff?: number; videoMaxDiff?: number; imageNonBlack?: number; frameErrors?: string[]
+  afterDefault?: MemStats; afterLow?: MemStats; afterRedraw?: MemStats
+}
+interface MemStats { textureBytes: number; textureCount: number; effectBytes: number; evictions: number; overBudgetFrames: number; rasterBytes: number; rasterCount: number }
 
 interface StretchReport {
   error?: string
@@ -329,6 +346,48 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   rmSync(projects.dirOf(REFRAME_PROJECT_ID), { recursive: true, force: true })
   rmSync(projects.dirOf(REFRAME_COPY_ID), { recursive: true, force: true })
   projects.create(reframeProject)
+  // memória: 12 quadros distintos do testsrc2 (1 por segundo) como PNG 1920×1080, 0,5 s cada em sequência; depois 4
+  // itens do testsrc2.mp4 (1080p), 1 s cada
+  await gen(['-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=1', '-frames:v', '12', join(dir, 'memoria-%02d.png')], 'editor: imagens da memória')
+  let memProject: Project = { ...createEmptyProject('Memória', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: MEMORY_PROJECT_ID, assets: [aVideo] }
+  const memImages: MediaItem[] = []
+  for (let k = 0; k < 12; k++) {
+    const f = join(dir, `memoria-${String(k + 1).padStart(2, '0')}.png`)
+    const a = assetFromInfo(`a_mem${k}`, f, statSync(f), await probe(f))
+    memProject = addAsset(memProject, a)
+    memImages.push({ ...createMediaItem(a, k * 500_000, 'video'), durationUs: 500_000 })
+  }
+  const memVideos: MediaItem[] = Array.from({ length: 4 }, (_, k) => ({ ...createMediaItem(aVideo, 6_000_000 + k * 1_000_000, 'video'), inUs: k * 500_000, durationUs: 1_000_000 }))
+  memProject = {
+    ...memProject,
+    tracks: [
+      { ...track('t_mem_img', 'Imagens', memImages[0]), items: memImages },
+      { ...track('t_mem_vid', 'Vídeos', memVideos[0]), items: memVideos }
+    ]
+  }
+  rmSync(projects.dirOf(MEMORY_PROJECT_ID), { recursive: true, force: true })
+  projects.create(memProject)
+  // transições: A = vermelho puro, B = azul puro, e os dois com um quadrado branco 400×300 em (760, 390); 1920×1080@30, 2 s
+  const box = 'drawbox=x=760:y=390:w=400:h=300:color=white:t=fill'
+  const trAssets: Asset[] = []
+  for (const [id, color, withBox] of [['a_tr_red', 'red', false], ['a_tr_blue', 'blue', false], ['a_tr_redbox', 'red', true], ['a_tr_bluebox', 'blue', true]] as const) {
+    const file = join(dir, `transicao-${id}.mp4`)
+    await gen(['-f', 'lavfi', '-i', `color=c=${color}:s=1920x1080:r=30${withBox ? `,${box}` : ''}`, '-t', '2', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '15', '-pix_fmt', 'yuv420p', file], `editor: transição ${id}`)
+    trAssets.push({ ...assetFromInfo(id, file, statSync(file), await probe(file)), status: 'ready' })
+  }
+  let trProject: Project = { ...createEmptyProject('Transições', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: TRANSITION_PROJECT_ID }
+  for (const a of trAssets) trProject = addAsset(trProject, a)
+  rmSync(projects.dirOf(TRANSITION_PROJECT_ID), { recursive: true, force: true })
+  projects.create(trProject)
+  // texto e formas: cinza 128 liso, listras verticais preto/branco de 2 px (detalhe para medir desfoque) e vermelho
+  let txProject: Project = { ...createEmptyProject('Texto e formas', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: TEXT_PROJECT_ID }
+  for (const [id, src] of [['a_tx_gray', 'color=c=0x808080:s=1920x1080'], ['a_tx_stripes', "nullsrc=s=1920x1080,format=gray,geq=lum='255*mod(floor(X/2),2)'"], ['a_tx_red', 'color=c=red:s=1920x1080']] as const) {
+    const file = join(dir, `texto-${id}.png`)
+    await gen(['-f', 'lavfi', '-i', src, '-frames:v', '1', '-update', '1', file], `editor: texto ${id}`)
+    txProject = addAsset(txProject, assetFromInfo(id, file, statSync(file), await probe(file)))
+  }
+  rmSync(projects.dirOf(TEXT_PROJECT_ID), { recursive: true, force: true })
+  projects.create(txProject)
 
   // janela visível sem foco (fora da barra de tarefas): oculta, o Chromium derruba o requestAnimationFrame para ~2/s
   // depois de umas dezenas de segundos, e a reprodução do editor anda por rAF
@@ -336,7 +395,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const win = new BrowserWindow({ width: 800, height: 600, show: false, focusable: false, skipTaskbar: true, webPreferences: { preload: preloadPath(), sandbox: false, backgroundThrottling: false, additionalArguments: ['--cialight-window=recorder'] } })
   win.showInactive()
   const result = await new Promise<{ ok: boolean; report: HarnessReport }>((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 240 s'] } }), 240_000)
+    const timer = setTimeout(() => resolve({ ok: false, report: { errors: ['timeout de 420 s'] } }), 420_000)
     ipcMain.once('test:result', (_e, r: { ok: boolean; report: HarnessReport }) => {
       clearTimeout(timer)
       resolve(r)
@@ -458,6 +517,41 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
       seg5.exported = out
     } catch (e) {
       seg5.exported = { frames: 0, measured: 0, occluded: 0, srcMinC: 0, worst: null, legible: [], error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  // transições: paridade preview × exportação nos mesmos quadros (amostra a cada 4 px); a amostra do preview sai do relatório
+  for (const run of result.report.transition?.parity ?? []) {
+    try {
+      if (!run.exportPath) continue
+      run.meanDiff = []
+      for (const f of run.frames) {
+        const k = f.frame - Math.round((run.fromUs * 30) / 1e6)
+        const raw = join(dir, `transicao-${run.kind}-${f.frame}.rgb`)
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', ...(k > 0 ? ['-ss', ((k - 0.5) / 30).toFixed(4)] : []), '-i', run.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro da transição' })
+        run.meanDiff.push(Math.max(...meanDiffPerChannel(f.preview, paritySample(new Uint8Array(readFileSync(raw)), 1920, 1080, 3))))
+      }
+    } catch (e) {
+      run.exportError = e instanceof Error ? e.message : String(e)
+    } finally {
+      for (const f of run.frames) f.preview = []
+    }
+  }
+  // texto: paridade preview × exportação do título (mesmo quadro, amostra a cada 4 px)
+  const tp = result.report.text?.parity
+  if (tp) {
+    try {
+      if (tp.exportPath) {
+        const raw = join(dir, 'texto-titulo.rgb')
+        await runFfmpeg(['-hide_banner', '-nostdin', '-y', '-ss', ((tp.frame - 0.5) / 30).toFixed(4), '-i', tp.exportPath, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw], { label: 'teste: quadro do título' })
+        const rgb = new Uint8Array(readFileSync(raw))
+        tp.meanDiff = meanDiffPerChannel(tp.preview, paritySample(rgb, 1920, 1080, 3))
+        // fundo azul do título no quadro exportado (±12: compressão): a caixa prova a fonte da exportação
+        tp.exportBlue = boundsRgb(rgb, 1920, 1080, (r, g, b) => Math.abs(r - 32) <= 12 && Math.abs(g - 80) <= 12 && Math.abs(b - 255) <= 12)
+      }
+    } catch (e) {
+      tp.exportError = e instanceof Error ? e.message : String(e)
+    } finally {
+      tp.preview = []
     }
   }
   win.destroy()
@@ -745,6 +839,53 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const ex5 = sc5?.exported
   check(!!ex5 && !ex5.error && ex5.frames === TRACK_SCENE.durationS * fps5 && ex5.measured > 90 && ex5.srcMinC >= 120, `seguir conteúdo (exportação): ${ex5?.frames} quadros, ${ex5?.measured} medidos (texto nítido na fonte em todos: contraste ≥ ${ex5?.srcMinC} ≥ 120) + ${ex5?.occluded} na oclusão ${ex5?.error ?? sc5?.exportError ?? ''}`, failures)
   check(!!ex5 && ex5.legible.length === 0, `seguir conteúdo (exportação): o texto é ilegível em TODO quadro exportado — pior ${JSON.stringify(ex5?.worst)}; legíveis ${JSON.stringify(ex5?.legible.slice(0, 5))}`, failures)
+  const mem = r.memory
+  console.log(`memória do compositor: ${JSON.stringify(mem)}`)
+  const MiB = 2 ** 20
+  const tex1080 = 1920 * 1080 * 4
+  check(!!mem && !mem.error && (mem.frameErrors?.length ?? 1) === 0, `memória: harness sem erro, 16 itens desenhados sem ausentes (${mem?.error ?? ''} ${JSON.stringify(mem?.frameErrors)})`, failures)
+  check(mem?.budget === 512 * MiB && (mem.maxDefault ?? Infinity) <= 512 * MiB, `memória: texturas ≤ 512 MiB em todos os quadros (máx. ${((mem?.maxDefault ?? 0) / MiB).toFixed(1)} MiB)`, failures)
+  check(mem?.afterDefault?.textureCount === 16 && mem.afterDefault.textureBytes === 16 * tex1080 && mem.afterDefault.evictions === 0, `memória: no orçamento padrão as 16 texturas 1080p ficam no cache entre quadros, sem descarte (${JSON.stringify(mem?.afterDefault)})`, failures)
+  check((mem?.afterLow?.evictions ?? 0) > 0 && (mem?.maxLow ?? Infinity) <= 64 * MiB && (mem?.afterLow?.textureBytes ?? Infinity) <= 64 * MiB && mem?.afterLow?.overBudgetFrames === 0, `memória: orçamento de 64 MiB (teste) → descarte LRU (${mem?.afterLow?.evictions} descartes; máx. ${((mem?.maxLow ?? 0) / MiB).toFixed(1)} MiB, ${mem?.afterLow?.textureCount} texturas)`, failures)
+  check((mem?.afterRedraw?.evictions ?? 0) > (mem?.afterLow?.evictions ?? Infinity), `memória: os quadros comparados foram redesenhados com texturas recriadas (descartes ${mem?.afterLow?.evictions} → ${mem?.afterRedraw?.evictions})`, failures)
+  check(mem?.imageMaxDiff === 0 && (mem.imageNonBlack ?? 0) > 1_000_000, `memória: imagem redesenhada depois do descarte = pixels de antes (dif. máx. ${mem?.imageMaxDiff}; ${mem?.imageNonBlack} px não pretos)`, failures)
+  check(mem?.videoMaxDiff === 0, `memória: vídeo redesenhado depois do descarte = pixels de antes (dif. máx. ${mem?.videoMaxDiff})`, failures)
+  const tr = r.transition
+  console.log(`transições: ${JSON.stringify({ ...tr, kinds: undefined, privacy: undefined })}`)
+  check(!!tr && !tr.error, `transições: harness sem erro (${tr?.error ?? ''})`, failures)
+  const [cA, cB] = [tr?.colors?.A, tr?.colors?.B]
+  check(!!cA && !!cB && cA[0] > 200 && cA[1] < 40 && cA[2] < 40 && cB[2] > 200 && cB[0] < 40 && cB[1] < 40, `transições: fontes vermelha ${JSON.stringify(cA)} e azul ${JSON.stringify(cB)}`, failures)
+  check(tr?.kinds?.length === 11, `transições: os 11 tipos medidos (${tr?.kinds?.length})`, failures)
+  for (const k of tr?.kinds ?? []) {
+    check(k.before.maxErr <= 3 && k.after.maxErr <= 3 && k.before.n === 100 && k.after.n === 100, `transição ${k.kind}: fora da janela a cor é pura — antes = A (erro máx. ${k.before.maxErr}), depois = B (${k.after.maxErr}) ≤ 3`, failures)
+    for (const s of k.inside) {
+      check(s.n >= 40 && s.maxErr <= 8, `transição ${k.kind} em linear ${s.linear} (p ${s.p}): ${s.n} pontos da grade = modelo ±8 (erro máx. ${s.maxErr}${s.worst ? ` em (${s.worst.u}, ${s.worst.v}): ${JSON.stringify(s.worst.got)} × ${JSON.stringify(s.worst.want)}` : ''})`, failures)
+    }
+  }
+  for (const pv of tr?.privacy ?? []) {
+    check(pv.frames === 30 && pv.whiteMax === 0, `transição ${pv.kind}, tarja ${pv.side === 'A' ? 'vinculada a A (termina no corte)' : 'ancorada em B (começa no corte)'}: nenhum pixel branco em ${pv.frames} quadros da janela (máx. ${pv.whiteMax}, ${pv.whiteFrames} quadros com branco)`, failures)
+    check(pv.controlWhiteMax > 1000, `transição ${pv.kind}, controle sem tarja (${pv.side}): o quadrado branco aparece (${pv.controlWhiteMax} px)`, failures)
+  }
+  check((tr?.privacy?.length ?? 0) === 8, `transições: 8 cenários de privacidade (${tr?.privacy?.length})`, failures)
+  const tc = tr?.trackScope?.centers ?? []
+  check(tc.length === 3 && tc.every((c) => Math.abs(c[0] - 0x12) <= 1 && Math.abs(c[1] - 0x34) <= 1 && Math.abs(c[2] - 0x56) <= 1), `transição: efeito \`track\` na faixa da transição cobre a composição (centro ${JSON.stringify(tc)} = #123456)`, failures)
+  const be = tr?.blurEdge
+  check(!!be && be.sharp > 300 && be.mid < 0.25 * be.sharp, `transição blur: borda do quadrado desfocada no meio (degrau ${be?.mid} < 25 % do nítido ${be?.sharp})`, failures)
+  for (const pr of tr?.parity ?? []) {
+    const md = pr.meanDiff ?? []
+    check(md.length === pr.frames.length && md.length === 3 && md.every((d) => d <= 4), `transição ${pr.kind}: exportação = preview nos quadros ${pr.frames.map((f) => f.frame).join('/')} (diferença média por canal ${JSON.stringify(md)} ≤ 4) ${pr.exportError ?? ''}`, failures)
+  }
+  const ss = tr?.slideSeam
+  check(!!ss && ss.minSum >= 0.9 * Math.min(...ss.colorSums), `transição slideL: emenda sem deixar ver o fundo (menor soma RGB perto da borda ${ss?.minSum} ≥ 90 % de ${ss ? Math.min(...ss.colorSums) : '?'})`, failures)
+  const sa = tr?.sameAsset
+  console.log(`transição com o mesmo asset em A e B — fim da janela: ${JSON.stringify(sa)}`)
+  // sem slot estável (medido em 2026-10-02): 26,8 + 43,3 + 25,1 = 95 ms nos 3 quadros após a janela, mediana 14,3
+  check(!!sa && !sa.error && sa.after3Ms <= 3 * sa.medianMs + 15, `transição com o mesmo asset em A e B: sem engasgo no fim da janela (3 quadros seguintes ${sa?.after3Ms} ms ≤ 3 × mediana ${sa?.medianMs} + 15; 1º ${sa?.boundaryMs} ms) ${sa?.error ?? ''}`, failures)
+  const tb = tr?.bench
+  console.log(`transições — desempenho 1080p (${tr?.renderer}): crossfade ${JSON.stringify(tb?.crossfade)} ms; blur ${JSON.stringify(tb?.blur)} ms`)
+  check(!!tb && !tb.error && !!tb.crossfade && !!tb.blur && tb.crossfade.mean < 20 && tb.blur.mean < 20, `transições: 1080p < 20 ms/quadro (compositor + GPU; alvo 12) — crossfade média ${tb?.crossfade?.mean} / p95 ${tb?.crossfade?.p95}, blur média ${tb?.blur?.mean} / p95 ${tb?.blur?.p95} ${tb?.error ?? ''}`, failures)
+
+  checkText(r.text, failures)
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)
@@ -758,4 +899,74 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   writeFileSync(join(outDir, 'editor-render-report.json'), JSON.stringify({ result, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE RENDER DO EDITOR PASSOU')
   return failures.length ? 1 : 0
+}
+
+/** Caixa dos pixels (RGB24, linha a linha de cima) que satisfazem `pred`; x1/y1 exclusivos. */
+function boundsRgb(d: Uint8Array, W: number, H: number, pred: (r: number, g: number, b: number) => boolean): PxBounds | null {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, n = 0
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 3
+    if (!pred(d[i], d[i + 1], d[i + 2])) continue
+    n++
+    x0 = Math.min(x0, x); x1 = Math.max(x1, x + 1); y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1)
+  }
+  return n ? { x0, y0, x1, y1, n } : null
+}
+
+/** Texto e formas (F5 Task 4): verificações das medidas do textHarness. */
+function checkText(tx: TextReport | undefined, failures: string[]): void {
+  console.log(`texto/formas: ${JSON.stringify(tx)}`)
+  check(!!tx && !tx.error, `texto: harness sem erro (${tx?.error ?? ''})`, failures)
+  const bx = (b: PxBounds | null | undefined): string => (b ? `[${b.x0},${b.y0})–[${b.x1},${b.y1}) n=${b.n}` : 'nenhum')
+  const close = (c: number[] | undefined, want: number[], tol: number): boolean => !!c && c.every((v, i) => Math.abs(v - want[i]) <= tol)
+  for (const t of tx?.titles ?? []) {
+    const e = t.expected
+    const ex0 = e.cx - e.w / 2, ex1 = e.cx + e.w / 2, ey0 = e.cy - e.h / 2, ey1 = e.cy + e.h / 2
+    const b = t.blue
+    // caixa medida = a da thread principal com a Manrope: ±2 px (borda antisserrilhada do fundo); fonte de reserva no worker daria outra largura
+    check(!!b && Math.abs(b.x0 - ex0) <= 2 && Math.abs(b.x1 - ex1) <= 2 && Math.abs(b.y0 - ey0) <= 2 && Math.abs(b.y1 - ey1) <= 2, `texto (${t.align}): fundo #2050ff ocupa a caixa de measureTextBox (${bx(b)} × [${ex0.toFixed(1)},${ey0.toFixed(1)})–[${ex1.toFixed(1)},${ey1.toFixed(1)}); fonte após ${t.fontTries} quadro(s))`, failures)
+    check(close(t.bgPixel, [32, 80, 255], 2), `texto (${t.align}): pixel do padding = (32,80,255) ±2 (${JSON.stringify(t.bgPixel)})`, failures)
+    const w = t.white
+    check(!!w && w.n > 0.05 * e.w * e.h && w.x0 >= ex0 - 1 && w.x1 <= ex1 + 1, `texto (${t.align}): letras brancas dentro da caixa, ${w?.n} px > 5 % da caixa (${bx(w)})`, failures)
+    const l2 = t.line2
+    // tolerância de alinhamento: o "T" tem margem lateral de tinta de poucos px (≤ 0,06 em ≈ 7 px a 110 px) + 1 px de antisserrilhado
+    const em = 0.07 * 110
+    const ok = !!l2 && (t.align === 'center'
+      ? Math.abs((l2.x0 + l2.x1) / 2 - e.cx) <= 3
+      : t.align === 'left' ? l2.x0 - (ex0 + t.pad) >= -2 && l2.x0 - (ex0 + t.pad) <= em : (ex1 - t.pad) - l2.x1 >= -2 && (ex1 - t.pad) - l2.x1 <= em)
+    check(ok, `texto (${t.align}): 2ª linha alinhada na caixa (tinta ${bx(l2)}; caixa x ${ex0.toFixed(1)}–${ex1.toFixed(1)}, padding ${t.pad.toFixed(1)})`, failures)
+  }
+  check(tx?.titles?.length === 3, `texto: 3 alinhamentos medidos (${tx?.titles?.length})`, failures)
+  const st = tx?.stroke
+  const sw = st?.white, sr = st?.red
+  check(!!sw && !!sr && sr.n > 500 && sw.x0 - sr.x0 >= 3 && sw.x0 - sr.x0 <= 9 && sr.x1 - sw.x1 >= 3 && sr.x1 - sw.x1 <= 9 && sw.y0 - sr.y0 >= 3 && sr.y1 - sw.y1 >= 3, `texto: contorno vermelho de ${st?.strokePx} px em volta das letras (branco ${bx(sw)}, vermelho ${bx(sr)})`, failures)
+  const sh = tx?.shadow
+  const hw = sh?.white, hd = sh?.dark
+  check(!!hw && !!hd && hd.n > 500 && Math.abs(hd.x1 - hw.x1 - (sh?.offsetPx ?? 0)) <= 3 && Math.abs(hd.y1 - hw.y1 - (sh?.offsetPx ?? 0)) <= 3, `texto: sombra preta deslocada (+${sh?.offsetPx}, +${sh?.offsetPx}) px (branco ${bx(hw)}, sombra ${bx(hd)})`, failures)
+  const wr = tx?.wrap
+  const wb = wr?.blue
+  check(!!wr && !!wb && wr.lines === 3 && Math.abs(wb.y1 - wb.y0 - wr.expectedH) <= 3 && wb.x1 - wb.x0 <= wr.maxW + 2, `texto: quebra com maxWidth 0,3 — ${wr?.lines} linhas, altura da caixa ${wb ? wb.y1 - wb.y0 : '?'} ≈ ${wr?.expectedH.toFixed(1)} ±3, largura ${wb ? wb.x1 - wb.x0 : '?'} ≤ ${wr?.maxW.toFixed(1)}`, failures)
+  const sp = tx?.shapes
+  check(close(sp?.rectCenter, [0, 192, 0], 1), `formas: centro do retângulo = (0,192,0) (${JSON.stringify(sp?.rectCenter)})`, failures)
+  check(close(sp?.ellipseCenter, [0, 192, 0], 1) && close(sp?.ellipseCorner, [128, 128, 128], 2), `formas: elipse preenchida no centro (${JSON.stringify(sp?.ellipseCenter)}), canto da caixa NÃO (${JSON.stringify(sp?.ellipseCorner)} = cinza)`, failures)
+  check(close(sp?.arrowTip, [255, 0, 255], 2) && close(sp?.arrowTail, [255, 0, 255], 2), `formas: seta magenta na ponta direita (${JSON.stringify(sp?.arrowTip)}) e na haste (${JSON.stringify(sp?.arrowTail)})`, failures)
+  check(close(sp?.spotOutside, [51, 51, 51], 3) && close(sp?.spotEdgeOutside, [51, 51, 51], 3) && close(sp?.spotInside, [128, 128, 128], 2), `formas: holofote dim 0,6 sobre cinza 128 — fora ${JSON.stringify(sp?.spotOutside)} / logo fora da borda ${JSON.stringify(sp?.spotEdgeOutside)} ≈ 51 ±3, dentro ${JSON.stringify(sp?.spotInside)} = 128 ±2`, failures)
+  check(close(sp?.spotRoundCorner, [51, 51, 51], 3) && close(sp?.spotRoundInside, [128, 128, 128], 2), `formas: holofote em retângulo com cantos (cornerRadius 0,5) — canto da caixa, fora da forma, escurecido ${JSON.stringify(sp?.spotRoundCorner)} ≈ 51 ±3; centro ${JSON.stringify(sp?.spotRoundInside)} = 128`, failures)
+  const so = tx?.trackSolid
+  check(!!so && so.letterPx > 1000 && so.bar > 70_000 && so.barWrong === 0 && so.same > 1_000_000 && so.sameMaxDiff <= 1, `privacidade: tarja \`track\` na faixa do texto é OPACA na região toda — ${so?.bar} px, ${so?.barWrong} fora da cor #123456 (região com ${so?.letterPx} px de letra); fora dela igual ao sem efeito (${so?.same} px, dif. máx. ${so?.sameMaxDiff})`, failures)
+  const si = tx?.trackSolidInvert
+  check(!!si && si.bar > 1_800_000 && si.barWrong === 0 && si.same > 19_000 && si.sameMaxDiff <= 1, `privacidade: tarja invertida \`track\` na faixa do texto — fora do buraco tudo #123456 (${si?.bar} px, ${si?.barWrong} errados); no buraco igual ao sem efeito (${si?.same} px, dif. máx. ${si?.sameMaxDiff})`, failures)
+  const pz = tx?.trackPixelate
+  check(!!pz && pz.belowMaxDiff <= 2 && pz.lapRatio < 0.2, `privacidade: pixelização padrão (${pz?.strength}, bloco ${pz?.cellPx.toFixed(1)} px; altura das maiúsculas ≈ ${pz?.capHeightPx.toFixed(0)} px) na faixa do texto = a mesma pixelização do quadro (escopo below, a da mídia na F2) ±2 (dif. máx. ${pz?.belowMaxDiff}); laplaciano na caixa ${pz?.lapRatio} < 0,2 do texto nítido (contraste ${pz?.contrastRatio})`, failures)
+  const lb = tx?.layerBlur
+  check(!!lb && lb.blurPx > 3 && lb.outsideMaxDiff <= 1 && lb.insideDiff > 100_000, `texto: desfoque da camada (${lb?.blurPx.toFixed(1)} px) só na caixa — fora dela idêntico ao sem desfoque (dif. máx. ${lb?.outsideMaxDiff}), dentro borrado (Σ dif. ${lb?.insideDiff})`, failures)
+  const ts = tx?.trackScope
+  check(!!ts && ts.mediaPixels > 100_000 && ts.mediaMaxDiff <= 1 && ts.textDiff > 100_000, `texto: efeito \`track\` (raio ${ts?.radius.toFixed(1)} px) na faixa do texto borra o texto (Σ dif. ${ts?.textDiff}) e não as listras abaixo (${ts?.mediaPixels} px da região, dif. máx. ${ts?.mediaMaxDiff})`, failures)
+  const cf = tx?.crossfade
+  check(!!cf && Math.abs(cf.p - 0.5) < 0.01 && close(cf.inBox, cf.expectedIn, 3) && close(cf.outside, cf.expectedOut, 3), `texto: crossfade imagem → título no meio (p ${cf?.p}): no fundo do título ${JSON.stringify(cf?.inBox)} ≈ ${JSON.stringify(cf?.expectedIn.map(Math.round))}, fora ${JSON.stringify(cf?.outside)} ≈ ${JSON.stringify(cf?.expectedOut.map(Math.round))} ±3`, failures)
+  const pr = tx?.parity
+  const pe = pr?.expected, xb = pr?.exportBlue
+  check(!!pe && !!xb && Math.abs(xb.x0 - (pe.cx - pe.w / 2)) <= 3 && Math.abs(xb.x1 - (pe.cx + pe.w / 2)) <= 3 && Math.abs(xb.y0 - (pe.cy - pe.h / 2)) <= 3 && Math.abs(xb.y1 - (pe.cy + pe.h / 2)) <= 3, `texto: a exportação espera a fonte — fundo do título no arquivo ${bx(xb)} = caixa de measureTextBox (Manrope) ±3 (${pe ? `x ${(pe.cx - pe.w / 2).toFixed(1)}–${(pe.cx + pe.w / 2).toFixed(1)}` : '?'})`, failures)
+  const md = pr?.meanDiff ?? []
+  check(md.length === 3 && md.every((d) => d <= 4), `texto: exportação = preview no quadro ${pr?.frame} do título (diferença média por canal ${JSON.stringify(md)} ≤ 4) ${pr?.exportError ?? ''}`, failures)
 }

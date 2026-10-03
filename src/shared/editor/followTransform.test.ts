@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { evalAnim } from './anim'
 import { contentPose, poseError, type RegionValues } from './contentPose'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
-import { attachCandidate, attachEffects, bakeScreenRegion, detachEffect, effectsOverClip, FIT_TOL, FIT_TOL_DEG } from './followTransform'
+import { attachCandidate, attachEffects, bakeScreenRegion, detachEffect, effectsOverClip, FIT_TOL, FIT_TOL_DEG, simplifyRegionSamples, type RegionSample } from './followTransform'
 import { deleteItems, deleteRanges, duplicateItems, EditError, findItem, freezeFrameAt, moveItems, setItemEnabled, splitAt, updateItem } from './ops'
 import { privacyWarnings } from './privacy'
 import type { Anim, Asset, Ease, EffectItem, MediaItem, Project, Us } from './project'
@@ -394,5 +394,28 @@ describe('privacidade com vários clipes', () => {
     expect(effectsOverClip(pip, 'm')).toEqual({ linked: [], unlinked: [] })
     expect(attachCandidate(p, 'fx')?.id).toBe('m')
     expect(attachCandidate(p, 'loose')).toBeNull()
+  })
+})
+
+describe("simplifyRegionSamples 'shrink': buraco minúsculo", () => {
+  it('amostra menor que 2μ (≈ 8,2 px) vira buraco nulo e key — o buraco simplificado nunca sai do de cada amostra', () => {
+    const W = 1920, H = 1080
+    // 11 amostras (1 ms): a 1ª com buraco de 10,4 px; depois buracos de 2 px cujo centro sai 2,2 px da reta (curva)
+    const px = (cx: number, cy: number, side: number): RegionValues => ({ x: cx / W, y: cy / H, w: side / W, h: side / H, rotation: 0 })
+    const input: RegionSample[] = Array.from({ length: 11 }, (_, i) => ({
+      t: i * 1000,
+      r: i === 0 ? px(500, 500, 10.4) : px(500 + 10 * i, 500 + (i < 10 ? 2.2 : 0), 2),
+      must: false
+    }))
+    const out = simplifyRegionSamples(input, 'rect', 0, W, H, 'shrink')
+    for (const s of input) {
+      const at = (a: Anim<number>): number => evalAnim(a, s.t)
+      const r = { x: at(out.x), y: at(out.y), w: at(out.w), h: at(out.h) }
+      if (!(r.w > 0 && r.h > 0)) continue
+      // o buraco de 2 px (abaixo de 2μ) tem de ficar nulo; o de 10,4 px, contido
+      expect(s.r.w * W).toBeGreaterThan(8)
+      expect(Math.abs(r.x - s.r.x) * W + (r.w * W) / 2).toBeLessThanOrEqual((s.r.w * W) / 2 + 1e-6)
+      expect(Math.abs(r.y - s.r.y) * H + (r.h * H) / 2).toBeLessThanOrEqual((s.r.h * H) / 2 + 1e-6)
+    }
   })
 })

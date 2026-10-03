@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { estimateBytes, exportMediaIssues, exportRange, frameCount, missingMediaWarnings, outputSize, presetVideoBitrate, resizeBitrate, targetBitrate, WHATSAPP_MAX_BPS } from './exportPlan'
+import { audioRateWarning, estimateBytes, exportMediaIssues, exportRange, frameCount, missingMediaWarnings, rawTargetBitrate, resizeBitrate, targetBitrate } from './exportPlan'
 import { addAsset, addMediaFromAsset, setItemEnabled, updateTrack } from '@shared/editor/ops'
 import { createEmptyProject } from '@shared/editor/factory'
 import type { Asset, Project } from '@shared/editor/project'
@@ -22,6 +22,12 @@ describe('targetBitrate', () => {
     expect(targetBitrate(64, 10 * 3600 * 1e6, 128)).toBe(100_000)
     expect(targetBitrate(64, 0, 128)).toBe(100_000)
   })
+  it('rawTargetBitrate: o mesmo cálculo sem piso (para a validação do diálogo)', () => {
+    expect(rawTargetBitrate(64, 60_000_000, 128)).toBe(8_461_934)
+    expect(rawTargetBitrate(1, 600_000_000, 192)).toBe(Math.floor((MiB * 8 * 0.96) / 600 - 192_000))
+    expect(rawTargetBitrate(1, 600_000_000, 192)).toBeLessThan(0)
+    expect(rawTargetBitrate(64, 0, 128)).toBe(0)
+  })
 })
 
 describe('frameCount', () => {
@@ -37,39 +43,6 @@ describe('frameCount', () => {
     expect(frameCount(0, 3_033_333, 30)).toBe(91)
     expect(frameCount(0, 3_033_334, 30)).toBe(91)
     expect(frameCount(0, 10_010_000, 29.97)).toBe(300)
-  })
-})
-
-describe('outputSize', () => {
-  const c = (width: number, height: number): { width: number; height: number } => ({ width, height })
-  it('Alta 1080p e WhatsApp cabem na caixa mantendo a proporção (pares)', () => {
-    expect(outputSize('high1080', c(1920, 1080))).toEqual({ width: 1920, height: 1080 })
-    expect(outputSize('high1080', c(1280, 720))).toEqual({ width: 1920, height: 1080 })
-    expect(outputSize('high1080', c(1080, 1920))).toEqual({ width: 1080, height: 1920 })
-    expect(outputSize('high1080', c(1080, 1080))).toEqual({ width: 1080, height: 1080 })
-    expect(outputSize('whatsapp', c(1920, 1080))).toEqual({ width: 1280, height: 720 })
-    expect(outputSize('whatsapp', c(1080, 1350))).toEqual({ width: 720, height: 900 })
-  })
-  it('Original: resolução do projeto (par)', () => {
-    expect(outputSize('original', c(2560, 1440))).toEqual({ width: 2560, height: 1440 })
-    expect(outputSize('original', c(1001, 777))).toEqual({ width: 1002, height: 778 })
-  })
-  it('Vertical 9:16: 1080×1920 só para projeto 9:16', () => {
-    expect(outputSize('vertical', c(720, 1280))).toEqual({ width: 1080, height: 1920 })
-    expect(outputSize('vertical', c(1920, 1080))).toBeNull()
-  })
-})
-
-describe('presetVideoBitrate', () => {
-  it('Alta: 12 Mbps a 30 fps, 20 Mbps a 60 fps; Original 20 Mbps', () => {
-    expect(presetVideoBitrate('high1080', 30, 10_000_000)).toBe(12_000_000)
-    expect(presetVideoBitrate('high1080', 60, 10_000_000)).toBe(20_000_000)
-    expect(presetVideoBitrate('vertical', 30, 10_000_000)).toBe(12_000_000)
-    expect(presetVideoBitrate('original', 30, 10_000_000)).toBe(20_000_000)
-  })
-  it('WhatsApp: bitrate calculado para 64 MB, limitado em vídeos curtos', () => {
-    expect(presetVideoBitrate('whatsapp', 30, 600_000_000)).toBe(targetBitrate(64, 600_000_000, 128))
-    expect(presetVideoBitrate('whatsapp', 30, 10_000_000)).toBe(WHATSAPP_MAX_BPS)
   })
 })
 
@@ -138,5 +111,14 @@ describe('missingMediaWarnings', () => {
     expect(w[0]).toContain('1 quadro ')
     expect(w[1]).toContain('120 quadros')
     expect(w[2]).toContain('“x”')
+  })
+})
+
+describe('audioRateWarning', () => {
+  it('avisa quando o codificador baixa a taxa de áudio pedida; nada quando é a mesma', () => {
+    expect(audioRateWarning(320_000, 192_000, 'aac')).toBe('O áudio saiu em AAC 192 kbps: o codificador deste computador não aceita 320 kbps.')
+    expect(audioRateWarning(192_000, 192_000, 'aac')).toBeNull()
+    expect(audioRateWarning(192_000, 192_000, 'opus')).toBeNull()
+    expect(audioRateWarning(192_000, 0, null)).toBeNull()
   })
 })

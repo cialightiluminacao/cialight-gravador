@@ -66,6 +66,14 @@ describe('timelineUsAtCursorMs (inverso: tempo do cursor → timeline) e cursorT
     for (let t = item.startUs; t < item.startUs + item.durationUs; t += 7_919) {
       const ms = cursorTimeMs(p, item, t)!
       const back = timelineUsAtCursorMs(p, item, ms)
+      // fim do reverso: o sourceTimeUs prende a fonte em inUs (F5: nunca um quadro do trecho cortado) — vários
+      // instantes mostram o mesmo quadro e a ida e volta não é única; o inverso cai fora do clipe ou num instante
+      // que mostra o mesmo quadro
+      const unclamped = item.inUs + (item.durationUs - (t - item.startUs)) * item.speed - 1e6 / 30
+      if (item.reverse && Math.round(unclamped) < item.inUs) {
+        if (back !== null) expect(cursorTimeMs(p, item, back)).toBe(ms)
+        continue
+      }
       expect(back).not.toBeNull()
       expect(Math.abs(back! - t)).toBeLessThanOrEqual(1)
     }

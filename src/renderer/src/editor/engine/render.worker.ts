@@ -2,12 +2,17 @@
 // Único caminho de render para preview e exportação ("preview = export"). Pedidos de quadro que chegam
 // durante um render são coalescidos (fica só o último); o cliente resolve os intermediários com o resultado dele.
 // Todo VideoFrame entregue ao compositor é fechado no mesmo quadro (ver posse em decoderPool.ts).
+// Fontes dos textos (F5): registradas/carregadas ao receber o projeto (text/fonts.ts); um quadro desenhado com a
+// fonte de reserva sai com `fontsPending` e é redesenhado quando a fonte carrega; a exportação espera as fontes.
 //
 // Exportação (`exportStart`, numa instância própria com o canvas na resolução de saída): para n = 0..N−1,
 // tUs = fromUs + frameToUs(n, fps) → o mesmo composeAt do preview (fontes originais/intermediárias, sequencial)
-// → VideoSample(canvas) → VideoSampleSource H.264; o áudio vem em blocos de 100 ms do audio worker de
+// → VideoSample(canvas) → VideoSampleSource H.264 (ou HEVC, só hardware); o áudio vem em blocos de 100 ms do audio worker de
 // exportação pela MessagePort, em ordem, → AudioSampleSource (AAC, ou Opus se AAC indisponível). O MP4
 // (mdat antes do moov; o main remuxa com faststart) sai em chunks `exportChunk` com contrapressão por `chunkAck`.
+// Quadros (`exportFramesStart`: GIF; fallback libx264): o mesmo laço de quadros, mas cada quadro é lido do canvas
+// (RGBA de cima para baixo) e sai em `exportFrame`, com até FRAMES_MAX_INFLIGHT sem ack. Quadro único
+// (`exportStill`): composeAt → canvas.convertToBlob PNG (opaco: o contexto não tem alfa e o fundo é desenhado).
 import {
   AudioSample,
   AudioSampleSource,
@@ -28,13 +33,17 @@ import { grayFromRgba, layersBelowEffect, startTracker, trackFrameTimes, trackNe
 import type { Session } from '@shared/types'
 import { drawStrokes } from '@shared/compositor'
 import { FILE_PROTOCOL } from '@shared/ipc'
-import { h264LevelFor } from '@/engine/encoderSupport'
+import { h264LevelFor, hevcCodecString } from '@/engine/encoderSupport'
 import { Compositor, type SourceMeta } from './compositor/compositor'
 import { DecoderPool } from './decoderPool'
+import { assignSlots, decodedLayers, firstDrawUs, flatLayers, type SlotMap } from './layerSources'
+import { loadFonts, registerAppFonts } from './text/fonts'
+import { fontFamilyOf, projectFontRequests, type FontRequest } from './text/fontRequests'
+import { fontReady } from './text/textRaster'
 import { SR } from './audio/mixer'
 import type { AudioIn, AudioOut } from './audio/protocol'
 import { frameCount } from '../export/exportPlan'
-import type { ExportJobSpec, RenderIn, RenderOut, TrackJobSpec } from './protocol'
+import type { ExportJobSpec, FramesJobSpec, RenderIn, RenderOut, TrackJobSpec } from './protocol'
 
 type FrameMsg = Extract<RenderIn, { t: 'frame' }>
 
@@ -60,6 +69,15 @@ const sessions = new Map<string, { load: Promise<void>; session: Session | null;
 let annCanvas: OffscreenCanvas | null = null
 // itens já aquecidos nesta reprodução (zera ao pausar/seek)
 const prefetched = new Set<string>()
+// slots de decoder do último quadro composto (assignSlots: o item mantém o iterador de um quadro para o outro)
+let lastSlots: SlotMap = new Map()
+// último quadro pedido (redesenho quando uma fonte pendente carrega) e se há redesenho por fazer
+let lastFrame: FrameMsg | null = null
+let fontRedraw = false
+// fontes já pedidas ao FontFaceSet (cada uma uma vez)
+const fontLoads = new Map<string, Promise<string[]>>()
+
+registerAppFonts()
 
 self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
   const m = e.data
@@ -75,6 +93,7 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
         break
       case 'project': {
         project = m.project
+        void requestFonts(projectFontRequests(m.project))
         const urls: Record<string, string> = {}
         const videoTracks: Record<string, number> = {}
         for (const [id, u] of Object.entries(m.mediaUrls)) {
@@ -118,6 +137,12 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
       case 'testBench':
         void bench(m)
         break
+      case 'memStats':
+        post({ t: 'memStats', id: m.id, stats: compositor?.memoryStats() ?? null })
+        break
+      case 'testTextureBudget':
+        compositor?.setTextureBudget(m.bytes)
+        break
       case 'readPixels': {
         const data = compositor ? compositor.readPixels(m.x, m.y, m.w, m.h) : new Uint8Array(0)
         post({ t: 'pixels', id: m.id, data }, [data.buffer])
@@ -146,6 +171,12 @@ self.addEventListener('message', (e: MessageEvent<RenderIn>) => {
       case 'trackCancel':
         if (tracking?.jobId === m.jobId) tracking.abort.abort()
         break
+      case 'exportFramesStart':
+        startFrames(m.job)
+        break
+      case 'exportStill':
+        void exportStill(m.id, m.tUs)
+        break
     }
   } catch (err) {
     post({ t: 'error', message: errMsg(err), fatal: m.t === 'init' })
@@ -168,20 +199,82 @@ async function pump(): Promise<void> {
   } finally {
     busy = false
   }
+  if (fontRedraw) void redrawForFonts()
+}
+
+/** Pede ao FontFaceSet as fontes (cada uma uma vez); resolve quando todas carregaram ou falharam. */
+function requestFonts(reqs: readonly FontRequest[], warn = true): Promise<string[]> {
+  return Promise.all(
+    reqs.map((r) => {
+      const key = `${r.font}|${r.text}`
+      let load = fontLoads.get(key)
+      if (!load) {
+        // cada texto digitado gera uma chave nova: o mapa não cresce sem limite (pedir de novo é barato)
+        if (fontLoads.size >= 256) fontLoads.clear()
+        load = loadFonts([r]).then((failed) => {
+          // não carregou (erro ou prazo): sai do mapa — o próximo pedido tenta de novo
+          if (failed.length) fontLoads.delete(key)
+          return failed.map((f) => fontFamilyOf(f.font))
+        })
+        fontLoads.set(key, load)
+      }
+      return load
+    })
+  ).then((lists) => {
+    const families = [...new Set(lists.flat())]
+    // preview: aviso (o editor mostra um toast por família); a exportação junta nos avisos do fim
+    if (warn && families.length) post({ t: 'fontWarning', families })
+    return families
+  })
+}
+
+/** Redesenha quando alguma das fontes pendentes ficar pronta (fonte que não carrega nunca: sem laço de redesenho). */
+function redrawWhenLoaded(reqs: readonly FontRequest[]): void {
+  void requestFonts(reqs).then(() => {
+    if (reqs.some((r) => fontReady(r.font, r.text))) void redrawForFonts()
+  })
+}
+
+/**
+ * Fonte que faltava carregou: redesenha o último quadro pedido (só o canvas; nada de `rendered`). Com um quadro em
+ * andamento ou na fila, fica para depois dele (pump) — esse já sai com a fonte, ou pede outro redesenho.
+ */
+async function redrawForFonts(): Promise<void> {
+  fontRedraw = true
+  // tocando, o próximo quadro já vem com a fonte (redesenhar aqui seria um seek no meio dos iteradores da reprodução)
+  if (lastFrame?.playing) {
+    fontRedraw = false
+    return
+  }
+  if (busy || pending || exporting || !lastFrame || !project) return
+  fontRedraw = false
+  busy = true
+  try {
+    const { fontsPending } = await composeAt(project, lastFrame.tUs, false)
+    if (!lastFrame.playing) pool.releaseAll()
+    if (fontsPending.length) redrawWhenLoaded(fontsPending)
+  } catch {
+    // o próximo quadro pedido mostra o erro, se ele persistir
+  } finally {
+    busy = false
+  }
+  if (pending) void pump()
 }
 
 async function renderFrame(m: FrameMsg): Promise<void> {
   const t0 = performance.now()
   const p = project
   if (!compositor || !p || !canvas) throw new Error('render antes de init/project')
-  const { missing, used } = await composeAt(p, m.tUs, m.playing)
+  lastFrame = m
+  const { missing, used, fontsPending } = await composeAt(p, m.tUs, m.playing)
+  if (fontsPending.length) redrawWhenLoaded(fontsPending)
   // buffers de reprodução só para o que está no quadro (e o que vai começar) e só durante a reprodução
   if (m.playing) pool.releaseExcept([...used, ...prefetchUpcoming(p, m.tUs, used)])
   else {
     prefetched.clear()
     pool.releaseAll()
   }
-  post({ t: 'rendered', seq: m.seq, tUs: m.tUs, ms: performance.now() - t0, missing: [...missing] })
+  post({ t: 'rendered', seq: m.seq, tUs: m.tUs, ms: performance.now() - t0, missing: [...missing], ...(fontsPending.length ? { fontsPending: true } : {}) })
 }
 
 /**
@@ -190,7 +283,7 @@ async function renderFrame(m: FrameMsg): Promise<void> {
  * (iterador por entrada do pool); senão, seek. `belowFx`: só as camadas abaixo desse efeito (rastreamento, R10).
  * Devolve os assets ausentes e as entradas [asset, slot] usadas.
  */
-async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { drawMs: number }, belowFx?: string): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][] }> {
+async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { drawMs: number }, belowFx?: string): Promise<{ missing: Set<string>; missingAnnotations: Set<string>; used: [string, number][]; fontsPending: readonly FontRequest[] }> {
   const comp = compositor
   if (!comp || !canvas) throw new Error('render antes de init')
   const W = canvas.width
@@ -202,15 +295,18 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
   const missing = new Set<string>()
   const missingAnnotations = new Set<string>()
   const frames: VideoFrame[] = []
-  // mesmo asset em mais de uma camada no quadro: cada uma com seu slot (iterador próprio)
-  const slots = new Map<string, number>()
-  const used: [string, number][] = []
+  // mesmo asset em mais de uma camada no quadro: cada uma com seu slot (iterador próprio), estável entre quadros
+  const flat = flatLayers(layers)
+  const slots = assignSlots(decodedLayers(p.assets, flat), lastSlots)
+  lastSlots = slots
+  const used: [string, number][] = [...slots.values()].map((s): [string, number] => [s.assetId, s.slot])
 
   try {
     // allSettled + try/catch por camada: nenhuma camada aborta a coleta das outras, e todo quadro
     // obtido entra em `frames` antes do finally (sem vazamento quando uma camada falha).
+    // fontes também das camadas de A e B das transições (flatLayers)
     await Promise.allSettled(
-      layers.map(async (layer) => {
+      flat.map(async (layer) => {
         if (layer.kind === 'annotations') {
           await loadSession(layer.sessionId)
           if (!sessions.get(layer.sessionId)?.session) missingAnnotations.add(layer.sessionId)
@@ -228,9 +324,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
                 meta.set(layer.itemId, { w: bmp.width, h: bmp.height, rotation: 0 })
               }
             } else {
-              const slot = slots.get(asset.id) ?? 0
-              slots.set(asset.id, slot + 1)
-              used.push([asset.id, slot])
+              const slot = slots.get(layer.itemId)?.slot ?? 0
               const sample = await pool.frameAt(asset.id, layer.srcUs, sequential, slot)
               if (sample) {
                 try {
@@ -264,7 +358,7 @@ async function composeAt(p: Project, tUs: Us, sequential: boolean, timing?: { dr
   } finally {
     for (const f of frames) f.close()
   }
-  return { missing, missingAnnotations, used }
+  return { missing, missingAnnotations, used, fontsPending: comp.pendingFonts }
 }
 
 /** Teste de desempenho: quadros sequenciais (como na reprodução), com o tempo do compositor medido com sync da GPU. */
@@ -289,8 +383,9 @@ async function bench(m: Extract<RenderIn, { t: 'testBench' }>): Promise<void> {
 }
 
 /**
- * Reprodução: aquece o decoder dos itens que começam em até PREFETCH_US (uma vez por item), no slot e
- * na posição da fonte do quadro em que começam. Devolve as entradas a manter fora do releaseExcept.
+ * Reprodução: aquece o decoder dos itens que passam a ser desenhados em até PREFETCH_US (uma vez por item), no slot e
+ * na posição da fonte do quadro em que aparecem — o B de uma transição aparece no início da janela (corte − d/2),
+ * congelado no 1º quadro. Devolve as entradas a manter fora do releaseExcept.
  * Não mexe numa entrada em uso no quadro atual (reposicionar o iterador quebraria a reprodução dela).
  */
 function prefetchUpcoming(p: Project, tUs: number, used: [string, number][]): [string, number][] {
@@ -299,23 +394,18 @@ function prefetchUpcoming(p: Project, tUs: number, used: [string, number][]): [s
   for (const track of p.tracks) {
     if (track.hidden) continue
     for (const item of track.items) {
-      if (item.type !== 'media' || item.enabled === false || item.startUs <= tUs || item.startUs > tUs + PREFETCH_US) continue
-      // slots como em renderFrame: ordem das camadas de vídeo com asset disponível
-      const slots = new Map<string, number>()
-      for (const layer of resolveFrame(p, item.startUs)) {
-        if (layer.kind !== 'media' || layer.srcUs === null) continue
-        const asset = p.assets.find((a) => a.id === layer.assetId)
-        if (!asset || asset.status === 'missing') continue
-        const slot = slots.get(asset.id) ?? 0
-        slots.set(asset.id, slot + 1)
-        if (layer.itemId !== item.id) continue
-        if (busyKeys.has(`${asset.id}#${slot}`)) break
-        keep.push([asset.id, slot])
-        if (!prefetched.has(item.id)) {
-          prefetched.add(item.id)
-          pool.prefetch(asset.id, layer.srcUs, slot)
-        }
-        break
+      if (item.type !== 'media' || item.enabled === false) continue
+      const atUs = firstDrawUs(track, item)
+      if (atUs <= tUs || atUs > tUs + PREFETCH_US) continue
+      // slot que composeAt vai dar ao item quando ele aparecer (assignSlots a partir dos slots do quadro atual)
+      const flat = flatLayers(resolveFrame(p, atUs))
+      const layer = flat.find((l) => l.kind === 'media' && l.itemId === item.id)
+      const s = assignSlots(decodedLayers(p.assets, flat), lastSlots).get(item.id)
+      if (!s || layer?.kind !== 'media' || layer.srcUs === null || busyKeys.has(`${s.assetId}#${s.slot}`)) continue
+      keep.push([s.assetId, s.slot])
+      if (!prefetched.has(item.id)) {
+        prefetched.add(item.id)
+        pool.prefetch(s.assetId, layer.srcUs, s.slot)
       }
     }
   }
@@ -362,8 +452,13 @@ const AUDIO_BLOCK_US = 100_000
 const AUDIO_AHEAD = 4
 const AUDIO_LEAD_US = 200_000
 const AUDIO_CHANNELS = 2
+// taxas de AAC tentadas abaixo da pedida antes de cair para Opus
+const AAC_FALLBACK_BPS = [256_000, 192_000, 160_000, 128_000]
 
-let exporting: { jobId: string; abort: AbortController; outbox: ChunkOutbox } | null = null
+// quadros RGBA em voo (GIF: o renderer espera cada pipeWrite antes do ack)
+const FRAMES_MAX_INFLIGHT = 2
+
+let exporting: { jobId: string; abort: AbortController; outbox: { ack(seq: number): void } } | null = null
 
 class Cancelled extends Error {
   constructor() {
@@ -392,13 +487,13 @@ async function encoderCall<T>(fn: () => Promise<T>): Promise<T> {
 // Bloco de áudio que não chega nesse tempo: o audio worker morreu ou travou → erro claro (sem pendurar).
 const AUDIO_BLOCK_TIMEOUT_MS = 20_000
 
-/** Fila de chunks do MP4 com contrapressão: com muitos em voo, espera o ack do cliente (gravou no disco). */
-class ChunkOutbox {
+/** Janela de contrapressão: numera o que sai e, com mais de `max` sem ack do cliente, espera. */
+class AckWindow {
   private seq = 0
   private acked = 0
   private waiter: (() => void) | null = null
 
-  constructor(private readonly jobId: string, private readonly signal: AbortSignal) {
+  constructor(private readonly max: number, private readonly signal: AbortSignal) {
     signal.addEventListener('abort', () => this.release())
   }
 
@@ -406,9 +501,13 @@ class ChunkOutbox {
     return this.seq
   }
 
+  next(): number {
+    return ++this.seq
+  }
+
   ack(seq: number): void {
     this.acked = Math.max(this.acked, seq)
-    if (this.seq - this.acked <= EXPORT_MAX_INFLIGHT) this.release()
+    if (this.seq - this.acked <= this.max) this.release()
   }
 
   private release(): void {
@@ -417,17 +516,39 @@ class ChunkOutbox {
     w?.()
   }
 
-  async send(chunk: StreamTargetChunk): Promise<void> {
+  /** Depois de enviar: espera enquanto houver mais de `max` em voo (cancelado → Cancelled). */
+  async wait(): Promise<void> {
     if (this.signal.aborted) throw new Cancelled()
-    const data = chunk.data.slice()
-    this.seq++
-    post({ t: 'exportChunk', jobId: this.jobId, seq: this.seq, data, position: chunk.position }, [data.buffer])
-    if (this.seq - this.acked > EXPORT_MAX_INFLIGHT) {
+    if (this.seq - this.acked > this.max) {
       await new Promise<void>((resolve) => {
         this.waiter = resolve
       })
       if (this.signal.aborted) throw new Cancelled()
     }
+  }
+}
+
+/** Fila de chunks do MP4 com contrapressão: com muitos em voo, espera o ack do cliente (gravou no disco). */
+class ChunkOutbox {
+  private readonly win: AckWindow
+
+  constructor(private readonly jobId: string, private readonly signal: AbortSignal) {
+    this.win = new AckWindow(EXPORT_MAX_INFLIGHT, signal)
+  }
+
+  get lastSeq(): number {
+    return this.win.lastSeq
+  }
+
+  ack(seq: number): void {
+    this.win.ack(seq)
+  }
+
+  async send(chunk: StreamTargetChunk): Promise<void> {
+    if (this.signal.aborted) throw new Cancelled()
+    const data = chunk.data.slice()
+    post({ t: 'exportChunk', jobId: this.jobId, seq: this.win.next(), data, position: chunk.position }, [data.buffer])
+    await this.win.wait()
   }
 }
 
@@ -521,31 +642,43 @@ async function runExport(
   signal: AbortSignal,
   outbox: ChunkOutbox,
   state: { packets: number }
-): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[] }> {
+): Promise<{ videoCodec: string; audioCodec: 'aac' | 'opus' | null; audioBitrate: number; hardware: ExportJobSpec['video']['hw']; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[] }> {
   const p = project
   if (!compositor || !canvas || !p) throw new Error('exportação antes de init/project')
   compositor.resize(job.width, job.height)
   selection = []
   prefetched.clear()
+  // fontes dos textos carregadas antes do 1º quadro (nenhum quadro exportado com a fonte de reserva)
+  const missingFonts = await requestFonts(projectFontRequests(p), false)
   const durationUs = job.toUs - job.fromUs
   const total = frameCount(job.fromUs, job.toUs, job.fps)
   if (total <= 0) throw new Error('Intervalo de exportação vazio')
 
   let audioCodec: 'aac' | 'opus' | null = null
+  let audioBitrate = job.audio?.bitrate ?? 0
   if (job.audio && audioPort) {
-    const opts = { numberOfChannels: AUDIO_CHANNELS, sampleRate: SR, quality: new Quality({ bitrate: job.audio.bitrate }) }
-    if (await canEncodeAudio('aac', opts)) audioCodec = 'aac'
-    else if (await canEncodeAudio('opus', opts)) audioCodec = 'opus'
-    else throw new Error('Nenhum codificador de áudio disponível (AAC ou Opus)')
+    const opts = (bitrate: number): Parameters<typeof canEncodeAudio>[1] => ({ numberOfChannels: AUDIO_CHANNELS, sampleRate: SR, quality: new Quality({ bitrate }) })
+    // AAC primeiro, na taxa pedida ou na maior aceita abaixo dela (o AAC do Windows não aceita 320 kbps); Opus só sem AAC
+    const aacRate = [job.audio.bitrate, ...AAC_FALLBACK_BPS.filter((b) => b < job.audio!.bitrate)]
+    for (const b of aacRate) {
+      if (await canEncodeAudio('aac', opts(b))) {
+        audioCodec = 'aac'
+        audioBitrate = b
+        break
+      }
+    }
+    if (!audioCodec && (await canEncodeAudio('opus', opts(job.audio.bitrate)))) audioCodec = 'opus'
+    if (!audioCodec) throw new Error('Nenhum codificador de áudio disponível (AAC ou Opus)')
   }
 
-  const videoCodec = h264LevelFor(job.width, job.height, job.fps)
+  const hevc = job.video.codec === 'hevc'
+  const videoCodec = hevc ? hevcCodecString(job.width, job.height, job.fps) : h264LevelFor(job.width, job.height, job.fps)
   const output = new Output({
     format: new Mp4OutputFormat({ fastStart: false }),
     target: new StreamTarget(new WritableStream<StreamTargetChunk>({ write: (chunk) => outbox.send(chunk) }), { chunked: true, chunkSize: EXPORT_CHUNK_BYTES })
   })
   const video = new VideoSampleSource({
-    codec: 'avc',
+    codec: job.video.codec,
     fullCodecString: videoCodec,
     quality: new Quality({ bitrate: job.video.bitrate }),
     keyFrameInterval: job.video.keyFrameIntervalS,
@@ -556,13 +689,15 @@ async function runExport(
     }
   })
   output.addVideoTrack(video, { frameRate: job.fps })
-  const audio = audioCodec ? new AudioSampleSource({ codec: audioCodec, quality: new Quality({ bitrate: job.audio!.bitrate }) }) : null
+  const audio = audioCodec ? new AudioSampleSource({ codec: audioCodec, quality: new Quality({ bitrate: audioBitrate }) }) : null
   if (audio) output.addAudioTrack(audio)
   const feed = audio && audioPort ? new AudioFeed(audioPort, job.fromUs, durationUs, signal) : null
 
   try {
     await encoderCall(() => output.start())
+    if (job.simulateHevcFailure && hevc) throw new EncoderError('falha simulada do encoder HEVC')
     if (job.simulateHwFailure && job.video.hw === 'prefer-hardware') throw new EncoderError('falha simulada do encoder de hardware')
+    if (job.simulateSoftwareFailure && job.video.hw === 'prefer-software') throw new EncoderError('falha simulada do encoder em software')
     const frameDur = 1 / job.fps
     let lastReport = 0
     // fontes que falharam (arquivo ausente, decoder que quebrou no meio…): o quadro sai com o placeholder,
@@ -595,7 +730,7 @@ async function runExport(
     if (feed) await feed.feed(audio!, Infinity)
     if (signal.aborted) throw new Cancelled()
     await encoderCall(() => output.finalize())
-    return { videoCodec, audioCodec, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations] }
+    return { videoCodec, audioCodec, audioBitrate: audioCodec ? audioBitrate : 0, hardware: job.video.hw, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations], missingFonts }
   } catch (err) {
     if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {})
     throw err
@@ -624,6 +759,26 @@ function startTracking(job: TrackJobSpec): void {
     })
     .finally(() => {
       if (tracking === me) tracking = null
+    })
+}
+
+function startFrames(job: FramesJobSpec): void {
+  if (exporting) {
+    post({ t: 'exportError', jobId: job.jobId, message: 'Já existe uma exportação em andamento neste worker', cancelled: false, beforeFirstPacket: false, encoderError: false })
+    return
+  }
+  const abort = new AbortController()
+  const win = new AckWindow(FRAMES_MAX_INFLIGHT, abort.signal)
+  const me = { jobId: job.jobId, abort, outbox: win }
+  exporting = me
+  runFrames(job, abort.signal, win)
+    .then((done) => post({ t: 'exportFramesDone', jobId: job.jobId, ...done }))
+    .catch((err: unknown) => {
+      const cancelled = abort.signal.aborted || err instanceof Cancelled
+      post({ t: 'exportError', jobId: job.jobId, message: cancelled ? 'cancelado' : errMsg(err), cancelled, beforeFirstPacket: false, encoderError: false })
+    })
+    .finally(() => {
+      if (exporting === me) exporting = null
       prefetched.clear()
       pool.releaseAll()
     })
@@ -655,6 +810,59 @@ async function runTracking(job: TrackJobSpec, signal: AbortSignal): Promise<Trac
     post({ t: 'trackProgress', jobId: job.jobId, frame: n + 1, total: times.length, result: step.result })
   }
   return results
+}
+
+/** Laço de quadros da exportação (o mesmo do vídeo), com cada quadro lido do canvas e enviado em RGBA. */
+async function runFrames(job: FramesJobSpec, signal: AbortSignal, win: AckWindow): Promise<{ frames: number; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[] }> {
+  const p = project
+  const comp = compositor
+  if (!comp || !canvas || !p) throw new Error('exportação antes de init/project')
+  comp.resize(job.width, job.height)
+  selection = []
+  prefetched.clear()
+  // fontes dos textos carregadas antes do 1º quadro (como no vídeo)
+  const missingFonts = await requestFonts(projectFontRequests(p), false)
+  const total = frameCount(job.fromUs, job.toUs, job.fps)
+  if (total <= 0) throw new Error('Intervalo de exportação vazio')
+  const missingFrames = new Map<string, number>()
+  const missingAnnotations = new Set<string>()
+  for (let n = 0; n < total; n++) {
+    if (signal.aborted) throw new Cancelled()
+    const tUs = job.fromUs + frameToUs(n, job.fps)
+    const composed = await composeAt(p, tUs, true)
+    for (const id of composed.missing) missingFrames.set(id, (missingFrames.get(id) ?? 0) + 1)
+    for (const id of composed.missingAnnotations) missingAnnotations.add(id)
+    // RGBA de cima para baixo (o readPixels do compositor já desvira o framebuffer)
+    const px = comp.readPixels(0, 0, job.width, job.height)
+    post({ t: 'exportFrame', jobId: job.jobId, seq: win.next(), total, rgba: px.buffer as ArrayBuffer, w: job.width, h: job.height }, [px.buffer])
+    pool.releaseExcept([...composed.used, ...prefetchUpcoming(p, tUs, composed.used)])
+    await win.wait()
+  }
+  return { frames: total, missing: [...missingFrames].map(([assetId, frames]) => ({ assetId, frames })), missingAnnotations: [...missingAnnotations], missingFonts }
+}
+
+/** Quadro único (PNG) no tamanho do canvas: composeAt (seek) → convertToBlob. */
+async function exportStill(id: number, tUs: Us): Promise<void> {
+  let missing: string[] = []
+  let missingAnnotations: string[] = []
+  let missingFonts: string[] = []
+  try {
+    const p = project
+    if (!compositor || !canvas || !p) throw new Error('quadro antes de init/project')
+    selection = []
+    // fontes dos textos carregadas antes do quadro (nunca o PNG com a fonte de reserva)
+    missingFonts = await requestFonts(projectFontRequests(p), false)
+    const composed = await composeAt(p, tUs, false)
+    missing = [...composed.missing]
+    missingAnnotations = [...composed.missingAnnotations]
+    // preserveDrawingBuffer: o desenho continua no canvas até o blob ficar pronto (nada mais desenha nesta instância)
+    const png = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer()
+    post({ t: 'still', id, png, missing, missingAnnotations, missingFonts }, [png])
+  } catch (err) {
+    post({ t: 'still', id, png: null, error: errMsg(err), missing, missingAnnotations, missingFonts })
+  } finally {
+    pool.releaseAll()
+  }
 }
 
 function errMsg(err: unknown): string {

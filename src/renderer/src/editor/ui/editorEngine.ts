@@ -53,6 +53,14 @@ export function createEditorEngine(opts: { stallMs?: number } = {}): EditorEngin
   const watchdog = new RenderWatchdog(opts.stallMs ?? RENDER_STALL_MS)
   const offRender = render.onMessage((m) => {
     if (m.t === 'rendered') watchdog.rendered()
+    // fonte de texto que não carregou: um aviso por família (o texto aparece com a fonte padrão)
+    if (m.t === 'fontWarning') {
+      for (const f of m.families) {
+        if (reported.has(`font:${f}`)) continue
+        reported.add(`font:${f}`)
+        toast.warning(`A fonte “${f}” não carregou`, { description: 'Os textos com ela aparecem com uma fonte padrão (e assim sairiam na exportação).' })
+      }
+    }
     if (m.t === 'error' && m.fatal && !reported.has('render:fatal')) {
       reported.add('render:fatal')
       toast.error('O visualizador parou de funcionar', { description: m.message })

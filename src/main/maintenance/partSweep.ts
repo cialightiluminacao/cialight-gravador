@@ -3,13 +3,16 @@ import { join } from 'path'
 
 // Limpeza de arquivos temporários (.part) que sobraram de uma queda/encerramento forçado: a ingestão grava
 // <nome>.part-<pid>-<n>.<ext> em proxies/ e cache/ dos projetos e a exportação do editor grava
-// <nome>.mp4.part na pasta de saída (que o numberedName ainda contaria como "ocupado"). Só arquivos com
-// esse padrão e com mais de 1 dia: nada em uso por esta ou outra instância é tocado.
+// <nome>.<mp4|gif|png|wav|mp3|m4a>.part (+ os temporários do GIF e da reserva libx264) na pasta de saída (que o numberedName
+// ainda contaria como "ocupado"). Só arquivos com esse padrão e com mais de 1 dia: nada em uso por esta ou
+// outra instância é tocado.
 
 export const STALE_PART_MS = 86_400_000
 
 const INGEST_PART = /\.part-\d+-\d+(\.[A-Za-z0-9]+)?$/
-const EXPORT_PART = /\.mp4\.part$/i
+// <nome>.<ext>.part do arquivo final, os temporários do GIF (<nome>.gif.ffv1.part, <nome>.gif.palette.part) e o
+// áudio PCM da reserva libx264 (<nome>.mp4.audio.part) — cada temporário só com a extensão que o gera
+const EXPORT_PART = /\.((mp4|gif|png|wav|mp3|m4a)|gif\.(ffv1|palette)|mp4\.audio)\.part$/i
 
 export const isIngestPart = (name: string): boolean => INGEST_PART.test(name)
 export const isExportPart = (name: string): boolean => EXPORT_PART.test(name)

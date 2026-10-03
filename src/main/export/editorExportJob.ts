@@ -1,7 +1,11 @@
 import { existsSync, mkdirSync, promises as fsp, renameSync, rmSync, statSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { numberedName, sanitizeFileName } from '@shared/filenames'
+import type { PipeSpec } from '@shared/ipc'
 import { runFfmpeg } from './ffmpegRunner'
+import { openFfmpegPipe, type FfmpegPipe } from './ffmpegPipe'
+import { audioPipeArgs, gifCapturePipeArgs, gifPaletteArgs, gifPaletteUseArgs, pipeExtension, validatePipeSpec, x264PipeArgs } from './pipeSpec'
+import { srtBesidePath } from '../captions/srtFiles'
 import { log } from '../log'
 
 // Arquivo de saída da exportação do editor (main). O render worker gera o MP4 (mdat antes do moov) e o
@@ -9,10 +13,34 @@ import { log } from '../log'
 // remuxa com `ffmpeg -c copy -movflags +faststart` para o nome final e apaga o .part; se o remux falhar (não
 // cancelado), o .part — um MP4 válido, só sem faststart — vira o arquivo final com um aviso: o render não se
 // perde. `cancel` apaga o parcial — e, no meio do remux, interrompe o ffmpeg e apaga a saída deste job.
-// Nunca sobrescreve: nome ocupado ganha " (2)", " (3)"… Uma exportação por vez.
+// Nunca sobrescreve: nome ocupado ganha " (2)", " (3)"… Uma exportação por vez (MP4, pipe ou quadro).
+//
+// Saídas por pipe (`openPipe`: GIF e só áudio): o renderer manda bytes crus (quadros RGBA / PCM f32) que vão
+// para o stdin do ffmpeg (ffmpegPipe, com contrapressão); o main valida o pedido (PipeSpec) e monta os
+// argumentos. GIF: passada 1 → FFV1 temporário `<nome>.gif.ffv1.part`; `pipeFinish` gera a paleta
+// (`<nome>.gif.palette.part`) e aplica → `<nome>.gif.part` → nome final. Os temporários ficam ao lado do .part
+// (a limpeza de .part antigos os alcança) e são apagados sempre — fim, falha ou cancelamento.
+// Fallback libx264 (`x264`): com áudio, os primeiros `samples` × 8 bytes são o PCM f32 estéreo do trecho, gravado
+// em `<nome>.audio.part`; completo o áudio, o ffmpeg abre (quadros do stdin + esse arquivo) e os bytes seguintes
+// são os quadros RGBA → `<nome>.part` (MP4 com faststart) → nome final. Sem áudio, o ffmpeg abre já no openPipe.
+// `writeStill` (quadro PNG): `.part` e rename, atômico.
 
 /** Espaço livre exigido = estimativa × isto (o .part e a cópia do remux coexistem no fim). */
 export const FREE_SPACE_FACTOR = 2.1
+
+interface PipeState {
+  spec: PipeSpec
+  /** null enquanto o x264 recebe o áudio (o ffmpeg só abre com o PCM completo no temporário). */
+  ff: FfmpegPipe | null
+  /** x264 com áudio: PCM f32 estéreo do trecho, gravado antes dos quadros no temporário `file`. */
+  audio?: { file: string; fh: fsp.FileHandle | null; need: number; queued: number; written: number }
+  /** Abre o ffmpeg (x264: depois do áudio). */
+  start?: () => FfmpegPipe
+  /** Bytes aceitos pelo ffmpeg (GIF: quadros × w·h·4). */
+  bytes: number
+  /** Temporários deste job (apagados no fim, na falha e no cancelamento). */
+  temps: string[]
+}
 
 interface Job {
   id: string
@@ -29,6 +57,12 @@ interface Job {
   remux: { abort: AbortController; done: Promise<void> } | null
   /** Saída criada por este job (só ela pode ser apagada num cancelamento/falha). */
   createdOut: string | null
+  /** Saída por pipe (GIF / só áudio / x264). */
+  pipe?: PipeState
+  /** cancel() em curso: o fim do áudio do x264 não abre mais o ffmpeg. */
+  cancelled?: boolean
+  /** ".srt ao lado": um `<nome>.srt` já existente também ocupa o nome (vídeo e legendas com o mesmo nome, nada sobrescrito). */
+  reserveSrt: boolean
 }
 
 export interface EditorExportOpened {
@@ -49,9 +83,31 @@ export interface EditorExportFinalized {
 export interface EditorExportDeps {
   /** Bytes livres no volume de `dir`. */
   freeBytes?: (dir: string) => Promise<number>
+  /** ffmpeg alimentado pelo stdin (testes injetam um falso). */
+  openPipe?: (args: string[], opts: { label?: string }) => FfmpegPipe
 }
 
-const isTaken = (dir: string) => (name: string): boolean => existsSync(join(dir, name)) || existsSync(join(dir, `${name}.part`))
+/** Gravações por pipe em voo por job: o renderer espera cada pipeWrite; acima disso o main recusa (memória limitada). */
+export const PIPE_MAX_INFLIGHT = 2
+
+/** Cancelamento esperado (pelo usuário, pela janela que fechou ou pela saída do app): não é erro. */
+export class ExportCancelledError extends Error {
+  constructor() {
+    super('cancelado')
+    this.name = 'ExportCancelledError'
+  }
+}
+
+/** Extensões de saída da exportação do editor (o formato decide). */
+export type EditorExportExt = 'mp4' | 'gif' | 'png' | 'wav' | 'mp3' | 'm4a'
+const MEDIA_EXT = /\.(mp4|mov|m4v|mkv|webm|gif|png|mp3|wav|m4a)$/i
+
+/**
+ * Nome ocupado na pasta: o arquivo, o `.part` de outra exportação (exceto o do próprio job, `self`) e, com `reserveSrt`,
+ * o `.srt` de mesmo nome.
+ */
+const isTaken = (dir: string, reserveSrt: boolean, self?: string) => (name: string): boolean =>
+  existsSync(join(dir, name)) || (name !== self && existsSync(join(dir, `${name}.part`))) || (reserveSrt && existsSync(srtBesidePath(join(dir, name))))
 
 /** rmSync que nunca lança (arquivo preso pelo antivírus/Explorer não pode derrubar o fluxo). */
 function safeRm(path: string): void {
@@ -69,21 +125,36 @@ async function defaultFreeBytes(dir: string): Promise<number> {
 
 const fmtMB = (b: number): string => `${Math.ceil(b / 1048576).toLocaleString('pt-BR')} MB`
 
-/** Nome final saneado e com extensão .mp4. */
-export function editorExportFileName(fileName: string): string {
+/** Chave de comparação de caminhos (absoluto normalizado; sem caixa no Windows). */
+function outputKey(p: string): string {
+  const r = resolve(p)
+  return process.platform === 'win32' ? r.toLowerCase() : r
+}
+
+/** Nome final saneado e com a extensão do formato (uma extensão de mídia diferente digitada é trocada). */
+export function editorExportFileName(fileName: string, ext: EditorExportExt = 'mp4'): string {
+  const hasExt = (n: string): boolean => n.toLowerCase().endsWith(`.${ext}`) && n.length > ext.length + 1
   let name = sanitizeFileName(fileName.trim())
+  if (hasExt(name)) return name
+  name = name.replace(MEDIA_EXT, '').trim()
+  if (hasExt(name)) return name
   if (!name) name = 'Vídeo'
-  if (!/\.mp4$/i.test(name)) name = sanitizeFileName(`${name}.mp4`)
-  return name
+  return sanitizeFileName(`${name}.${ext}`)
 }
 
 export class EditorExportJobs {
   private readonly jobs = new Map<string, Job>()
+  /** Jobs cancelados (os últimos): uma chamada atrasada para eles é cancelamento, não "não encontrada". */
+  private readonly cancelledIds = new Set<string>()
   private seq = 0
+  /** Saídas concluídas nesta sessão (chave normalizada): só ao lado delas o main grava o .srt. */
+  private readonly completed = new Set<string>()
   private readonly freeBytes: (dir: string) => Promise<number>
+  private readonly openFfmpegPipe: (args: string[], opts: { label?: string }) => FfmpegPipe
 
   constructor(deps: EditorExportDeps = {}) {
     this.freeBytes = deps.freeBytes ?? defaultFreeBytes
+    this.openFfmpegPipe = deps.openPipe ?? ((args, opts) => openFfmpegPipe(args, opts))
   }
 
   get busy(): boolean {
@@ -93,23 +164,12 @@ export class EditorExportJobs {
   /**
    * owner: webContents.id de quem abriu (os jobs dele são cancelados se a janela some).
    * estimateBytes: tamanho estimado; exige estimate × FREE_SPACE_FACTOR livres na pasta.
+   * reserveSrt: o .srt vai ao lado — `<nome>.srt` existente também conta como nome ocupado.
    */
-  async open(outputDir: string, fileName: string, owner = 0, estimateBytes = 0): Promise<EditorExportOpened> {
-    if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
-    if (!outputDir) throw new Error('Pasta de destino não definida')
-    mkdirSync(outputDir, { recursive: true })
-    if (estimateBytes > 0) {
-      const need = estimateBytes * FREE_SPACE_FACTOR
-      const free = await this.freeBytes(outputDir)
-      if (free < need) throw new Error(`Espaço insuficiente na pasta de destino: são necessários cerca de ${fmtMB(need)} livres (há ${fmtMB(free)}). Libere espaço ou escolha outra pasta.`)
-    }
-    if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
+  async open(outputDir: string, fileName: string, owner = 0, estimateBytes = 0, reserveSrt = false): Promise<EditorExportOpened> {
     const requested = editorExportFileName(fileName)
-    const name = numberedName(requested, isTaken(outputDir))
-    const part = join(outputDir, `${name}.part`)
-    const id = `edx-${Date.now()}-${++this.seq}`
-    const job: Job = { id, owner, dir: outputDir, requested, name, part, fh: null, writes: new Set(), remux: null, createdOut: null }
-    this.jobs.set(id, job) // reserva antes do await: outra abertura simultânea já vê o job
+    const job = await this.reserve(outputDir, estimateBytes, owner, requested, reserveSrt)
+    const { id, name, part } = job
     try {
       job.fh = await fsp.open(part, 'w')
     } catch (e) {
@@ -118,6 +178,16 @@ export class EditorExportJobs {
     }
     log.info(`exportação do editor ${id}: ${part}`)
     return { jobId: id, path: join(outputDir, name) }
+  }
+
+  /** `path` é o arquivo final de uma exportação concluída nesta sessão (não um caminho qualquer vindo do renderer)? */
+  isCompletedOutput(path: string): boolean {
+    return typeof path === 'string' && path !== '' && this.completed.has(outputKey(path))
+  }
+
+  /** O .srt ao lado já foi gravado: a saída deixa de aceitar outro (um uso por exportação). */
+  consumeCompletedOutput(path: string): void {
+    this.completed.delete(outputKey(path))
   }
 
   async write(jobId: string, data: Uint8Array, position: number): Promise<void> {
@@ -150,7 +220,7 @@ export class EditorExportJobs {
     if (job.remux) throw new Error('finalização já em andamento')
     await this.closeHandle(job)
     // nome ocupado enquanto exportava (outro programa): próximo número livre, sem contar o próprio .part
-    const name = numberedName(job.requested, (n) => existsSync(join(job.dir, n)) || (n !== job.name && existsSync(join(job.dir, `${n}.part`))))
+    const name = numberedName(job.requested, isTaken(job.dir, job.reserveSrt, job.name))
     const out = join(job.dir, name)
     const abort = new AbortController()
     let release: () => void = () => {}
@@ -168,7 +238,7 @@ export class EditorExportJobs {
         }
       )
       if (!existedBefore && existsSync(out)) job.createdOut = out
-      if (r.cancelled || abort.signal.aborted) throw new Error('cancelado')
+      if (r.cancelled || abort.signal.aborted) throw new ExportCancelledError()
       const size = statSync(out).size
       if (opts.maxBytes && size > opts.maxBytes) {
         safeRm(out)
@@ -176,12 +246,13 @@ export class EditorExportJobs {
         return { path: out, size, oversize: true }
       }
       job.createdOut = null // concluída: a saída é do usuário
+      this.completed.add(outputKey(out))
       return { path: out, size }
     } catch (e) {
       if (!existedBefore && existsSync(out)) job.createdOut = out
       if (job.createdOut) safeRm(job.createdOut)
       job.createdOut = null
-      if (abort.signal.aborted) throw e
+      if (abort.signal.aborted) throw new ExportCancelledError()
       // o remux falhou de verdade: o .part já é um MP4 completo (mdat antes do moov) — vira a saída
       const kept = this.keepPart(job, opts.maxBytes)
       if (!kept) throw e
@@ -195,10 +266,193 @@ export class EditorExportJobs {
     }
   }
 
+  /**
+   * Pasta definida, nenhuma exportação em andamento e espaço livre (estimativa × FREE_SPACE_FACTOR); então
+   * reserva o job (nome livre) na MESMA tarefa da última checagem: duas aberturas simultâneas nunca passam juntas.
+   */
+  private async reserve(outputDir: string, estimateBytes: number, owner: number, requested: string, reserveSrt = false): Promise<Job> {
+    if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
+    if (!outputDir) throw new Error('Pasta de destino não definida')
+    mkdirSync(outputDir, { recursive: true })
+    if (estimateBytes > 0) {
+      const need = estimateBytes * FREE_SPACE_FACTOR
+      const free = await this.freeBytes(outputDir)
+      if (free < need) throw new Error(`Espaço insuficiente na pasta de destino: são necessários cerca de ${fmtMB(need)} livres (há ${fmtMB(free)}). Libere espaço ou escolha outra pasta.`)
+    }
+    if (this.jobs.size > 0) throw new Error('Já existe uma exportação em andamento')
+    const name = numberedName(requested, isTaken(outputDir, reserveSrt))
+    const id = `edx-${Date.now()}-${++this.seq}`
+    const job: Job = { id, owner, dir: outputDir, requested, name, part: join(outputDir, `${name}.part`), fh: null, writes: new Set(), remux: null, createdOut: null, reserveSrt }
+    this.jobs.set(id, job)
+    return job
+  }
+
+  /** Nome livre no fim (ocupado enquanto exportava: o próximo número, sem contar o próprio .part). */
+  private finalName(job: Job): string {
+    return numberedName(job.requested, isTaken(job.dir, job.reserveSrt, job.name))
+  }
+
+  /**
+   * Saída por pipe (GIF / só áudio): valida o pedido, reserva o nome e abre o ffmpeg lendo o stdin.
+   * estimateBytes: espaço que a exportação ocupa (GIF: inclui o temporário sem perdas).
+   * reserveSrt (só o vídeo pelo x264): o .srt vai ao lado — `<nome>.srt` existente também conta como nome ocupado.
+   */
+  async openPipe(outputDir: string, fileName: string, rawSpec: unknown, owner = 0, estimateBytes = 0, reserveSrt = false): Promise<EditorExportOpened> {
+    const spec = validatePipeSpec(rawSpec)
+    const job = await this.reserve(outputDir, estimateBytes, owner, editorExportFileName(fileName, pipeExtension(spec)), reserveSrt && spec.kind === 'x264')
+    const { id, name, part } = job
+    try {
+      if (spec.kind === 'x264') {
+        const audioFile = spec.audio ? join(outputDir, `${name}.audio.part`) : null
+        const start = (): FfmpegPipe => this.openFfmpegPipe(x264PipeArgs(spec, part, audioFile), { label: 'editor: libx264 (reserva)' })
+        if (audioFile && spec.audio) {
+          const fh = await fsp.open(audioFile, 'w')
+          job.pipe = { spec, ff: null, audio: { file: audioFile, fh, need: spec.audio.samples * 8, queued: 0, written: 0 }, start, bytes: 0, temps: [audioFile] }
+        } else job.pipe = { spec, ff: start(), bytes: 0, temps: [] }
+      } else {
+        const temps = spec.kind === 'gif' ? [join(outputDir, `${name}.ffv1.part`), join(outputDir, `${name}.palette.part`)] : []
+        const args = spec.kind === 'gif' ? gifCapturePipeArgs(spec, temps[0]) : audioPipeArgs(spec, part)
+        job.pipe = { spec, ff: this.openFfmpegPipe(args, { label: spec.kind === 'gif' ? 'editor: GIF (quadros)' : `editor: áudio ${spec.format}` }), bytes: 0, temps }
+      }
+    } catch (e) {
+      this.jobs.delete(id)
+      throw e
+    }
+    log.info(`exportação do editor ${id} (${spec.kind}): ${part}`)
+    return { jobId: id, path: join(outputDir, name) }
+  }
+
+  /**
+   * Bytes para o stdin do ffmpeg; resolve quando ele os aceitou (contrapressão). Mais de PIPE_MAX_INFLIGHT em voo
+   * no job é recusado (o renderer espera cada um): o main nunca acumula quadros sem limite. owner: só a janela dona.
+   */
+  async pipeWrite(jobId: string, data: Uint8Array, owner?: number): Promise<void> {
+    const job = this.must(jobId, owner)
+    const pipe = job.pipe
+    if (!pipe) throw new Error('exportação sem pipe')
+    if (job.remux) throw new Error('finalização já em andamento')
+    if (job.writes.size >= PIPE_MAX_INFLIGHT) throw new Error(`gravações demais em andamento na exportação (máximo ${PIPE_MAX_INFLIGHT}): espere cada pipeWrite`)
+    const a = pipe.audio
+    if (a && a.queued < a.need) {
+      // x264: PCM do áudio (antes dos quadros), por posição no temporário
+      if (a.queued + data.byteLength > a.need) throw new Error('bytes de áudio além do declarado na exportação')
+      const position = a.queued
+      a.queued += data.byteLength
+      const p = this.writeAudio(job, a, data, position)
+      job.writes.add(p)
+      try {
+        await p
+      } finally {
+        job.writes.delete(p)
+      }
+      return
+    }
+    if (!pipe.ff) throw new Error('áudio da exportação ainda sendo gravado')
+    const p = pipe.ff.write(data)
+    job.writes.add(p)
+    try {
+      await p
+      pipe.bytes += data.byteLength
+    } finally {
+      job.writes.delete(p)
+    }
+  }
+
+  /** Grava um pedaço do áudio do x264; com o áudio completo, fecha o temporário e abre o ffmpeg. */
+  private async writeAudio(job: Job, a: NonNullable<PipeState['audio']>, data: Uint8Array, position: number): Promise<void> {
+    const fh = a.fh
+    if (!fh) throw new Error('áudio da exportação já fechado')
+    let off = 0
+    while (off < data.byteLength) off += (await fh.write(data, off, data.byteLength - off, position + off)).bytesWritten
+    a.written += data.byteLength
+    const pipe = job.pipe!
+    if (a.written === a.need && !pipe.ff && !job.cancelled) {
+      a.fh = null
+      await fh.close()
+      if (job.cancelled) return // cancelado enquanto fechava
+      pipe.ff = pipe.start!()
+    }
+  }
+
+  /**
+   * Fecha o stdin e espera o ffmpeg; GIF: paleta + paletteuse (onProgress 0–1 pela duração). Renomeia o .part
+   * para o nome final. Temporários apagados sempre; falha/cancelamento apaga o .part.
+   */
+  async pipeFinish(jobId: string, opts: { onProgress?: (fraction: number) => void; owner?: number; maxBytes?: number } = {}): Promise<EditorExportFinalized> {
+    const job = this.must(jobId, opts.owner)
+    const pipe = job.pipe
+    if (!pipe) throw new Error('exportação sem pipe')
+    if (job.remux) throw new Error('finalização já em andamento')
+    const abort = new AbortController()
+    let release: () => void = () => {}
+    job.remux = { abort, done: new Promise<void>((r) => (release = r)) }
+    abort.signal.addEventListener('abort', () => void pipe.ff?.abort())
+    let ok = false
+    try {
+      await Promise.allSettled([...job.writes])
+      if (abort.signal.aborted) throw new ExportCancelledError()
+      if (pipe.audio && pipe.audio.written !== pipe.audio.need) throw new Error(`áudio incompleto na exportação (${pipe.audio.written} de ${pipe.audio.need} bytes)`)
+      if (!pipe.ff) throw new Error('exportação sem ffmpeg')
+      const r = await pipe.ff.end()
+      if (r.cancelled || abort.signal.aborted) throw new ExportCancelledError()
+      if (pipe.spec.kind === 'gif') {
+        const { width, height, fps } = pipe.spec
+        const frames = Math.floor(pipe.bytes / (width * height * 4))
+        const durationUs = (frames / fps) * 1e6
+        const [lossless, palette] = pipe.temps
+        // paleta: lê o arquivo todo (até 20 %); paletteuse: o resto
+        const span = (from: number, to: number) => (p: { outTimeUs: number }): void => {
+          if (durationUs > 0) opts.onProgress?.(from + (to - from) * Math.min(1, Math.max(0, p.outTimeUs / durationUs)))
+        }
+        const p1 = await runFfmpeg(gifPaletteArgs(lossless, palette), { label: 'editor: GIF (paleta)', signal: abort.signal, onProgress: span(0, 0.2) })
+        if (p1.cancelled || abort.signal.aborted) throw new ExportCancelledError()
+        const p2 = await runFfmpeg(gifPaletteUseArgs(lossless, palette, job.part), { label: 'editor: GIF', signal: abort.signal, onProgress: span(0.2, 1) })
+        if (p2.cancelled || abort.signal.aborted) throw new ExportCancelledError()
+      }
+      const out = join(job.dir, this.finalName(job))
+      renameSync(job.part, out)
+      const size = statSync(out).size
+      opts.onProgress?.(1)
+      ok = true
+      if (opts.maxBytes && size > opts.maxBytes) {
+        safeRm(out)
+        log.info(`exportação do editor ${jobId}: ${size} bytes > alvo ${opts.maxBytes}; saída apagada`)
+        return { path: out, size, oversize: true }
+      }
+      // vídeo pelo codificador de reserva: aceita o .srt ao lado, como o MP4 do WebCodecs
+      if (pipe.spec.kind === 'x264') this.completed.add(outputKey(out))
+      return { path: out, size }
+    } finally {
+      await this.closeAudio(pipe)
+      for (const t of pipe.temps) safeRm(t)
+      if (!ok) safeRm(job.part)
+      this.jobs.delete(jobId)
+      job.remux = null
+      release()
+    }
+  }
+
+  /** Quadro PNG: grava `<nome>.png.part` e renomeia para um nome livre (nunca sobrescreve). owner: a janela que pediu. */
+  async writeStill(outputDir: string, fileName: string, png: Uint8Array, owner = 0): Promise<{ path: string; size: number }> {
+    const job = await this.reserve(outputDir, png.byteLength, owner, editorExportFileName(fileName, 'png'))
+    const { id, part } = job
+    try {
+      await fsp.writeFile(part, png)
+      const out = join(outputDir, this.finalName(job))
+      renameSync(part, out)
+      return { path: out, size: statSync(out).size }
+    } catch (e) {
+      safeRm(part)
+      throw e
+    } finally {
+      this.jobs.delete(id)
+    }
+  }
+
   /** Renomeia o .part para um nome livre (nunca sobrescreve); null se não deu. */
   private keepPart(job: Job, maxBytes: number | undefined): EditorExportFinalized | null {
     try {
-      const name = numberedName(job.requested, (n) => existsSync(join(job.dir, n)) || (n !== job.name && existsSync(join(job.dir, `${n}.part`))))
+      const name = numberedName(job.requested, isTaken(job.dir, job.reserveSrt, job.name))
       const out = join(job.dir, name)
       renameSync(job.part, out)
       const size = statSync(out).size
@@ -206,6 +460,7 @@ export class EditorExportJobs {
         safeRm(out)
         return { path: out, size, oversize: true }
       }
+      this.completed.add(outputKey(out))
       return { path: out, size, warning: 'O arquivo foi salvo sem a otimização para reprodução on-line (faststart): o passo final falhou, mas o vídeo está completo.' }
     } catch (e) {
       log.warn(`exportação do editor ${job.id}: não foi possível manter o arquivo sem faststart`, e)
@@ -217,10 +472,19 @@ export class EditorExportJobs {
   async cancel(jobId: string): Promise<void> {
     const job = this.jobs.get(jobId)
     if (!job) return
+    job.cancelled = true
+    this.cancelledIds.add(jobId)
+    if (this.cancelledIds.size > 32) this.cancelledIds.delete(this.cancelledIds.values().next().value!)
     if (job.remux) {
       const { abort, done } = job.remux
       abort.abort()
       await done
+    }
+    if (job.pipe) {
+      await job.pipe.ff?.abort()
+      await Promise.allSettled([...job.writes])
+      await this.closeAudio(job.pipe)
+      for (const t of job.pipe.temps) safeRm(t)
     }
     await this.closeHandle(job)
     safeRm(job.part)
@@ -234,6 +498,12 @@ export class EditorExportJobs {
     await Promise.all([...this.jobs.values()].filter((j) => owner === null || j.owner === owner).map((j) => this.cancel(j.id)))
   }
 
+  private async closeAudio(pipe: PipeState): Promise<void> {
+    const fh = pipe.audio?.fh
+    if (pipe.audio) pipe.audio.fh = null
+    if (fh) await fh.close().catch(() => {})
+  }
+
   private async closeHandle(job: Job): Promise<void> {
     await Promise.allSettled([...job.writes])
     const fh = job.fh
@@ -241,9 +511,14 @@ export class EditorExportJobs {
     if (fh) await fh.close().catch(() => {})
   }
 
-  private must(jobId: string): Job {
+  /** Job aberto; cancelado → ExportCancelledError; owner (quando dado) tem de ser a janela dona. */
+  private must(jobId: string, owner?: number): Job {
     const job = this.jobs.get(jobId)
-    if (!job) throw new Error('exportação não encontrada (cancelada?)')
+    if (!job) {
+      if (this.cancelledIds.has(jobId)) throw new ExportCancelledError()
+      throw new Error('exportação não encontrada (cancelada?)')
+    }
+    if (owner !== undefined && job.owner !== owner) throw new Error('exportação de outra janela')
     return job
   }
 }

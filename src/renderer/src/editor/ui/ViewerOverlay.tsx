@@ -4,12 +4,17 @@ import { cn } from '@/lib/cn'
 import { useEditorStore } from '../state/editorStore'
 import { usePausedPlayhead } from '../state/pausedPlayhead'
 import { useViewerTool } from '../state/viewerTool'
-import { addEffectAt } from './editorActions'
+import { toast } from 'sonner'
+import type { TextItem } from '@shared/editor/project'
+import { findItem } from '@shared/editor/ops'
+import { addEffectAt, addShapeAt, addTextAt } from './editorActions'
 import { effectFromDrag, isEffectDrag } from './EffectLibrary'
+import { isShapeDrag, isTextDrag, shapeFromDrag, textFromDrag } from './TextLibrary'
 import { effectBoxes, hitTest, hitTestRegions, itemBoxes, type Guides, type Pt } from './viewerGeometry'
 import { EffectRegionHandles, RegionOutline, selectedRegion, startRegionDraw, startRegionGesture } from './viewer/EffectRegionHandles'
-import { editableMedia, ItemTransformHandles, startItemTransform, type GestureCtx } from './viewer/ItemTransformHandles'
+import { editableItem, ItemTransformHandles, startItemTransform, type GestureCtx } from './viewer/ItemTransformHandles'
 import { cancelViewerGesture } from './viewer/viewerGesture'
+import { TextEditor } from './viewer/TextEditor'
 import { startZoomDraw, ZoomRectPreview } from './viewer/ZoomTool'
 import { markFocusPoint, ReframeOverlay } from './viewer/ReframeOverlay'
 import { useReframe } from '../state/reframe'
@@ -37,12 +42,30 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
   const [zoomRect, setZoomRect] = useState<ZoomRect | null>(null)
   const [guides, setGuides] = useState<Guides>(NO_GUIDES)
   const [dropHover, setDropHover] = useState(false)
+  /** Texto em edição direta (duplo clique). */
+  const [editingId, setEditingId] = useState<string | null>(null)
+  // fonte que terminou de carregar muda a caixa do texto: mede de novo
+  const [fontTick, setFontTick] = useState(0)
+  useEffect(() => {
+    const set = document.fonts
+    if (!set) return
+    const on = (): void => setFontTick((n) => n + 1)
+    set.addEventListener('loadingdone', on)
+    return () => set.removeEventListener('loadingdone', on)
+  }, [])
   const rootRef = useRef<HTMLDivElement>(null)
   const clearHover = (): void => {
     if (rootRef.current) rootRef.current.style.cursor = ''
   }
-  const boxes = useMemo(() => (project && !playing ? itemBoxes(project, playheadUs) : []), [project, playheadUs, playing])
+  const boxes = useMemo(() => (project && !playing ? itemBoxes(project, playheadUs) : []), [project, playheadUs, playing, fontTick])
   const regions = useMemo(() => (project && !playing ? effectBoxes(project, playheadUs) : []), [project, playheadUs, playing])
+  // a caixa do texto em edição sumiu (o playhead saiu do item, o texto foi apagado): encerra com aviso, sem perder em silêncio
+  useEffect(() => {
+    if (editingId && !boxes.some((b) => b.itemId === editingId)) {
+      setEditingId(null)
+      toast('A edição do texto foi encerrada: o texto saiu do quadro. O que foi digitado não foi aplicado.')
+    }
+  }, [editingId, boxes])
   // saindo da tela no meio de um gesto: cancela; a ferramenta não fica ligada para o próximo projeto
   useEffect(
     () => () => {
@@ -57,7 +80,8 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
   useEffect(() => clearHover(), [selection, drawing, zooming, playheadUs])
   if (!project) return null
   const selId = selection.length === 1 && !playing ? selection[0] : null
-  const selectedMedia = selId && !drawing && !zooming && !reframing ? boxes.find((b) => b.itemId === selId && editableMedia(project, b.itemId)) : undefined
+  const selectedMedia = selId && !drawing && !zooming && !reframing && !editingId ? boxes.find((b) => b.itemId === selId && editableItem(project, b.itemId)) : undefined
+  const editingBox = editingId ? boxes.find((b) => b.itemId === editingId) : undefined
   const selectedFx = selId ? selectedRegion(project, selId, playheadUs) : null
 
   const ctx: GestureCtx = {
@@ -103,7 +127,7 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
     if (region) startRegionGesture(e, region, { kind: 'move' }, ctx)
     else {
       const box = boxes.find((b) => b.itemId === hit)
-      if (box) startItemTransform(e, box, { kind: 'move' }, ctx)
+      if (box && !editingId) startItemTransform(e, box, { kind: 'move' }, ctx)
     }
   }
 
@@ -120,14 +144,41 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
     if (root.style.cursor !== cursor) root.style.cursor = cursor
   }
 
+  // duplo clique num texto: edição direta (a contagem não: o conteúdo dela vem de "de/até" no inspetor)
+  const onDoubleClick = (e: React.MouseEvent): void => {
+    if (playing || drawing || zooming || reframing) return
+    const pt = ctx.toCanvas(e)
+    if (hitTestRegions(regions, pt.x, pt.y)) return
+    const hit = hitTest(boxes, pt.x, pt.y)
+    const found = hit ? findItem(project, hit) : null
+    if (!found || found.item.type !== 'text') return
+    if (found.track.locked) {
+      toast(`A faixa "${found.track.name}" está bloqueada: desbloqueie para editar o texto.`)
+      return
+    }
+    if ((found.item as TextItem).counter) {
+      toast('Este texto é uma contagem: ajuste “De” e “Até” no inspetor.')
+      return
+    }
+    useEditorStore.getState().select([hit!])
+    setEditingId(hit)
+  }
+
   const onDrop = (e: React.DragEvent): void => {
     setDropHover(false)
     const preset = effectFromDrag(e)
-    if (!preset) return
+    const textPreset = textFromDrag(e)
+    const shapePreset = shapeFromDrag(e)
+    if (!preset && !textPreset && !shapePreset) return
     e.preventDefault()
     if (useEditorStore.getState().playing) onPause()
     const pt = ctx.toCanvas(e)
     const clamp01 = (v: number): number => Math.min(1, Math.max(0, v))
+    // texto/forma: no playhead, centrados onde soltou (um passo de desfazer só)
+    const at = { x: clamp01(pt.x / project.canvas.width), y: clamp01(pt.y / project.canvas.height) }
+    if (textPreset) return void addTextAt(textPreset, useEditorStore.getState().playheadUs, { at })
+    if (shapePreset) return void addShapeAt(shapePreset, useEditorStore.getState().playheadUs, { at })
+    if (!preset) return
     addEffectAt(preset, useEditorStore.getState().playheadUs, { region: { x: clamp01(pt.x / project.canvas.width), y: clamp01(pt.y / project.canvas.height) } })
   }
 
@@ -140,8 +191,9 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
       onPointerDown={onBackgroundDown}
       onPointerMove={onHover}
       onPointerLeave={clearHover}
+      onDoubleClick={onDoubleClick}
       onDragOver={(e) => {
-        if (!isEffectDrag(e)) return
+        if (!isEffectDrag(e) && !isTextDrag(e) && !isShapeDrag(e)) return
         e.preventDefault()
         e.dataTransfer.dropEffect = 'copy'
         if (!dropHover) setDropHover(true)
@@ -164,6 +216,7 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
       {selectedFx && !playing && !zooming && !reframing ? (
         <EffectRegionHandles box={selectedFx.box} k={scale} locked={selectedFx.locked} inactive={selectedFx.inactive} keyed={selectedFx.keyed} drawing={drawing} onGesture={(e, g) => startRegionGesture(e, selectedFx.box.itemId, g, ctx)} />
       ) : null}
+      {editingId && editingBox ? <TextEditor itemId={editingId} box={editingBox} k={scale} onClose={() => setEditingId(null)} /> : null}
       {reframing ? <ReframeOverlay project={project} playheadUs={playheadUs} width={width} height={height} /> : null}
       {zoomRect ? <ZoomRectPreview rect={zoomRect} k={scale} W={project.canvas.width} H={project.canvas.height} /> : null}
     </div>

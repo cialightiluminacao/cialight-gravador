@@ -2,17 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
 import { evalAnim } from './anim'
 import { screenToContent, toScreen, type ClipFrame, type RegionValues } from './contentPose'
-import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
+import { createEffectItem, createEmptyProject, createMediaItem, createShapeItem } from './factory'
 import { attachEffects } from './followTransform'
 import { findItem } from './ops'
 import { privacyWarnings } from './privacy'
-import type { AnnotationsItem, Asset, EffectItem, Item, MediaItem, Project, TextItem, Track, Us } from './project'
+import type { AnnotationsItem, Asset, EffectItem, Item, MediaItem, Project, ShapeItem, TextItem, Track, Us } from './project'
 import { layerBase } from './layerGeometry'
 import { clipFrameAt, effectRegionAt } from './resolve'
 import { parseProject, toDiskProject } from './schema'
 import { frameToUs, itemEndUs } from './time'
-import { applyKenBurns, coversFrame, sourceOf } from './zoom'
-import { focusFromScreen, focusToScreen, mainClipAt, reframeCanvas, reframeName, reframeProject, reframeWindow, type FocusPoint } from './reframe'
+import { applyKenBurns, applyZoom, coversFrame, sourceOf } from './zoom'
+import { focusFromScreen, focusToScreen, hasZoomKeys, mainClipAt, reframeCanvas, reframeName, reframeProject, reframeWindow, type FocusPoint } from './reframe'
 
 const S = 1_000_000
 const vid: Asset = { id: 'v', name: 'tela', kind: 'video', source: { type: 'file', path: 'C:/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 20 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, status: 'ready' }
@@ -127,6 +127,56 @@ describe('reframeProject: clipe principal com pontos de foco', () => {
     expect((m1.visual!.transform.x.keys?.length ?? 0)).toBeGreaterThan(1)
   })
 
+  it('zoom anterior + ponto de foco: o detalhe do zoom fica no quadro novo durante toda a espera (denso, 1/240 s)', () => {
+    // 2,5× no detalhe (0,25; 0,25) de 3 s a 4,5 s (ida 2,5→3 s, espera 1,5 s, volta até 5 s)
+    const p = applyZoom(single(), 'm', { x: 0.25, y: 0.25, w: 0.4, h: 0.4 }, 2.5 * S, 0.5 * S, 1.5 * S, 'inOut', { clamp: true }).project
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 1 * S, x: 0.7, y: 0.5 }] } })
+    const m1 = mOf(r.project, 'm')
+    const src = sourceOf(r.project, m1)
+    for (let k = 0; k <= 240 * 1.5; k++) {
+      const t = 3 * S + Math.round((k * S) / 240)
+      const s = toScreen(clipFrameAt(r.project, m1, Math.min(t, 4.5 * S))!, 0.25 * 1920, 0.25 * 1080)
+      // dentro do quadro e a ±2 % do centro
+      expect(Math.abs(s.x - 540)).toBeLessThanOrEqual(0.02 * 1080)
+      expect(Math.abs(s.y - 960)).toBeLessThanOrEqual(0.02 * 1920)
+    }
+    // fora do zoom, o ponto do usuário manda (no centro) e nunca aparece borda
+    for (const t of [0, 1 * S, 2 * S, 6 * S, 9 * S]) {
+      const s = toScreen(clipFrameAt(r.project, m1, t)!, 0.7 * 1920, 0.5 * 1080)
+      expect(Math.abs(s.x - 540)).toBeLessThanOrEqual(0.005 * 1920 + 1e-6)
+    }
+    for (let k = 0; k < 300; k++) expect(coversFrame(m1.visual!, src, { w: 1080, h: 1920 }, frameToUs(k, 30))).toBe(true)
+  })
+
+  it('afastar (escala abaixo da do clipe) não conta como zoom: o ponto do usuário continua no centro no trecho normal', () => {
+    const p = single((m) => {
+      m.visual!.transform.scale = { value: 1, keys: [{ tUs: 0, value: 1, ease: 'linear' }, { tUs: 6 * S, value: 1, ease: 'inOut' }, { tUs: 8 * S, value: 0.6, ease: 'linear' }] }
+    })
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.7, y: 0.5 }] } })
+    const m1 = mOf(r.project, 'm')
+    for (const t of [0, 2 * S, 5.9 * S]) {
+      const s = toScreen(clipFrameAt(r.project, m1, t)!, 0.7 * 1920, 0.5 * 1080)
+      expect(Math.abs(s.x - 540)).toBeLessThanOrEqual(0.005 * 1920 + 1e-6)
+    }
+    expect(hasZoomKeys(m1)).toBe(false)
+  })
+
+  it('hasZoomKeys: zoom sim, Ken Burns leve e clipe parado não (nota do painel)', () => {
+    expect(hasZoomKeys(mOf(applyZoom(single(), 'm', { x: 0.25, y: 0.25, w: 0.4, h: 0.4 }, 2.5 * S, 0.5 * S, 1.5 * S, 'inOut', { clamp: true }).project, 'm'))).toBe(true)
+    expect(hasZoomKeys(mOf(applyKenBurns(single(), 'm', 'br').project, 'm'))).toBe(false)
+    expect(hasZoomKeys(mOf(single(), 'm'))).toBe(false)
+  })
+
+  it('Ken Burns (aproximação leve) + ponto de foco: o ponto do usuário continua no centro', () => {
+    const p = applyKenBurns(single(), 'm', 'br').project
+    const r = reframeProject(p, '9:16', { mode: 'cover', focus: { m: [{ localUs: 0, x: 0.7, y: 0.5 }] } })
+    const m1 = mOf(r.project, 'm')
+    for (const t of [0, 5 * S, 9.9 * S]) {
+      const s = toScreen(clipFrameAt(r.project, m1, t)!, 0.7 * 1920, 0.5 * 1080)
+      expect(Math.abs(s.x - 540)).toBeLessThanOrEqual(0.005 * 1920 + 1e-6)
+    }
+  })
+
   it("modo 'contain': fit contain, posição intacta, pontos ignorados", () => {
     const r = reframeProject(single(), '9:16', { mode: 'contain', focus: { m: [{ localUs: 0, x: 0.9, y: 0.5 }] } })
     const v = mOf(r.project, 'm').visual!
@@ -198,6 +248,30 @@ describe('reframeProject: sobreposições e textos', () => {
     expect(t.visual.transform.x).toEqual({ value: 0.3 })
     expect(t.visual.transform.y).toEqual({ value: 0.9 })
     expect(t.style.size).toEqual({ value: 48 })
+  })
+
+  it('forma: a caixa mantém a proporção visual (px pelo lado menor), com e sem `box`', () => {
+    const p = single()
+    const withBox: ShapeItem = { ...createShapeItem('rect', 0, { durationUs: 5 * S }), id: 'sb', box: { w: 0.3, h: 0.2 } }
+    const noBox: ShapeItem = { ...createShapeItem('rect', 0, { durationUs: 5 * S }), id: 'sn' }
+    delete noBox.box
+    p.tracks.push(track('ts', [withBox, { ...noBox, startUs: 5 * S }]))
+    const r = reframeProject(p, '9:16', { mode: 'cover' })
+    // 16:9 1920×1080 → 9:16 1080×1920: lado menor 1080 nos dois; 0,3×1920 = 576 px e 0,2×1080 = 216 px continuam
+    for (const id of ['sb', 'sn']) {
+      const s = findItem(r.project, id)!.item as ShapeItem
+      expect(s.box!.w * 1080).toBeCloseTo(576, 6)
+      expect(s.box!.h * 1920).toBeCloseTo(216, 6)
+      expect(s.strokeWidth).toBe(withBox.strokeWidth) // já na referência do lado menor
+    }
+    // quadrado 1:1 a partir de 1280×720: lado menor 720 → 1080 (escala 1,5) — a caixa cresce junto com o texto
+    const q = { ...single(), canvas: { ...single().canvas, width: 1280, height: 720 } }
+    q.tracks.push(track('ts', [withBox]))
+    const r2 = reframeProject(q, '1:1', { mode: 'cover' })
+    const s2 = findItem(r2.project, 'sb')!.item as ShapeItem
+    const short = Math.min(r2.project.canvas.width, r2.project.canvas.height) / 720
+    expect(s2.box!.w * r2.project.canvas.width).toBeCloseTo(0.3 * 1280 * short, 6)
+    expect(s2.box!.h * r2.project.canvas.height).toBeCloseTo(0.2 * 720 * short, 6)
   })
 })
 

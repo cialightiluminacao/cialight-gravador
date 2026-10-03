@@ -3,6 +3,7 @@ import { useAppStore } from './store'
 import { cn } from '@/lib/cn'
 import { RecDot, Tip } from '@/components/ui/primitives'
 import { formatClock } from '@/lib/format'
+import { requestLeaveEditor } from '@/editor/ui/ExportQueuePanel'
 
 // Barra de título custom (a janela usa titleBarStyle 'hidden' + overlay nativo do Windows).
 // A área toda é arrastável; botões são no-drag. O overlay nativo ocupa a direita.
@@ -40,7 +41,7 @@ export function Titlebar(): React.JSX.Element {
         <Tip content="Projetos do editor">
           <button
             className={cn('no-drag flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-semibold hover:bg-white/5 disabled:pointer-events-none disabled:opacity-40', screen === 'projects' || screen === 'editor' ? 'text-fg' : 'text-muted hover:text-fg')}
-            onClick={() => setScreen(screen === 'projects' ? useAppStore.getState().returnScreen : 'projects')}
+            onClick={() => (screen === 'editor' ? requestLeaveEditor(() => setScreen('projects')) : setScreen(screen === 'projects' ? useAppStore.getState().returnScreen : 'projects'))}
             disabled={busy}
             aria-label="Projetos"
           >

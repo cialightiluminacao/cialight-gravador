@@ -192,6 +192,7 @@ async function main() {
   await connect()
   await send('Page.enable')
   await viewport(1366, 768)
+  for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`)); i++) await sleep(500)
   await ev(`localStorage.setItem('editor.timelineHeight', '260'); window.__navigate('projects'); return 1`)
   await sleep(500)
   await ev(`window.__navigate('editor:p-qa-editor-fixture'); return 1`)

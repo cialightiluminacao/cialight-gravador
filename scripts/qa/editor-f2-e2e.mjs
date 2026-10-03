@@ -8,7 +8,7 @@
 // arrasta a região até o CPF (2 keyframes acompanhando o texto); solta uma Tarja na linha do tempo e um
 // Pixelizar por duplo clique, posicionados pelo inspetor (cor da tarja #e11d48). Confere o aviso de
 // privacidade no diálogo de exportação (Pixelizar fraco → "Revisar" seleciona e leva o playhead) e exporta
-// "Alta 1080p" (Esconder texto a 60, o piso). No arquivo exportado, com o ffmpeg: contraste local da linha de texto
+// "YouTube 1080p" (Esconder texto a 60, o piso). No arquivo exportado, com o ffmpeg: contraste local da linha de texto
 // (p99−p1 após caixa 3 px) < 0,15 da fonte e energia de alta frequência (variância do laplaciano) na
 // caixa do texto cai para < 0,2 da fonte em vários instantes (inclusive o 1º e o último quadro do item) e a tarja tem
 // a cor exata (±3). Depois muda a velocidade do clipe para 0,5× (os efeitos criados sobre ele são vinculados e
@@ -281,6 +281,7 @@ async function main() {
   await ev(HELPERS + '; return 1')
 
   console.log('Projetos → Novo projeto')
+  for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`)); i++) await sleep(500)
   await ev(`localStorage.setItem('editor.timelineHeight', '260'); window.__navigate('projects'); return 1`)
   await sleep(800)
   await ev(`await T.clickEl(T.button('Novo projeto')); await T.wait(300); const d = T.dialog(); T.setValue(d.querySelector('input'), 'E2E privacidade'); await T.settle(); await T.clickEl(T.button('Criar e abrir', d)); return 1`)
@@ -373,11 +374,11 @@ async function main() {
   await shot('e2e-06-revisar.png')
   await ev(`await T.setField('Intensidade', 50); T.st().select([]); return 1`)
 
-  console.log('exportar Alta 1080p')
+  console.log('exportar YouTube 1080p')
   await ev(`window.__qaEditor.exportDir = ${JSON.stringify(OUT)}; await T.clickEl([...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar'))); await T.wait(500)
-    await T.clickEl([...T.dialog().querySelectorAll('[role="radio"]')].find((b) => b.textContent.startsWith('Alta 1080p'))); return 1`)
+    await T.clickEl([...T.dialog().querySelectorAll('[role="radio"]')].find((b) => b.textContent.startsWith('YouTube 1080p'))); return 1`)
   const dlg = await ev(`return { text: T.dialog()?.textContent ?? '', privacy: !!T.dialog()?.querySelector('[data-privacy-warnings]') }`)
-  check('Alta 1080p (1920×1080) e sem avisos com intensidades seguras', dlg.text.includes('1920×1080') && !dlg.privacy, dlg.text.slice(0, 200))
+  check('YouTube 1080p (1920×1080) e sem avisos com intensidades seguras', dlg.text.includes('1920×1080') && !dlg.privacy, dlg.text.slice(0, 200))
   await shot('e2e-07-exportar.png')
   await ev(`await T.clickEl(T.button('Exportar', T.dialog())); return 1`)
   let text = ''
@@ -495,10 +496,10 @@ async function main() {
   writeFileSync(join(E2E, 'e2e-f2-result.json'), JSON.stringify({ file: files[0], ratios, pixR, ctrl, cpf0, cpfL, conta, senha, textStrength: TEXT_STRENGTH, speed: { sp, slow, tarja2 } }, null, 2))
 }
 
-/** Exporta "Alta 1080p" pelo diálogo para `dir` (vazia); devolve o .mp4 ou null (com o check de falha). */
+/** Exporta "YouTube 1080p" pelo diálogo para `dir` (vazia); devolve o .mp4 ou null (com o check de falha). */
 async function exportHigh(dir) {
   await ev(`window.__qaEditor.exportDir = ${JSON.stringify(dir)}; await T.clickEl([...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar'))); await T.wait(500)
-    await T.clickEl([...T.dialog().querySelectorAll('[role="radio"]')].find((b) => b.textContent.startsWith('Alta 1080p'))); return 1`)
+    await T.clickEl([...T.dialog().querySelectorAll('[role="radio"]')].find((b) => b.textContent.startsWith('YouTube 1080p'))); return 1`)
   const privacy = await ev(`return T.dialog()?.querySelector('[data-privacy-warnings]')?.textContent ?? null`)
   check('nova exportação sem avisos de privacidade', privacy === null, privacy)
   await ev(`await T.clickEl(T.button('Exportar', T.dialog())); return 1`)

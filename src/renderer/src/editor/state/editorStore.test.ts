@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('sonner', () => ({ toast: { error: vi.fn() } }))
+vi.mock('sonner', () => ({ toast: Object.assign(vi.fn(), { error: vi.fn() }) }))
 
 import { toast } from 'sonner'
 import { createEffectItem, createEmptyProject, createMediaItem } from '@shared/editor/factory'
 import { attachEffects } from '@shared/editor/followTransform'
-import { EditError, addMarker, findItem, updateItem } from '@shared/editor/ops'
+import { EditError, addAsset, addMarker, addMediaFromAsset, addTransition, deleteItems, findItem, moveItems, removeTransition, trimItem, updateItem } from '@shared/editor/ops'
 import type { Asset, EffectItem, MediaItem, Project } from '@shared/editor/project'
 import { flushAutosave, startAutosave, useEditorStore } from './editorStore'
 
@@ -20,6 +20,7 @@ beforeEach(() => {
   st().close()
   st().open(base())
   vi.mocked(toast.error).mockClear()
+  vi.mocked(toast).mockClear()
 })
 
 describe('editorStore', () => {
@@ -407,5 +408,68 @@ describe('prévia fora do histórico (zoom automático, I1)', () => {
     expect(st().preview).toBeNull()
     st().setPreview(base())
     expect(st().preview).toBeNull()
+  })
+})
+
+describe('transição removida pela normalização (toast no commit)', () => {
+  const S = 1_000_000
+  const vid = { id: 'v', name: 'v', kind: 'video', source: { type: 'file', path: 'C:/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 4 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, status: 'ready' } as Asset
+  /** A 0–4 s, B 4–8 s com Dissolver na entrada de B. */
+  function withTransition(): { a: string; b: string } {
+    let p = addAsset(base(), vid)
+    const ra = addMediaFromAsset(p, 'v', 0)
+    const rb = addMediaFromAsset(ra.project, 'v', 4 * S)
+    p = addTransition(rb.project, rb.itemIds[0], 'crossfade')
+    st().open(p)
+    return { a: ra.itemIds[0], b: rb.itemIds[0] }
+  }
+  const hasTransition = (id: string): boolean => !!(findItem(st().project!, id)!.item as MediaItem).transitionIn
+
+  it('aparar o fim de A (sem ripple) abre buraco: a transição some com toast que fala do Ctrl+Z', () => {
+    const { a, b } = withTransition()
+    expect(st().apply((p) => trimItem(p, a, 'end', 3 * S))).toBe(true)
+    expect(hasTransition(b)).toBe(false)
+    expect(toast).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(toast).mock.calls[0][0]).toBe('Transição removida porque os clipes não estão mais encostados')
+    expect(vi.mocked(toast).mock.calls[0][1]).toEqual({ description: 'Ctrl+Z desfaz.' })
+    st().undo()
+    expect(hasTransition(b)).toBe(true)
+  })
+
+  it('arraste (transação): nenhum toast nos quadros transitórios, um só no commit', () => {
+    const { b } = withTransition()
+    st().begin()
+    for (let k = 1; k <= 5; k++) st().apply(() => moveItems(st().txBase!, [b], k * 100_000), { transient: true })
+    expect(hasTransition(b)).toBe(false)
+    expect(toast).not.toHaveBeenCalled()
+    st().commitTx()
+    expect(toast).toHaveBeenCalledTimes(1)
+    expect(st().history.past).toHaveLength(1)
+  })
+
+  it('arraste que volta a encostar antes de soltar: nada removido, nenhum toast', () => {
+    const { b } = withTransition()
+    st().begin()
+    st().apply(() => moveItems(st().txBase!, [b], 200_000), { transient: true })
+    st().apply(() => moveItems(st().txBase!, [b], 0), { transient: true })
+    st().commitTx()
+    expect(hasTransition(b)).toBe(true)
+    expect(toast).not.toHaveBeenCalled()
+  })
+
+  it('removeTransition (pedido do usuário) e apagar o próprio clipe B não avisam', () => {
+    const { b } = withTransition()
+    st().apply((p) => removeTransition(p, b), { quietTransitions: true })
+    expect(hasTransition(b)).toBe(false)
+    st().undo()
+    st().apply((p) => deleteItems(p, [b], { ripple: false }))
+    expect(toast).not.toHaveBeenCalled()
+  })
+
+  it('apagar A (o anterior) tira a transição de B: avisa', () => {
+    const { a, b } = withTransition()
+    st().apply((p) => deleteItems(p, [a], { ripple: false }))
+    expect(hasTransition(b)).toBe(false)
+    expect(toast).toHaveBeenCalledTimes(1)
   })
 })

@@ -5,7 +5,7 @@
 //   node scripts/qa/editor-export.mjs   → abre o app (CIALIGHT_QA=editor-fixture, CIALIGHT_RAW_DIR=test-out/raw),
 //                                          exporta a fixture no preset WhatsApp para test-out/qa-export e fecha
 //
-// Screenshots em docs/qa/editor-f1/: formulário, aviso do Vertical em projeto 16:9, progresso e concluído.
+// Screenshots em docs/qa/editor-f1/: formulário, Reels 9:16 desativado em projeto 16:9, progresso e concluído.
 import { spawn, execFileSync } from 'child_process'
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
@@ -94,6 +94,7 @@ async function main() {
   await connect()
   await send('Page.enable')
   await send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false })
+  for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`)); i++) await sleep(500)
   await ev(`window.__navigate('projects'); return 1`)
   await sleep(500)
   await ev(`window.__navigate('editor:p-qa-editor-fixture'); return 1`)
@@ -108,16 +109,14 @@ async function main() {
   await ev(`${CLICK('header', 'Exportar')}; return 1`)
   await sleep(500)
   let text = await ev(dialogText)
-  check('diálogo abre com os 4 presets', ['Alta 1080p', 'WhatsApp', 'Original', 'Vertical 9:16'].every((p) => text.includes(p)), text)
+  check('diálogo abre com os presets (F7)', ['YouTube 1080p', 'WhatsApp (até 64 MB)', 'Original (máxima)', 'Instagram Reels/Stories (9:16)'].every((p) => text.includes(p)), text)
   check('nome padrão = nome do projeto', await ev(`return document.querySelector('[role="dialog"] input').value`) === 'Projeto de teste do editor.mp4', null)
   check('estimativa de tamanho visível', /≈ [\d.,]+ MB/.test(text), text)
   await shot('export-dialog.png')
 
-  await ev(`${CLICK('dialog', 'Vertical 9:16')}; return 1`)
-  await sleep(200)
-  text = await ev(dialogText)
-  check('Vertical em projeto 16:9 avisa para mudar a proporção', text.includes('Mude a proporção do projeto para 9:16'), text)
-  check('Exportar desabilitado no Vertical', await ev(`return [...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === 'Exportar')?.disabled`) === true, null)
+  // F7: o preset 9:16 fica desativado com o motivo num projeto 16:9 (nunca tarja/corte silenciosos)
+  const reels = await ev(`const b = document.querySelector('[role="dialog"] [data-preset="reels"]'); return { disabled: b.disabled, title: b.title }`)
+  check('Reels/Stories 9:16 em projeto 16:9: desativado com o motivo', reels.disabled === true && reels.title.includes('O projeto não é 9:16'), reels)
   await shot('export-dialog-vertical.png')
 
   await ev(`${CLICK('dialog', 'WhatsApp')}; return 1`)

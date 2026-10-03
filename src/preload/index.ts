@@ -77,6 +77,7 @@ const api: IpcApi = {
     duplicate: (sourceId, p) => ipcRenderer.invoke(IPC.project.duplicate, sourceId, p),
     fromSession: (sessionId) => ipcRenderer.invoke(IPC.project.fromSession, sessionId),
     pickMedia: () => ipcRenderer.invoke(IPC.project.pickMedia),
+    findRelinks: (projectId, opts) => ipcRenderer.invoke(IPC.project.findRelinks, projectId, opts),
     writeGeneratedOpen: (projectId, base, ext, meta) => ipcRenderer.invoke(IPC.project.writeGeneratedOpen, projectId, base, ext, meta),
     writeGenerated: (handle, data, position) => ipcRenderer.invoke(IPC.project.writeGenerated, handle, data, position),
     writeGeneratedMeta: (handle, meta) => ipcRenderer.invoke(IPC.project.writeGeneratedMeta, handle, meta),
@@ -108,7 +109,25 @@ const api: IpcApi = {
     close: (jobId) => ipcRenderer.invoke(IPC.editorExport.close, jobId),
     finalize: (jobId, opts) => ipcRenderer.invoke(IPC.editorExport.finalize, jobId, opts),
     cancel: (jobId) => ipcRenderer.invoke(IPC.editorExport.cancel, jobId),
-    onFinalizeProgress: (cb) => on(IPC.editorExport.finalizeProgress, cb)
+    onFinalizeProgress: (cb) => on(IPC.editorExport.finalizeProgress, cb),
+    openPipe: (outputDir, fileName, spec, opts) => ipcRenderer.invoke(IPC.editorExport.openPipe, outputDir, fileName, spec, opts),
+    pipeWrite: (jobId, data) => ipcRenderer.invoke(IPC.editorExport.pipeWrite, jobId, data),
+    pipeFinish: (jobId, opts) => ipcRenderer.invoke(IPC.editorExport.pipeFinish, jobId, opts),
+    writeStill: (outputDir, fileName, png) => ipcRenderer.invoke(IPC.editorExport.writeStill, outputDir, fileName, png),
+    saveText: (defaultPath, text) => ipcRenderer.invoke(IPC.editorExport.saveText, defaultPath, text),
+    setQueueState: (state) => ipcRenderer.invoke(IPC.editorExport.setQueueState, state)
+  },
+  brand: {
+    list: () => ipcRenderer.invoke(IPC.brand.list),
+    save: (template, assetsToCopy, projectId) => ipcRenderer.invoke(IPC.brand.save, template, assetsToCopy, projectId),
+    remove: (id) => ipcRenderer.invoke(IPC.brand.remove, id),
+    rename: (id, name) => ipcRenderer.invoke(IPC.brand.rename, id, name),
+    materialize: (templateId, projectId) => ipcRenderer.invoke(IPC.brand.materialize, templateId, projectId)
+  },
+  captions: {
+    openSrt: () => ipcRenderer.invoke(IPC.captions.openSrt),
+    saveSrt: (text, defaultName) => ipcRenderer.invoke(IPC.captions.saveSrt, text, defaultName),
+    writeSrtBeside: (videoPath, text) => ipcRenderer.invoke(IPC.captions.writeSrtBeside, videoPath, text)
   },
   recording: {
     setPhase: (phase, ctx) => ipcRenderer.invoke(IPC.recording.setPhase, phase, ctx),

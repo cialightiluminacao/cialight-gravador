@@ -90,10 +90,11 @@ export function Slider({ className, ...props }: SliderPrimitive.SliderProps): Re
 }
 
 /* ---------- Segmented (toggle group single) ---------- */
-export function Segmented<T extends string>({ value, onValueChange, options, className, size = 'md' }: { value: T; onValueChange: (v: T) => void; options: { value: T; label: React.ReactNode; disabled?: boolean; title?: string }[]; className?: string; size?: 'sm' | 'md' }): React.JSX.Element {
+export function Segmented<T extends string>({ value, onValueChange, options, className, size = 'md', ariaLabel }: { value: T; onValueChange: (v: T) => void; options: { value: T; label: React.ReactNode; disabled?: boolean; title?: string }[]; className?: string; size?: 'sm' | 'md'; ariaLabel?: string }): React.JSX.Element {
   return (
     <ToggleGroupPrimitive.Root
       type="single"
+      aria-label={ariaLabel}
       value={value}
       onValueChange={(v) => {
         if (v) onValueChange(v as T)
@@ -124,10 +125,12 @@ export interface SelectOption {
   label: string
   hint?: string
 }
-export function Select({ value, onValueChange, options, placeholder = 'Selecionar…', disabled, className, triggerClassName }: { value: string | null; onValueChange: (v: string) => void; options: SelectOption[]; placeholder?: string; disabled?: boolean; className?: string; triggerClassName?: string }): React.JSX.Element {
+export function Select({ value, onValueChange, options, placeholder = 'Selecionar…', disabled, className, triggerClassName, id, ariaLabel }: { value: string | null; onValueChange: (v: string) => void; options: SelectOption[]; placeholder?: string; disabled?: boolean; className?: string; triggerClassName?: string; id?: string; ariaLabel?: string }): React.JSX.Element {
   return (
     <SelectPrimitive.Root value={value ?? undefined} onValueChange={onValueChange} disabled={disabled}>
       <SelectPrimitive.Trigger
+        id={id}
+        aria-label={ariaLabel}
         className={cn(
           'flex h-10 w-full items-center justify-between gap-2 rounded-xl border border-border-strong bg-surface-2 px-3 text-left text-sm text-fg hover:bg-surface-3 disabled:opacity-40 data-[placeholder]:text-muted',
           triggerClassName,

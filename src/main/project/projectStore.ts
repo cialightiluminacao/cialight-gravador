@@ -1,4 +1,5 @@
-import { closeSync, copyFileSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'fs'
+import { closeSync, copyFileSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'fs'
+import { renameSyncRetry } from '../fs/renameRetry'
 import { join } from 'path'
 import { parseProject, toDiskProject } from '@shared/editor/schema'
 import { projectDurationUs, updateAsset } from '@shared/editor/ops'
@@ -139,7 +140,7 @@ export class ProjectStore {
     // formato que a v1.3 instalada também lê (toDiskProject); o cache guarda o modelo
     const json = JSON.stringify(toDiskProject(p), null, 2)
     writeFileSync(tmp, json, 'utf8')
-    renameSync(tmp, file)
+    renameSyncRetry(tmp, file)
     this.cache.set(p.id.toLowerCase(), p)
     try {
       this.rotateVersions(dir, json)
@@ -161,16 +162,25 @@ export class ProjectStore {
     const name = `${String(next).padStart(3, '0')}.json`
     const tmp = join(vdir, `${name}.tmp`)
     writeFileSync(tmp, json, 'utf8')
-    renameSync(tmp, join(vdir, name))
+    renameSyncRetry(tmp, join(vdir, name))
     names.push(name)
     while (names.length > MAX_VERSIONS) unlinkSync(join(vdir, names.shift()!))
   }
 
   load(id: string): Project {
+    return this.remember(this.read(id))
+  }
+
+  /**
+   * Lê o project.json (ou a versão válida mais recente) SEM tocar no cache. Varreduras (list, sessionUsage) usam esta:
+   * reler o disco não pode substituir o projeto em memória de um editor aberto, que pode ter assets ainda não salvos
+   * (importados, copiados de um modelo de marca) — o protocolo media/ deixaria de achá-los até o próximo autosave.
+   */
+  private read(id: string): Project {
     const dir = this.dirOf(id)
     let firstError: unknown
     try {
-      return this.remember(parseProject(JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8'))))
+      return parseProject(JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')))
     } catch (e) {
       firstError = e
     }
@@ -181,7 +191,7 @@ export class ProjectStore {
         try {
           const p = parseProject(JSON.parse(readFileSync(join(vdir, n), 'utf8')))
           this.deps.log?.warn(`project.json inválido em ${id}; recuperado de versions/${n}`, firstError)
-          return this.remember(p)
+          return p
         } catch {
           // tenta a próxima mais antiga
         }
@@ -261,6 +271,16 @@ export class ProjectStore {
   }
 
   /**
+   * Resultado da ingestão com o projeto aberto num editor (que grava o project.json no próximo autosave): aplica só
+   * no cache em memória, para o protocolo media/ resolver já o proxy/intermediário novo. Asset ausente: ignora.
+   */
+  cacheAssetPatch(id: string, assetId: string, patch: Partial<Asset>): void {
+    const p = this.cache.get(id.toLowerCase())
+    if (!p || !p.assets.some((a) => a.id === assetId)) return
+    this.cache.set(p.id.toLowerCase(), updateAsset(p, assetId, patch))
+  }
+
+  /**
    * Aplica o resultado da ingestão direto no disco (sem editor com o projeto aberto): parte do
    * project.json, acrescenta assets que só existem no cache (importados e ainda não salvos), aplica o
    * patch e salva (o save atualiza o cache). Lança se o asset não existe em nenhum dos dois.
@@ -286,7 +306,9 @@ export class ProjectStore {
     for (const name of readdirSync(root)) {
       try {
         if (!statSync(join(root, name)).isDirectory()) continue
-        const p = this.load(name)
+        // o disco valida a pasta; o projeto em memória (editor aberto) é o mais novo
+        const disk = this.read(name)
+        const p = this.cache.get(name.toLowerCase()) ?? disk
         const thumb = join(this.dirOf(name), 'cache', 'thumb.jpg')
         out.push({ id: p.id, name: p.name, updatedAt: p.updatedAt, durationUs: projectDurationUs(p), thumb: existsSync(thumb) ? thumb : undefined, originSessionId: p.originSessionId })
       } catch {
@@ -315,7 +337,7 @@ export class ProjectStore {
       for (const name of readdirSync(root)) {
         try {
           if (!statSync(join(root, name)).isDirectory()) continue
-          add(this.load(name))
+          add(this.cache.get(name.toLowerCase()) ?? this.read(name))
         } catch {
           // pasta que não é projeto válido: ignora
         }
@@ -440,7 +462,7 @@ export class ProjectStore {
     if (!isGeneratedMeta(meta)) throw new Error('meta de arquivo gerado inválido')
     const tmp = `${w.marker}.tmp`
     writeFileSync(tmp, JSON.stringify(meta), 'utf8')
-    renameSync(tmp, w.marker)
+    renameSyncRetry(tmp, w.marker)
   }
 
   /** Fecha o arquivo; o marcador fica até clearPendingGenerated (o renderer salvou o projeto com o asset). */

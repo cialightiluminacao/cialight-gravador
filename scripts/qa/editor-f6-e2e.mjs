@@ -374,6 +374,7 @@ async function main() {
   await ev(HELPERS + '; return 1')
 
   console.log('Histórico → Editar (project.fromSession pelo caminho padrão)')
+  for (let i = 0; i < 60 && !(await ev(`return typeof window.__navigate === 'function'`)); i++) await sleep(500)
   await ev(`localStorage.setItem('editor.timelineHeight', '260'); window.__navigate('history'); return 1`)
   for (let i = 0; i < 40; i++) {
     if (await ev(`return [...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Editar')`)) break

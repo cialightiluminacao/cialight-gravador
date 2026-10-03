@@ -1,15 +1,20 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronLeft, CloudAlert, Crop, LoaderCircle, Redo2, Undo2, Upload } from 'lucide-react'
+import { Check, ChevronLeft, CloudAlert, Crop, ImageDown, ListOrdered, LoaderCircle, Redo2, Undo2, Upload } from 'lucide-react'
 import type { Project } from '@shared/editor/project'
 import { Button } from '@/components/ui/Button'
 import { Select, Tip, type SelectOption } from '@/components/ui/primitives'
 import { useEditorStore } from '../state/editorStore'
+import { SHORTCUT_LABELS } from '../shortcuts'
 import { ASPECTS, aspectIdOf, canvasForAspect, firstMediaSize, type AspectId } from './aspects'
 import { useReframe } from '../state/reframe'
 import { defaultReframeAspect } from './ReframeDialog'
+import { exportCurrentFrame } from './frameExport'
+import { copyProjectChapters } from './chaptersActions'
+import { ExportQueueButton } from './ExportQueuePanel'
 
 // Barra superior do editor: voltar (salva antes), nome editável, desfazer/refazer, estado do
-// autosave, proporção do quadro (só o quadro), "Reenquadrar" (proporção nova com o conteúdo reposicionado) e Exportar.
+// autosave, proporção do quadro (só o quadro), "Reenquadrar" (proporção nova com o conteúdo reposicionado),
+// "Quadro" (o quadro do cursor como PNG), "Exportações" (a fila, quando há itens) e Exportar.
 
 function useNow(everyMs: number): number {
   const [now, setNow] = useState(() => Date.now())
@@ -126,9 +131,22 @@ export function TopBar({ onBack, onExport }: { onBack: () => void; onExport: () 
             <Crop className="h-3.5 w-3.5" /> Reenquadrar
           </Button>
         </Tip>
-        <Button variant="primary" size="sm" className="ml-1.5 h-8 px-3.5" onClick={onExport}>
-          <Upload className="h-3.5 w-3.5" /> Exportar
-        </Button>
+        <Tip content="Exportar o quadro do cursor como PNG (tamanho do projeto)" shortcut={SHORTCUT_LABELS.exportFrame} side="bottom">
+          <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" aria-label="Exportar quadro (PNG)" data-export-frame="" onClick={() => void exportCurrentFrame()}>
+            <ImageDown className="h-3.5 w-3.5" /> Quadro
+          </Button>
+        </Tip>
+        <Tip content="Copiar capítulos do YouTube (dos marcadores; usa I–O se marcado)" side="bottom">
+          <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" aria-label="Copiar capítulos" data-copy-chapters="" onClick={() => void copyProjectChapters()}>
+            <ListOrdered className="h-3.5 w-3.5" /> Capítulos
+          </Button>
+        </Tip>
+        <ExportQueueButton />
+        <Tip content="Exportar vídeo, GIF ou áudio" shortcut={SHORTCUT_LABELS.export} side="bottom">
+          <Button variant="primary" size="sm" className="ml-1.5 h-8 px-3.5" onClick={onExport}>
+            <Upload className="h-3.5 w-3.5" /> Exportar
+          </Button>
+        </Tip>
       </div>
     </header>
   )

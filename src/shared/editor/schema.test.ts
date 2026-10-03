@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { parseProject, toDiskProject, validateProject } from './schema'
 import { parseProjectV13 } from '../__fixtures__/projectSchemaV13'
-import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
+import { createEffectItem, createEmptyProject, createMediaItem, patchTextStyle, SHAPE_PRESETS, TEXT_PRESETS, type ShapePresetId, type TextPresetId } from './factory'
 import { DEFAULT_CURSOR_FX } from './project'
-import type { Asset, CursorFx, MediaItem, PresetAnim, Project, TextItem } from './project'
+import type { Asset, CursorFx, EffectItem, Item, MediaItem, PresetAnim, Project, ShapeItem, TextItem, Track } from './project'
+import * as ops from './ops'
+import { applyTemplate, templateFromSelection, type BrandTemplate } from './brand'
+import { transitionWindows } from './transitions'
 import { resolveFrame } from './resolve'
 import { planAudio } from './audioPlan'
 import fixture from './__fixtures__/v13-project.json'
@@ -112,9 +115,20 @@ describe('schema', () => {
 
 describe('schema F4: propriedades que viraram animáveis (compatível com v1.1–v1.3)', () => {
   // projeto no formato da v1.3 (corte/ajuste/raio/tamanho do texto numéricos) e o que a v1.3 resolvia/mixava
-  // (golden gerado com o código da v1.3 antes da mudança; ShapeLayer.item reduzido ao id)
+  // (golden gerado com o código da v1.3 antes da mudança; ShapeLayer.item reduzido ao id). F5: TextLayer/ShapeLayer
+  // ganharam `trackId` (escopo `track` com alvo em texto/forma) — campo novo, não um valor diferente: a comparação o
+  // ignora em vez de regenerar o golden (o resto da camada continua idêntico ao da v1.3).
+  // F5 (correção de privacidade): UMA entrada do golden mudou — frames[206] (t = 8 999 999, último µs do clipe
+  // reverso i_v2, inUs 2 000 000, 2×): srcUs 1 966 669 → 2 000 000. A v1.3 lia ali um quadro ANTES de inUs (trecho
+  // cortado, que pode ser sigiloso); sourceTimeUs agora prende srcUs ao trecho aparado. Nenhuma outra entrada mudou
+  // (planAudio idêntico).
   const old = fixture as unknown
-  const shrink = (layers: ReturnType<typeof resolveFrame>) => layers.map((l) => (l.kind === 'shape' ? { ...l, item: l.item.id } : l))
+  const shrink = (layers: ReturnType<typeof resolveFrame>) =>
+    layers.map((l) => {
+      if (l.kind !== 'text' && l.kind !== 'shape') return l
+      const { trackId: _trackId, ...rest } = l
+      return rest.kind === 'shape' ? { ...rest, item: rest.item.id } : rest
+    })
   it('número vira { value } no parse, sem mudar version', () => {
     const p = parseProject(old)
     expect(p.version).toBe(1)
@@ -308,5 +322,117 @@ describe('cursorFx e asset.cursor (F6)', () => {
     expect('cursorFx' in back.tracks[0].items[0]).toBe(false)
     expect(back).toEqual({ ...p, tracks: [{ ...p.tracks[0], items: [rest] }, ...p.tracks.slice(1)] })
     expect(parseProjectV13(diskOf(back)).success).toBe(true)
+  })
+})
+
+describe('v1.3 lê um projeto com TODAS as funções da F5 ao mesmo tempo (invariante 1)', () => {
+  const S = 1_000_000
+  const vid = (id: string): Asset => ({ id, name: `${id}.mp4`, kind: 'video', source: { type: 'file', path: `C:/m/${id}.mp4`, size: 1, mtimeMs: 1 }, durationUs: 30 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, audio: { channels: 2, sampleRate: 48000, codec: 'mp4a' }, status: 'ready' })
+  const png = (id: string): Asset => ({ id, name: `${id}.png`, kind: 'image', source: { type: 'file', path: `C:/m/${id}.png`, size: 1, mtimeMs: 1 }, durationUs: null, video: { width: 200, height: 100, fps: 0, codec: 'png', rotation: 0, decodable: true, gopUs: 0 }, status: 'ready' })
+  const all = (p: Project): Item[] => p.tracks.flatMap((t) => t.items)
+  const trackOf = (p: Project, id: string): Track => ops.findItem(p, id)!.track
+  /** Assets do projeto copiados do modelo (como o brandActions faz depois de copiar os arquivos). */
+  const materialized = (t: BrandTemplate): Record<string, Asset> =>
+    Object.fromEntries(t.assets.map((a) => [a.id, { ...(a.kind === 'image' ? png(`gen-${a.id}`) : vid(`gen-${a.id}`)), name: a.name, source: { type: 'generated' as const, file: `generated/brand-${t.id}-${a.file}` } }]))
+  /** Efeito como gravado até a v1.4: escopo track sem alvo gravado (alvo pela posição). */
+  const asLegacy = (p: Project, fxId: string): Project => ({
+    ...p,
+    tracks: p.tracks.map((t) => ({
+      ...t,
+      items: t.items.map((i) => {
+        if (i.id !== fxId || i.type !== 'effect') return i
+        const { targetTrackId: _t, linkId: _l, ...rest } = i
+        return { ...rest, scope: 'track' as const }
+      })
+    }))
+  })
+
+  function kitchenSink(): Project {
+    let p = createEmptyProject('tudo')
+    for (const a of [vid('a'), vid('b'), png('logo')]) p = ops.addAsset(p, a)
+    // V1: A 0–10 s e B 10–20 s encostados, Dissolver na entrada de B (transição em mídia)
+    const a = ops.addMediaFromAsset(p, 'a', 0)
+    p = ops.updateItem<MediaItem>(a.project, a.itemIds[0], (d) => { d.durationUs = 10 * S })
+    p = ops.updateItem<MediaItem>(p, a.itemIds[1], (d) => { d.durationUs = 10 * S })
+    const b = ops.addMediaFromAsset(p, 'b', 10 * S)
+    p = ops.updateItem<MediaItem>(b.project, b.itemIds[0], (d) => { d.durationUs = 10 * S })
+    p = ops.updateItem<MediaItem>(p, b.itemIds[1], (d) => { d.durationUs = 10 * S })
+    p = ops.addTransition(p, b.itemIds[0], 'crossfade', S)
+    const v1 = trackOf(p, a.itemIds[0]).id
+    // texto NA faixa V1 (depois de B) + efeito antigo de escopo track sem alvo → a próxima edição grava o alvo com
+    // targetMediaOnly (regra do alvo antigo)
+    const legacyText = ops.addText(p, 'title', 22 * S, { trackId: v1 })
+    const lfx = ops.addEffect(legacyText.project, 'blur', 1 * S, { durationUs: 6 * S })
+    p = ops.addMarker(asLegacy(lfx.project, lfx.itemId), 0)
+    // todos os modelos de texto numa faixa de texto, encostados (texto→texto com transição), sombra configurada
+    const first = ops.addText(p, 'title', 0, { durationUs: 2 * S })
+    p = first.project
+    const textTrack = trackOf(p, first.itemId).id
+    let t = 2 * S
+    const textIds: string[] = [first.itemId]
+    for (const id of (Object.keys(TEXT_PRESETS) as TextPresetId[]).filter((x) => x !== 'caption')) {
+      const r = ops.addText(p, id, t, { durationUs: 2 * S, trackId: textTrack })
+      p = r.project
+      textIds.push(r.itemId)
+      t += 2 * S
+    }
+    p = ops.addTransition(p, textIds[1], 'slideL', 0.5 * S)
+    p = ops.updateItem<TextItem>(p, textIds[2], (it) => { it.style = patchTextStyle(it.style, { shadowStyle: { color: '#ff000080', blur: 0.2, dx: -0.05, dy: 0.1 }, background: '#11223344', backgroundRadius: 0.3, padding: 0.4 }) })
+    // todas as formas (inclui destaque e holofote)
+    t = 0
+    for (const id of Object.keys(SHAPE_PRESETS) as ShapePresetId[]) {
+      p = ops.addShape(p, id, t, { durationUs: 2 * S }).project
+      t += 3 * S
+    }
+    const spot = all(p).find((i): i is ShapeItem => i.type === 'shape' && !!i.spotlight)!
+    p = ops.updateItem<ShapeItem>(p, spot.id, (it) => { it.spotlight = { dim: 0.35 }; it.cornerRadius = 0.2 })
+    // efeito novo de escopo track ligado à faixa de TEXTO
+    const tfx = ops.addEffect(p, 'pixelate', 3 * S, { durationUs: 4 * S })
+    p = ops.updateItem<EffectItem>(tfx.project, tfx.itemId, (it) => { it.scope = 'track'; it.targetTrackId = textTrack; delete it.linkId })
+    // faixa de legendas (modelo "Legenda") com cues encostadas e estilo próprio
+    p = ops.importCaptions(p, [{ startUs: 1 * S, endUs: 3 * S, text: 'Olá' }, { startUs: 3 * S, endUs: 5 * S, text: 'Ação' }], { mode: 'replace' }).project
+    p = ops.setCaptionStyle(p, { shadow: true, maxWidth: 0.6 })
+    // marca: abertura (desloca tudo) e marca d'água, de modelos salvos de um projeto de origem
+    let src = ops.addAsset(createEmptyProject('origem'), png('logo'))
+    const logo = ops.addMediaFromAsset(src, 'logo', 0)
+    src = ops.updateItem<MediaItem>(logo.project, logo.itemIds[0], (d) => { d.durationUs = 2 * S; d.visual!.transform.scale = { value: 0.2 } })
+    const introTitle = ops.addText(src, 'title', 0, { durationUs: 2 * S })
+    const intro = templateFromSelection(introTitle.project, [logo.itemIds[0], introTitle.itemId], 'Vinheta', 'intro').template
+    const mark = templateFromSelection(introTitle.project, [logo.itemIds[0]], 'Logo', 'watermark').template
+    p = applyTemplate(p, intro, materialized(intro), 'intro', 0).project
+    p = applyTemplate(p, mark, materialized(mark), 'watermark', 0).project
+    return p
+  }
+
+  it('toDiskProject → v1.3 aceita, o parse novo devolve o mesmo projeto e a regravação da v1.3 continua legível', () => {
+    const p = kitchenSink()
+    // o projeto tem de fato tudo (o teste não pode passar vazio)
+    const items = all(p)
+    const texts = items.filter((i): i is TextItem => i.type === 'text')
+    const fx = items.filter((i): i is EffectItem => i.type === 'effect')
+    expect(texts.length).toBeGreaterThanOrEqual(Object.keys(TEXT_PRESETS).length + 3)
+    expect(texts.some((x) => x.counter)).toBe(true)
+    expect(texts.some((x) => x.style.shadowStyle)).toBe(true)
+    expect(items.some((i) => i.type === 'shape' && i.spotlight)).toBe(true)
+    expect(items.filter((i) => i.type === 'shape').length).toBeGreaterThanOrEqual(Object.keys(SHAPE_PRESETS).length)
+    const kinds = transitionWindows(p).map((w) => `${ops.findItem(p, w.fromId)!.item.type}→${ops.findItem(p, w.toId)!.item.type}`)
+    expect(kinds.sort()).toEqual(['media→media', 'text→text'])
+    expect(p.tracks.some(ops.isCaptionsTrack)).toBe(true)
+    expect(fx.some((e) => e.targetMediaOnly === true)).toBe(true)
+    const textTrackFx = fx.find((e) => e.scope === 'track' && !e.targetMediaOnly)!
+    expect(p.tracks.find((tr) => tr.id === textTrackFx.targetTrackId)!.items.every((i) => i.type === 'text')).toBe(true)
+    const gen = new Set(p.assets.filter((x) => x.source.type === 'generated').map((x) => x.id))
+    expect(items.filter((i) => i.type === 'media' && gen.has(i.assetId)).length).toBeGreaterThanOrEqual(2) // abertura + marca d'água
+    expect(items.some((i) => i.type === 'media' && i.startUs === 0 && p.assets.find((x) => x.id === i.assetId)?.source.type === 'generated')).toBe(true)
+    expect(validateProject(p)).toEqual([])
+
+    const disk = JSON.parse(JSON.stringify(toDiskProject(p)))
+    const v13 = parseProjectV13(disk)
+    expect(v13.success).toBe(true)
+    expect(parseProject(disk)).toEqual(p)
+    // a v1.3 regrava (perde só o que é da v1.5): o arquivo continua legível pelo build novo e pela própria v1.3
+    const back = parseProject(JSON.parse(JSON.stringify(v13.data)))
+    expect(validateProject(back)).toEqual([])
+    expect(parseProjectV13(JSON.parse(JSON.stringify(toDiskProject(back)))).success).toBe(true)
   })
 })

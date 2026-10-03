@@ -1,11 +1,12 @@
 import { z } from 'zod'
 import { frameDurUs, itemEndUs } from './time'
-import { ANIM_PRESETS, CURSOR_FX_LIMITS, DEFAULT_CURSOR_FX, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
-import type { Anim, AnimPreset, CursorFx, EffectItem, MediaItem, EffectRegion, Item, PresetAnim, Project, VisualProps } from './project'
+import { ANIM_PRESETS, CURSOR_FX_LIMITS, DEFAULT_CURSOR_FX, DEFAULT_TEXT_SHADOW, MIN_ITEM_US, MAX_SPEED, MIN_SPEED } from './project'
+import type { Anim, AnimPreset, Asset, CursorFx, EffectItem, EffectRegion, Item, MediaItem, PresetAnim, Project, ShapeItem, TextItem, Track, VisualProps } from './project'
 import { anchoredUnion } from './attachment'
 import { attachedMedia } from './resolve'
 import { conservativeRegion } from './contentPose'
 import { itemAnimEntries, type AnimPath } from './animPaths'
+import { maxTransitionUs, MIN_TRANSITION_US, transitionInOf, transitionPairOk } from './transitions'
 
 const us = z.number().int()
 const unit = z.number().min(0).max(1)
@@ -102,24 +103,37 @@ const mediaItem = z.object({
   transitionIn: transition.optional(),
   cursorFx: cursorFx.optional().catch(undefined)
 })
-const textStyle = z.object({
-  font: z.string(),
-  size: animOrNumber,
-  weight: z.number(),
-  color: z.string(),
-  background: z.string().optional(),
-  stroke: z.object({ width: z.number(), color: z.string() }).optional(),
-  shadow: z.boolean().optional(),
-  align: z.enum(['left', 'center', 'right']),
-  lineHeight: z.number()
-})
+// F5 (v1.5): itálico, largura máxima, fundo com margem/cantos e sombra com parâmetros — opcionais, a v1.3 os descarta.
+// `shadow` (boolean da v1.3) e `shadowStyle` ficam coerentes: projeto antigo com `shadow: true` ganha a sombra padrão.
+const textStyle = z
+  .object({
+    font: z.string(),
+    size: animOrNumber,
+    weight: z.number(),
+    color: z.string(),
+    background: z.string().optional(),
+    stroke: z.object({ width: z.number(), color: z.string() }).optional(),
+    shadow: z.boolean().optional(),
+    align: z.enum(['left', 'center', 'right']),
+    lineHeight: z.number(),
+    italic: z.boolean().optional(),
+    maxWidth: z.number().optional(),
+    padding: z.number().optional(),
+    backgroundRadius: z.number().optional(),
+    shadowStyle: z.object({ color: z.string(), blur: z.number(), dx: z.number(), dy: z.number() }).optional()
+  })
+  .transform((st) => {
+    if (st.shadowStyle) return st.shadow ? st : { ...st, shadow: true }
+    return st.shadow ? { ...st, shadowStyle: { ...DEFAULT_TEXT_SHADOW } } : st
+  })
 const textItem = z.object({
   ...itemBase,
   type: z.literal('text'),
   text: z.string(),
   style: textStyle,
   visual,
-  transitionIn: transition.optional()
+  transitionIn: transition.optional(),
+  counter: z.object({ from: z.number(), to: z.number() }).optional()
 })
 const shapeItem = z.object({
   ...itemBase,
@@ -128,7 +142,10 @@ const shapeItem = z.object({
   fill: z.string(),
   stroke: z.string(),
   strokeWidth: z.number(),
-  visual
+  visual,
+  box: z.object({ w: z.number(), h: z.number() }).optional(),
+  cornerRadius: z.number().optional(),
+  spotlight: z.object({ dim: z.number() }).optional()
 })
 const effectRegion = z.object({ shape: z.enum(['rect', 'ellipse']), x: anim, y: anim, w: anim, h: anim, rotation: anim })
 const effectItem = z.object({
@@ -142,12 +159,18 @@ const effectItem = z.object({
   invert: z.boolean(),
   scope: z.enum(['below', 'track']),
   targetTrackId: z.string().optional(),
+  targetMediaOnly: z.literal(true).optional(),
   // no disco a região do ancorado (espaço do conteúdo) fica em attach.region e `region` é a caixa estática do quadro
   // (toDiskProject); parseProject a devolve a `region`
   attach: z.object({ mediaItemId: z.string(), fallback: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional(), region: effectRegion.optional() }).optional()
 })
 const annotationsItem = z.object({ ...itemBase, type: z.literal('annotations'), sessionId: z.string(), inUs: us, autoFadeMs: z.number().nonnegative().nullable().optional() })
 const item = z.discriminatedUnion('type', [mediaItem, textItem, shapeItem, effectItem, annotationsItem])
+/**
+ * Item de um modelo de marca (brand.ts): só mídia, texto e forma, no formato do modelo em memória (os transforms do
+ * schema são idempotentes nele). Efeitos e anotações não entram em modelos.
+ */
+export const BrandItemSchema = z.discriminatedUnion('type', [mediaItem, textItem, shapeItem]) as unknown as z.ZodType<MediaItem | TextItem | ShapeItem>
 
 const assetSource = z.discriminatedUnion('type', [
   z.object({ type: z.literal('session'), sessionId: z.string(), stream: z.enum(['screen', 'webcam', 'mic', 'system']) }),
@@ -196,9 +219,11 @@ const track = z.object({
   hidden: z.boolean(),
   locked: z.boolean(),
   volume: z.number(),
-  role: z.enum(['voice', 'music', 'sfx', 'effects']).optional(),
+  role: z.enum(['voice', 'music', 'sfx', 'effects', 'captions']).optional(),
+  // faixa de legendas no disco (a v1.3 recusa role 'captions'): sem `role` e com captionsV15 — o parse devolve o papel
+  captionsV15: z.boolean().optional(),
   items: z.array(item)
-})
+}).transform(({ captionsV15, ...t }) => (captionsV15 && t.kind === 'video' && t.role === undefined ? { ...t, role: 'captions' as const } : t))
 
 export const ProjectSchema: z.ZodType<Project> = z.object({
   version: z.literal(1),
@@ -233,8 +258,9 @@ export function migrateProject(json: unknown): unknown {
   const tracks = (json as { tracks?: unknown } | null)?.tracks
   if (!Array.isArray(tracks)) return json
   const isLegacyFx = (t: unknown): boolean => {
-    const x = t as { kind?: unknown; name?: unknown; role?: unknown; items?: unknown }
-    return x?.kind === 'video' && x.role === undefined && typeof x.name === 'string' && /^Efeitos( \d+)?$/.test(x.name) &&
+    const x = t as { kind?: unknown; name?: unknown; role?: unknown; items?: unknown; captionsV15?: unknown }
+    // faixa de legendas no disco (sem role, captionsV15) nunca vira de efeitos, nem vazia e chamada "Efeitos"
+    return x?.kind === 'video' && x.role === undefined && x.captionsV15 !== true && typeof x.name === 'string' && /^Efeitos( \d+)?$/.test(x.name) &&
       Array.isArray(x.items) && x.items.every((i) => (i as { type?: unknown })?.type === 'effect')
   }
   if (!tracks.some(isLegacyFx)) return json
@@ -295,18 +321,41 @@ function fromDiskAnchors(p: Project): Project {
  * maior que o do build novo. A região do conteúdo vai em `attach.region`; parseProject desfaz a troca e a ida e volta
  * pelo parse novo não perde nada.
  */
-function diskAnchored(p: Project, fx: EffectItem): unknown {
+function diskAnchored(p: Project, fx: EffectItem, cache: UnionCache): unknown {
   const at = fx.attach!
   const m = attachedMedia(p, fx)
-  // a caixa cobre a região com a geometria do build novo E com a que a v1.3 desenha (presets dela, sem curva)
-  const u = m ? boxUnion(anchoredUnion(p, fx, m), m.visual ? anchoredUnion(p, fx, { ...m, visual: v13Geometry(m.visual) }) : null) : null
-  const box = boxUnion(u, at.fallback ?? null)
+  const box = boxUnion(m ? diskUnion(p, fx, m, cache) : null, at.fallback ?? null)
   const r = conservativeRegion(fx, box)
   return {
     ...fx,
     region: { shape: fx.region.shape, x: { value: r.x }, y: { value: r.y }, w: { value: r.w }, h: { value: r.h }, rotation: { value: r.rotation } },
     attach: { ...at, region: fx.region }
   }
+}
+
+// Caixa do disco por efeito (o autosave grava a cada 1 s): recalculada só quando o efeito, o clipe da âncora, o asset
+// dele ou o quadro mudam (anchoredUnion só lê esses quatro). Mesmos objetos (projeto imutável no renderer): acerto
+// direto. O processo principal recebe o projeto pelo IPC e o parseia de novo a cada gravação (objetos novos, mesmo
+// conteúdo): aí vale a chave de conteúdo (JSON do que anchoredUnion lê), bem mais barata que as duas uniões.
+type UnionEntry = { fx: EffectItem; m: MediaItem; asset: Asset | undefined; canvas: Project['canvas']; key: string | null; u: Box | null }
+type UnionCache = { prev: Map<string, UnionEntry>; next: Map<string, UnionEntry> }
+/** Por projeto: as entradas da última gravação (efeitos apagados saem na seguinte). */
+const unionCaches = new Map<string, Map<string, UnionEntry>>()
+const unionKey = (p: Project, fx: EffectItem, m: MediaItem, asset: Asset | undefined): string =>
+  JSON.stringify([fx.startUs, fx.durationUs, fx.region, m.startUs, m.durationUs, m.assetId, m.visual, asset?.video ?? null, p.canvas.width, p.canvas.height])
+/** União da região ancorada com a geometria do build novo E com a que a v1.3 desenha (presets dela, sem curva). */
+function diskUnion(p: Project, fx: EffectItem, m: MediaItem, cache: UnionCache): Box | null {
+  const asset = p.assets.find((a) => a.id === m.assetId)
+  const c = cache.prev.get(fx.id)
+  let e: UnionEntry
+  if (c && c.fx === fx && c.m === m && c.asset === asset && c.canvas === p.canvas) e = c
+  else {
+    const key = unionKey(p, fx, m, asset)
+    const u = c && c.key === key ? c.u : boxUnion(anchoredUnion(p, fx, m), m.visual ? anchoredUnion(p, fx, { ...m, visual: v13Geometry(m.visual) }) : null)
+    e = { fx, m, asset, canvas: p.canvas, key, u }
+  }
+  cache.next.set(fx.id, e)
+  return e.u
 }
 
 type Box = { x: number; y: number; w: number; h: number }
@@ -356,21 +405,34 @@ function diskVisual(v: VisualProps): unknown {
  * keys nessas propriedades. parseProject aceita as duas formas. Efeito ancorado: diskAnchored. Não muda o projeto recebido.
  */
 export function toDiskProject(p: Project): unknown {
+  const cache: UnionCache = { prev: unionCaches.get(p.id) ?? new Map(), next: new Map() }
   const item = (it: Item): unknown => {
     switch (it.type) {
       case 'media':
         return it.visual ? { ...it, visual: diskVisual(it.visual) } : it
       case 'text':
-        return { ...it, style: { ...it.style, size: compact(it.style.size) }, visual: diskVisual(it.visual) }
+        // shadow (boolean da v1.3) coerente com os parâmetros da sombra; os campos da v1.5 a v1.3 descarta
+        return { ...it, style: { ...it.style, size: compact(it.style.size), ...(it.style.shadowStyle ? { shadow: true } : {}) }, visual: diskVisual(it.visual) }
       case 'shape':
         return { ...it, visual: diskVisual(it.visual) }
       case 'effect':
-        return it.attach ? diskAnchored(p, it) : it
+        return it.attach ? diskAnchored(p, it, cache) : it
       default:
         return it
     }
   }
-  return { ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map(item) })) }
+  // faixa de legendas: a v1.3 recusa role 'captions' — vai sem papel (para ela, uma faixa de vídeo com textos) e com
+  // captionsV15, que o parse devolve a role 'captions'
+  const track = (t: Track): unknown => {
+    const items = t.items.map(item)
+    if (t.role !== 'captions') return { ...t, items }
+    const { role: _role, ...rest } = t
+    return { ...rest, captionsV15: true, items }
+  }
+  const out = { ...p, tracks: p.tracks.map(track) }
+  if (cache.next.size) unionCaches.set(p.id, cache.next)
+  else unionCaches.delete(p.id)
+  return out
 }
 
 /** Nome da propriedade nas mensagens (os de antes da F4 mantidos: volume, x, strength…). */
@@ -396,6 +458,12 @@ export function validateProject(p: Project): string[] {
   const errs: string[] = []
   const assets = new Map(p.assets.map((a) => [a.id, a]))
   const tol = frameDurUs(p.canvas.fps)
+  const captions = p.tracks.filter((t) => t.role === 'captions')
+  if (captions.length > 1) errs.push('Há mais de uma faixa de legendas')
+  for (const tr of captions) {
+    if (tr.kind !== 'video') errs.push(`Faixa "${tr.name}": a faixa de legendas precisa ser de vídeo`)
+    for (const it of tr.items) if (it.type !== 'text') errs.push(`Faixa "${tr.name}", item ${it.id}: a faixa de legendas só aceita textos`)
+  }
   for (const tr of p.tracks) {
     // compara com o maior fim acumulado (um item longo pode cobrir vários seguintes)
     const sorted = [...tr.items].sort((a, b) => a.startUs - b.startUs)
@@ -403,6 +471,17 @@ export function validateProject(p: Project): string[] {
     for (const cur of sorted) {
       if (maxEndItem && cur.startUs < itemEndUs(maxEndItem)) errs.push(`Faixa "${tr.name}": item ${cur.id} sobrepõe o item ${maxEndItem.id}`)
       if (!maxEndItem || itemEndUs(cur) > itemEndUs(maxEndItem)) maxEndItem = cur
+    }
+    for (let i = 0; i < sorted.length; i++) {
+      const b = sorted[i]
+      const tin = transitionInOf(b)
+      if (!tin) continue
+      const tag = `Faixa "${tr.name}", item ${b.id}`
+      const a = sorted[i - 1]
+      const d = tin.durationUs
+      if (!transitionPairOk(tr, a, b)) errs.push(`${tag}: transição sem clipe anterior encostado e elegível na mesma faixa de vídeo`)
+      else if (d < MIN_TRANSITION_US) errs.push(`${tag}: transição menor que o mínimo (${MIN_TRANSITION_US} µs)`)
+      else if (d > maxTransitionUs(a, b)) errs.push(`${tag}: transição maior que metade do clipe mais curto`)
     }
     for (const it of tr.items) {
       const tag = `Faixa "${tr.name}", item ${it.id}`
@@ -418,6 +497,22 @@ export function validateProject(p: Project): string[] {
         if (it.cursorFx) errs.push(...cursorFxErrors(it.cursorFx).map((m) => `${tag}: ${m}`))
       } else if (tr.kind !== 'video') {
         errs.push(`${tag}: item visual só pode ficar em faixa de vídeo`)
+      }
+      // faixas dos campos da v1.5 (fora do zod: recusar no parse perderia o projeto inteiro)
+      const out = (name: string, v: number | undefined, lo: number, hi: number): void => {
+        if (v !== undefined && !(v >= lo && v <= hi)) errs.push(`${tag}: ${name} fora do intervalo ${lo}–${hi}`)
+      }
+      if (it.type === 'text') {
+        const st = it.style
+        out('maxWidth', st.maxWidth, 0.01, 1)
+        out('padding', st.padding, 0, 10)
+        out('backgroundRadius', st.backgroundRadius, 0, 10)
+        out('sombra (desfoque)', st.shadowStyle?.blur, 0, 10)
+      } else if (it.type === 'shape') {
+        out('cornerRadius', it.cornerRadius, 0, 0.5)
+        out('spotlight.dim', it.spotlight?.dim, 0, 1)
+        out('box.w', it.box?.w, 0.001, 10)
+        out('box.h', it.box?.h, 0.001, 10)
       }
       for (const [pt, an] of itemAnimEntries(it)) {
         const name = animLabel(pt)
