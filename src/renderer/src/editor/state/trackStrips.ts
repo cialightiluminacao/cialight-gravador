@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { EffectRegion, Us } from '@shared/editor/project'
+import { findItem } from '@shared/editor/ops'
+import type { EffectRegion, Project, Us } from '@shared/editor/project'
 import type { TrackSample, TrackState } from '@shared/editor/track'
 import { useEditorStore } from './editorStore'
 
@@ -12,10 +13,10 @@ export interface TrackStrip {
   region: EffectRegion
   samples: TrackSample[]
   /**
-   * Instante (absoluto) da perda NÃO recuperada do último rastreamento (G4: "Continuar daqui" / "Continuar
-   * rastreamento"); null/ausente = terminou confiante. Vale mesmo depois que o usuário reposiciona a região.
+   * Instante da perda NÃO recuperada do último rastreamento, LOCAL ao efeito (G4: "Continuar daqui" / "Continuar
+   * rastreamento"; local: acompanha o efeito movido, como os keys); null/ausente = terminou confiante. Use liveLossUs.
    */
-  lossUs?: Us | null
+  lossLocalUs?: Us | null
 }
 
 interface State {
@@ -53,4 +54,23 @@ export function stripRuns(samples: readonly TrackSample[], durationUs: Us): { fr
  */
 export function mergeStripSamples(prev: readonly TrackSample[], fresh: readonly TrackSample[], fromLocalUs: Us): TrackSample[] {
   return [...prev.filter((s) => s.tUs < fromLocalUs), ...fresh]
+}
+
+/**
+ * Instante absoluto da perda que "Continuar daqui" / "Continuar rastreamento" oferecem (G4), derivado do estado atual:
+ * só enquanto o rastreamento que a gravou continua no histórico — a região do item é a gravada ou ela está num
+ * projeto do passado (o usuário a ajustou depois, o fluxo normal). Desfeito o rastreamento (ou fora do histórico), o
+ * efeito sumido ou a perda fora do trecho atual do efeito → null (nunca um instante errado).
+ */
+export function liveLossUs(strip: TrackStrip | undefined, project: Project | null, past: readonly Project[], itemId: string): Us | null {
+  if (!strip || strip.lossLocalUs === null || strip.lossLocalUs === undefined || !project) return null
+  const f = findItem(project, itemId)
+  if (!f || f.item.type !== 'effect') return null
+  if (strip.lossLocalUs < 0 || strip.lossLocalUs >= f.item.durationUs) return null
+  let alive = f.item.region === strip.region
+  for (let i = past.length - 1; !alive && i >= 0; i--) {
+    const g = findItem(past[i], itemId)
+    alive = g?.item.type === 'effect' && g.item.region === strip.region
+  }
+  return alive ? f.item.startUs + strip.lossLocalUs : null
 }

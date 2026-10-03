@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { evalAnim } from './anim'
 import { createEffectItem } from './factory'
 import type { EffectItem, Us } from './project'
-import { trackFrames, trackFrameTimes, trackToKeys, type GrayImage, type TrackKeysResult, type TrackOpts, type TrackResult } from './track'
+import { DEFAULT_REDETECT, trackFrames, trackFrameTimes, trackToKeys, type GrayImage, type TrackKeysResult, type TrackOpts, type TrackResult } from './track'
 
 // Oráculo de privacidade ADVERSARIAL do "Seguir conteúdo" (revisão da Task 5, rulings R19/R20): conteúdo repetido e
 // parecido (linhas de tabela rolando), cópia idêntica do valor em outro lugar, oclusão parcial de uma linha, região
@@ -15,6 +15,10 @@ const AH = 270
 const CW = 1920
 const CH = 1080
 const FPS = 30
+/** fps dos quadros analisados nas suítes de oclusão/sósia/redetecção (revisão da G4: a 60 fps um portão por quadro vazava). */
+const FPS_LIST = [24, 30, 60] as const
+/** Tempo máximo de um caso parametrizado por fps (60 fps = o dobro de quadros; a máquina pode estar carregada). */
+const SLOW_MS = 30_000
 const GEO = { analysisW: AW, analysisH: AH, canvasW: CW, canvasH: CH }
 const usOf = (t: number): Us => Math.round(t * 1e6)
 
@@ -134,10 +138,10 @@ function oracle(sc: Adv, fx0: EffectItem, fx1: EffectItem, t0: number, t1: numbe
   return { fails, worst }
 }
 
-function run(sc: Adv, t0: number, t1: number, invert: boolean, opts: Partial<TrackOpts> = {}): { fails: number; worst: string; results: TrackResult[]; fx0: EffectItem; fx1: EffectItem; out: TrackKeysResult } {
+function run(sc: Adv, t0: number, t1: number, invert: boolean, opts: Partial<TrackOpts> = {}, fps: number = FPS): { fails: number; worst: string; results: TrackResult[]; fx0: EffectItem; fx1: EffectItem; out: TrackKeysResult } {
   const b = userBox(sc, t0)
   const fx0: EffectItem = { ...createEffectItem('blurText', 0, usOf(t1), { x: b.x / AW, y: b.y / AH, w: b.w / AW, h: b.h / AH }), id: 'fx', invert }
-  const frames = trackFrameTimes(usOf(t0), usOf(t1), FPS).map((tUs) => ({ tUs, img: render(sc, tUs / 1e6) }))
+  const frames = trackFrameTimes(usOf(t0), usOf(t1), fps).map((tUs) => ({ tUs, img: render(sc, tUs / 1e6) }))
   const results = trackFrames(frames, b, opts)
   const out = trackToKeys(fx0, results, GEO)
   const fx1 = { ...fx0, region: out.region }
@@ -169,13 +173,13 @@ const SCENES: [string, Adv, Adv, number, number][] = [
   ['zoom lento de 2–4 % (entrando e saindo)', ZOOM, ZOOM, 0, 2]
 ]
 
-describe('oráculo adversarial (R19/R20)', () => {
+for (const fps of FPS_LIST) describe(`oráculo adversarial (R19/R20) a ${fps} fps`, () => {
   for (const [name, normal, inverted, t0, t1] of SCENES) {
     for (const invert of [false, true]) {
       it(`${name}${invert ? ' — invertido' : ''}`, () => {
-        const r = run(invert ? inverted : normal, t0, t1, invert)
+        const r = run(invert ? inverted : normal, t0, t1, invert, {}, fps)
         expect(r.fails, `${r.worst} | estados ${r.results.map((x) => x.state[0]).join('')}`).toBe(0)
-      })
+      }, SLOW_MS)
     }
   }
 })
@@ -205,7 +209,7 @@ const NEAR: Adv = {
   occl: (t) => (t >= 0.5 ? [{ x0: 150, y0: 85, x1: 250, y1: Math.min(115, 90 + 25 * (t - 0.5)) }] : [])
 }
 
-describe('oráculo adversarial (R21: sem recuperação automática)', () => {
+for (const fps of FPS_LIST) describe(`oráculo adversarial (R21: cópia idêntica; com a redetecção da G4 ligada) a ${fps} fps`, () => {
   const cases: [string, Adv, number][] = [
     ['cópia idêntica parada, alvo revelado aos poucos', REVEAL, 1.9],
     ['cópia idêntica que se afasta (fantasma de arrasto)', DRAG, 2],
@@ -214,9 +218,12 @@ describe('oráculo adversarial (R21: sem recuperação automática)', () => {
   for (const [name, sc, t1] of cases) {
     for (const invert of [false, true]) {
       it(`${name}${invert ? ' — invertido' : ''}`, () => {
-        const r = run(sc, 0, t1, invert)
+        const r = run(sc, 0, t1, invert, {}, fps)
         expect(r.fails, `${r.worst} | estados ${r.results.map((x) => x.state[0]).join('')}`).toBe(0)
-      })
+        // nunca um quadro confiante sobre a cópia (y 130) depois da perda
+        const first = r.results.findIndex((x) => x.state !== 'ok')
+        if (first > 0) for (const x of r.results.slice(first)) if (x.state === 'ok') expect(Math.abs(x.y - 130), `t=${x.tUs}`).toBeGreaterThan(10)
+      }, SLOW_MS)
     }
   }
 })
@@ -346,7 +353,7 @@ function boundaryUs(out: TrackKeysResult, results: TrackResult[]): Us[] {
   return ts.filter((t) => t >= 0)
 }
 
-describe('redetecção automática (G4, R3)', () => {
+for (const fps of FPS_LIST) describe(`redetecção automática (G4, R3) a ${fps} fps`, () => {
   const recovers: [string, Adv, number][] = [
     ['cursor passando sobre o conteúdo parado (< 1 s)', CURSOR, 1.6],
     ['cursor passando sobre o conteúdo andando (< 1 s)', CURSOR_MOVING, 1.6],
@@ -359,7 +366,7 @@ describe('redetecção automática (G4, R3)', () => {
   for (const [name, sc, t1] of recovers) {
     for (const invert of [false, true]) {
       it(`${name}${invert ? ' — invertido' : ''}: reencontra e o oráculo vale em todo instante`, () => {
-        const r = run(sc, 0, t1, invert)
+        const r = run(sc, 0, t1, invert, {}, fps)
         const tag = `estados ${states(r.results)}`
         expect(r.out.recovered.length, tag).toBeGreaterThanOrEqual(1)
         expect(r.out.lost, tag).toEqual([])
@@ -367,10 +374,12 @@ describe('redetecção automática (G4, R3)', () => {
         expect(o2.fails, `${o2.worst} | ${tag}`).toBe(0)
         const R0 = at(r.fx0, 0)
         for (const g of r.out.recovered) {
-          // reencontro (os 3 quadros de confirmação) dentro de 1 s da perda
-          expect(g.toUs - g.fromUs, tag).toBeLessThanOrEqual(1_000_000)
           const i = r.results.findIndex((x) => x.tUs === g.toUs)
           expect(r.results[i].reacquired, tag).toBe(true)
+          // R3: a janela de 1 s vai da perda até a ACEITAÇÃO — o 3º quadro da confirmação (i + 2)
+          const accept = r.results[i + DEFAULT_REDETECT.confirmFrames - 1]
+          expect(accept, tag).toBeDefined()
+          expect(accept.tUs - g.fromUs, tag).toBeLessThanOrEqual(DEFAULT_REDETECT.maxUs)
           // no lugar certo: o centro relatado bate com o caminho real do alvo (± 1 px da análise)
           for (let j = i; j < Math.min(r.results.length, i + 3); j++) {
             const c = sc.target.path(r.results[j].tUs / 1e6)
@@ -399,14 +408,14 @@ describe('redetecção automática (G4, R3)', () => {
           const ks = r.fx1.region[c].keys!.map((k) => k.tUs)
           for (let k = 1; k < ks.length; k++) expect(ks[k]).toBeGreaterThan(ks[k - 1])
         }
-      })
+      }, SLOW_MS)
     }
   }
 
   for (const invert of [false, true]) {
     it(`oclusão > 1 s${invert ? ' — invertido' : ''}: exatamente como sem a redetecção (segurada e ampliada até o fim)`, () => {
-      const on = run(LONG, 0, 2, invert)
-      const off = run(LONG, 0, 2, invert, { redetect: null })
+      const on = run(LONG, 0, 2, invert, {}, fps)
+      const off = run(LONG, 0, 2, invert, { redetect: null }, fps)
       expect(on.out.recovered).toEqual([])
       expect(on.out.lost).toHaveLength(1)
       expect(on.fx1.region).toEqual(off.fx1.region)
@@ -415,12 +424,12 @@ describe('redetecção automática (G4, R3)', () => {
       const first = on.results.findIndex((x) => x.state !== 'ok')
       expect(on.results.slice(first + 1).every((x) => x.state === 'lost'), states(on.results)).toBe(true)
       expect(on.fails, on.worst).toBe(0)
-    })
+    }, SLOW_MS)
   }
 
   for (const invert of [false, true]) {
     it(`sósia idêntico que fica depois que o alvo reaparece${invert ? ' — invertido' : ''}: nunca travado, oráculo vale`, () => {
-      const r = run(LOOKALIKE_STAYS, 0, 1.6, invert)
+      const r = run(LOOKALIKE_STAYS, 0, 1.6, invert, {}, fps)
       const tag = `estados ${states(r.results)}`
       const first = r.results.findIndex((x) => x.state !== 'ok')
       expect(first, tag).toBeGreaterThan(0)
@@ -429,25 +438,25 @@ describe('redetecção automática (G4, R3)', () => {
       expect(r.out.recovered, tag).toEqual([])
       const o2 = oracle(LOOKALIKE_STAYS, r.fx0, r.fx1, 0, 1.6, boundaryUs(r.out, r.results))
       expect(o2.fails, `${o2.worst} | ${tag}`).toBe(0)
-    })
+    }, SLOW_MS)
   }
 
   for (const invert of [false, true]) {
     it(`rolagem que começa com o alvo coberto${invert ? ' — invertido' : ''}: não reencontra (mais blur, nunca menos), oráculo vale`, () => {
       // 30 px de deslocamento sem movimento antes: fora da coerência (8 px + 0,5 px/quadro) — o mesmo caso de um sósia
-      const r = run(SCROLL_STARTS_HIDDEN, 0, 1.4, invert)
+      const r = run(SCROLL_STARTS_HIDDEN, 0, 1.4, invert, {}, fps)
       expect(r.out.recovered, states(r.results)).toEqual([])
       expect(r.out.lost).toHaveLength(1)
       expect(r.fails, r.worst).toBe(0)
-    })
+    }, SLOW_MS)
   }
 
   it('com a redetecção desligada (redetect: null) nada volta: o comportamento da F6 (R21)', () => {
-    const r = run(CURSOR, 0, 1.6, false, { redetect: null })
+    const r = run(CURSOR, 0, 1.6, false, { redetect: null }, fps)
     expect(r.out.recovered).toEqual([])
     expect(r.out.lost).toHaveLength(1)
     const first = r.results.findIndex((x) => x.state !== 'ok')
     expect(r.results.slice(first + 1).every((x) => x.state === 'lost')).toBe(true)
     expect(r.fails, r.worst).toBe(0)
-  })
+  }, SLOW_MS)
 })

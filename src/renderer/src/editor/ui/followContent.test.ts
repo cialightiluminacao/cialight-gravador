@@ -12,7 +12,7 @@ import { addMarker, applyTrackedRegion, findItem } from '@shared/editor/ops'
 import type { EffectItem, EffectRegion, Project } from '@shared/editor/project'
 import { runContentTracking, TrackingCancelled, type ContentTrackingResult } from '../engine/contentTracking'
 import { useEditorStore } from '../state/editorStore'
-import { mergeStripSamples, stripRuns, useTrackStrips } from '../state/trackStrips'
+import { liveLossUs, mergeStripSamples, stripRuns, useTrackStrips } from '../state/trackStrips'
 import { CONTINUE_HINT, followContent, useTrackJobs } from './followContent'
 
 const st = (): ReturnType<typeof useEditorStore.getState> => useEditorStore.getState()
@@ -128,7 +128,7 @@ describe('Continuar daqui / Continuar rastreamento (G4)', () => {
     await followContent('fx')
     const opts = vi.mocked(toast.warning).mock.calls[0][1] as { action: { label: string; onClick: () => void } }
     expect(opts.action.label).toBe('Continuar daqui')
-    expect(useTrackStrips.getState().strips.fx.lossUs).toBe(1_250_000)
+    expect(useTrackStrips.getState().strips.fx.lossLocalUs).toBe(1_250_000)
     opts.action.onClick()
     expect(st().playheadUs).toBe(1_250_000)
     expect(st().selection).toEqual(['fx'])
@@ -153,7 +153,7 @@ describe('Continuar daqui / Continuar rastreamento (G4)', () => {
     expect((findItem(st().project!, 'fx')!.item as EffectItem).region).toEqual(tracked2)
     const strip = useTrackStrips.getState().strips.fx
     expect(strip.samples.map((x) => x.tUs)).toEqual([0, 1_000_000, 1_200_000, 1_600_000])
-    expect(strip.lossUs).toBeNull()
+    expect(strip.lossLocalUs).toBeNull()
     expect(toast.success).toHaveBeenCalled()
     st().undo()
     expect(st().project).toEqual(before)
@@ -167,6 +167,33 @@ describe('Continuar daqui / Continuar rastreamento (G4)', () => {
     expect(toast.warning).not.toHaveBeenCalled()
     const desc = (vi.mocked(toast.success).mock.calls[0][1] as { description: string }).description
     expect(desc).toContain('Uma perda breve foi recuperada automaticamente (00:00,5)')
+  })
+
+  it('a perda oferecida vem do estado atual: acompanha o efeito movido e some quando o rastreamento é desfeito', async () => {
+    st().open(base())
+    vi.mocked(runContentTracking).mockResolvedValue(out([{ tUs: 1_250_000 }]))
+    await followContent('fx')
+    const strip = (): ReturnType<typeof useTrackStrips.getState>['strips'][string] => useTrackStrips.getState().strips.fx
+    expect(liveLossUs(strip(), st().project, st().history.past, 'fx')).toBe(1_250_000)
+    // o usuário ajusta a região (o rastreamento fica no passado): continua valendo
+    expect(st().apply((p) => applyTrackedRegion(p, 'fx', { ...tracked, y: { value: 0.35 } }))).toBeTruthy()
+    expect(liveLossUs(strip(), st().project, st().history.past, 'fx')).toBe(1_250_000)
+    // efeito movido 0,5 s (keys locais acompanham): a perda também
+    expect(st().apply((p) => ({ ...p, tracks: p.tracks.map((t) => ({ ...t, items: t.items.map((it) => (it.id === 'fx' ? { ...it, startUs: it.startUs + 500_000 } : it)) })) }))).toBeTruthy()
+    expect(liveLossUs(strip(), st().project, st().history.past, 'fx')).toBe(1_750_000)
+    const opts = vi.mocked(toast.warning).mock.calls[0][1] as unknown as { action: { onClick: () => void } }
+    opts.action.onClick()
+    expect(st().playheadUs).toBe(1_750_000)
+    // desfaz tudo até antes do rastreamento: a perda não vale mais e "Continuar daqui" não move o playhead
+    st().undo()
+    st().undo()
+    st().undo()
+    expect(st().history.past).toHaveLength(0)
+    expect(liveLossUs(strip(), st().project, st().history.past, 'fx')).toBeNull()
+    st().setPlayhead(42)
+    opts.action.onClick()
+    expect(st().playheadUs).toBe(42)
+    expect(toast.info).toHaveBeenLastCalledWith('Esta perda não vale mais', expect.anything())
   })
 
   it('mergeStripSamples: antes do ponto de partida ficam, dali em diante as novas', () => {

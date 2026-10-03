@@ -24,7 +24,7 @@
 // da perda o molde é procurado numa janela de 3× searchPx em volta da última posição confiante; volta só com 3
 // quadros seguidos de confiança ≥ 0,93, o 2º pico ≥ 0,15 abaixo, rígidos e coerentes com o movimento (um conteúdo
 // idêntico — cópia, fantasma de arrasto — que aparece longe da previsão enquanto o alvo está escondido seria
-// indistinguível dele: recusado pela coerência, REDETECT_DRIFT_PX). Os quadros entre a perda e o reencontro ficam
+// indistinguível dele: recusado pela coerência, REDETECT_DRIFT_PX_PER_S). Os quadros entre a perda e o reencontro ficam
 // segurados e ampliados (invertido: buraco nulo). Sem reencontro, perdido até o fim; para continuar, o usuário
 // reposiciona a região num quadro posterior e usa "Continuar rastreamento" / "Seguir conteúdo" dali (a mescla mantém
 // os keys de antes). O 1º quadro da perda é 'weak' (âmbar) quando havia um pico plausível perto da previsão, senão
@@ -305,6 +305,8 @@ export interface Tracker {
   readonly lostAtUs?: Us | null
   /** Quadros desde o último 'ok' (0 = o último quadro foi 'ok'). */
   readonly sinceOk?: number
+  /** tUs do último quadro 'ok' (a deriva admitida na redetecção é por TEMPO, independente do fps). */
+  readonly lastOkUs?: Us
   /** A janela da redetecção já acabou nesta perda (perdido até o fim). */
   readonly gaveUp?: boolean
   /** Candidatos seguidos ao reencontro (os quadros imediatamente anteriores). */
@@ -554,7 +556,7 @@ export function startTracker(first: GrayImage, box: TrackBox, tUs: Us, opts: Par
   if (std(patch) < o.minStd) throw new EditError('invalid', 'A região está sobre uma área lisa, sem detalhe para seguir: posicione-a sobre o conteúdo a esconder.')
   const tracker: Tracker = {
     opts: o, box, c0x: x0 + patch.w / 2, c0y: y0 + patch.h / 2, patch, set: tplSet(patch, 1),
-    pos: { x: box.x, y: box.y }, scale: 1, v: null, lost: false, reach: 0
+    pos: { x: box.x, y: box.y }, scale: 1, v: null, lost: false, reach: 0, lastOkUs: tUs
   }
   return { tracker, result: { tUs, x: box.x, y: box.y, w: box.w, h: box.h, scale: 1, scaleLo: 1, scaleHi: 1, confidence: 1, state: 'ok', reach: 0 } }
 }
@@ -603,7 +605,7 @@ export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Trac
     const x = f.ix - offX, y = f.iy - offY
     // movimento recente: entre dois quadros 'ok' seguidos (sem perda no meio: R21)
     const v = { x: x - tr.pos.x, y: y - tr.pos.y }
-    return { tracker: { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v, sinceOk: 0 }, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
+    return { tracker: { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v, sinceOk: 0, lastOkUs: tUs }, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
   }
   // o 1º quadro da perda: âmbar se havia um pico plausível perto da previsão (abaixo do 'ok'), senão vermelho
   return lose(reach0, conf, !ambiguous && d <= o.gateMinPx && conf >= o.lostBelow ? 'weak' : 'lost')
@@ -613,15 +615,17 @@ export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Trac
  * Deriva admitida (px da análise por quadro) entre a posição prevista pelo movimento de antes da perda e o 1º candidato
  * ao reencontro. Salvaguarda a mais da G4 (só recusa): um sósia IDÊNTICO que aparece na janela enquanto o alvo está
  * coberto tem confiança ≈ 1 e nenhum 2º pico (o alvo está escondido) — a margem não o separa. Ele só é aceito se estiver
- * onde o alvo poderia estar pelo movimento de antes (a ±(2·gateMinPx + 2·|v| + k·REDETECT_DRIFT_PX) da previsão).
+ * onde o alvo poderia estar pelo movimento de antes (a ±(2·gateMinPx + 2·|v| + REDETECT_DRIFT_PX_PER_S·Δt) da previsão,
+ * Δt = tempo desde o último quadro 'ok'). Por TEMPO, não por quadro: a 60 fps uma deriva por quadro dobraria em 1 s e
+ * um sósia a 30 px passaria (revisão da G4). 15 px/s = os 0,5 px/quadro de antes a 30 fps; ≤ 15 px na janela de 1 s.
  */
-const REDETECT_DRIFT_PX = 0.5
+const REDETECT_DRIFT_PX_PER_S = 15
 
 /**
  * Um quadro perdido dentro da janela da redetecção (G4, R3; ver RedetectOpts): procura o molde (última escala confiante
  * ± os passos) na janela de radiusMul·searchPx em volta da última posição confiante (presa ao quadro). Um quadro é
  * candidato com confiança ≥ minConf, o 2º pico fora da vizinhança ≥ minMargin abaixo, rígido e coerente: o 1º perto da
- * previsão do movimento de antes (REDETECT_DRIFT_PX), os seguintes dentro do portão de movimento normal a partir do
+ * previsão do movimento de antes (REDETECT_DRIFT_PX_PER_S), os seguintes dentro do portão de movimento normal a partir do
  * candidato anterior. Com confirmFrames candidatos seguidos o rastreamento volta ('ok', confirms = os anteriores, que
  * resolveRedetections promove). Até lá o quadro é perdido (posição segurada, cobertura crescendo) — o candidato vai em
  * `cand`, sem efeito na região se não for confirmado.
@@ -655,13 +659,15 @@ function redetectStep(tr: Tracker, img: GrayImage, tUs: Us, rd: RedetectOpts, re
     if (Math.hypot(c.x - p.x - v.x, c.y - p.y - v.y) <= 2 * o.gateMinPx + 2 * Math.hypot(v.x, v.y)) seq = [...prev, c]
   }
   // ou começa uma: perto da previsão pelo movimento de antes da perda
-  if (!seq.length && Math.hypot(c.x - tr.pos.x - vx * sinceOk, c.y - tr.pos.y - vy * sinceOk) <= 2 * o.gateMinPx + 2 * vlen + REDETECT_DRIFT_PX * sinceOk) seq = [c]
+  // (v é por quadro e sinceOk conta quadros: a previsão não depende do fps; a deriva é por tempo)
+  const drift = (REDETECT_DRIFT_PX_PER_S * Math.max(0, tUs - (tr.lastOkUs ?? tUs))) / 1e6
+  if (!seq.length && Math.hypot(c.x - tr.pos.x - vx * sinceOk, c.y - tr.pos.y - vy * sinceOk) <= 2 * o.gateMinPx + 2 * vlen + drift) seq = [c]
   if (!seq.length) return held([])
   if (seq.length < rd.confirmFrames) return held(seq, c)
   const p = seq.length > 1 ? seq[seq.length - 2] : null
   const v = p ? { x: c.x - p.x, y: c.y - p.y } : tr.v
   return {
-    tracker: { ...tr, set: c.set, pos: { x: c.x, y: c.y }, scale: c.scale, v, lost: false, reach: 0, lostAtUs: null, sinceOk: 0, gaveUp: false, cands: [] },
+    tracker: { ...tr, set: c.set, pos: { x: c.x, y: c.y }, scale: c.scale, v, lost: false, reach: 0, lostAtUs: null, sinceOk: 0, lastOkUs: tUs, gaveUp: false, cands: [] },
     result: { tUs, x: c.x, y: c.y, w: tr.box.w * c.scale, h: tr.box.h * c.scale, scale: c.scale, scaleLo: c.lo, scaleHi: c.hi, confidence: Math.max(0, Math.min(1, c.score)), state: 'ok', reach: 0, confirms: seq.length - 1 }
   }
 }

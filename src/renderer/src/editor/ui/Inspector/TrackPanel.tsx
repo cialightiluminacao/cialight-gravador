@@ -5,7 +5,7 @@ import { formatTrackTime, trackingBlocker } from '@shared/editor/track'
 import { Button } from '@/components/ui/Button'
 import { Progress, Tip } from '@/components/ui/primitives'
 import { useEditorStore } from '../../state/editorStore'
-import { useTrackStrips } from '../../state/trackStrips'
+import { liveLossUs, useTrackStrips } from '../../state/trackStrips'
 import { cancelFollow, continueFrom, followContent, useTrackJobs } from '../followContent'
 import { PanelSection } from './common'
 
@@ -21,9 +21,10 @@ export function TrackPanel({ project, item }: { project: Project; item: EffectIt
   const blocked = trackingBlocker(project, item.id)
   const pct = job && job.total > 0 ? (job.frame / job.total) * 100 : 0
   const showLegend = !!strip && strip.region === item.region
-  const lossUs = strip?.lossUs ?? null
+  // do estado atual (G4): some se o rastreamento foi desfeito; acompanha o efeito movido
+  const lossUs = useEditorStore((s) => liveLossUs(strip, s.project, s.history.past, item.id))
   const end = itemEndUs(item)
-  const lossInside = lossUs !== null && lossUs >= item.startUs && lossUs < end
+  const lossInside = lossUs !== null
   const atLoss = useEditorStore((s) => lossInside && s.playheadUs >= lossUs! && s.playheadUs < end)
   const disabledTip = blocked ?? (busy ? 'Já há um rastreamento em andamento' : null)
 
@@ -50,7 +51,7 @@ export function TrackPanel({ project, item }: { project: Project; item: EffectIt
                 <p className="text-[10.5px] leading-snug text-warn" role="status">
                   Rastreamento perdido em {formatTrackTime(lossUs!)}: {item.invert ? 'buraco fechado' : 'região ampliada'} daí até o fim do efeito.
                 </p>
-                <Button size="sm" variant="ghost" className="h-7 w-full px-2" data-follow-continue-from="" onClick={() => continueFrom(item.id, lossUs!)}>
+                <Button size="sm" variant="ghost" className="h-7 w-full px-2" data-follow-continue-from="" onClick={() => continueFrom(item.id)}>
                   <SkipBack className="h-3.5 w-3.5" /> Continuar daqui
                 </Button>
                 {atLoss ? (

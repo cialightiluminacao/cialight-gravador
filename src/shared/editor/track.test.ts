@@ -514,6 +514,33 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
     // a partir do reencontro, a região do quadro confiante (justa: encolhe só aí)
     expect(region(fx1, t3).w).toBeLessThan(region(fx1, t3 - 1).w)
   })
+  it('"Continuar rastreamento" (G4, mescla pura, redetecção ligada): keys antes do playhead idênticos, depois só os da nova passada, sem tUs repetido', () => {
+    const sc: Scene = { path: occludedPath, pw: 60, ph: 40, occluder: OCCLUDER }
+    for (const invert of [false, true]) {
+      // 1ª passada com as opções padrão (redetecção ligada): a oclusão passa de 1 s → perda até o fim
+      const first = run(sc, 0, 2, { invert })
+      expect(first.lost).toHaveLength(1)
+      // o usuário reposiciona a região no playhead (edição normal) e continua dali, também com as opções padrão
+      const t2 = 1.75, a = usOf(t2), c = sc.path(t2)
+      const r1 = first.fx1.region
+      const user: EffectItem = { ...first.fx1, region: { ...r1, x: setValue(r1.x, a, c.x / AW), y: setValue(r1.y, a, c.y / AH), w: setValue(r1.w, a, sc.pw / AW), h: setValue(r1.h, a, sc.ph / AH) } }
+      const res2 = trackFrames(frames(sc, t2, 2), boxAt(sc, t2))
+      // a mesma passada num efeito sem keys com a região ajustada (só os keys novos)
+      const fresh = trackToKeys({ ...user, region: { ...user.region, x: { value: c.x / AW }, y: { value: c.y / AH }, w: { value: sc.pw / AW }, h: { value: sc.ph / AH } } }, res2, GEO).region
+      const out = trackToKeys(user, res2, GEO).region
+      for (const ch of ['x', 'y', 'w', 'h'] as const) {
+        const keys = out[ch].keys!
+        // antes do playhead (até a − 2): exatamente os keys de antes (objetos iguais, mesma ordem)
+        expect(JSON.stringify(keys.filter((k) => k.tUs < a - 1)), ch).toBe(JSON.stringify(user.region[ch].keys!.filter((k) => k.tUs < a - 1)))
+        // do playhead em diante: só os da nova passada
+        expect(keys.filter((k) => k.tUs >= a), ch).toEqual(fresh[ch].keys!.filter((k) => k.tUs >= a))
+        expect(keys.filter((k) => k.tUs >= a)[0].tUs, ch).toBe(a)
+        // entre a − 1 e a nada além do key de fronteira; tUs estritamente crescente
+        expect(keys.filter((k) => k.tUs > a - 1 && k.tUs < a), ch).toEqual([])
+        for (let i = 1; i < keys.length; i++) expect(keys[i].tUs, ch).toBeGreaterThan(keys[i - 1].tUs)
+      }
+    }
+  })
   it('formato do toast da perda', () => {
     expect(formatTrackTime(2_216_667)).toBe('00:02,2')
     expect(formatTrackTime(83_950_000)).toBe('01:23,9')

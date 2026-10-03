@@ -1,11 +1,11 @@
 import { create } from 'zustand'
 import { toast } from 'sonner'
 import { applyTrackedRegion, EditError, findItem } from '@shared/editor/ops'
-import type { EffectItem, Us } from '@shared/editor/project'
+import type { EffectItem } from '@shared/editor/project'
 import { formatTrackTime, lossMessage, trackingBlocker } from '@shared/editor/track'
 import { runContentTracking, TrackingCancelled } from '../engine/contentTracking'
 import { useEditorStore } from '../state/editorStore'
-import { mergeStripSamples, useTrackStrips } from '../state/trackStrips'
+import { liveLossUs, mergeStripSamples, useTrackStrips } from '../state/trackStrips'
 
 // "Seguir conteúdo" (F6) do efeito selecionado: roda o rastreamento (engine/contentTracking: worker próprio) a partir
 // do playhead até o fim do efeito e aplica a região com keys como UMA edição (um passo de desfazer). Fica fora do
@@ -34,10 +34,17 @@ export function cancelFollow(itemId: string): void {
 /** Texto da dica de "Continuar daqui" (G4). */
 export const CONTINUE_HINT = 'Ajuste a região sobre o conteúdo e clique em “Continuar rastreamento”.'
 
-/** "Continuar daqui" (G4): playhead no instante da perda, o efeito selecionado e a dica do próximo passo. */
-export function continueFrom(itemId: string, lossUs: Us): void {
+/**
+ * "Continuar daqui" (G4): playhead no instante da perda, o efeito selecionado e a dica do próximo passo. O instante vem
+ * do estado ATUAL (liveLossUs: o efeito pode ter sido movido; o rastreamento, desfeito) — nunca um instante velho.
+ */
+export function continueFrom(itemId: string): void {
   const st = useEditorStore.getState()
-  if (!st.project || !findItem(st.project, itemId)) return
+  const lossUs = liveLossUs(useTrackStrips.getState().strips[itemId], st.project, st.history.past, itemId)
+  if (lossUs === null) {
+    toast.info('Esta perda não vale mais', { description: 'O rastreamento foi desfeito ou o efeito mudou. Rode “Seguir conteúdo” de novo.' })
+    return
+  }
   st.setPlayhead(lossUs)
   st.select([itemId])
   toast.info(CONTINUE_HINT)
@@ -73,7 +80,7 @@ export async function followContent(itemId: string, o: { resume?: boolean } = {}
     const fx = findItem(useEditorStore.getState().project!, itemId)?.item as EffectItem | undefined
     if (fx) {
       const samples = o.resume && prevStrip ? mergeStripSamples(prevStrip.samples, out.samples, out.fromUs - fx.startUs) : out.samples
-      useTrackStrips.getState().set(itemId, { region: fx.region, samples, lossUs: out.lost[0]?.tUs ?? null })
+      useTrackStrips.getState().set(itemId, { region: fx.region, samples, lossLocalUs: out.lost.length ? out.lost[0].tUs - fx.startUs : null })
     }
     const keys = out.results.length
     const invert = !!fx?.invert
@@ -87,7 +94,7 @@ export async function followContent(itemId: string, o: { resume?: boolean } = {}
       toast.warning(lossMessage(first, invert), {
         description: `${invert ? 'Fechado, o buraco esconde o quadro inteiro' : 'Ampliada, a região esconde mais do que o conteúdo'} daí até o fim do efeito (faixa vermelha no item). Para voltar a seguir, use “Continuar daqui”: ajuste a região sobre o conteúdo (ali ou num quadro posterior em que ele apareça) e clique em “Continuar rastreamento” — os keyframes de antes ficam.${recNote} Ctrl+Z desfaz.`,
         duration: 12_000,
-        action: { label: 'Continuar daqui', onClick: () => continueFrom(itemId, first.tUs) }
+        action: { label: 'Continuar daqui', onClick: () => continueFrom(itemId) }
       })
     } else {
       toast.success('Conteúdo seguido', { description: `${keys === 1 ? '1 quadro analisado' : `${keys} quadros analisados`}: keyframes de posição e tamanho criados — edite-os como quiser.${recNote} Se depois mudar o tempo ou a velocidade do clipe (deslizar o conteúdo, velocidade, mover só o clipe ou só o efeito), rode “Seguir conteúdo” de novo: a região não acompanha essas mudanças. Ctrl+Z desfaz.` })
