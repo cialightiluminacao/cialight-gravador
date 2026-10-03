@@ -298,7 +298,7 @@ function itemLayer(p: Project, track: Track, item: Item, tUs: Us): Layer | null 
     case 'effect':
       return {
         kind: 'effect', itemId: item.id, trackId: track.id, effect: item.effect, targetTrackId: item.targetTrackId ?? visualTrackBelow(p, track.id),
-        ...(item.scope === 'track' && !item.targetTrackId ? { legacyTarget: true as const } : {}),
+        ...(item.scope === 'track' && (!item.targetTrackId || item.targetMediaOnly) ? { legacyTarget: true as const } : {}),
         region: { shape: item.region.shape, ...effectRegionAt(p, item, tUs) },
         strength: ev(item.strength, local), feather: item.feather, color: item.color, invert: item.invert, scope: item.scope
       }

@@ -93,13 +93,14 @@ describe('escopo `track` sem targetTrackId (alvo antigo): só mídia/anotações
     expect(effectBound(layers, 2)).toBe(false)
     expect(privacyWarnings(p, 0, 4 * S).filter((w) => w.kind === 'noTarget').map((w) => w.tUs)).toEqual([0])
   })
-  it('uma edição qualquer não grava o alvo de texto (o comportamento continua o mesmo)', () => {
+  it('uma edição qualquer grava o alvo com targetMediaOnly (congelado, e o comportamento continua o mesmo)', () => {
     const q = ops.updateItem<TextItem>(legacy(), 't', (d) => {
       d.text = 'outro'
     })
     const e = findItem(q, 'e')!.item as EffectItem
-    expect(e.targetTrackId).toBeUndefined()
+    expect(e).toMatchObject({ targetTrackId: 'T', targetMediaOnly: true })
     const layers = resolveFrame(q, S)
+    expect(layers[layers.length - 1]).toMatchObject({ targetTrackId: 'T', legacyTarget: true })
     expect(effectBound(layers, layers.findIndex((l) => l.kind === 'effect'))).toBe(false)
   })
   it('alvo antigo com mídia na faixa abaixo continua ligado (e a edição grava a ligação)', () => {

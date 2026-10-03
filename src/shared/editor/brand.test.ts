@@ -137,6 +137,15 @@ describe('BrandTemplateSchema', () => {
     expect(BrandTemplateSchema.safeParse({ ...t, tracks: [{ items: [fx] }] }).success).toBe(false)
     expect(BrandFileSchema.safeParse({ version: 2, templates: [] }).success).toBe(false)
   })
+  it('recusa arquivo repetido, itens sobrepostos na faixa e item além da duração', () => {
+    const two = templateFromSelection(s.p, [s.logo, s.video], 'X', 'overlay').template
+    expect(BrandTemplateSchema.safeParse(two).success).toBe(true)
+    expect(BrandTemplateSchema.safeParse({ ...two, assets: two.assets.map((a) => ({ ...a, file: 'mesmo.png' })) }).success).toBe(false)
+    const tr = t.tracks.find((x) => x.items[0].type === 'text')!
+    const dup = { ...tr.items[0], id: 'outro', startUs: tr.items[0].startUs + 1000 }
+    expect(BrandTemplateSchema.safeParse({ ...t, tracks: [...t.tracks.filter((x) => x !== tr), { items: [tr.items[0], dup] }] }).success).toBe(false)
+    expect(BrandTemplateSchema.safeParse({ ...t, durationUs: t.durationUs - 1 }).success).toBe(false)
+  })
 })
 
 /** Destino: vídeo 0–10 s (áudio vinculado), blur vinculado 2–6 s numa faixa de efeitos, marcador em 3 s. */
@@ -285,6 +294,15 @@ describe('applyTemplate', () => {
     expect(r.itemIds.map((id) => [find(r.project, id).startUs, find(r.project, id).durationUs])).toEqual([[0, 4 * S], [4 * S, 4 * S], [8 * S, 2 * S]])
   })
 
+  it("marca d'água: legendas do modelo ficam de fora com aviso (não viram texto comum)", () => {
+    const src = ops.addCaption(createEmptyProject('c'), 0, 'Assinatura').project
+    const capText = ops.addText(src, 'title', 0)
+    const t = templateFromSelection(capText.project, items(capText.project).map((i) => i.id), 'C', 'watermark').template
+    const r = applyTemplate(target().p, t, {}, 'watermark', 0)
+    expect(r.warnings).toEqual(["As legendas do modelo não entram na marca d'água."])
+    expect(r.itemIds.map((id) => (find(r.project, id) as TextItem).text)).toEqual(['Título'])
+  })
+
   it("marca d'água num projeto vazio → EditError", () => {
     const s = source()
     const t = templateFromSelection(s.p, [s.logo], 'Logo', 'watermark').template
@@ -344,7 +362,40 @@ function privacyScene(): Project {
   return p
 }
 
+/**
+ * Caso da revisão: efeito ANTIGO de escopo `track` sem targetTrackId (alvo pela posição, visualTrackBelow) cuja faixa
+ * de baixo tem mídia E texto (stampLegacyTargets não gravava o alvo nesse caso). Uma faixa de vídeo nova criada entre
+ * o efeito e a faixa dele não pode roubar o alvo. Só uma faixa de conteúdo: um modelo com 2 faixas visuais cria outra.
+ */
+function legacyScene(): Project {
+  let p = ops.addAsset(createEmptyProject('legado'), file('a', 'video', 30 * S))
+  const m = ops.addMediaFromAsset(p, 'a', 0)
+  p = ops.updateItem<MediaItem>(m.project, m.itemIds[0], (d) => { d.durationUs = 10 * S })
+  p = ops.updateItem<MediaItem>(p, m.itemIds[1], (d) => { d.durationUs = 10 * S })
+  const v1 = trackOf(p, m.itemIds[0]).id
+  p = ops.addText(p, 'title', 12 * S, { trackId: v1 }).project
+  const fx = ops.addEffect(p, 'blur', 1 * S, { durationUs: 6 * S, region: { x: 0.4, y: 0.4, w: 0.3, h: 0.3 } })
+  // projeto antigo: escopo `track` sem alvo gravado e sem vínculo (montado à mão: nenhuma edição passou por ele)
+  const legacy = (i: Item): Item => {
+    if (i.id !== fx.itemId || i.type !== 'effect') return i
+    const { targetTrackId: _t, linkId: _l, ...rest } = i
+    return { ...rest, scope: 'track' }
+  }
+  return { ...fx.project, tracks: fx.project.tracks.map((t) => ({ ...t, items: t.items.map(legacy) })) }
+}
+const legacyFx = (p: Project): EffectItem => items(p).find((i): i is EffectItem => i.type === 'effect' && i.scope === 'track')!
+
 describe('privacidade: abertura (intro) não muda a cobertura de nenhum efeito', () => {
+  it('cena legada: o efeito sem alvo gravado cobre o clipe da faixa de baixo (que tem texto)', () => {
+    const p = legacyScene()
+    const fx = legacyFx(p)
+    expect(fx.targetTrackId).toBeUndefined()
+    const v1 = p.tracks.find((t) => t.items.some((i) => i.type === 'text'))!
+    expect(v1.items.some((i) => i.type === 'media')).toBe(true)
+    const layer = resolveFrame(p, 2 * S).find((l) => l.kind === 'effect')!
+    expect(layer).toMatchObject({ targetTrackId: v1.id, legacyTarget: true })
+  })
+
   it('cena tem os casos: vinculado, ancorado, invertido, escopo track, transição, legendas', () => {
     const p = privacyScene()
     const fx = items(p).filter((i): i is EffectItem => i.type === 'effect')
@@ -357,10 +408,11 @@ describe('privacidade: abertura (intro) não muda a cobertura de nenhum efeito',
   })
 
   it.each([
-    ['modelo com texto, forma, logo e vídeo', () => brandOf()],
-    ['modelo só com texto', () => { const s = source(); return templateFromSelection(s.p, [s.title], 'T', 'intro').template }]
-  ])('denso (1/240 s): resolve(original, t) = resolve(novo, t + duração) nas camadas originais — %s', (_n, make) => {
-    const p = privacyScene()
+    ['cena completa, modelo com texto, forma, logo e vídeo', privacyScene, () => brandOf()],
+    ['cena completa, modelo só com texto', privacyScene, () => { const s = source(); return templateFromSelection(s.p, [s.title], 'T', 'intro').template }],
+    ['efeito antigo sem alvo gravado (faixa com texto + mídia), modelo com 2 faixas visuais', legacyScene, () => brandOf()]
+  ])('denso (1/240 s): resolve(original, t) = resolve(novo, t + duração) nas camadas originais — %s', (_n, scene, make) => {
+    const p = scene()
     const t = make()
     const q = applyTemplate(p, t, materialized(t), 'intro', 0).project
     const D = t.durationUs
@@ -377,6 +429,26 @@ describe('privacidade: abertura (intro) não muda a cobertura de nenhum efeito',
       n++
     }
     expect(n).toBeGreaterThan(2000)
+    v13RoundTrip(q)
+  })
+})
+
+describe('privacidade: modelo no playhead não muda a cobertura de nenhum efeito', () => {
+  it('denso (1/240 s): efeito antigo sem alvo gravado, modelo com 2 faixas visuais (cria faixa de vídeo nova)', () => {
+    const p = legacyScene()
+    const t = brandOf()
+    const q = applyTemplate(p, t, materialized(t), 'playhead', 20 * S).project
+    expect(q.tracks.filter((x) => x.kind === 'video').length).toBeGreaterThan(p.tracks.filter((x) => x.kind === 'video').length)
+    const orig = new Set(items(p).map((i) => i.id))
+    const end = ops.projectDurationUs(p)
+    const step = Math.round(S / 240)
+    for (let at = 0; at < end; at += step) {
+      const a = JSON.stringify(resolveFrame(p, at))
+      const b = JSON.stringify(resolveFrame(q, at).filter((l) => orig.has(layerKey(l))))
+      if (a !== b) throw new Error(`cobertura diferente em t=${at} µs:
+${a}
+${b}`)
+    }
     v13RoundTrip(q)
   })
 })

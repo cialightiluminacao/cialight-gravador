@@ -306,13 +306,6 @@ export interface IpcApi {
     onFinalizeProgress(cb: (p: { jobId: string; fraction: number }) => void): Unsubscribe
   }
   /**
-   * Legendas (SRT). `openSrt`: diálogo de abrir (*.srt) e o texto do arquivo (BOM UTF-8/UTF-16; sem BOM, UTF-8 se
-   * válido, senão Windows-1252); null se cancelado. `saveSrt`: diálogo de salvar, grava UTF-8 com BOM; caminho ou null.
-   * `writeSrtBeside`: grava `<mesmo nome>.srt` ao lado do vídeo — só aceita o arquivo final de uma exportação do
-   * editor concluída nesta sessão (o caminho devolvido pela exportação, que pode ser numerado), uma vez; nunca
-   * sobrescreve: com `<nome>.srt` já existente devolve `{ path: null, warning }`.
-   */
-  /**
    * Modelos de marca (F5). Ficam em userData/brand-templates.json + brand-assets/<id>/ (em teste/QA, numa pasta de
    * teste). `list`: `warning` quando o arquivo estava corrompido (foi renomeado; a lista começa vazia). `save`: copia os
    * arquivos (`assetsToCopy`, assets do projeto `projectId` aberto, já salvo) — falha não deixa nada pela metade; limite
@@ -327,6 +320,13 @@ export interface IpcApi {
     rename(id: string, name: string): Promise<BrandTemplate>
     materialize(templateId: string, projectId: string): Promise<{ assetId: string; asset: Asset }[]>
   }
+  /**
+   * Legendas (SRT). `openSrt`: diálogo de abrir (*.srt) e o texto do arquivo (BOM UTF-8/UTF-16; sem BOM, UTF-8 se
+   * válido, senão Windows-1252); null se cancelado. `saveSrt`: diálogo de salvar, grava UTF-8 com BOM; caminho ou null.
+   * `writeSrtBeside`: grava `<mesmo nome>.srt` ao lado do vídeo — só aceita o arquivo final de uma exportação do
+   * editor concluída nesta sessão (o caminho devolvido pela exportação, que pode ser numerado), uma vez; nunca
+   * sobrescreve: com `<nome>.srt` já existente devolve `{ path: null, warning }`.
+   */
   captions: {
     openSrt(): Promise<{ text: string; name: string } | null>
     saveSrt(text: string, defaultName: string): Promise<string | null>

@@ -94,6 +94,28 @@ describe('BrandStore', () => {
     expect(readdirSync(join(dir, 'ud')).filter((f) => f.startsWith('brand-templates.corrupt-'))).toHaveLength(2)
   })
 
+  it('corrompido entre listar e salvar/renomear/excluir: lança com o aviso (não grava por cima calado)', () => {
+    store.save(tpl('bt_a', false), [])
+    writeFileSync(file(), 'quebrado')
+    expect(() => store.save(tpl('bt_b', false), [])).toThrow(/corrompido/)
+    writeFileSync(file(), 'quebrado')
+    expect(() => store.rename('bt_a', 'X')).toThrow(/corrompido/)
+    writeFileSync(file(), 'quebrado')
+    expect(() => store.remove('bt_a')).toThrow(/corrompido/)
+    expect(readdirSync(join(dir, 'ud')).filter((f) => f.startsWith('brand-templates.corrupt-')).length).toBeGreaterThanOrEqual(1)
+    // depois do aviso, salvar começa uma lista nova
+    store.save(tpl('bt_b', false), [])
+    expect(store.list().templates.map((t) => t.id)).toEqual(['bt_b'])
+  })
+
+  it('excluir: a pasta sai por rename antes de mexer na lista; sobra .removing antiga é limpa', () => {
+    store.save(tpl('bt_a'), [{ assetId: 'logo', path: join(src, 'logo.png') }])
+    writeFileSync(join(dir, 'ud', 'brand-assets', 'bt_a.removing'), 'sobra de uma exclusão anterior')
+    store.remove('bt_a')
+    expect(store.list().templates).toEqual([])
+    expect(readdirSync(join(dir, 'ud', 'brand-assets'))).toEqual([])
+  })
+
   it('zod: modelo inválido, id repetido, arquivo faltando ou caminho inseguro → recusa sem deixar nada pela metade', () => {
     expect(() => store.save({ ...tpl('bt_a'), id: '../fora' }, [{ assetId: 'logo', path: join(src, 'logo.png') }])).toThrow(/inválido/)
     expect(() => store.save(tpl('bt_a'), [])).toThrow(/logo\.png/)
@@ -105,7 +127,7 @@ describe('BrandStore', () => {
   })
 
   it('cópia falhando no 2º arquivo (o 1º já copiado): a pasta temporária sai, nada na lista', () => {
-    const two = tpl('bt_a')
+    const two = { ...tpl('bt_a'), durationUs: 4 * S }
     two.assets.push({ id: 'logo2', name: 'logo2.png', kind: 'image', file: '2-logo2.png' })
     two.tracks[0].items.push({ ...createMediaItem({ ...logo, id: 'logo2' }, 3 * S, 'video'), id: 'i3', durationUs: S })
     mkdirSync(join(src, 'pasta.png')) // stat passa, copiar falha

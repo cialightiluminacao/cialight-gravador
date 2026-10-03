@@ -48,23 +48,27 @@ const isContentTrack = (t: Track): boolean => t.kind === 'video' && !isFxTrack(t
  * nem cria faixa nessa posição (ficaria por cima dos efeitos de privacidade) — inclusive uma faixa "Texto" que ficou
  * vazia. Mover explicitamente continua livre (privacyWarnings 'covered' avisa).
  */
-function aboveGuard(p: Project, i: number): boolean {
+export function aboveGuard(p: Project, i: number): boolean {
   const g = p.tracks.findIndex((t) => isFxTrack(t) || isCaptionsTrack(t))
   return g >= 0 && i > g
 }
 
 /**
  * Efeito "só a faixa abaixo" sem targetTrackId (projeto antigo): grava a faixa a que ele está ligado agora pela
- * posição (visualTrackBelow), antes de qualquer edição mexer na ordem das faixas. Daí em diante a ligação é explícita.
+ * posição (visualTrackBelow), antes de qualquer edição mexer na ordem das faixas — inclusive criar uma faixa de vídeo
+ * entre o efeito e a faixa dele (createTrack, addMediaFromAsset, modelos de marca), que roubaria o alvo. Daí em diante a
+ * ligação é explícita. Faixa-alvo com texto/forma: grava com `targetMediaOnly` (a regra do alvo antigo continua: só
+ * mídia/anotações/transição contam — resolve legacyTarget), então o texto não passa a ser afetado. Sem faixa abaixo:
+ * fica sem alvo (aviso noTarget).
  */
 function stampLegacyTargets(d: Project): void {
   for (const t of d.tracks) {
     for (const it of t.items) {
       if (it.type !== 'effect' || it.scope !== 'track' || it.targetTrackId) continue
       const below = visualTrackBelow(d, t.id)
-      // faixa com texto/forma: gravar a ligação faria o efeito passar a agir no texto (o alvo antigo só vale para
-      // mídia/anotações — resolve legacyTarget); fica sem gravar, com o mesmo comportamento de antes
-      if (below && !d.tracks.find((x) => x.id === below)!.items.some((x) => x.type === 'text' || x.type === 'shape')) it.targetTrackId = below
+      if (!below) continue
+      it.targetTrackId = below
+      if (d.tracks.find((x) => x.id === below)!.items.some((x) => x.type === 'text' || x.type === 'shape')) it.targetMediaOnly = true
     }
   }
 }
@@ -489,6 +493,7 @@ export function setEffectScope(p: Project, itemId: string, scope: EffectItem['sc
   return edit(p, (d) => {
     const it = mustFind(d, itemId).item as EffectItem
     it.scope = scope
+    delete it.targetMediaOnly // ligação escolhida agora: regra nova (texto/forma da faixa contam)
     if (target) it.targetTrackId = target
     else delete it.targetTrackId
   })

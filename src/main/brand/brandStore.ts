@@ -1,13 +1,12 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
-import { BRAND_FILE_VERSION, BRAND_MAX_ASSET_BYTES, BRAND_NAME_MAX, BrandFileSchema, BrandTemplateSchema, isSafeBrandFileName, isSafeBrandId, type BrandTemplate } from '@shared/editor/brand'
+import { BRAND_FILE_VERSION, BRAND_MAX_ASSET_BYTES, BRAND_NAME_MAX, BrandFileSchema, BrandTemplateSchema, formatBrandMb as fmtMb, isSafeBrandFileName, isSafeBrandId, type BrandTemplate } from '@shared/editor/brand'
 
 // Modelos de marca no main: <dir>/brand-templates.json (versão 1, validado com zod; gravação atômica tmp + rename,
 // como settingsStore.persist) e os arquivos em <dir>/brand-assets/<id do modelo>/. NUNCA no settings.json. `dir` é o
 // userData do app; em teste/QA, uma pasta de teste (brandDir.ts) — os modelos reais do usuário não são tocados.
 // Arquivo corrompido: renomeado para brand-templates.corrupt-<data>.json (nunca apagado) e a lista começa vazia.
 
-const fmtMb = (b: number): string => `${Math.round(b / (1024 * 1024)).toLocaleString('pt-BR')} MB`
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 /**
@@ -58,8 +57,18 @@ export class BrandStore {
     }
   }
 
+  /**
+   * Lista para quem vai mexer nela (get/save/rename/remove): se o arquivo estava corrompido (acabou de ser renomeado),
+   * lança com o aviso — nunca grava por cima da lista que o usuário via sem dizer nada.
+   */
+  private current(): BrandTemplate[] {
+    const r = this.list()
+    if (r.warning) throw new Error(r.warning)
+    return r.templates
+  }
+
   get(id: string): BrandTemplate {
-    const t = this.list().templates.find((x) => x.id === id)
+    const t = this.current().find((x) => x.id === id)
     if (!t) throw new Error('Modelo não encontrado (talvez tenha sido excluído)')
     return t
   }
@@ -86,7 +95,7 @@ export class BrandStore {
     const parsed = BrandTemplateSchema.safeParse(template)
     if (!parsed.success) throw new Error(`Modelo inválido: ${parsed.error.issues.map((i) => i.message).join('; ')}`)
     const t = parsed.data
-    const { templates } = this.list()
+    const templates = this.current()
     if (templates.some((x) => x.id === t.id)) throw new Error(`O modelo ${t.id} já existe`)
     const sources = t.assets.map((a) => {
       const f = files.find((x) => x.assetId === a.id)
@@ -135,7 +144,7 @@ export class BrandStore {
   rename(id: string, name: string): BrandTemplate {
     const clean = name.trim().slice(0, BRAND_NAME_MAX)
     if (!clean) throw new Error('Dê um nome ao modelo')
-    const { templates } = this.list()
+    const templates = this.current()
     const i = templates.findIndex((x) => x.id === id)
     if (i < 0) throw new Error('Modelo não encontrado (talvez tenha sido excluído)')
     const next = { ...templates[i], name: clean }
@@ -145,9 +154,30 @@ export class BrandStore {
 
   /** Tira o modelo da lista e apaga a pasta dos arquivos dele (projetos que o usaram têm cópia própria). */
   remove(id: string): void {
-    const { templates } = this.list()
+    const templates = this.current()
     if (!templates.some((x) => x.id === id)) throw new Error('Modelo não encontrado (talvez tenha sido excluído)')
-    this.persist(templates.filter((x) => x.id !== id))
-    rmSync(this.assetsDir(id), { recursive: true, force: true })
+    // a pasta sai do caminho primeiro (rename atômico; em uso → erro e nada muda), depois a lista; apagar a pasta
+    // renomeada é o último passo (se falhar, é só sobra de disco, limpa no próximo remove/save do mesmo id)
+    const dir = this.assetsDir(id)
+    const trash = `${dir}.removing`
+    rmSync(trash, { recursive: true, force: true })
+    if (existsSync(dir)) {
+      try {
+        renameSync(dir, trash)
+      } catch (e) {
+        throw new Error(`Não foi possível excluir os arquivos do modelo (estão em uso?): ${errText(e)}`)
+      }
+    }
+    try {
+      this.persist(templates.filter((x) => x.id !== id))
+    } catch (e) {
+      if (existsSync(trash)) renameSync(trash, dir)
+      throw e
+    }
+    try {
+      rmSync(trash, { recursive: true, force: true })
+    } catch {
+      // sobra de disco; o modelo já saiu da lista
+    }
   }
 }

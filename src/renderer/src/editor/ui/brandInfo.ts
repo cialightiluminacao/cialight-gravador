@@ -26,8 +26,8 @@ export function brandModes(kind: BrandTemplateKind): ApplyMode[] {
 export function formatBrandDuration(us: Us): string {
   const s = Math.round(us / 100_000) / 10
   if (s < 60) return `${String(s).replace('.', ',')} s`
-  const m = Math.floor(s / 60)
-  return `${m} min ${String(Math.round(s - m * 60)).padStart(2, '0')} s`
+  const total = Math.round(s) // acima de 1 min, segundos inteiros (119,6 s → 2 min 00 s, nunca "1 min 60 s")
+  return `${Math.floor(total / 60)} min ${String(total % 60).padStart(2, '0')} s`
 }
 
 /** Toast de sucesso de cada modo. */

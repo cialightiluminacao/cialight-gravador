@@ -16,6 +16,8 @@ describe('brandInfo', () => {
     expect(formatBrandDuration(3_000_000)).toBe('3 s')
     expect(formatBrandDuration(2_540_000)).toBe('2,5 s')
     expect(formatBrandDuration(65_000_000)).toBe('1 min 05 s')
+    expect(formatBrandDuration(119_600_000)).toBe('2 min 00 s')
+    expect(formatBrandDuration(59_960_000)).toBe('1 min 00 s')
   })
   it('mensagem da abertura diz quanto o projeto andou', () => {
     expect(applyMessage('intro', { name: 'Vinheta', durationUs: 3_000_000 }).description).toMatch(/^O projeto foi para a frente 3 s/)

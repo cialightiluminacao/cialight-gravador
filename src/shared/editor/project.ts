@@ -137,6 +137,12 @@ export interface EffectItem extends ItemBase {
    */
   targetTrackId?: string
   /**
+   * Alvo gravado de um efeito ANTIGO (sem targetTrackId) cuja faixa-alvo tinha texto/forma: vale a regra do alvo antigo
+   * — só mídia, anotações e transição da faixa contam (o texto dela não é afetado). Congela a ligação de hoje para que
+   * uma faixa nova entre o efeito e a faixa dele não roube o alvo. A v1.3 descarta o campo (ela não desenha texto).
+   */
+  targetMediaOnly?: true
+  /**
    * Ancorado a um clipe de mídia: a região (anims de `region`) fica no ESPAÇO DO CONTEÚDO dele — centro e tamanho em
    * fração da fonte exibida, rotação relativa à do clipe — e o resolve a leva ao quadro em cada instante
    * (contentPose.contentToScreen), seguindo zoom/pan/corte/rotação/animação e edições futuras do clipe. `fallback`:

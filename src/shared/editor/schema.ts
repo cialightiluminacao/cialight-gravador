@@ -135,6 +135,7 @@ const effectItem = z.object({
   invert: z.boolean(),
   scope: z.enum(['below', 'track']),
   targetTrackId: z.string().optional(),
+  targetMediaOnly: z.literal(true).optional(),
   // no disco a região do ancorado (espaço do conteúdo) fica em attach.region e `region` é a caixa estática do quadro
   // (toDiskProject); parseProject a devolve a `region`
   attach: z.object({ mediaItemId: z.string(), fallback: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional(), region: effectRegion.optional() }).optional()

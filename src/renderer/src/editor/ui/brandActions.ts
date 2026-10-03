@@ -56,7 +56,10 @@ export async function applyBrandTemplate(t: BrandTemplate, mode: ApplyMode): Pro
       await flushAutosave()
       const list = await window.api.brand.materialize(t.id, projectId)
       const cur = st().project
-      if (cur?.id !== projectId) return false
+      if (cur?.id !== projectId) {
+        toast.warning(`O modelo “${t.name}” não foi aplicado`, { description: 'O projeto mudou enquanto os arquivos eram copiados. Abra o projeto e aplique de novo.' })
+        return false
+      }
       for (const { assetId, asset } of list) {
         const src = asset.source
         const existing = src.type === 'generated' ? cur.assets.find((a) => a.source.type === 'generated' && a.source.file === src.file) : undefined

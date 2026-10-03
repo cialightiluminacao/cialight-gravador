@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { sanitizeFileName } from '../filenames'
 import { newId } from './ids'
-import { addTrack, contentEndUs, EditError, ensureCaptionsTrack, freeTrackName, insertItems, isCaptionsTrack, isFxTrack, isOverlayTrack, linkItems, musicTrackName, shiftAllContent } from './ops'
+import { aboveGuard, addTrack, contentEndUs, EditError, ensureCaptionsTrack, freeTrackName, insertItems, isCaptionsTrack, isFxTrack, isOverlayTrack, linkItems, musicTrackName, shiftAllContent } from './ops'
 import { MIN_ITEM_US } from './project'
 import type { Asset, AssetKind, Item, MediaItem, Project, ShapeItem, TextItem, Track, Us } from './project'
 import { BrandItemSchema } from './schema'
@@ -51,15 +51,21 @@ export const BrandTemplateSchema: z.ZodType<BrandTemplate> = z.object({
 }).superRefine((t, ctx) => {
   const ids = new Set(t.assets.map((a) => a.id))
   if (ids.size !== t.assets.length) ctx.addIssue({ code: 'custom', message: 'asset repetido' })
-  for (const tr of t.tracks) for (const it of tr.items) {
-    if (it.type === 'media' && !ids.has(it.assetId)) ctx.addIssue({ code: 'custom', message: `item ${it.id} usa um arquivo que não está no modelo` })
-    if (it.startUs < 0 || it.durationUs < MIN_ITEM_US) ctx.addIssue({ code: 'custom', message: `item ${it.id} fora do modelo` })
+  if (new Set(t.assets.map((a) => a.file.toLowerCase())).size !== t.assets.length) ctx.addIssue({ code: 'custom', message: 'arquivo repetido' })
+  for (const tr of t.tracks) {
+    const sorted = [...tr.items].sort((a, b) => a.startUs - b.startUs)
+    sorted.forEach((it, i) => {
+      if (it.type === 'media' && !ids.has(it.assetId)) ctx.addIssue({ code: 'custom', message: `item ${it.id} usa um arquivo que não está no modelo` })
+      if (it.startUs < 0 || it.durationUs < MIN_ITEM_US || itemEndUs(it) > t.durationUs) ctx.addIssue({ code: 'custom', message: `item ${it.id} fora do modelo` })
+      if (i > 0 && itemEndUs(sorted[i - 1]) > it.startUs) ctx.addIssue({ code: 'custom', message: `itens ${sorted[i - 1].id} e ${it.id} se sobrepõem` })
+    })
   }
 }) as unknown as z.ZodType<BrandTemplate>
 export const BrandFileSchema = z.object({ version: z.literal(BRAND_FILE_VERSION), templates: z.array(BrandTemplateSchema) })
 export type BrandFile = z.infer<typeof BrandFileSchema>
 
-const fmtMb = (b: number): string => `${Math.round(b / (1024 * 1024)).toLocaleString('pt-BR')} MB`
+/** "12 MB" (pt-BR). */
+export const formatBrandMb = (b: number): string => `${Math.round(b / (1024 * 1024)).toLocaleString('pt-BR')} MB`
 
 /** Nome do arquivo do asset dentro da pasta do modelo: "<n>-<nome saneado>" (único pelo índice). */
 export function brandAssetFileName(index: number, asset: Pick<Asset, 'name'>): string {
@@ -115,7 +121,7 @@ export function templateFromSelection(p: Project, itemIds: readonly string[], na
     assetsToCopy.push({ assetId: a.id, sourcePath: src.type === 'file' ? src.path : src.file })
     if (src.type === 'file') knownBytes += src.size
   }
-  if (knownBytes > BRAND_MAX_ASSET_BYTES) throw new EditError('invalid', `Os arquivos do modelo somam ${fmtMb(knownBytes)}; o limite é ${fmtMb(BRAND_MAX_ASSET_BYTES)} por modelo.`)
+  if (knownBytes > BRAND_MAX_ASSET_BYTES) throw new EditError('invalid', `Os arquivos do modelo somam ${formatBrandMb(knownBytes)}; o limite é ${formatBrandMb(BRAND_MAX_ASSET_BYTES)} por modelo.`)
 
   const tracks: BrandTemplateTrack[] = []
   for (const track of p.tracks) {
@@ -146,11 +152,6 @@ function categoryOf(tt: BrandTemplateTrack): Category {
 }
 
 const isFree = (t: Track, s: Us, e: Us): boolean => !t.items.some((i) => i.startUs < e && itemEndUs(i) > s)
-/** Alguma faixa de efeitos ou a de legendas abaixo do índice i (mídia automática nunca fica nessa posição). */
-const aboveGuard = (p: Project, i: number): boolean => {
-  const g = p.tracks.findIndex((t) => isFxTrack(t) || isCaptionsTrack(t))
-  return g >= 0 && i > g
-}
 /** Índice de uma faixa de sobreposição nova: no topo das de vídeo, logo abaixo da de legendas. */
 function overlayIndex(p: Project): number {
   const cap = p.tracks.findIndex(isCaptionsTrack)
@@ -264,8 +265,9 @@ function placeWatermark(p0: Project, template: BrandTemplate, assetMap: Readonly
   const end = contentEndUs(p0)
   if (end < MIN_ITEM_US) throw new EditError('invalid', "O projeto ainda não tem conteúdo: a marca d'água vai do início ao fim do conteúdo")
   const warnings: string[] = []
-  const visual = template.tracks.filter((tt) => categoryOf(tt) !== 'audio')
-  if (visual.length < template.tracks.length) warnings.push("O áudio do modelo não entra na marca d'água.")
+  const visual = template.tracks.filter((tt) => categoryOf(tt) !== 'audio' && categoryOf(tt) !== 'captions')
+  if (template.tracks.some((tt) => categoryOf(tt) === 'audio')) warnings.push("O áudio do modelo não entra na marca d'água.")
+  if (template.tracks.some((tt) => categoryOf(tt) === 'captions')) warnings.push("As legendas do modelo não entram na marca d'água.")
   if (!visual.length) throw new EditError('invalid', "O modelo não tem nada visual para usar como marca d'água")
   let q = p0
   const itemIds: string[] = []
