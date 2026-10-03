@@ -251,7 +251,9 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     await flushAutosave()
     useAppStore.getState().closeEditor()
   }
-  useEffect(() => registerEditorLeave(leave), [leave])
+  const leaveRef = useRef(leave)
+  leaveRef.current = leave
+  useEffect(() => registerEditorLeave(() => leaveRef.current()), [])
   // fila de exportações ativa: pergunta antes (sair interrompe; os itens ficam salvos para retomar depois)
   const back = (): void => requestLeaveEditor(() => void leave())
 

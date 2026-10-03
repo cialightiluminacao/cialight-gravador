@@ -35,3 +35,24 @@ describe('arquivo da fila de exportações', () => {
     expect(sanitizeItem(item('a.mp4', { request: { project: {}, fromUs: 0, toUs: 1, outputDir: 'C:/x', fileName: 'a' } }))).toBeNull()
   })
 })
+
+const BS = String.fromCharCode(92)
+const NUL = String.fromCharCode(0)
+
+describe('caminhos do pedido (nada vindo do renderer vira apagar/gravar fora da pasta)', () => {
+  const req = (outputDir: string, fileName: string): PersistedQueueItem['request'] => ({ project: { id: 'p' }, fromUs: 0, toUs: 1, outputDir, fileName })
+  it('pasta relativa, com .. ou vazia: item rejeitado', () => {
+    for (const dir of ['saida', './saida', `..${BS}fora`, 'C:/saida/../../x', '', `C:${BS}ok${BS}..${BS}x`]) expect(sanitizeItem(item('a.mp4', { request: req(dir, 'a.mp4') })), dir).toBeNull()
+  })
+  it('nome com separador, .. ou NUL: item rejeitado', () => {
+    for (const n of ['../a.mp4', 'sub/a.mp4', `sub${BS}a.mp4`, '..', '.', `a${NUL}.mp4`, '  ']) expect(sanitizeItem(item('a.mp4', { request: req('C:/saida', n) })), n).toBeNull()
+  })
+  it('pasta absoluta (unidade, UNC, raiz) e nome simples: aceito', () => {
+    for (const dir of ['C:/saida', `D:${BS}Vídeos${BS}Aula`, `${BS}${BS}srv${BS}share${BS}x`, '/home/u/v']) expect(sanitizeItem(item('a.mp4', { request: req(dir, 'Aula 1.mp4') })), dir).not.toBeNull()
+  })
+  it('o arquivo lido também é filtrado (item malicioso gravado à mão sai)', () => {
+    const text = JSON.stringify({ version: 1, items: [item('a.mp4', { request: req(`..${BS}x`, 'a.mp4') }), item('b.mp4')] })
+    const r = parseQueueFile(text)
+    expect(r.ok && r.items.map((i) => i.request.fileName)).toEqual(['b.mp4'])
+  })
+})

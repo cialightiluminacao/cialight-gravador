@@ -1,5 +1,6 @@
 import { existsSync, promises as fsp, readdirSync, statSync } from 'fs'
 import { join } from 'path'
+import { isSafeFileName, isSafeOutputDir } from '@shared/exportQueueFile'
 
 // Limpeza de arquivos temporários (.part) que sobraram de uma queda/encerramento forçado: a ingestão grava
 // <nome>.part-<pid>-<n>.<ext> em proxies/ e cache/ dos projetos e a exportação do editor grava
@@ -81,6 +82,8 @@ export async function removeItemParts(items: readonly { outputDir: string; fileN
   const removed: string[] = []
   const seen = new Set<string>()
   for (const it of items) {
+    // defesa em profundidade: o item já foi validado ao gravar/ler, mas nunca apaga fora de uma pasta absoluta nem com nome com separador
+    if (!isSafeOutputDir(it.outputDir) || !isSafeFileName(it.fileName)) continue
     let names: string[] = []
     try {
       names = readdirSync(it.outputDir)

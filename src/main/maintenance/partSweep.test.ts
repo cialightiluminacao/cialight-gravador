@@ -80,3 +80,29 @@ describe('exportPartsFor (parciais da fila salva)', () => {
     expect(exportPartsFor(names, '')).toEqual([])
   })
 })
+
+describe('removeItemParts (só o parcial exato do item, dentro da pasta dele)', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'rip-'))
+  })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+  it('apaga os parciais do nome do item; vizinhos, finais e outros nomes ficam', async () => {
+    const { removeItemParts } = await import('./partSweep')
+    const keep = ['Aula2.mp4.part', 'Outro.mp4.part', 'Aula.mp4', 'Aula.srt.part', 'notas.txt']
+    const gone = ['Aula.mp4.part', 'Aula (2).mp4.part', 'Aula.gif.ffv1.part']
+    for (const n of [...keep, ...gone]) writeFileSync(join(dir, n), 'x')
+    const removed = await removeItemParts([{ outputDir: dir, fileName: 'Aula.mp4' }])
+    expect(removed.map((p) => p.slice(dir.length + 1)).sort()).toEqual([...gone].sort())
+    for (const n of keep) expect(existsSync(join(dir, n)), n).toBe(true)
+  })
+  it('item com pasta relativa ou nome com separador/.. nunca apaga nada', async () => {
+    const { removeItemParts } = await import('./partSweep')
+    mkdirSync(join(dir, 'sub'))
+    writeFileSync(join(dir, 'sub', 'a.mp4.part'), 'x')
+    writeFileSync(join(dir, 'a.mp4.part'), 'x')
+    expect(await removeItemParts([{ outputDir: 'sub', fileName: 'a.mp4' }, { outputDir: dir, fileName: '../a.mp4' }, { outputDir: dir, fileName: 'sub/a.mp4' }, { outputDir: `${dir}/sub/..`, fileName: 'a.mp4' }])).toEqual([])
+    expect(existsSync(join(dir, 'sub', 'a.mp4.part'))).toBe(true)
+    expect(existsSync(join(dir, 'a.mp4.part'))).toBe(true)
+  })
+})

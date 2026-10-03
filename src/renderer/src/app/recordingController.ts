@@ -382,7 +382,11 @@ export function handleCommand(cmd: RecorderCommand): void {
         if (decideRecordHotkey({ screen: st.screen, editorProjectId: st.editorProjectId, queueActive: exportQueue.active() }) === 'confirm-leave') {
           const cfg = buildConfigFromStore()
           if (!cfg) toast.error('Escolha uma fonte de gravação primeiro.')
-          else requestLeaveEditor(() => void leaveEditorNow().then(() => startRecording(cfg)))
+          else {
+            // o atalho é global: o gravador pode estar escondido/minimizado/sem foco — traz para a frente antes de perguntar
+            void api.app.showRecorder()
+            requestLeaveEditor(() => void leaveEditorNow().then(() => startRecording(cfg)))
+          }
           break
         }
         const cfg = st.screen === 'prepare' || st.screen === 'review' || st.screen === 'history' || st.screen === 'settings' ? buildConfigFromStore() : null

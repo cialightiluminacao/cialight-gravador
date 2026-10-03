@@ -249,8 +249,21 @@ async function main() {
   await sleep(600)
   const phase = await ev(`return { editor: !!document.querySelector('[data-editor-topbar]'), active: window.__qaEditor.queue.active() }`)
   check('"Continuar exportando": continua no editor com a fila intacta (nada gravou)', phase.editor && phase.active, phase)
-  await ev(`window.__qaEditor.queue.cancelAll(); return 1`)
-  await sleep(1500)
+  // confirmar: interrompe a fila, sai do editor e só então grava (a contagem regressiva de 3 s basta; cancela em seguida)
+  await ev(`const src = (await window.api.sources.list()).screens[0]; if (!src) throw new Error('sem fonte de tela'); window.__qa.store.getState().setSelectedSource(src); return 1`)
+  await ev(`window.api.recording.sendCommand('toggleRecord'); return 1`)
+  await waitFor(async () => ((await ev(`return !!document.querySelector('[data-queue-leave]')`)) ? true : null), 5000, 100)
+  await ev(`[...document.querySelector('[data-queue-leave]').querySelectorAll('button')].find((b) => b.textContent.trim() === 'Sair e interromper').click(); return 1`)
+  const rec = await waitFor(async () => {
+    const st = await ev(`const s = window.__qa.store.getState(); return { screen: s.screen, phase: s.phase }`)
+    return st.phase === 'countdown' || st.phase === 'recording' ? st : null
+  }, 15000, 100)
+  check('"Sair e interromper" pelo atalho: sai do editor e a gravação começa (contagem/gravando)', !!rec && rec.screen === 'recording', rec)
+  await ev(`await window.__qa.controller.cancelRecording(); return 1`)
+  await waitFor(async () => ((await ev(`return window.__qa.store.getState().phase`)) === 'idle' ? true : null), 15000, 100)
+  const fileD = readQueueFile()
+  check('D: a fila interrompida ficou no arquivo (g4d-*)', (fileD?.items ?? []).some((i) => i.request.fileName.startsWith('g4d-')), fileD?.items?.map((i) => i.request.fileName))
+  await sleep(1000)
 
   // ---- E) nada no %APPDATA% real ----
   const realAfter = existsSync(REAL_QFILE) ? statSync(REAL_QFILE).mtimeMs : null

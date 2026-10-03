@@ -23,6 +23,18 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object
 const isStr = (v: unknown): v is string => typeof v === 'string'
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
+/** Caminho absoluto (unidade `C:\` / `C:/`, UNC ou raiz POSIX), sem segmento `..` e sem NUL. */
+export function isSafeOutputDir(dir: unknown): dir is string {
+  if (!isStr(dir) || dir.includes('\0')) return false
+  if (!/^([A-Za-z]:[\\/]|\\\\|\/)/.test(dir)) return false
+  return !dir.split(/[\\/]/).includes('..')
+}
+
+/** Nome simples de arquivo: sem separador, sem NUL, nem "." / "..". */
+export function isSafeFileName(name: unknown): name is string {
+  return isStr(name) && name.trim() !== '' && !/[\\/\0]/.test(name) && name.trim() !== '.' && name.trim() !== '..'
+}
+
 /** Valida um item (cópia só com os campos conhecidos); inválido → null. */
 export function sanitizeItem(raw: unknown): PersistedQueueItem | null {
   if (!isObj(raw)) return null
@@ -32,7 +44,7 @@ export function sanitizeItem(raw: unknown): PersistedQueueItem | null {
   if (!Array.isArray(privacy) || !privacy.every(isStr)) return null
   if (!isObj(request)) return null
   if (!isObj(request.project) || !isStr(request.project.id)) return null
-  if (!isStr(request.outputDir) || !request.outputDir || !isStr(request.fileName) || !request.fileName) return null
+  if (!isSafeOutputDir(request.outputDir) || !isSafeFileName(request.fileName)) return null
   if (!isNum(request.fromUs) || !isNum(request.toUs)) return null
   return { kind, label, durationUs, privacy: [...privacy], projectId, createdAt, request }
 }
