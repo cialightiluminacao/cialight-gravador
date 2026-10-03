@@ -1,7 +1,7 @@
 // Avisos de privacidade: efeitos fracos demais, desativados ou com mídia por cima, num intervalo da timeline. Puro.
 import { evalAnim } from './anim'
 import { regionTouchesOver } from './attachment'
-import { clipMoves, contentPose, followCheckTimes, poseError, type ContentPose } from './contentPose'
+import { clipMovingSpans, contentPose, followCheckTimes, poseError, type ContentPose } from './contentPose'
 import type { Anim, EffectItem, Item, MediaItem, Project, Us } from './project'
 import { itemEndUs } from './time'
 import { attachedMedia, clipFrameAt, effectRegionAt, visualTrackBelow } from './resolve'
@@ -259,10 +259,16 @@ export function privacyWarnings(p: Project, fromUs: Us, toUs: Us): PrivacyWarnin
           if (m.type !== 'media' || !m.visual || m.enabled === false || m.id === own?.id) continue
           const inGroup = !!it.linkId && m.linkId === it.linkId
           if (!inGroup && !(target ? t.id === target : mi < ti)) continue
-          // o teste barato (tempo) antes de clipMoves: o laço é efeitos × clipes
+          // o teste barato (tempo) antes do de movimento: o laço é efeitos × clipes. O movimento é por intervalo: só
+          // onde o clipe se move (ex.: o trecho do zoom automático) a região precisa acompanhá-lo
           const a = Math.max(m.startUs, from), b = Math.min(itemEndUs(m), e, hi)
-          if (a >= b || !clipMoves(m) || !regionTouchesOver(p, it, m, a, b)) continue
-          const at = unfollowedAt(p, it, m, a, b)
+          if (a >= b) continue
+          let at: Us | null = null
+          for (const [sa, sb] of clipMovingSpans(m, a, b)) {
+            if (!regionTouchesOver(p, it, m, sa, sb)) continue
+            const u = unfollowedAt(p, it, m, sa, sb)
+            if (u !== null && (at === null || u < at)) at = u
+          }
           const kind = inGroup ? 'transformedUnderEffect' : 'unlinkedOverMoving'
           if (at !== null && (!moved[kind] || at < moved[kind]!.tUs)) moved[kind] = { tUs: at, mediaItemId: m.id }
         }

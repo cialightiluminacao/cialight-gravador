@@ -66,6 +66,38 @@ export function clipMoves(m: MediaItem): boolean {
   return animated(t.x, t.y, t.scale, t.rotation, v.crop.l, v.crop.t, v.crop.r, v.crop.b) || (!!v.animIn && presetMoves(v.animIn.preset)) || (!!v.animOut && presetMoves(v.animOut.preset))
 }
 
+/**
+ * Subintervalos de [a, b) (timeline, µs) em que o clipe move o conteúdo: segmentos entre keys de x/y/escala/rotação/
+ * corte com valores diferentes (entre keys iguais, antes do 1º e depois do último o valor é constante) e as janelas
+ * das animações de entrada/saída com geometria. Curvas não são analisadas: segmento com valores diferentes conta
+ * inteiro (conservador), inclusive 'segurar' (o salto cai no instante da key final, incluído). Ordenados e sem sobreposição. O(keys).
+ */
+export function clipMovingSpans(m: MediaItem, a: Us, b: Us): [Us, Us][] {
+  const v = m.visual
+  if (!v || a >= b) return []
+  const spans: [Us, Us][] = []
+  const push = (lo: Us, hi: Us): void => { if (lo < b && hi > a) spans.push([Math.max(lo, a), Math.min(hi, b)]) }
+  const t = v.transform, c = v.crop
+  for (const an of [t.x, t.y, t.scale, t.rotation, c.l, c.t, c.r, c.b]) {
+    const k = an.keys
+    if (!k) continue
+    for (let i = 0; i + 1 < k.length; i++) if (k[i].value !== k[i + 1].value) push(m.startUs + k[i].tUs, m.startUs + k[i + 1].tUs + (k[i].ease === 'hold' ? 1 : 0)) // 'segurar': o salto cai na key final, que entra no intervalo
+  }
+  if (v.animIn && presetMoves(v.animIn.preset)) push(m.startUs, m.startUs + v.animIn.durationUs)
+  if (v.animOut && presetMoves(v.animOut.preset)) push(itemEndUs(m) - v.animOut.durationUs, itemEndUs(m))
+  spans.sort((x, y) => x[0] - y[0])
+  const out: [Us, Us][] = []
+  for (const s of spans) {
+    const last = out[out.length - 1]
+    if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1])
+    else out.push([s[0], s[1]])
+  }
+  return out
+}
+
+/** O clipe move o conteúdo em algum ponto de [a, b) (timeline, µs)? Ver clipMovingSpans. */
+export const clipMovesIn = (m: MediaItem, a: Us, b: Us): boolean => clipMovingSpans(m, a, b).length > 0
+
 /** Região do quadro → pose no espaço do conteúdo (como matrix.layerMatrix: R(−θ)·(região − centro) / tamanho). */
 export function contentPose(cf: ClipFrame, r: RegionValues): ContentPose {
   const { W, H } = cf

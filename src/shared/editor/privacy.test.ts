@@ -227,3 +227,43 @@ describe('privacyWarnings: clipe se move sob efeito vinculado (transformedUnderE
     expect(tue(follow(true))).toEqual([])
   })
 })
+
+describe('privacyWarnings: movimento avaliado por intervalo (zoom automático + Seguir conteúdo)', () => {
+  const vid: Asset = { id: 'v', name: 'v', kind: 'video', source: { type: 'file', path: 'C:/v.mp4', size: 1, mtimeMs: 1 }, durationUs: 10 * S, video: { width: 1920, height: 1080, fps: 30, codec: 'avc1', rotation: 0, decodable: true, gopUs: S }, status: 'ready' }
+  const lin = (...ks: [number, number][]) => ({ value: ks[0][1], keys: ks.map(([tUs, value]) => ({ tUs, value, ease: 'linear' as const })) })
+  /** Clipe de 10 s com zoom automático em 1–3 s (escala 1→1,8→1,8→1) e um blur de 5–8 s (ou de 0–10 s). */
+  function scene(opts: { link: boolean; fxStart: number; fxEnd: number; tracked: boolean }): Project {
+    const p = createEmptyProject('t')
+    p.assets = [vid]
+    const m = { ...createMediaItem(vid, 0, 'video'), id: 'm', ...(opts.link ? { linkId: 'l1' } : {}) } as MediaItem
+    m.visual!.transform.scale = lin([0, 1], [S, 1], [1.5 * S, 1.8], [2.5 * S, 1.8], [3 * S, 1])
+    const base = createEffectItem('blur', opts.fxStart, opts.fxEnd)
+    const x = opts.tracked ? lin([0, 0.3], [S, 0.35], [2 * S, 0.4]) : { value: 0.3 }
+    const fx: EffectItem = { ...base, id: 'fx', ...(opts.link ? { linkId: 'l1' } : {}), region: { ...base.region, x, y: { value: 0.3 }, w: { value: 0.1 }, h: { value: 0.1 }, rotation: { value: 0 } } }
+    p.tracks = [
+      { id: 'tv', kind: 'video', name: 'Vídeo 1', muted: false, hidden: false, locked: false, volume: 1, items: [m] },
+      { id: 'tf', kind: 'video', name: 'Efeitos', role: 'effects', muted: false, hidden: false, locked: false, volume: 1, items: [fx] }
+    ]
+    return p
+  }
+  const of = (p: Project, kind: string) => privacyWarnings(p, 0, 10 * S).filter((w) => w.kind === kind)
+  it('blur rastreado em 5–8 s com o clipe parado ali: sem transformedUnderEffect (nem unlinkedOverMoving)', () => {
+    expect(of(scene({ link: true, fxStart: 5 * S, fxEnd: 8 * S, tracked: true }), 'transformedUnderEffect')).toEqual([])
+    expect(of(scene({ link: false, fxStart: 5 * S, fxEnd: 8 * S, tracked: true }), 'unlinkedOverMoving')).toEqual([])
+  })
+  it('blur parado sobre o trecho do zoom (1–3 s): continua avisando, com tUs dentro do zoom', () => {
+    const w = of(scene({ link: true, fxStart: 0, fxEnd: 10 * S, tracked: false }), 'transformedUnderEffect')
+    expect(w).toHaveLength(1)
+    expect(w[0].tUs).toBeGreaterThanOrEqual(S)
+    expect(w[0].tUs).toBeLessThan(3 * S)
+  })
+  it('blur parado só sobre 1–3 s: avisa; clipe não vinculado: unlinkedOverMoving', () => {
+    const w = of(scene({ link: true, fxStart: S, fxEnd: 3 * S, tracked: false }), 'transformedUnderEffect')
+    expect(w).toHaveLength(1)
+    expect(w[0].tUs).toBeGreaterThanOrEqual(S)
+    expect(w[0].tUs).toBeLessThan(3 * S)
+    const u = of(scene({ link: false, fxStart: S, fxEnd: 3 * S, tracked: false }), 'unlinkedOverMoving')
+    expect(u).toHaveLength(1)
+    expect(u[0].tUs).toBeLessThan(3 * S)
+  })
+})
