@@ -3,6 +3,7 @@ import { extname, isAbsolute } from 'path'
 import { SENSITIVE_KIND_LABELS, type SensitiveKind } from '@shared/editor/sensitive'
 import type { ScanError, ScanProgress, ScanResult } from '@shared/editor/sensitiveScan'
 import type { ScanRequest, ScanRunOpts } from './scan'
+import { parseFfprobe } from '../media/probe'
 
 // Uma varredura de dados sensíveis por vez (a segunda recebe 'busy'), pedidos validados aqui (vêm do renderer pelo IPC).
 // Os termos personalizados vivem só na memória desta varredura (nunca em log nem em disco).
@@ -45,6 +46,20 @@ export function validateScanRequest(raw: unknown, isFile: (p: string) => boolean
     ok: true,
     req: { filePath, fromUs: Math.round(fromUs), toUs: Math.round(toUs), ...(kinds ? { kinds } : {}), ...(customTerms ? { customTerms } : {}), ...(vsi !== undefined ? { videoStreamIndex: vsi } : {}) }
   }
+}
+
+export interface StreamInfo { video?: { width: number; height: number; rotation?: number }; durationUs: number | null }
+
+/**
+ * Dimensões/giro/duração da faixa de vídeo v:N (ruling R23: a webcam do rec.mp4 é v:1, com outro tamanho que a tela).
+ * N = 0 usa o probe normal; N > 0 roda `ffprobe -select_streams v:N` (só ela aparece) pelo `run` injetado.
+ */
+export async function probeVideoStream(file: string, idx: number, deps: { probe: (f: string) => Promise<StreamInfo>; run: (args: string[]) => Promise<string> }): Promise<StreamInfo> {
+  if (!idx) return deps.probe(file)
+  const out = await deps.run(['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-select_streams', `v:${idx}`, file])
+  const json = JSON.parse(out) as { streams?: { codec_type?: string }[] }
+  if (!json.streams?.some((s) => s.codec_type === 'video')) throw new Error(`faixa de vídeo v:${idx} inexistente`)
+  return parseFfprobe(json, file)
 }
 
 export interface ScanSink {

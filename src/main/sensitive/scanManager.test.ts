@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ScanResult } from '@shared/editor/sensitiveScan'
 import type { ScanRequest, ScanRunOpts } from './scan'
-import { MAX_CUSTOM_TERMS, SensitiveScans, validateScanRequest } from './scanManager'
+import { MAX_CUSTOM_TERMS, probeVideoStream, SensitiveScans, validateScanRequest } from './scanManager'
 
 const FILE = 'C:\\videos\\gravacao.mp4'
 const isFile = (p: string): boolean => p === FILE
@@ -46,6 +46,30 @@ describe('validateScanRequest', () => {
   })
   it('50 termos de 100 caracteres passam', () => {
     expect(validateScanRequest({ ...ok, customTerms: Array.from({ length: 50 }, () => 'y'.repeat(100)) }, isFile).ok).toBe(true)
+  })
+})
+
+describe('probeVideoStream (ruling R23)', () => {
+  const webcam = { codec_type: 'video', width: 640, height: 480, avg_frame_rate: '30/1', r_frame_rate: '30/1', codec_name: 'h264', side_data_list: [{ side_data_type: 'Display Matrix', rotation: -90 }] }
+  it('v:0 usa o probe normal (sem ffprobe extra)', async () => {
+    const calls: string[][] = []
+    const r = await probeVideoStream(FILE, 0, { probe: async () => ({ video: { width: 1920, height: 1080 }, durationUs: 5 }), run: async (a) => (calls.push(a), '') })
+    expect(r.video).toEqual({ width: 1920, height: 1080 })
+    expect(calls).toEqual([])
+  })
+  it('v:1 pede só a faixa 1 ao ffprobe e devolve o tamanho/giro DELA', async () => {
+    const calls: string[][] = []
+    const r = await probeVideoStream(FILE, 1, {
+      probe: async () => { throw new Error('não deveria usar o probe da v:0') },
+      run: async (a) => (calls.push(a), JSON.stringify({ streams: [webcam], format: { duration: '8.0' } }))
+    })
+    expect(calls[0].slice(calls[0].indexOf('-select_streams'), calls[0].indexOf('-select_streams') + 2)).toEqual(['-select_streams', 'v:1'])
+    expect(calls[0].at(-1)).toBe(FILE)
+    expect(r.video).toMatchObject({ width: 640, height: 480, rotation: 90 })
+    expect(r.durationUs).toBe(8_000_000)
+  })
+  it('faixa inexistente: erro (a varredura vira erro de ffmpeg, nunca a faixa errada)', async () => {
+    await expect(probeVideoStream(FILE, 3, { probe: async () => ({ durationUs: 1 }), run: async () => JSON.stringify({ streams: [], format: { duration: '8' } }) })).rejects.toThrow(/v:3/)
   })
 })
 

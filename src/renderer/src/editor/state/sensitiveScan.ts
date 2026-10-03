@@ -38,6 +38,8 @@ export interface SensitiveScanState {
   /** Linhas desmarcadas (todas começam marcadas: privacidade primeiro). */
   unchecked: Set<string>
   ignored: Set<string>
+  /** Linhas cujo "Esconder" foi pulado (faixa bloqueada): ficam na lista, marcadas "não escondido". */
+  notHidden: Set<string>
   /** Filtro por tipo na revisão (vazio = todos). */
   filter: Set<SensitiveKind>
   thumbs: Record<string, string>
@@ -60,6 +62,7 @@ const fresh = (): Omit<SensitiveScanState, 'open' | 'clipId' | 'focusTick' | 'op
   rows: [],
   unchecked: new Set(),
   ignored: new Set(),
+  notHidden: new Set(),
   filter: new Set(),
   thumbs: {},
   hover: null

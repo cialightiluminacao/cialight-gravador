@@ -1,14 +1,13 @@
 import { toast } from 'sonner'
 import type { Asset } from '@shared/editor/project'
 import type { SensitiveKind } from '@shared/editor/sensitive'
-import type { ScanResult } from '@shared/editor/sensitiveScan'
-import type { SensitiveScanProgress, SensitiveScanRequest } from '@shared/ipc'
-import { ipcErrorMessage } from '@/lib/ipcError'
+import type { SensitiveScanRequest } from '@shared/ipc'
 import type { PlaybackController } from '../engine/PlaybackController'
 import { useEditorStore } from '../state/editorStore'
 import { useSensitiveScan } from '../state/sensitiveScan'
 import { seekTo } from './editorActions'
 import { makeThumbs } from './sensitiveThumbs'
+import { scanOnce } from './sensitiveScanIpc'
 import { buildRows, hideRows, hideToast, OCR_LANG_HINT, parseCustomWords, planScan, SCAN_DISCLAIMER, type ReviewRow, type ScanOutcome } from './sensitiveReview'
 
 // Fluxo do "Procurar dados sensíveis" (G3): varreduras em sequência pelo IPC (uma por arquivo/trecho), cancelamento,
@@ -31,42 +30,6 @@ async function sourcePath(a: Asset): Promise<string | null> {
   return null
 }
 
-/** Uma varredura: assina antes de começar (o `done` pode chegar antes da resposta do start). */
-function scanOnce(req: SensitiveScanRequest, onProgress: (p: SensitiveScanProgress) => void, onId: (id: string) => void): Promise<ScanResult> {
-  const api = window.api.editor.sensitive
-  const p = new Promise<ScanResult>((resolve) => {
-    let id: string | null = null
-    const early: { scanId: string; result: ScanResult }[] = []
-    const earlyProg: SensitiveScanProgress[] = []
-    const offProg = api.onProgress((pr) => {
-      if (id === null) earlyProg.push(pr)
-      else if (pr.scanId === id) onProgress(pr)
-    })
-    const finish = (r: ScanResult): void => {
-      offDone()
-      offProg()
-      resolve(r)
-    }
-    const offDone = api.onDone((d) => {
-      if (id === null) early.push(d)
-      else if (d.scanId === id) finish(d.result)
-    })
-    api.start(req).then(
-      (r) => {
-        if (r.error) return finish({ occurrences: [], framesSampled: 0, framesOcr: 0, ms: 0, lang: '', error: r.error })
-        id = r.scanId
-        onId(r.scanId)
-        for (const pr of earlyProg) if (pr.scanId === id) onProgress(pr)
-        const d = early.find((x) => x.scanId === id)
-        if (d) finish(d.result)
-      },
-      (e) => finish({ occurrences: [], framesSampled: 0, framesOcr: 0, ms: 0, lang: '', error: { code: 'ffmpeg', message: ipcErrorMessage(e) } })
-    )
-  })
-  lastDone = p
-  return p
-}
-
 /** Começa a busca com as escolhas do diálogo. */
 export async function startSensitiveScan(): Promise<void> {
   const s = ss()
@@ -87,6 +50,8 @@ export async function startSensitiveScan(): Promise<void> {
   }
   const my = ++gen
   const files = plan.jobs.length
+  // mais de uma varredura: um erro no meio descarta também as anteriores (lista parcial nunca parece completa — R21)
+  const multi = plan.jobs.reduce((n, j) => n + j.ranges.length, 0) > 1
   ss().patch({ step: 'scanning', progress: { file: 1, files, range: 1, ranges: plan.jobs[0].ranges.length, phase: 'amostrando', done: 0, total: 0 }, rows: [], unchecked: new Set(), ignored: new Set(), filter: new Set(), thumbs: {}, hover: null })
   await lastDone.catch(() => {})
   const outcomes: ScanOutcome[] = []
@@ -105,15 +70,16 @@ export async function startSensitiveScan(): Promise<void> {
       const r = job.ranges[j]
       ss().patch({ progress: { file: i + 1, files, range: j + 1, ranges: job.ranges.length, phase: 'amostrando', done: 0, total: 0 } })
       const req: SensitiveScanRequest = { filePath: path, fromUs: r.fromUs, toUs: r.toUs, kinds, ...(words.length ? { customTerms: words } : {}), videoStreamIndex: job.videoStreamIndex }
-      const result = await scanOnce(
-        req,
-        (pr) => {
+      const run = scanOnce(window.api.editor.sensitive, req, {
+        onProgress: (pr) => {
           if (my === gen) ss().patch({ progress: { file: i + 1, files, range: j + 1, ranges: job.ranges.length, phase: pr.phase, done: pr.done, total: pr.total } })
         },
-        (id) => {
-          if (my === gen) ss().patch({ scanId: id })
-        }
-      )
+        onId: (id) => ss().patch({ scanId: id }),
+        // Cancelar/Esc/fechar antes do start responder: scanOnce cancela no main assim que houver o id
+        isStale: () => my !== gen
+      })
+      lastDone = run
+      const result = await run
       if (my !== gen) return // cancelada/fechada: o aviso já foi dado
       ss().patch({ scanId: null })
       if (result.cancelled) {
@@ -124,7 +90,7 @@ export async function startSensitiveScan(): Promise<void> {
       if (result.error) {
         ss().patch({ step: 'setup', progress: null })
         if (result.error.code === 'ocrUnavailable') toast.error(result.error.message, { description: OCR_LANG_HINT, duration: 15_000 })
-        else toast.error('A busca de dados sensíveis falhou', { description: result.error.message })
+        else toast.error('A busca de dados sensíveis falhou', { description: `${result.error.message}${multi ? ' Nenhum resultado foi mantido.' : ''}` })
         return
       }
       occurrences.push(...result.occurrences)
@@ -157,6 +123,14 @@ export function cancelSensitiveScan(quiet = false): void {
   if (!quiet) toast('Busca cancelada')
 }
 
+/** "Nova busca": volta às opções e larga a revisão (miniaturas em geração param). */
+export function resetSensitiveReview(): void {
+  gen++
+  thumbsAbort?.abort()
+  thumbsAbort = null
+  ss().patch({ step: 'setup', rows: [], thumbs: {}, unchecked: new Set(), ignored: new Set(), notHidden: new Set(), filter: new Set(), hover: null })
+}
+
 /** Fecha o diálogo: cancela a busca, solta as miniaturas e apaga termos e resultados da memória. */
 export function closeSensitiveDialog(): void {
   if (ss().step === 'scanning') cancelSensitiveScan(false)
@@ -177,17 +151,22 @@ export function hideSensitiveRows(rows: readonly ReviewRow[]): void {
   })
   const o = out as ReturnType<typeof hideRows> | null
   if (!ok || !o) return
+  // as não escondidas (faixa bloqueada) ficam na lista, marcadas: desbloquear e tentar de novo
+  const failed = new Set(ss().notHidden)
+  for (const id of o.notHiddenIds) failed.add(id)
+  const done = new Set(rows.filter((r) => !o.notHiddenIds.has(r.id)).map((r) => r.id))
+  for (const id of done) failed.delete(id)
   if (o.itemIds.length === 0) {
-    toast.warning('Nenhum efeito foi criado', { description: `${o.notHidden || rows.length} não puderam ser escondidos (faixa bloqueada ou fora dos clipes).` })
+    ss().patch({ notHidden: failed })
+    toast.warning('Nenhum efeito foi criado', { description: `${o.notHidden === 1 ? '1 não pôde ser escondido' : `${o.notHidden || rows.length} não puderam ser escondidos`} (faixa bloqueada). Desbloqueie a faixa e tente de novo.` })
     return
   }
   es().select(o.itemIds)
   const t = hideToast(o)
-  toast.success(t.title, t.description ? { description: t.description } : undefined)
-  const done = new Set(rows.map((r) => r.id))
+  toast.success(t.title, t.description ? { description: `${t.description}. Elas continuam na lista.` } : undefined)
   const left = ss().rows.filter((r) => !done.has(r.id))
   if (left.length === 0 || left.every((r) => ss().ignored.has(r.id))) closeSensitiveDialog()
-  else ss().patch({ rows: left, hover: null })
+  else ss().patch({ rows: left, notHidden: failed, hover: null })
 }
 
 /** Linha em foco/sob o ponteiro: playhead no 1º instante em que ela aparece e contorno no visualizador. */

@@ -17,7 +17,7 @@ import { newId, newProjectId } from '@shared/editor/ids'
 import { parseProject } from '@shared/editor/schema'
 import { IngestQueue, assetFromInfo, type IngestInput } from './media/ingest'
 import { findRelinkCandidates, relinkQuery } from './project/relinkSearch'
-import { IMAGE_EXTENSIONS, parseFfprobe, probe } from './media/probe'
+import { IMAGE_EXTENSIONS, probe } from './media/probe'
 import { getRecorderWindow, showRecorder, displayIdOfWindow, setEditorMode } from './windows/recorderWindow'
 import { hideBar, showBar, toggleBar, updateBar, isBarHiddenByUser } from './windows/barWindow'
 import { hideOverlays, setOverlayMode, showOverlays, syncStrokesToOverlays } from './windows/overlayWindows'
@@ -29,7 +29,7 @@ import { encoderFallbackChain } from '@shared/encoderCache'
 import type { AudioProcessOpts } from '@shared/editor/audioProcess'
 import { ffmpegPath, ffprobePath, ocrScriptPath, rnnoiseDir } from './export/ffmpegPath'
 import { runScan } from './sensitive/scan'
-import { SensitiveScans } from './sensitive/scanManager'
+import { probeVideoStream, SensitiveScans, type StreamInfo } from './sensitive/scanManager'
 import { MissingModelError, missingModelMessage } from './media/audioProcess'
 import { buildReviewAssets } from './export/reviewAssets'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -646,13 +646,9 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
 
   // ---- dados sensíveis (G3): OCR no main; o renderer só recebe tipo, máscara, confiança, caixas e tempos ----
   // dimensões/giro da faixa v:N pedida (ruling R23: a webcam do rec.mp4 é v:1, com outro tamanho que a tela)
-  const probeScanStream = async (file: string, idx = 0): Promise<{ video?: { width: number; height: number; rotation?: number }; durationUs: number | null }> => {
-    if (!idx) return probe(file)
-    const out = await new Promise<string>((res, rej) =>
-      execFile(ffprobePath(), ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-select_streams', `v:${idx}`, file], { maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout) => (err ? rej(err) : res(stdout)))
-    )
-    return parseFfprobe(JSON.parse(out), file)
-  }
+  const runFfprobe = (args: string[]): Promise<string> =>
+    new Promise<string>((res, rej) => execFile(ffprobePath(), args, { maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout) => (err ? rej(err) : res(stdout))))
+  const probeScanStream = (file: string, idx = 0): Promise<StreamInfo> => probeVideoStream(file, idx, { probe, run: runFfprobe })
   const sensitiveScans = new SensitiveScans(
     (req, opts) => runScan(req, { ffmpeg: ffmpegPath(), helperScript: ocrScriptPath(), probe: probeScanStream, log }, opts),
     (p) => {

@@ -149,6 +149,7 @@ describe('aplicação', () => {
     // CPF em a1 e a2 (mesma fonte), e-mail em b1
     expect(o.itemIds).toHaveLength(3)
     expect(o.notHidden).toBe(0)
+    expect(o.notHiddenIds.size).toBe(0)
     expect(hideToast(o)).toEqual({ title: '2 dados escondidos (3 efeitos criados)' })
     const fx = o.project.tracks.flatMap((t) => t.items).filter((i) => i.type === 'effect')
     expect(fx.map((f) => f.type === 'effect' && f.attach?.mediaItemId).sort()).toEqual(['a1', 'a2', 'b1'])
@@ -167,6 +168,7 @@ describe('aplicação', () => {
     const o = hideRows(p, rows, 'blur')
     expect(o.itemIds).toHaveLength(0)
     expect(o.notHidden).toBe(2)
+    expect([...o.notHiddenIds].sort()).toEqual(['x:o1', 'x:o2'])
     expect(hideToast({ requested: 3, notHidden: 1, itemIds: ['e1', 'e2'] })).toEqual({ title: '2 dados escondidos (2 efeitos criados)', description: '1 não pôde ser escondido (faixa bloqueada)' })
   })
 })

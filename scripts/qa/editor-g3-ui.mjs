@@ -35,6 +35,8 @@ const SETTINGS = join(process.env.APPDATA ?? '', 'cialight-gravador', 'settings.
 const MAIN_LOG = join(process.env.APPDATA ?? '', 'cialight-gravador', 'logs', 'main.log')
 const W = 1920, H = 1080, FPS = 30, DUR_S = 8
 const CUSTOM = 'Fulano Exemplo'
+// webcam (v:1 do rec.mp4, ruling R23): outro tamanho e uma palavra que só existe nela
+const CAM = { w: 640, h: 480, word: 'Beltrano Teste', x: 120, y: 200, size: 40 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failures = 0
@@ -70,14 +72,19 @@ function makeSession(L) {
   const dt = (text, x, y, size = 26, color = '0x1F1F1F') => `drawtext=fontfile=/Windows/Fonts/segoeui.ttf:textfile=${tf(text)}:expansion=none:y_align=font:fontsize=${size}:fontcolor=${color}:x=${x}:y=${y}`
   const parts = ['drawbox=x=0:y=0:w=1920:h=40:color=0xE1E1E1:t=fill', 'drawbox=x=250:y=60:w=1650:h=1020:color=0xFFFFFF:t=fill', dt('Cadastro de clientes', 320, 110, 22, '0x3A3A3A'), dt('Clique em Salvar para concluir o cadastro', 320, 520, 20, '0x3A3A3A')]
   for (const it of items) parts.push(dt(it.value, it.x, it.y))
-  writeFileSync(join(GEN, 'f.txt'), `format=rgb24,\n${parts.join(',\n')}`)
+  // duas faixas de vídeo: tela (v:0) e "webcam" (v:1, 640×480, com a palavra só dela)
+  const cam = ['drawbox=x=40:y=60:w=560:h=360:color=0xFFFFFF:t=fill', dt(CAM.word, CAM.x, CAM.y, CAM.size)]
+  writeFileSync(join(GEN, 'f.txt'), `[0:v]format=rgb24,\n${parts.join(',\n')},format=yuv420p[s];\n[1:v]format=rgb24,\n${cam.join(',\n')},format=yuv420p[w]`)
   const rec = join(dir, 'rec.mp4')
-  execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', `color=c=0xF3F3F3:s=${W}x${H}:r=${FPS}:d=${DUR_S}`, '-/vf', 'f.txt', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-g', '60', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', rec], { cwd: GEN })
+  execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', `color=c=0xF3F3F3:s=${W}x${H}:r=${FPS}:d=${DUR_S}`, '-f', 'lavfi', '-i', `color=c=0x9AA4B0:s=${CAM.w}x${CAM.h}:r=${FPS}:d=${DUR_S}`, '-/filter_complex', 'f.txt', '-map', '[s]', '-map', '[w]', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-g', '60', '-movflags', '+faststart', rec], { cwd: GEN })
+  items.push({ kind: 'custom', value: CAM.word, cam: true })
   const session = {
     version: 1, id: SESSION_ID, createdAt: new Date().toISOString(), state: 'finalized',
     source: { kind: 'screen', id: 'screen:0:0', name: 'Monitor sintético', bounds: { x: 0, y: 0, width: W, height: H }, scaleFactor: 1 },
     video: { width: W, height: H, fps: FPS, codec: 'avc1.640028', bitrate: 8e6 },
-    systemAudio: false, tracks: { screen: 0 }, durationMs: DUR_S * 1000, pauses: [], pip: [], strokes: [], clearEvents: [], markers: [],
+    webcam: { deviceId: 'sintetica', label: 'Webcam sintética', width: CAM.w, height: CAM.h, mirrored: false },
+    // PiP no canto inferior direito (vazio na tela sintética)
+    systemAudio: false, tracks: { screen: 0, webcam: 1 }, durationMs: DUR_S * 1000, pauses: [], pip: [{ tMs: 0, x: 0.76, y: 0.7, w: 0.2, h: 0.2667, shape: 'rounded', visible: true }], strokes: [], clearEvents: [], markers: [],
     engine: 'webcodecs', files: { rec: 'rec.mp4' }, bytes: statSync(rec).size
   }
   writeFileSync(join(dir, 'session.json'), JSON.stringify(session, null, 2))
@@ -169,7 +176,7 @@ async function main() {
   const L = await loadLib()
   const items = makeSession(L)
   for (const it of items) truths.push(it.value)
-  console.log(`gravação sintética: ${items.map((i) => i.kind).join(', ')}`)
+  console.log(`gravação sintética: ${items.map((i) => (i.cam ? 'webcam:' : '') + i.kind).join(', ')}`)
   // as entradas do drawtext (com os valores) saem antes do app: a varredura de bytes do fim vale para tudo o que sobra
   rmSync(GEN, { recursive: true, force: true })
 
@@ -198,7 +205,9 @@ async function main() {
 
   const clips = await ev(`const O = window.__qaEditor.ops; const v = T.st().project.tracks[0].items[0]; let B
     T.st().apply((p) => { const r = O.duplicateItems(p, [v.id], v.durationUs); B = r.itemIds[0]; return r.project })
-    T.st().select([]); return { A: v.id, B, assetId: v.assetId }`)
+    T.st().select([]); const cam = T.st().project.tracks.find((t) => t.items.some((i) => i.type === 'media' && T.st().project.assets.find((a) => a.id === i.assetId)?.videoTrackIndex === 1))
+    return { A: v.id, B, assetId: v.assetId, camTrack: cam?.id, cam: cam?.items[0]?.id }`)
+  check('a gravação tem a faixa da webcam (asset v:1)', !!clips.cam, clips)
 
   // ---------------- 1) aba Efeitos → diálogo → palavra personalizada → Procurar
   console.log('aba Efeitos → Procurar dados sensíveis')
@@ -270,6 +279,29 @@ async function main() {
   const cmFx = await ev(`const fx = T.effects(); return { past: T.past(), n: fx.length, attach: [...new Set(fx.map((f) => f.attach?.mediaItemId))], open: T.ss().open }`)
   check('"Esconder todos" do clipe: um passo, efeitos só no clipe B, diálogo fecha (lista vazia)', cmFx.past === pb + 1 && cmFx.n === cm.rows.length && cmFx.attach.length === 1 && cmFx.attach[0] === clips.B && !cmFx.open, cmFx)
   await ev(`await T.key('z', { ctrlKey: true }); await T.wait(300); return 1`)
+
+  // ---------------- 4b) R23: busca no clipe da webcam (asset v:1) acha a palavra só dela, na geometria da v:1;
+  // faixa bloqueada → a linha fica marcada "não escondido"; desbloqueada → Esconder de novo funciona
+  console.log('webcam (v:1): busca no clipe, faixa bloqueada e de novo')
+  await ev(`await T.contextMenu(${JSON.stringify(clips.cam)}); const it = T.menuItem('Procurar dados sensíveis neste clipe'); if (!it) throw new Error('sem a entrada no menu da webcam'); await T.click(it); await T.waitFor(() => T.dialog(), 5000); return 1`)
+  await ev(`await T.setText(T.el('[data-sensitive-words]'), ${JSON.stringify(CAM.word)}); await T.click(T.el('[data-sensitive-start]')); await T.waitFor(() => T.ss().step === 'scanning', 5000); await T.waitFor(() => T.ss().step !== 'scanning', 240000); return 1`)
+  const camRows = await ev(`const s = T.ss(); return { step: s.step, toasts: T.toasts(), rows: s.rows.map((r) => ({ id: r.id, kind: r.kind, clipId: r.clipId, w: r.occ.sourceW, h: r.occ.sourceH, box: r.occ.samples[0].box })) }`)
+  const cw = camRows.rows.find((r) => r.kind === 'custom')
+  const inBox = (b, x, y) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h
+  check(`R23: a palavra da webcam é achada na faixa v:1 (${CAM.w}×${CAM.h}), com a caixa onde ela foi desenhada`,
+    camRows.step === 'review' && !!cw && cw.clipId === clips.cam && cw.w === CAM.w && cw.h === CAM.h && inBox(cw.box, (CAM.x + 40) / CAM.w, (CAM.y + CAM.size * 0.6) / CAM.h), camRows)
+  if (cw) {
+    const pastCam = await ev(`return T.past()`)
+    const pl = await ev(`T.st().apply((p) => window.__qaEditor.ops.updateTrack(p, ${JSON.stringify(clips.camTrack)}, { locked: true })); const p0 = T.past(); const fx0 = T.effects().length
+      await T.click(T.el('[data-sensitive-row="${cw.id}"] button[aria-label^="Esconder"]')); await T.wait(300)
+      return { added: T.effects().length - fx0, steps: T.past() - p0, still: T.ss().rows.some((r) => r.id === ${JSON.stringify(cw.id)}), marked: !!document.querySelector('[data-sensitive-row="${cw.id}"] [data-sensitive-not-hidden]'), toasts: T.toasts() }`)
+    check('faixa bloqueada: nada criado, a linha fica com "não escondido" e o aviso pede para desbloquear', pl.added === 0 && pl.still && pl.marked && pl.toasts.some((t) => t.includes('Desbloqueie')), pl)
+    const ul = await ev(`T.st().apply((p) => window.__qaEditor.ops.updateTrack(p, ${JSON.stringify(clips.camTrack)}, { locked: false })); const p0 = T.past(); const fx0 = T.effects().length
+      await T.click(T.el('[data-sensitive-row="${cw.id}"] button[aria-label^="Esconder"]')); await T.wait(300)
+      const fx = T.effects(); return { added: fx.length - fx0, steps: T.past() - p0, attach: fx.map((f) => f.attach?.mediaItemId), open: T.ss().open, still: T.ss().rows.some((r) => r.id === ${JSON.stringify(cw.id)}) }`)
+    check('desbloqueada: Esconder de novo cria o efeito no clipe da webcam (um passo) e a linha sai', ul.added === 1 && ul.steps === 1 && ul.attach.includes(clips.cam) && !ul.still, ul)
+    await ev(`if (T.ss().open) { await T.click(T.dialog().querySelector('[aria-label="Fechar"]')); await T.wait(300) } for (let i = 0; i < 6 && T.past() > ${pastCam}; i++) await T.key('z', { ctrlKey: true }); await T.wait(300); return T.effects().length`)
+  }
 
   // ---------------- 5) cancelar no meio da busca
   console.log('cancelar no meio da busca')

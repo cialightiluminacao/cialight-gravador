@@ -230,6 +230,7 @@ export interface HideOutcome extends Omit<HideResult, 'skipped'> {
   requested: number
   /** Ocorrências com algum efeito pulado (não ficaram escondidas em todo clipe). */
   notHidden: number
+  notHiddenIds: Set<string>
 }
 
 /**
@@ -254,7 +255,8 @@ export function hideRows(p: Project, rows: readonly ReviewRow[], style: 'blur' |
     itemIds.push(...r.itemIds)
     skipped.push(...r.skipped)
   }
-  return { project, itemIds, skipped, requested: rows.length, notHidden: new Set(skipped.map((s) => s.occurrenceId)).size }
+  const notHiddenIds = new Set(skipped.map((s) => s.occurrenceId))
+  return { project, itemIds, skipped, requested: rows.length, notHidden: notHiddenIds.size, notHiddenIds }
 }
 
 /** Texto do aviso do resultado (nunca silêncio). */

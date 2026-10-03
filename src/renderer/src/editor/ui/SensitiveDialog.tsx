@@ -8,7 +8,7 @@ import { cn } from '@/lib/cn'
 import type { PlaybackController } from '../engine/PlaybackController'
 import { useEditorStore } from '../state/editorStore'
 import { useSensitiveScan } from '../state/sensitiveScan'
-import { cancelSensitiveScan, closeSensitiveDialog, focusSensitiveRow, hideSensitiveRows, startSensitiveScan } from './sensitiveFlow'
+import { cancelSensitiveScan, closeSensitiveDialog, resetSensitiveReview, focusSensitiveRow, hideSensitiveRows, startSensitiveScan } from './sensitiveFlow'
 import { THUMB_H, THUMB_W } from './sensitiveThumbs'
 import { ALL_KINDS, checkedRows, formatSpan, kindCounts, MAX_CUSTOM_WORDS, parseCustomWords, PHASE_LABELS, planScan, ROW_PAGE, SCAN_DISCLAIMER, visibleRows, type ReviewRow } from './sensitiveReview'
 
@@ -132,7 +132,7 @@ function Scanning(): React.JSX.Element {
   )
 }
 
-const Row = memo(function Row({ row, checked, thumb, fps, onFocus }: { row: ReviewRow; checked: boolean; thumb: string | undefined; fps: number; onFocus: (r: ReviewRow) => void }): React.JSX.Element {
+const Row = memo(function Row({ row, checked, failed, thumb, fps, onFocus }: { row: ReviewRow; checked: boolean; failed: boolean; thumb: string | undefined; fps: number; onFocus: (r: ReviewRow) => void }): React.JSX.Element {
   const label = SENSITIVE_KIND_LABELS[row.kind]
   const toggle = (on: boolean): void => {
     const u = new Set(st().unchecked)
@@ -156,6 +156,11 @@ const Row = memo(function Row({ row, checked, thumb, fps, onFocus }: { row: Revi
         <div className="flex items-center gap-1.5 text-[11px]">
           <span className="font-semibold text-fg-2">{label}</span>
           {row.occ.confidence === 'pattern' ? <span className="rounded-full border border-warn/30 bg-warn/15 px-1.5 text-[9.5px] font-semibold text-warn" title="O formato bate, mas o dígito verificador não foi conferido">não confirmado</span> : null}
+          {failed ? (
+            <span data-sensitive-not-hidden="" className="rounded-full border border-danger/30 bg-danger/15 px-1.5 text-[9.5px] font-semibold text-danger" title="A faixa do clipe está bloqueada: desbloqueie e clique em Esconder de novo">
+              não escondido
+            </span>
+          ) : null}
         </div>
         <div className="truncate font-mono text-[11.5px] text-fg" data-sensitive-masked="">
           {row.occ.masked}
@@ -197,6 +202,8 @@ function Review({ playback }: { playback: PlaybackController | null }): React.JS
   const counts = useMemo(() => kindCounts(live), [live])
   const shown = useMemo(() => visibleRows(rows, filter, ignored), [rows, filter, ignored])
   const selected = useMemo(() => checkedRows(shown, unchecked), [shown, unchecked])
+  const allChecked = useMemo(() => checkedRows(live, unchecked).length, [live, unchecked])
+  const notHidden = useSensitiveScan((s) => s.notHidden)
   const onFocus = useMemo(() => (r: ReviewRow) => focusSensitiveRow(r, playback), [playback])
   const toggleFilter = (k: SensitiveKind): void => {
     const f = new Set(filter)
@@ -222,7 +229,7 @@ function Review({ playback }: { playback: PlaybackController | null }): React.JS
       </div>
       <ul className="-mx-1.5 min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-0.5" aria-label="Dados encontrados" data-sensitive-list="" onPointerLeave={() => focusSensitiveRow(null, playback)}>
         {shown.slice(0, limit).map((r) => (
-          <Row key={r.id} row={r} checked={!unchecked.has(r.id)} thumb={thumbs[r.id]} fps={fps} onFocus={onFocus} />
+          <Row key={r.id} row={r} checked={!unchecked.has(r.id)} failed={notHidden.has(r.id)} thumb={thumbs[r.id]} fps={fps} onFocus={onFocus} />
         ))}
       </ul>
       {shown.length > limit ? (
@@ -233,11 +240,11 @@ function Review({ playback }: { playback: PlaybackController | null }): React.JS
       <StyleChoice />
       <Disclaimer />
       <div className="flex flex-wrap justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={() => st().patch({ step: 'setup', rows: [], thumbs: {}, hover: null })}>
+        <Button size="sm" variant="ghost" onClick={resetSensitiveReview}>
           Nova busca
         </Button>
-        <Button size="sm" variant="secondary" disabled={selected.length === 0} onClick={() => hideSensitiveRows(selected)} data-sensitive-hide-selected="">
-          Esconder selecionados ({selected.length})
+        <Button size="sm" variant="secondary" disabled={selected.length === 0} title={filter.size ? 'Só as marcadas entre as do filtro de tipo' : undefined} onClick={() => hideSensitiveRows(selected)} data-sensitive-hide-selected="">
+          Esconder selecionados ({filter.size ? `${selected.length} de ${allChecked} marcados` : selected.length})
         </Button>
         <Button size="sm" variant="primary" disabled={live.length === 0} onClick={() => hideSensitiveRows(live)} data-sensitive-hide-all="">
           Esconder todos
