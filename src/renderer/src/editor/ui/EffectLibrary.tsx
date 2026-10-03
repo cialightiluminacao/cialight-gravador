@@ -1,8 +1,10 @@
-import { Droplets, Focus, Grid3x3, Plus, RectangleHorizontal, ScanFace, ScanText } from 'lucide-react'
+import { Droplets, Focus, Grid3x3, Plus, RectangleHorizontal, ScanFace, ScanText, ShieldAlert } from 'lucide-react'
 import type { EffectPresetId } from '@shared/editor/factory'
 import { Tip } from '@/components/ui/primitives'
 import { useEditorStore } from '../state/editorStore'
 import { addEffectAt } from './editorActions'
+import { useSensitiveScan } from '../state/sensitiveScan'
+import { planScan } from './sensitiveReview'
 
 // Aba "Efeitos" da biblioteca: predefinições de privacidade (spec §10). Arrastar o cartão para a
 // linha do tempo (no ponto/faixa do ponteiro) ou para o visualizador (no playhead, região centrada
@@ -31,9 +33,38 @@ export function isEffectDrag(e: React.DragEvent): boolean {
 
 const addAtPlayhead = (id: EffectPresetId): void => addEffectAt(id, useEditorStore.getState().playheadUs)
 
+/** "Procurar dados sensíveis" (G3): varre todos os clipes de vídeo ativos; desativado (com dica) sem nenhum. */
+function SensitiveScanButton(): React.JSX.Element {
+  const canScan = useEditorStore((s) => !!s.project && planScan(s.project).jobs.length > 0)
+  const button = (
+    <button
+      type="button"
+      data-sensitive-open=""
+      disabled={!canScan}
+      aria-describedby={canScan ? undefined : 'sensitive-open-hint'}
+      onClick={() => useSensitiveScan.getState().openDialog(null)}
+      className="col-span-2 flex items-center gap-2 rounded-lg border border-border bg-bg-2 px-2.5 py-2 text-left text-[12px] font-medium text-fg hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      <ShieldAlert className="h-4 w-4 shrink-0 text-accent" />
+      <span className="flex-1">Procurar dados sensíveis</span>
+    </button>
+  )
+  return canScan ? (
+    <Tip content="Procura CPF, e-mails, telefones, cartões e outros dados nos vídeos e lista para esconder">{button}</Tip>
+  ) : (
+    <Tip content="Adicione um clipe de vídeo à linha do tempo para procurar dados sensíveis">
+      <span className="col-span-2" tabIndex={0}>
+        {button}
+        <span id="sensitive-open-hint" className="sr-only">Adicione um clipe de vídeo à linha do tempo para procurar dados sensíveis</span>
+      </span>
+    </Tip>
+  )
+}
+
 export function EffectLibrary(): React.JSX.Element {
   return (
     <div className="grid grid-cols-2 gap-1.5 p-2">
+      <SensitiveScanButton />
       {EFFECT_PRESETS.map((p) => (
         <div
           key={p.id}

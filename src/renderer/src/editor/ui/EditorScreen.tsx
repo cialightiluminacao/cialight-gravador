@@ -22,6 +22,9 @@ import { ExportDialog } from './ExportDialog'
 import { QueueLeaveDialog, requestLeaveEditor } from './ExportQueuePanel'
 import { exportQueue, setQueueBeforeItem } from '../export/exportQueueStore'
 import { SilenceDialog } from './SilenceDialog'
+import { SensitiveDialog } from './SensitiveDialog'
+import { closeSensitiveDialog } from './sensitiveFlow'
+import { useSensitiveScan } from '../state/sensitiveScan'
 import { ReframeDialog } from './ReframeDialog'
 import { useReframe } from '../state/reframe'
 import { useSilencePreview } from '../state/silencePreview'
@@ -45,7 +48,7 @@ import { viewerGestureActive } from './viewer/viewerGesture'
 
 declare global {
   interface Window {
-    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; reframe: typeof useReframe; narration: typeof useNarration; expanded: typeof useExpandedItems; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; queue: typeof exportQueue; memStats: () => ReturnType<EditorEngine['render']['memStats']>; filmstrips: () => FilmstripStats; exportDir?: string; narrationFailWritesAfter?: number; clipPoint: (itemId: string, tUs: number, x: number, y: number) => { x: number; y: number } | null; ops: typeof editorOps & { hideOccurrences: typeof hideOccurrences } }
+    __qaEditor?: { store: typeof useEditorStore; silence: typeof useSilencePreview; reframe: typeof useReframe; narration: typeof useNarration; expanded: typeof useExpandedItems; sensitive: typeof useSensitiveScan; engine: EditorEngine; controller: EditorEngine['playback']; importPaths: (paths: string[]) => Promise<Asset[]>; queue: typeof exportQueue; memStats: () => ReturnType<EditorEngine['render']['memStats']>; filmstrips: () => FilmstripStats; exportDir?: string; narrationFailWritesAfter?: number; clipPoint: (itemId: string, tUs: number, x: number, y: number) => { x: number; y: number } | null; ops: typeof editorOps & { hideOccurrences: typeof hideOccurrences } }
   }
 }
 
@@ -102,7 +105,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
     setEngine(eng)
     const stopAutosave = startAutosave((p) => api.project.save(p))
     // QA (fora do pacote): store e motor acessíveis por CDP
-    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, reframe: useReframe, narration: useNarration, expanded: useExpandedItems, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths), queue: exportQueue, memStats: () => eng.render.memStats(), filmstrips: () => filmstripBudget.stats(), clipPoint: qaClipPoint, ops: { ...editorOps, hideOccurrences } }
+    if (useAppStore.getState().appInfo?.isPackaged === false) window.__qaEditor = { store: useEditorStore, silence: useSilencePreview, reframe: useReframe, narration: useNarration, expanded: useExpandedItems, sensitive: useSensitiveScan, engine: eng, controller: eng.playback, importPaths: (paths) => importPaths(projectId, paths), queue: exportQueue, memStats: () => eng.render.memStats(), filmstrips: () => filmstripBudget.stats(), clipPoint: qaClipPoint, ops: { ...editorOps, hideOccurrences } }
     const offProgress = api.media.onProgress((j) => {
       if (j.projectId.toLowerCase() !== projectId.toLowerCase()) return
       const st = useEditorStore.getState()
@@ -173,6 +176,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       closeRelinkPrompt()
       eng.playback.pause()
       useSilencePreview.getState().close()
+      closeSensitiveDialog()
       engineRef.current = null
       if (window.__qaEditor?.engine === eng) delete window.__qaEditor
       void (async () => {
@@ -302,6 +306,7 @@ export function EditorScreen({ projectId }: { projectId: string }): React.JSX.El
       </div>
       {loaded ? <SilenceDialog /> : null}
       {loaded ? <ReframeDialog playback={engine?.playback ?? null} /> : null}
+      {loaded ? <SensitiveDialog playback={engine?.playback ?? null} /> : null}
       {loaded ? <CurveEditor /> : null}
       {loaded ? <NarrationOverlay /> : null}
       <QueueLeaveDialog />

@@ -18,6 +18,7 @@ import { TextEditor } from './viewer/TextEditor'
 import { startZoomDraw, ZoomRectPreview } from './viewer/ZoomTool'
 import { markFocusPoint, ReframeOverlay } from './viewer/ReframeOverlay'
 import { useReframe } from '../state/reframe'
+import { SensitiveOutline } from './viewer/SensitiveOutline'
 
 // Manipulação direta no visualizador: clique seleciona (Ctrl/Shift alterna) — regiões de efeito
 // primeiro (ficam sempre "por cima" para seleção), senão a mídia abaixo —, arrastar move; alças do
@@ -218,6 +219,7 @@ export function ViewerOverlay({ width, height, scale, onPause }: { width: number
       ) : null}
       {editingId && editingBox ? <TextEditor itemId={editingId} box={editingBox} k={scale} onClose={() => setEditingId(null)} /> : null}
       {reframing ? <ReframeOverlay project={project} playheadUs={playheadUs} width={width} height={height} /> : null}
+      {!playing ? <SensitiveOutline project={project} playheadUs={playheadUs} k={scale} /> : null}
       {zoomRect ? <ZoomRectPreview rect={zoomRect} k={scale} W={project.canvas.width} H={project.canvas.height} /> : null}
     </div>
   )

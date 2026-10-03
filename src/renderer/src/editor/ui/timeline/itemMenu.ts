@@ -1,4 +1,4 @@
-import { AudioLines, ChevronsUpDown, ClipboardCopy, ClipboardPaste, Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
+import { AudioLines, ShieldAlert, ChevronsUpDown, ClipboardCopy, ClipboardPaste, Copy, Eye, EyeOff, Gauge, Link2, Repeat, Scissors, SplitSquareHorizontal, Trash2, Unlink } from 'lucide-react'
 import { convertEffects, detachAudio, enableGroupIds, findItem, linkedIds, linkItems, setSpeed, unlinkMedia } from '@shared/editor/ops'
 import type { EffectItem, Marker, Project } from '@shared/editor/project'
 import { itemEndUs } from '@shared/editor/time'
@@ -7,6 +7,8 @@ import { SHORTCUT_LABELS } from '../../shortcuts'
 import { useEditorStore } from '../../state/editorStore'
 import { useExpandedItems } from '../../state/keyframeLanes'
 import { useSilencePreview } from '../../state/silencePreview'
+import { useSensitiveScan } from '../../state/sensitiveScan'
+import { scannableAsset } from '../sensitiveReview'
 import { deleteSelection, hasClipboard, runShortcut, seekTo, splitAtPlayhead, toggleEnabledSelection } from '../editorActions'
 import type { MenuEntry } from './ContextMenu'
 
@@ -92,6 +94,10 @@ export function itemMenuEntries(p: Project, itemId: string, playback: PlaybackCo
     // item com som: abre o "Remover silêncios" com a faixa dele como voz de referência
     ...(main?.type === 'media' && p.assets.find((a) => a.id === main.assetId)?.audio && !main.freeze
       ? [{ label: 'Remover silêncios…', icon: AudioLines, onSelect: () => useSilencePreview.getState().openDialog(findItem(p, itemId)?.track.id ?? null) }]
+      : []),
+    // clipe visual: "Procurar dados sensíveis" só no trecho dele (desativado se não é vídeo legível ou está desativado)
+    ...(main?.type === 'media' && main.visual && findItem(p, itemId)?.track.kind === 'video'
+      ? [{ label: 'Procurar dados sensíveis neste clipe…', icon: ShieldAlert, disabled: !scannableAsset(p.assets.find((a) => a.id === main.assetId)) || main.enabled === false, onSelect: () => useSensitiveScan.getState().openDialog(itemId) }]
       : []),
     { separator: true },
     { label: 'Excluir', icon: Trash2, shortcut: SHORTCUT_LABELS.delete, danger: true, onSelect: () => deleteSelection(false) },
