@@ -605,10 +605,11 @@ function isAlnumLike(ch: string): boolean {
 }
 
 /**
- * Segmentos = sequências máximas de letras/dígitos separadas por 1–2 de '-' ou ' ' (espaço só entre palavras próximas,
- * vão < 2 × largura de caractere). Um candidato é uma sequência de segmentos só-hex (após o mapeamento) com 32 hex no
- * total: vale com ≥ 3 das 4 quebras nas posições do UUID (8/12/16/20, hífen ou espaço) e ≤ 2 quebras fora delas, ou
- * como um só segmento de 32 hex com dígitos e letras.
+ * Segmentos = sequências máximas de letras/dígitos separadas por 1–3 de '-' ou ' ' (hífen lido como palavra própria;
+ * espaço só entre palavras próximas, vão < 2 × largura de caractere). Um candidato é uma sequência de segmentos só-hex
+ * (após o mapeamento) com 32 hex no total — ou 33 (caractere a mais do OCR) — e vale com ≥ 3 das 4 quebras nas posições
+ * do UUID (8/12/16/20, hífen ou espaço) e ≤ 2 quebras fora delas, ou como um só segmento de 32 hex. Sempre exige ≥ 1
+ * dígito e ≥ 1 letra a–f no texto LIDO (antes do mapeamento): tabela de números em blocos 8+4 não é chave PIX.
  */
 function detectUuidTolerant(p: Pass, out: Cand[]): void {
   const t = p.t
@@ -631,12 +632,12 @@ function detectUuidTolerant(p: Pass, out: Cand[]): void {
       else hex += h
       i++
     }
-    // separador anterior: 1–2 caracteres de '-'/' ', e espaço só entre palavras próximas
+    // separador anterior: 1–3 caracteres de '-'/' ', e espaço só entre palavras próximas
     let okSep = false
     if (segs.length > 0) {
       const prevE = segs[segs.length - 1]!.e
       const gap = t.slice(prevE, s)
-      if (gap.length >= 1 && gap.length <= 2 && /^[- ]+$/.test(gap)) {
+      if (gap.length >= 1 && gap.length <= 3 && /^[- ]+$/.test(gap)) {
         okSep = true
         for (let k = prevE; k < s; k++) {
           if (t[k] === ' ' && p.wordOf[k] === -1 && !p.near[p.wordOf[k - 1]!]) okSep = false
@@ -663,12 +664,12 @@ function detectUuidTolerant(p: Pass, out: Cand[]): void {
       }
       len += sg.hex.length
       hex += sg.hex
-      if (len > 32) break
-      if (len === 32) {
-        const single = a === b && /\d/.test(hex) && /[a-f]/.test(hex)
-        if ((good >= 3 && stray <= 2) || single) found.push({ a, b, good, stray, hex })
-        break
-      }
+      if (len > 33) break
+      if (len < 32) continue
+      const read = t.slice(segs[a]!.s, sg.e)
+      if (!/\d/.test(read) || !/[a-fA-F]/.test(read)) continue
+      const broken = good >= 3 && stray <= 2
+      if (len === 33 ? broken : broken || a === b) found.push({ a, b, good, stray, hex: hex.slice(0, 32) })
     }
   }
   // sobrepostos: fica o de mais quebras certas, depois menos quebras fora do lugar
@@ -963,6 +964,8 @@ function mergeLines(lines: readonly OcrLine[]): OcrWord[][][] {
 // parênteses só no miolo (o ")" do Consolas lido no lugar de "J"), nunca na ponta ("(expira" é prosa).
 const TOKEN_CONT = /^[A-Za-z0-9_\-.=+/øØêé€θ|!$•·]+$/
 function isTokenCont(w: string): boolean {
+  // pedaço longo com letras e dígitos continua o token qualquer que seja a pontuação (")", ":", ",", aspas)
+  if (w.length >= 8 && /\d/.test(w) && /[A-Za-z]/.test(w)) return true
   if (/^[()]|[()]$/.test(w)) return false
   return TOKEN_CONT.test(w.replace(/[()]/g, ''))
 }

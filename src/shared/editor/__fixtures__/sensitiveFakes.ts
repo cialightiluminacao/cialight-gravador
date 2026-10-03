@@ -216,7 +216,7 @@ export function fakeTokens(seed: number): string[] {
 }
 
 /**
- * Corpus FIXO de 200 linhas SEM dado sensível (prosa, datas, horas, dinheiro, versões, ISBN,
+ * Corpus FIXO de 202 linhas SEM dado sensível (prosa, datas, horas, dinheiro, versões, ISBN,
  * números de pedido, textos de interface). Nenhuma deve gerar detecção.
  */
 function buildNegativeCorpus(): string[] {
@@ -286,13 +286,15 @@ function buildNegativeCorpus(): string[] {
     out.push(`${meses[i % 12]} ${1 + i} ${cells.join(' ')}`)
   }
   out.push('Jan 15 2300 4100 3200 1100 900 450 1200', 'Qtd 41 11 11 11 21 31 11')
+  // tabelas de números em blocos de 8 + 4 (revisão da Task 2c: o UUID tolerante não pode virar chave PIX)
+  out.push('20241003 1000 2000 3000 4000 5000 6000', 'Pedido 12345678 1500 2300 4100 3200 1100 9000 trimestre', 'Lote 10203040 0001 0002 0003 0004 0005 0006')
   // completa até 200 com variações de prosa numerada
   let k = 0
   while (out.length < 200) {
     out.push(`Passo ${k + 1}: revise o clipe ${k + 3} e confirme a duração de ${k + 2} segundos.`)
     k++
   }
-  return out.slice(0, 200)
+  return out
 }
 
 export const NEGATIVE_CORPUS: readonly string[] = buildNegativeCorpus()

@@ -696,9 +696,9 @@ describe('rótulos de UI', () => {
   })
 })
 
-describe('negativos: corpus fixo de 200 linhas', () => {
-  it('tem 200 linhas', () => {
-    expect(NEGATIVE_CORPUS).toHaveLength(200)
+describe('negativos: corpus fixo de 202 linhas', () => {
+  it('tem 202 linhas (200 + 3 tabelas da revisão da Task 2c no lugar de 1 de enchimento)', () => {
+    expect(NEGATIVE_CORPUS).toHaveLength(202)
   })
   for (const gap of [0.03, 0.012, 0.0075, 0.004, 0.003, 0.002]) {
     it(`zero falsos positivos (vão ${gap})`, () => {
@@ -745,6 +745,31 @@ describe('desempenho', () => {
     const med = times[4]!
     // eslint-disable-next-line no-console
     console.info(`[sensitive perf] mediana ${med.toFixed(2)} ms`)
+    expect(med).toBeLessThan(60)
+  })
+  it('300 linhas × 12 palavras partidas em 3 OcrLine que se juntam (mergeLines)', () => {
+    const lines: OcrLine[] = []
+    for (let i = 0; i < 300; i++) {
+      const base = NEGATIVE_CORPUS[i % NEGATIVE_CORPUS.length]!.split(' ')
+      while (base.length < 12) base.push(`palavra${base.length}`)
+      const y = 0.005 + (i % 100) * 0.0095
+      const x0 = i < 100 ? 0.01 : i < 200 ? 0.34 : 0.67
+      const full = line(base.slice(0, 12).join(' '), 0.004, y)
+      for (const w of full.words) w.box = { ...w.box, x: w.box.x - 0.05 + x0, h: 0.008 }
+      // a mesma linha visual chega em 3 pedaços (4 palavras cada), fora de ordem
+      lines.push({ words: full.words.slice(8) }, { words: full.words.slice(0, 4) }, { words: full.words.slice(4, 8) })
+    }
+    expect(detectSensitive(lines)).toEqual([]) // aquecimento; o corpus é todo negativo
+    const times: number[] = []
+    for (let r = 0; r < 9; r++) {
+      const t0 = performance.now()
+      detectSensitive(lines, { customTerms: ['joao da silva'] })
+      times.push(performance.now() - t0)
+    }
+    times.sort((a, b) => a - b)
+    const med = times[4]!
+    // eslint-disable-next-line no-console
+    console.info(`[sensitive perf, linhas unidas] mediana ${med.toFixed(2)} ms`)
     expect(med).toBeLessThan(60)
   })
 })
@@ -1350,6 +1375,34 @@ describe('Task 2c: leituras reais do OCR (recall de ponta a ponta)', () => {
       const ds = only(detectSensitive([ocr([['de', 600, 615], ['1b325d83-13fa-4bbf-b8f9-8b4003588807', 621, 975]])]), 'pix')
       expect(ds).toHaveLength(1)
       expect(left(ds[0]!.box)).toBe(621)
+    })
+  })
+
+  describe('fix round 1 (revisão da Task 2c)', () => {
+    it('1: tabela de números em blocos 8+4 não vira PIX (vãos de 0,5 a 1,5 caractere)', () => {
+      const rows = ['20241003 1000 2000 3000 4000 5000 6000', 'Pedido 12345678 1500 2300 4100 3200 1100 9000 trimestre', 'Lote 10203040 0001 0002 0003 0004 0005 0006']
+      for (const r of rows) for (const gap of [0.004, 0.008, 0.012]) expect(only(detectSensitive([line(r, gap)]), 'pix'), `${r} ${gap}`).toEqual([])
+      expect(NEGATIVE_CORPUS).toEqual(expect.arrayContaining(rows))
+    })
+    it('1: UUID tolerante exige dígito e letra a–f no texto lido (antes do mapeamento)', () => {
+      expect(only(detectSensitive([line('ID 12345678 1234 1234 1234 123456789012')]), 'pix')).toEqual([])
+      expect(only(detectSensitive([line('ID OOO12345-1234-1234-1234-123456789012')]), 'pix')).toEqual([])
+      expect(only(detectSensitive([line('ID 12345678-1234-1234-1234-12345678901a')]), 'pix')).toHaveLength(1)
+    })
+    it('2: pedaço longo de token com pontuação continua o token', () => {
+      const ds = detectSensitive([ocr([['ghp_MdkUCaF90g51FCPpDSbDp47e', 300, 520], ['Xa1b2c3)', 524, 590], ['d4e5f6g7h8', 594, 680]], 300, 16)])
+      expect(covers(ds, 'token', 300, 680)).toBe(true)
+      const ds2 = detectSensitive([ocr([['sk-JMsY6nBEJg1', 1402, 1556], ['hid3Cz7s:6dcs,ijllYZ"5g', 1561, 1764]], 300, 20)])
+      expect(covers(ds2, 'token', 1402, 1764)).toBe(true)
+    })
+    it('3: hífen lido como palavra própria e caractere a mais (33 hex)', () => {
+      const a = only(detectSensitive([ocr([['b325d83a', 600, 680], ['-', 683, 688], ['13fa-4bbf-b8f9-8b4003588807', 691, 960]], 400, 16)]), 'pix')
+      expect(a).toHaveLength(1)
+      expect(left(a[0]!.box)).toBe(600)
+      expect(right(a[0]!.box)).toBe(960)
+      const b = only(detectSensitive([ocr([['b325d83a-13fa-4bbf-b8f9-8b40035888071', 600, 970]], 400, 16)]), 'pix')
+      expect(b).toHaveLength(1)
+      expect(right(b[0]!.box)).toBe(970)
     })
   })
 
