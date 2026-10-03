@@ -1,0 +1,724 @@
+import { describe, expect, it } from 'vitest'
+import {
+  detectSensitive,
+  isValidCnpj,
+  isValidCpf,
+  luhnValid,
+  maskSensitive,
+  SENSITIVE_KIND_LABELS,
+  type Detection,
+  type OcrBox,
+  type OcrLine,
+  type SensitiveKind
+} from './sensitive'
+import {
+  breakLastDigit,
+  fakeCard,
+  fakeCep,
+  fakeCnpj,
+  fakeCpf,
+  fakeEmail,
+  fakeIpv4,
+  fakePhone,
+  fakePlate,
+  fakeToken,
+  fakeTokens,
+  fakeUuid,
+  formatCard,
+  formatCnpj,
+  formatCpf,
+  NEGATIVE_CORPUS,
+  TOKEN_STYLES,
+  type CardBrand,
+  type PhoneStyle
+} from './__fixtures__/sensitiveFakes'
+
+const H = 0.02
+/** Linha a partir de texto: palavras separadas por espaço; gap entre palavras configurável. */
+function line(text: string, gap = 0.03, y = 0.1): OcrLine {
+  let x = 0.05
+  const words = text.split(' ').filter(Boolean).map((t) => {
+    const w = t.length * 0.008
+    const box = { x, y, w, h: H }
+    x += w + gap
+    return { text: t, box }
+  })
+  return { words }
+}
+/** Linha com palavras e caixas explícitas: [texto, x, w]. */
+function raw(parts: Array<[string, number, number]>, y = 0.1): OcrLine {
+  return { words: parts.map(([text, x, w]) => ({ text, box: { x, y, w, h: H } })) }
+}
+function expectBox(a: OcrBox, b: OcrBox): void {
+  expect(a.x).toBeCloseTo(b.x, 9)
+  expect(a.y).toBeCloseTo(b.y, 9)
+  expect(a.w).toBeCloseTo(b.w, 9)
+  expect(a.h).toBeCloseTo(b.h, 9)
+}
+const kindsOf = (ds: Detection[]): SensitiveKind[] => ds.map((d) => d.kind)
+const only = (ds: Detection[], k: SensitiveKind): Detection[] => ds.filter((d) => d.kind === k)
+
+describe('validadores', () => {
+  it('CPF', () => {
+    expect(isValidCpf('52998224725')).toBe(true)
+    expect(isValidCpf('52998224726')).toBe(false)
+    expect(isValidCpf('11111111111')).toBe(false)
+    expect(isValidCpf('1234567890')).toBe(false)
+    expect(isValidCpf('529.982.247-25')).toBe(false)
+  })
+  it('CNPJ', () => {
+    expect(isValidCnpj('11222333000181')).toBe(true)
+    expect(isValidCnpj('11222333000182')).toBe(false)
+    expect(isValidCnpj('00000000000000')).toBe(false)
+    expect(isValidCnpj('1122233300018')).toBe(false)
+  })
+  it('Luhn', () => {
+    expect(luhnValid('4111111111111111')).toBe(true)
+    expect(luhnValid('4111111111111112')).toBe(false)
+    expect(luhnValid('378282246310005')).toBe(true)
+    expect(luhnValid('411111111111')).toBe(false) // 12 dígitos
+    expect(luhnValid('41111111111111111111')).toBe(false) // 20
+  })
+  it('fakes são válidos', () => {
+    for (let s = 1; s <= 40; s++) {
+      expect(isValidCpf(fakeCpf(s))).toBe(true)
+      expect(isValidCnpj(fakeCnpj(s))).toBe(true)
+      for (const b of ['visa', 'mastercard', 'amex', 'elo', 'diners'] as CardBrand[]) expect(luhnValid(fakeCard(s, b))).toBe(true)
+    }
+  })
+  it('fakes são determinísticos', () => {
+    expect(fakeCpf(5)).toBe(fakeCpf(5))
+    expect(fakeTokens(3)).toEqual(fakeTokens(3))
+    expect(fakeCpf(5)).not.toBe(fakeCpf(6))
+  })
+})
+
+describe('CPF', () => {
+  for (let s = 1; s <= 25; s++) {
+    it(`formatado e sem formatação #${s}`, () => {
+      const d = fakeCpf(s)
+      for (const txt of [formatCpf(d), d]) {
+        const ds = detectSensitive([line(`CPF ${txt} ok`)])
+        const c = only(ds, 'cpf')
+        expect(c).toHaveLength(1)
+        expect(c[0]!.value).toBe(d)
+        expect(c[0]!.confidence).toBe('validated')
+        expect(only(ds, 'phone')).toHaveLength(0)
+      }
+    })
+  }
+  it('máscara só com o grupo do meio', () => {
+    const ds = detectSensitive([line('CPF 529.982.247-25')])
+    expect(ds[0]!.masked).toBe('***.982.***-**')
+  })
+  it('checksum errado não é CPF (formatado)', () => {
+    for (let s = 1; s <= 25; s++) {
+      expect(kindsOf(detectSensitive([line(formatCpf(breakLastDigit(fakeCpf(s))))]))).not.toContain('cpf')
+    }
+  })
+  it('checksum errado sem formatação não é CPF', () => {
+    for (let s = 1; s <= 25; s++) {
+      expect(kindsOf(detectSensitive([line(breakLastDigit(fakeCpf(s)))]))).not.toContain('cpf')
+    }
+  })
+  it('todos iguais não é CPF', () => {
+    for (let d = 0; d <= 9; d++) {
+      const x = String(d).repeat(11)
+      expect(kindsOf(detectSensitive([line(x)]))).not.toContain('cpf')
+      expect(detectSensitive([line(formatCpf(x))])).toEqual([])
+    }
+  })
+  it('CPF válido de 11 dígitos é cpf e não telefone', () => {
+    // 11 + 9XXXXXXXX com checksum válido de CPF
+    let found = 0
+    for (let s = 1; s < 4000 && found < 3; s++) {
+      const d = fakeCpf(s)
+      if (!/^(1[1-9])9\d{8}$/.test(d)) continue
+      found++
+      const ds = detectSensitive([line(d)])
+      expect(kindsOf(ds)).toEqual(['cpf'])
+    }
+    expect(found).toBeGreaterThan(0)
+  })
+  it('número de 11 dígitos que não é CPF nem telefone: nada', () => {
+    expect(detectSensitive([line('12345678900')])).toEqual([])
+  })
+})
+
+describe('CNPJ', () => {
+  for (let s = 1; s <= 25; s++) {
+    it(`formatado e sem formatação #${s}`, () => {
+      const d = fakeCnpj(s)
+      for (const txt of [formatCnpj(d), d]) {
+        const ds = detectSensitive([line(`CNPJ ${txt}`)])
+        const c = only(ds, 'cnpj')
+        expect(c).toHaveLength(1)
+        expect(c[0]!.value).toBe(d)
+        expect(c[0]!.confidence).toBe('validated')
+        expect(only(ds, 'card')).toHaveLength(0)
+      }
+    })
+  }
+  it('máscara', () => {
+    const ds = detectSensitive([line('11.222.333/0001-81')])
+    expect(ds[0]!.masked).toBe('**.***.333/0001-**')
+  })
+  it('inválido / todos iguais', () => {
+    for (let s = 1; s <= 25; s++) {
+      expect(kindsOf(detectSensitive([line(formatCnpj(breakLastDigit(fakeCnpj(s))))]))).not.toContain('cnpj')
+      expect(kindsOf(detectSensitive([line(breakLastDigit(fakeCnpj(s)))]))).not.toContain('cnpj')
+    }
+    expect(kindsOf(detectSensitive([line('00.000.000/0000-00')]))).not.toContain('cnpj')
+    expect(kindsOf(detectSensitive([line('11111111111111')]))).not.toContain('cnpj')
+  })
+})
+
+describe('cartão', () => {
+  const brands: CardBrand[] = ['visa', 'mastercard', 'amex', 'elo', 'diners']
+  for (let s = 1; s <= 25; s++) {
+    it(`bandeiras, agrupado e corrido #${s}`, () => {
+      const b = brands[s % brands.length]!
+      const d = fakeCard(s, b)
+      for (const txt of [formatCard(d), formatCard(d, '-'), d]) {
+        const ds = detectSensitive([line(`Cartao ${txt} val`)])
+        const c = only(ds, 'card')
+        expect(c).toHaveLength(1)
+        expect(c[0]!.value).toBe(d)
+        expect(c[0]!.confidence).toBe('validated')
+      }
+    })
+  }
+  it('máscara só com os 4 últimos', () => {
+    const ds = detectSensitive([line('4111 1111 1111 1111')])
+    expect(ds[0]!.masked).toBe('**** **** **** 1111')
+  })
+  it('Luhn inválido e todos iguais: nada', () => {
+    for (let s = 1; s <= 25; s++) {
+      const d = breakLastDigit(fakeCard(s, 'visa'))
+      expect(kindsOf(detectSensitive([line(formatCard(d))]))).not.toContain('card')
+    }
+    expect(kindsOf(detectSensitive([line('0000 0000 0000 0000')]))).not.toContain('card')
+    expect(kindsOf(detectSensitive([line('1111111111111111')]))).not.toContain('card')
+  })
+})
+
+describe('e-mail', () => {
+  for (let s = 1; s <= 10; s++) {
+    it(`variantes #${s}`, () => {
+      const e = fakeEmail(s)
+      const ds = detectSensitive([line(`Contato: ${e}`)])
+      const c = only(ds, 'email')
+      expect(c).toHaveLength(1)
+      expect(c[0]!.value).toBe(e)
+      expect(c[0]!.confidence).toBe('pattern')
+    })
+  }
+  it('máscara mantém TLD', () => {
+    const ds = detectSensitive([line('joao@exemplo.com.br')])
+    expect(ds[0]!.masked).toBe('j***@e***.com.br')
+  })
+  it('sem @ ou sem TLD: nada', () => {
+    expect(detectSensitive([line('joao.exemplo.com')])).toEqual([])
+    expect(detectSensitive([line('joao@localhost')])).toEqual([])
+    expect(detectSensitive([line('joao@exemplo.c')])).toEqual([])
+  })
+  it('dígitos dentro de e-mail não viram CPF/telefone', () => {
+    const ds = detectSensitive([line(`${fakeCpf(3)}@exemplo.com`)])
+    expect(kindsOf(ds)).toEqual(['email'])
+  })
+})
+
+describe('telefone', () => {
+  const styles: PhoneStyle[] = ['paren', 'space', 'bare', 'intl', 'landlineParen', 'landlineSpace']
+  for (let s = 1; s <= 12; s++) {
+    it(`formatos #${s}`, () => {
+      const st = styles[s % styles.length]!
+      const p = fakePhone(s, st)
+      const ds = detectSensitive([line(`Tel ${p}`)])
+      // bare pode coincidir com CPF válido (raríssimo); a prioridade é cpf
+      const c = only(ds, 'phone')
+      expect(c.length + only(ds, 'cpf').length).toBe(1)
+      if (c.length) {
+        expect(c[0]!.confidence).toBe('pattern')
+        expect(c[0]!.value).toBe(p.replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, ''))
+      }
+    })
+  }
+  it('formatos explícitos', () => {
+    for (const t of ['(11) 98765-4321', '11 98765-4321', '11987654321', '(11) 3456-7890', '+55 11 98765-4321', '+5511987654321', '(21) 2345-6789', '(11)98765-4321']) {
+      const ds = detectSensitive([line(t.split(' ').join(' '))])
+      expect(kindsOf(ds), t).toContain(isValidCpf(t.replace(/\D/g, '')) ? 'cpf' : 'phone')
+    }
+  })
+  it('máscara', () => {
+    expect(detectSensitive([line('(11) 98765-4321')])[0]!.masked).toBe('(11) *****-4321')
+    expect(detectSensitive([line('(11) 3456-7890')])[0]!.masked).toBe('(11) ****-7890')
+  })
+  it('DDD inválido, fixo sem formatação e celular sem 9: nada', () => {
+    expect(detectSensitive([line('(10) 98765-4321')])).toEqual([])
+    expect(detectSensitive([line('(20) 98765-4321')])).toEqual([])
+    expect(detectSensitive([line('(11) 18765-4321')])).toEqual([])
+    expect(detectSensitive([line('(11) 6456-7890')])).toEqual([])
+    expect(detectSensitive([line('1134567890')])).toEqual([])
+  })
+})
+
+describe('CEP', () => {
+  for (let s = 1; s <= 8; s++) {
+    it(`com hífen #${s}`, () => {
+      const c = fakeCep(s)
+      const ds = only(detectSensitive([line(`CEP ${c} Centro`)]), 'cep')
+      expect(ds).toHaveLength(1)
+      expect(ds[0]!.value).toBe(c.replace('-', ''))
+      expect(ds[0]!.confidence).toBe('pattern')
+      expect(only(detectSensitive([line(c)]), 'cep')).toHaveLength(1)
+    })
+  }
+  it('sem hífen só com rótulo CEP', () => {
+    expect(only(detectSensitive([line('CEP: 01310100')]), 'cep')).toHaveLength(1)
+    expect(only(detectSensitive([line('cep 01310100')]), 'cep')).toHaveLength(1)
+    expect(only(detectSensitive([line('01310100')]), 'cep')).toHaveLength(0)
+    expect(only(detectSensitive([line('Lote 20240312')]), 'cep')).toHaveLength(0)
+  })
+  it('máscara', () => {
+    expect(detectSensitive([line('01310-100')])[0]!.masked).toBe('*****-100')
+  })
+})
+
+describe('placa', () => {
+  const variants: Array<[number, 'old' | 'oldHyphen' | 'mercosul']> = [
+    [1, 'old'], [2, 'oldHyphen'], [3, 'mercosul'], [4, 'old'], [5, 'oldHyphen'], [6, 'mercosul'], [7, 'mercosul'], [8, 'old']
+  ]
+  for (const [s, st] of variants) {
+    it(`${st} #${s}`, () => {
+      const p = fakePlate(s, st)
+      const c = only(detectSensitive([line(`Placa ${p}`)]), 'plate')
+      expect(c).toHaveLength(1)
+      expect(c[0]!.value).toBe(p.replace('-', ''))
+      expect(c[0]!.confidence).toBe('pattern')
+    })
+  }
+  it('minúsculas e máscara', () => {
+    const d = detectSensitive([line('abc1d23')])
+    expect(d[0]!.kind).toBe('plate')
+    expect(d[0]!.masked).toBe('****D23')
+  })
+  it('exige fronteira de palavra', () => {
+    expect(detectSensitive([line('XABC1D234')])).toEqual([])
+    expect(detectSensitive([line('ABCD1234')])).toEqual([])
+  })
+})
+
+describe('PIX (UUID)', () => {
+  for (let s = 1; s <= 8; s++) {
+    it(`uuid #${s}`, () => {
+      const u = fakeUuid(s)
+      const c = only(detectSensitive([line(`Chave ${u}`)]), 'pix')
+      expect(c).toHaveLength(1)
+      expect(c[0]!.value).toBe(u)
+      expect(only(detectSensitive([line(u.toUpperCase())]), 'pix')).toHaveLength(1)
+    })
+  }
+  it('máscara termina nos 4 últimos', () => {
+    const u = '123e4567-e89b-12d3-a456-426614174000'
+    expect(detectSensitive([line(u)])[0]!.masked).toBe('xxxxxxxx-…-…-…-4000')
+  })
+})
+
+describe('IP', () => {
+  for (let s = 1; s <= 10; s++) {
+    it(`ipv4 #${s}`, () => {
+      const ip = fakeIpv4(s)
+      const c = only(detectSensitive([line(`Servidor ${ip}:8080`)]), 'ip')
+      expect(c).toHaveLength(1)
+      expect(c[0]!.value).toBe(ip)
+    })
+  }
+  it('octeto > 255 e versões: nada', () => {
+    expect(detectSensitive([line('1.2.3.400')])).toEqual([])
+    expect(detectSensitive([line('256.1.1.1')])).toEqual([])
+    expect(detectSensitive([line('v10.0.19045')])).toEqual([])
+    expect(detectSensitive([line('v1.2.3.4')])).toEqual([])
+    expect(detectSensitive([line('10.0.19045')])).toEqual([])
+  })
+  it('máscara', () => {
+    expect(detectSensitive([line('192.168.0.42')])[0]!.masked).toBe('***.***.***.42')
+  })
+})
+
+describe('token', () => {
+  it('todos os estilos', () => {
+    for (const st of TOKEN_STYLES) {
+      for (let s = 1; s <= 2; s++) {
+        const tk = fakeToken(s, st)
+        const c = only(detectSensitive([line(`key=${tk}`)]), 'token')
+        expect(c.length, st).toBeGreaterThanOrEqual(1)
+        expect(c[0]!.value).toBe(tk)
+        expect(c[0]!.confidence).toBe('pattern')
+      }
+    }
+  })
+  it('fakeTokens cobre tudo', () => {
+    for (const tk of fakeTokens(9)) {
+      expect(kindsOf(detectSensitive([line(tk)]))).toContain('token')
+    }
+  })
+  it('máscara: 4 primeiros + reticências', () => {
+    expect(detectSensitive([line('sk-proj-abcdefghijklmnopqrstu')])[0]!.masked).toBe('sk-p…')
+  })
+  it('prosa com sk- no meio de palavra não é token', () => {
+    expect(detectSensitive([line('task-management-system-core-module')])).toEqual([])
+  })
+})
+
+describe('rotulado', () => {
+  const labels = ['Senha', 'Password', 'Token', 'Conta', 'Agência', 'Agencia', 'Chave', 'Secret', 'Pin', 'CVV', 'Código de segurança', 'API key', 'SENHA', 'senha']
+  for (const lb of labels) {
+    it(`rótulo ${lb}`, () => {
+      const ds = only(detectSensitive([line(`${lb}: hunter2abc`)]), 'labeled')
+      expect(ds).toHaveLength(1)
+      expect(ds[0]!.masked).toBe(`${lb}: ••••••`)
+      expect(ds[0]!.confidence).toBe('pattern')
+    })
+  }
+  it('= e valor em várias palavras até o fim da linha; caixa só do valor', () => {
+    const l = line('Senha: minha senha secreta')
+    const ds = only(detectSensitive([l]), 'labeled')
+    expect(ds).toHaveLength(1)
+    const [lab, ...val] = l.words
+    expect(ds[0]!.box.x).toBeCloseTo(val[0]!.box.x, 9)
+    expect(ds[0]!.box.x).toBeGreaterThan(lab!.box.x + lab!.box.w - 1e-9)
+    const last = val[val.length - 1]!.box
+    expect(ds[0]!.box.x + ds[0]!.box.w).toBeCloseTo(last.x + last.w, 9)
+  })
+  it('valor colado ao rótulo na mesma palavra inclui a palavra inteira', () => {
+    const l = line('Senha=abc123')
+    const ds = only(detectSensitive([l]), 'labeled')
+    expectBox(ds[0]!.box, l.words[0]!.box)
+  })
+  it('valor vazio: cobre o rótulo', () => {
+    const l = line('Senha:')
+    const ds = only(detectSensitive([l]), 'labeled')
+    expect(ds).toHaveLength(1)
+    expectBox(ds[0]!.box, l.words[0]!.box)
+  })
+  it('rótulo e dois pontos em palavras separadas', () => {
+    const ds = only(detectSensitive([line('Senha : abc123')]), 'labeled')
+    expect(ds).toHaveLength(1)
+  })
+  it('dois rótulos na linha não se engolem', () => {
+    const ds = only(detectSensitive([line('Senha: abc Token: xyz')]), 'labeled')
+    expect(ds).toHaveLength(2)
+  })
+  it('sem : ou = não é rótulo', () => {
+    expect(detectSensitive([line('Senha forte exigida')])).toEqual([])
+    expect(detectSensitive([line('Espinho: pin')])).toEqual([])
+  })
+})
+
+describe('customTerms', () => {
+  it('multi-palavra e acentos', () => {
+    const l = line('Cliente joao da silva pagou')
+    const ds = detectSensitive([l], { customTerms: ['João da Silva'] })
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.kind).toBe('custom')
+    expect(ds[0]!.masked).toBe('j***')
+    expect(ds[0]!.box.x).toBeCloseTo(l.words[1]!.box.x, 9)
+    expect(ds[0]!.box.x + ds[0]!.box.w).toBeCloseTo(l.words[3]!.box.x + l.words[3]!.box.w, 9)
+  })
+  it('acento no texto, termo sem acento e vice-versa', () => {
+    expect(detectSensitive([line('Fulano João')], { customTerms: ['joao'] })).toHaveLength(1)
+    expect(detectSensitive([line('Fulano Joao')], { customTerms: ['JOÃO'] })).toHaveLength(1)
+    expect(detectSensitive([line('Conceição')], { customTerms: ['conceicao'] })).toHaveLength(1)
+  })
+  it('palavra inteira, termo curto ignorado, pontuação', () => {
+    expect(detectSensitive([line('Silvana')], { customTerms: ['Silva'] })).toEqual([])
+    expect(detectSensitive([line('Silva,')], { customTerms: ['Silva'] })).toHaveLength(1)
+    expect(detectSensitive([line('a b')], { customTerms: ['a'] })).toEqual([])
+    expect(detectSensitive([line('Silva')], { customTerms: ['  '] })).toEqual([])
+  })
+  it('respeita kinds', () => {
+    expect(detectSensitive([line('Silva')], { customTerms: ['Silva'], kinds: ['cpf'] })).toEqual([])
+    expect(detectSensitive([line('Silva')], { customTerms: ['Silva'], kinds: ['custom'] })).toHaveLength(1)
+  })
+  it('sem customTerms não há custom', () => {
+    expect(detectSensitive([line('Silva')])).toEqual([])
+  })
+})
+
+describe('opts.kinds', () => {
+  it('filtra tipos', () => {
+    const l = line(`CPF ${formatCpf(fakeCpf(1))} mail ${fakeEmail(1)}`)
+    expect(kindsOf(detectSensitive([l], { kinds: ['email'] }))).toEqual(['email'])
+    expect(kindsOf(detectSensitive([l], { kinds: ['cpf'] }))).toEqual(['cpf'])
+    expect(kindsOf(detectSensitive([l])).sort()).toEqual(['cpf', 'email'])
+  })
+})
+
+describe('robustez de OCR: palavras quebradas', () => {
+  const cpf = '529.982.247-25'
+  it('"123.456." + "789-00" (vão grande: passada 1; vão pequeno: passada 2)', () => {
+    for (const gap of [0.002, 0.03]) {
+      const l = line('CPF 529.982. 247-25', gap)
+      const ds = only(detectSensitive([l]), 'cpf')
+      expect(ds, `gap ${gap}`).toHaveLength(1)
+      expect(ds[0]!.value).toBe('52998224725')
+      const [, a, b] = l.words
+      expect(ds[0]!.box.x).toBeCloseTo(a!.box.x, 9)
+      expect(ds[0]!.box.x + ds[0]!.box.w).toBeCloseTo(b!.box.x + b!.box.w, 9)
+    }
+  })
+  it('"529.982.247" + "-" + "25"', () => {
+    for (const gap of [0.002, 0.03]) {
+      const l = line('529.982.247 - 25', gap)
+      const ds = only(detectSensitive([l]), 'cpf')
+      expect(ds, `gap ${gap}`).toHaveLength(1)
+      expect(ds[0]!.box.x).toBeCloseTo(l.words[0]!.box.x, 9)
+      expect(ds[0]!.box.x + ds[0]!.box.w).toBeCloseTo(l.words[2]!.box.x + l.words[2]!.box.w, 9)
+    }
+    // com vão de 0 (sem espaço no texto) a união inclui as 3 palavras
+    const l = line('529.982.247 - 25', 0)
+    expect(only(detectSensitive([l]), 'cpf')).toHaveLength(1)
+  })
+  it('"joao." + "silva@exemplo.com"', () => {
+    const l = raw([['joao.', 0.1, 0.04], ['silva@exemplo.com', 0.1405, 0.14]])
+    const ds = only(detectSensitive([l]), 'email')
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.value).toBe('joao.silva@exemplo.com')
+    expect(ds[0]!.box.x).toBeCloseTo(0.1, 9)
+    expect(ds[0]!.box.x + ds[0]!.box.w).toBeCloseTo(0.2805, 9)
+  })
+  it('vão grande entre as partes de um e-mail: não cola (só o trecho válido)', () => {
+    const l = raw([['joao.', 0.05, 0.04], ['silva@exemplo.com', 0.5, 0.14]])
+    const ds = only(detectSensitive([l]), 'email')
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.value).toBe('silva@exemplo.com')
+  })
+  it('cartão quebrado em 4 grupos colados e em 2 metades', () => {
+    const d = fakeCard(4, 'visa')
+    const l = raw([[d.slice(0, 8), 0.1, 0.06], [d.slice(8), 0.1605, 0.06]])
+    const ds = only(detectSensitive([l]), 'card')
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.value).toBe(d)
+    expect(ds[0]!.box.w).toBeCloseTo(0.12 + 0.0005, 6)
+  })
+  it('CNPJ dividido na barra', () => {
+    const d = fakeCnpj(2)
+    const f = formatCnpj(d)
+    const i = f.indexOf('/')
+    const l = raw([[f.slice(0, i + 1), 0.1, 0.07], [f.slice(i + 1), 0.171, 0.06]])
+    const ds = only(detectSensitive([l]), 'cnpj')
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.value).toBe(d)
+  })
+  it('token longo dividido em duas palavras', () => {
+    const tk = fakeToken(5, 'sk')
+    const l = raw([[tk.slice(0, 12), 0.1, 0.1], [tk.slice(12), 0.2005, 0.1]])
+    const ds = only(detectSensitive([l]), 'token')
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.value).toBe(tk)
+  })
+  it('sem duplicar: mesma detecção das duas passadas vira uma só', () => {
+    const l = line(`CPF ${cpf} ok`, 0.002)
+    expect(only(detectSensitive([l]), 'cpf')).toHaveLength(1)
+  })
+})
+
+describe('robustez de OCR: confusões', () => {
+  it('l23.456.789-O9 estilo: mapeia e valida', () => {
+    // 52998224725 → "S2998224725" não tem 'S' confundível... usa CPF com 0/1
+    let n = 0
+    for (let s = 1; s < 3000 && n < 5; s++) {
+      const d = fakeCpf(s)
+      if (!/[01]/.test(d)) continue
+      n++
+      const noisy = formatCpf(d).replace(/0/g, 'O').replace(/1/g, 'l')
+      const ds = only(detectSensitive([line(`CPF ${noisy}`)]), 'cpf')
+      expect(ds, noisy).toHaveLength(1)
+      expect(ds[0]!.value).toBe(d)
+    }
+    expect(n).toBe(5)
+  })
+  it('confusões S→5, B→8, Z→2, D→0, I→1, |→1', () => {
+    let n = 0
+    for (let s = 1; s < 20000 && n < 6; s++) {
+      const d = fakeCpf(s)
+      if (!/[5]/.test(d) || !/[8]/.test(d)) continue
+      n++
+      const noisy = formatCpf(d).replace(/5/g, 'S').replace(/8/g, 'B').replace(/2/g, 'Z').replace(/1/g, '|')
+      const ds = only(detectSensitive([line(noisy)]), 'cpf')
+      expect(ds, noisy).toHaveLength(1)
+      expect(ds[0]!.value).toBe(d)
+    }
+    expect(n).toBeGreaterThan(0)
+  })
+  it('mapeamento que NÃO valida não gera detecção (checksum nunca é relaxado)', () => {
+    for (let s = 1; s <= 30; s++) {
+      const d = breakLastDigit(fakeCpf(s))
+      const noisy = formatCpf(d).replace(/0/g, 'O').replace(/1/g, 'l')
+      expect(kindsOf(detectSensitive([line(noisy)])), noisy).not.toContain('cpf')
+    }
+    expect(kindsOf(detectSensitive([line('l23.456.789-O0')]))).not.toContain('cpf')
+  })
+  it('palavras comuns nunca viram dígitos', () => {
+    for (const w of ['approve', 'Sobre', 'DOSE', 'BOSS', 'Isis', 'SOS', 'ZIZ', 'lOlO', 'Dis', 'ISO']) {
+      expect(detectSensitive([line(`${w} ${w}`)]), w).toEqual([])
+    }
+  })
+  it('cartão com confusões', () => {
+    const d = fakeCard(11, 'visa')
+    const noisy = formatCard(d).replace(/0/g, 'O').replace(/1/g, 'I')
+    const ds = only(detectSensitive([line(noisy)]), 'card')
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.value).toBe(d)
+  })
+  it('telefone com confusão', () => {
+    const ds = only(detectSensitive([line('(11) 98765-432l')]), 'phone')
+    expect(ds).toHaveLength(1)
+    expect(ds[0]!.value).toBe('11987654321')
+  })
+})
+
+describe('caixa: união exata e superconjunto', () => {
+  it('detecção cobre toda palavra contribuinte', () => {
+    const l = raw([['CPF', 0.1, 0.03], ['529.982.', 0.15, 0.06], ['247-25', 0.22, 0.05], ['fim', 0.3, 0.03]])
+    const ds = only(detectSensitive([l]), 'cpf')
+    expect(ds).toHaveLength(1)
+    const b: OcrBox = ds[0]!.box
+    expect(b.x).toBeCloseTo(0.15, 9)
+    expect(b.w).toBeCloseTo(0.27 - 0.15, 9)
+    expect(b.y).toBeCloseTo(0.1, 9)
+    expect(b.h).toBeCloseTo(H, 9)
+  })
+  it('alturas e y diferentes: união vertical', () => {
+    const l: OcrLine = {
+      words: [
+        { text: '529.982.', box: { x: 0.1, y: 0.1, w: 0.06, h: 0.02 } },
+        { text: '247-25', box: { x: 0.165, y: 0.105, w: 0.05, h: 0.03 } }
+      ]
+    }
+    const ds = only(detectSensitive([l]), 'cpf')
+    expect(ds[0]!.box.y).toBeCloseTo(0.1, 9)
+    expect(ds[0]!.box.h).toBeCloseTo(0.035, 9)
+  })
+  it('palavra com um único caractere contribuinte entra inteira', () => {
+    // "5" colado ao fim da palavra anterior
+    const l = raw([['Ref:52998224725abc', 0.1, 0.1]])
+    const ds = detectSensitive([l])
+    for (const d of ds) expectBox(d.box, { x: 0.1, y: 0.1, w: 0.1, h: H })
+  })
+  it('várias linhas e ordem', () => {
+    const a = line(`CPF ${formatCpf(fakeCpf(1))}`, 0.03, 0.1)
+    const b = line(`mail ${fakeEmail(1)}`, 0.03, 0.2)
+    const ds = detectSensitive([a, b])
+    expect(kindsOf(ds)).toEqual(['cpf', 'email'])
+    expect(ds[1]!.box.y).toBeCloseTo(0.2, 9)
+  })
+})
+
+describe('deduplicação entre tipos', () => {
+  it('cpf/cnpj/card vencem phone e dígitos soltos nos mesmos caracteres', () => {
+    const d = fakeCard(8, 'visa')
+    expect(kindsOf(detectSensitive([line(d)]))).toEqual(['card'])
+    expect(kindsOf(detectSensitive([line(fakeCnpj(8))]))).not.toContain('phone')
+  })
+  it('rotulado e e-mail coexistem (cobrem a mesma área)', () => {
+    const ds = detectSensitive([line('Senha: joao@exemplo.com')])
+    expect(kindsOf(ds).sort()).toEqual(['email', 'labeled'])
+  })
+})
+
+describe('máscara nunca vaza o valor completo', () => {
+  const samples: Array<[SensitiveKind, string]> = [
+    ['cpf', fakeCpf(1)],
+    ['cnpj', fakeCnpj(1)],
+    ['card', fakeCard(1, 'visa')],
+    ['card', fakeCard(2, 'amex')],
+    ['email', fakeEmail(1)],
+    ['email', 'a@b.co'],
+    ['phone', '11987654321'],
+    ['phone', '1134567890'],
+    ['cep', '01310100'],
+    ['plate', 'ABC1D23'],
+    ['plate', 'ABC1234'],
+    ['pix', fakeUuid(1)],
+    ['ip', '192.168.0.42'],
+    ['ip', '1.2.3.4'],
+    ['token', fakeToken(1, 'sk')],
+    ['token', 'sk-1'],
+    ['labeled', 'Senha: hunter2'],
+    ['labeled', 'Senha:'],
+    ['custom', 'joao da silva'],
+    ['custom', 'jo']
+  ]
+  for (const [k, v] of samples) {
+    it(`${k} ${v.length}`, () => {
+      const m = maskSensitive(k, v)
+      expect(m.includes(v)).toBe(false)
+      expect(m.length).toBeGreaterThan(0)
+    })
+  }
+  it('valores malformados não vazam', () => {
+    for (const k of Object.keys(SENSITIVE_KIND_LABELS) as SensitiveKind[]) {
+      for (const v of ['', '1', 'ab', 'xyz123']) expect(maskSensitive(k, v).includes(v) && v !== '').toBe(false)
+    }
+  })
+  it('detecções de ponta a ponta mascaram', () => {
+    const l = line(`${formatCpf(fakeCpf(9))} ${fakeEmail(9)} ${fakeToken(9, 'ghp')} Senha: abc`)
+    for (const d of detectSensitive([l])) expect(d.masked.includes(d.value)).toBe(false)
+  })
+})
+
+describe('rótulos de UI', () => {
+  it('pt-BR', () => {
+    expect(SENSITIVE_KIND_LABELS).toEqual({
+      cpf: 'CPF', cnpj: 'CNPJ', email: 'E-mail', phone: 'Telefone', card: 'Cartão', cep: 'CEP', plate: 'Placa',
+      pix: 'Chave PIX', ip: 'IP', token: 'Token/chave de API', labeled: 'Campo rotulado', custom: 'Termo personalizado'
+    })
+  })
+})
+
+describe('negativos: corpus fixo de 200 linhas', () => {
+  it('tem 200 linhas', () => {
+    expect(NEGATIVE_CORPUS).toHaveLength(200)
+  })
+  for (const gap of [0.03, 0.002]) {
+    it(`zero falsos positivos (vão ${gap === 0.03 ? 'grande: só passada 1' : 'pequeno: palavras coladas'})`, () => {
+      const bad: string[] = []
+      NEGATIVE_CORPUS.forEach((t) => {
+        const ds = detectSensitive([line(t, gap)], { customTerms: [] })
+        if (ds.length) bad.push(`${t} -> ${ds.map((d) => d.kind).join(',')}`)
+      })
+      expect(bad).toEqual([])
+    })
+  }
+  it('negativos pontuais', () => {
+    for (const t of ['12/03/2024', '14:35:20', 'R$ 1.234.567,89', '1.2.3.400', 'v10.0.19045', '978-3-16-148410-0', 'Pedido 12345']) {
+      expect(detectSensitive([line(t)]), t).toEqual([])
+    }
+  })
+})
+
+describe('desempenho', () => {
+  it('300 linhas × 12 palavras', () => {
+    const lines: OcrLine[] = []
+    for (let i = 0; i < 300; i++) {
+      const base = NEGATIVE_CORPUS[i % NEGATIVE_CORPUS.length]!.split(' ')
+      while (base.length < 12) base.push(`palavra${base.length}`)
+      lines.push(line(base.slice(0, 12).join(' '), 0.004, 0.01 + (i % 50) * 0.02))
+    }
+    lines[7] = line(`CPF ${formatCpf(fakeCpf(1))} mail ${fakeEmail(1)} Senha: x`)
+    detectSensitive(lines) // aquecimento
+    const times: number[] = []
+    for (let r = 0; r < 9; r++) {
+      const t0 = performance.now()
+      detectSensitive(lines, { customTerms: ['joao da silva'] })
+      times.push(performance.now() - t0)
+    }
+    times.sort((a, b) => a - b)
+    const med = times[4]!
+    // eslint-disable-next-line no-console
+    console.info(`[sensitive perf] mediana ${med.toFixed(2)} ms`)
+    expect(med).toBeLessThan(60)
+  })
+})
