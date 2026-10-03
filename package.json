@@ -15,10 +15,11 @@
     "test:watch": "vitest",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "fetch:models": "node scripts/fetch-models.mjs",
+    "fetch:whisper": "node scripts/fetch-whisper.mjs",
     "vendor:signalsmith": "node scripts/vendor-signalsmith.mjs",
     "spike": "cross-env CIALIGHT_SPIKE=1 electron-vite dev",
     "spike:editor": "cross-env CIALIGHT_SPIKE=editor electron-vite dev",
-    "dist:win": "node scripts/fetch-models.mjs && electron-vite build && electron-builder --win",
+    "dist:win": "node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && electron-vite build && electron-builder --win",
     "postversion": "git push --follow-tags",
     "test:ffmpeg": "electron-vite build && cross-env CIALIGHT_TEST=ffmpeg CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:capture": "electron-vite build && cross-env CIALIGHT_TEST=capture CIALIGHT_RAW_DIR=test-out/raw electron .",
@@ -29,7 +30,7 @@
     "test:editor-narration": "electron-vite build && node scripts/qa/editor-f3-narration.mjs",
     "test:models": "node scripts/fetch-models.mjs && electron-vite build && cross-env CIALIGHT_TEST=models CIALIGHT_RAW_DIR=test-out/raw electron .",
     "icons": "node scripts/make-icons.mjs",
-    "release:publish": "node scripts/fetch-models.mjs && electron-vite build && electron-builder --win --publish always"
+    "release:publish": "node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && electron-vite build && electron-builder --win --publish always"
   },
   "dependencies": {
     "electron-log": "^5.4.4",
@@ -127,6 +128,16 @@
         "to": "models",
         "filter": [
           "**/*.rnnn"
+        ]
+      },
+      {
+        "from": "resources/whisper",
+        "to": "whisper",
+        "filter": [
+          "*.exe",
+          "*.dll",
+          "LICENSE*",
+          "VERSION.json"
         ]
       },
       {
