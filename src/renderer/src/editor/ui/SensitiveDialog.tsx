@@ -272,6 +272,7 @@ export function SensitiveDialog({ playback }: { playback: PlaybackController | n
   const clipName = clipId ? project.tracks.flatMap((t) => t.items).find((i) => i.id === clipId)?.name : null
   const files = plan?.jobs.length ?? 0
   const scope = clipId ? `Só no clipe${clipName ? ` “${clipName}”` : ''}; os efeitos entram só nele.` : `Em todos os clipes de vídeo ativos (${files === 1 ? '1 arquivo' : `${files} arquivos`}).`
+  const skippedNote = plan?.unsupported ? ` ${plan.unsupported === 1 ? '1 clipe fica' : `${plan.unsupported} clipes ficam`} de fora (imagem, mídia ausente ou gerada: a busca lê só vídeos).` : ''
   return (
     <DialogPrimitive.Root
       open={open}
@@ -300,7 +301,7 @@ export function SensitiveDialog({ playback }: { playback: PlaybackController | n
                 <ShieldAlert className="h-4 w-4 text-accent" /> Procurar dados sensíveis
               </DialogPrimitive.Title>
               <DialogPrimitive.Description className="mt-1 text-[12px] leading-relaxed text-muted">
-                {step === 'review' ? `${found === 1 ? '1 encontrado' : `${found} encontrados`}. Confira cada um e escolha o que esconder.` : `Lê o texto dos quadros (no computador, sem internet) e lista CPF, e-mails, telefones, cartões e outros dados. ${scope}`}
+                {step === 'review' ? `${found === 1 ? '1 encontrado' : `${found} encontrados`}. Confira cada um e escolha o que esconder.` : `Lê o texto dos quadros (no computador, sem internet) e lista CPF, e-mails, telefones, cartões e outros dados. ${scope}${skippedNote}`}
               </DialogPrimitive.Description>
             </div>
             <DialogPrimitive.Close className="rounded-lg p-1 text-muted hover:bg-white/5 hover:text-fg" aria-label="Fechar">
