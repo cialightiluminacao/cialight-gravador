@@ -1225,3 +1225,19 @@ describe('Task 2b fix round 2: palavras de enchimento depois do rótulo', () => 
     expect(lab('Telefone do cliente 11987654321').length).toBeGreaterThanOrEqual(1)
   })
 })
+
+describe('Task 2b fix round 3: artigos só como enchimento antes de outro enchimento', () => {
+  const lab = (t: string): Detection[] => only(detectSensitive([line(t)]), 'labeled')
+  it('prosa com artigo + número fica silenciosa', () => {
+    for (const t of ['Senha de 8 caracteres', 'Telefone de 3 lojas', 'Cartao de 2 pessoas', 'Email do 1 cliente', 'CPF do cliente 3 vezes',
+      'Telefone no 3 andar', 'Validade de 12 meses', 'Enviar email para 3 pessoas', 'Pagamento via PIX em 2 dias']) {
+      expect(lab(t), t).toHaveLength(0)
+    }
+  })
+  it('recall: enchimentos e artigo + enchimento continuam', () => {
+    for (const t of ['Senha atual hunter2', 'RG numero 123456', 'Cartao final 1234', 'Email do cliente joao@x.com', 'Cartão do titular 4111',
+      'Telefone da cliente 11987654321', 'RG nº 12.345.678-9', 'Senha atual 8 caracteres']) {
+      expect(lab(t).length, t).toBeGreaterThanOrEqual(1)
+    }
+  })
+})

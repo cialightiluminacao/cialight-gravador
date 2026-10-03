@@ -538,21 +538,25 @@ function detectDigitKinds(p: Pass, out: Cand[]): void {
 const TOKEN_PRE = /^(?:sk[-_]|gh[pousrPOUSR]_|github_pat_|xox[baprs]-|AKIA|AIza|ey[Jj3])/
 const TOKEN_NOSEP = /^(?:sk|gh[pousrPOUSR]|github_pat|xox[baprs])$/
 
-const FILLER = new Set(['numero', 'no', 'final', 'fixo', 'atual', 'nova', 'novo', 'do', 'da', 'de', 'dos', 'das', 'titular', 'cliente', 'principal', 'cadastrado', 'cadastrada'])
-const FILLER_ARTICLES = new Set(['do', 'da', 'de', 'dos', 'das'])
+const FILLER = new Set(['numero', 'final', 'fixo', 'atual', 'nova', 'novo', 'titular', 'cliente', 'principal', 'cadastrado', 'cadastrada'])
+const ARTICLES = new Set(['do', 'da', 'de', 'dos', 'das', 'no'])
 
-/** Palavra de enchimento entre rótulo e valor (sem acento/caixa, sem pontuação); "nº"/"n." contam. */
-function isFiller(word: string, key: string): boolean {
+/** 'filler' = enchimento (numero, nº, atual...); 'article' = de/do/da/dos/das/no; null = outra palavra. Sem acento/caixa/pontuação final. */
+function fillerKind(word: string): 'filler' | 'article' | null {
   const w = fold(word).replace(/[.,;:]+$/, '')
-  if (/^n[oº°]?$/.test(w)) return true
-  // "Validade de 12 meses" é prosa: com "de/do/da" como enchimento dispararia; só "Validade" exclui
-  if (key === 'validade' && FILLER_ARTICLES.has(w)) return false
-  return FILLER.has(w)
+  if (/^n[º°]?$/.test(w) || FILLER.has(w)) return 'filler'
+  return ARTICLES.has(w) ? 'article' : null
 }
 
 function wordHasDigitOrAt(p: Pass, w: number): boolean {
   const ws = p.wordStart[w]!
   return /\d/.test(p.m.slice(ws, ws + p.words[w]!.length)) || p.words[w]!.includes('@')
+}
+
+function wordHasAtOrDigits(p: Pass, w: number, min: number): boolean {
+  const ws = p.wordStart[w]!
+  const digits = p.m.slice(ws, ws + p.words[w]!.length).replace(/\D/g, '').length
+  return digits >= min || p.words[w]!.includes('@')
 }
 
 function detectTokenWords(p: Pass, out: Cand[]): void {
@@ -657,9 +661,23 @@ function detectTextKinds(p: Pass, out: Cand[]): void {
       if (L.key === 'endereco') {
         for (let w = wa; w <= Math.min(wLast, wa + 5) && !ok; w++) ok = wordHasDigitOrAt(p, w)
       } else {
+        // artigo (de/do/da/dos/das/no) só é enchimento quando logo seguido de outro enchimento ("do cliente 123"):
+        // sozinho, "Senha de 8 caracteres" / "Telefone no 3 andar" seriam prosa
         let w = wa
-        for (let skipped = 0; skipped < 2 && w < wLast && isFiller(p.words[w]!, L.key); skipped++) w++
-        ok = wordHasDigitOrAt(p, w)
+        let viaArticle = false
+        for (let skipped = 0; skipped < 2 && w < wLast; ) {
+          const k = fillerKind(p.words[w]!)
+          if (k === 'filler') {
+            w++
+            skipped++
+          } else if (k === 'article' && skipped === 0 && w + 1 < wLast + 1 && fillerKind(p.words[w + 1]!) === 'filler') {
+            w += 2
+            skipped += 2
+            viaArticle = true
+          } else break
+        }
+        // depois de artigo + enchimento exige valor "de verdade" (>= 3 dígitos ou @): "CPF do cliente 3 vezes" é prosa
+        ok = w <= wLast && (viaArticle ? wordHasAtOrDigits(p, w, 3) : wordHasDigitOrAt(p, w))
       }
       if (!ok) continue
     }
