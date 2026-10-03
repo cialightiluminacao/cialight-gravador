@@ -13,17 +13,20 @@ import { probe } from './media/probe'
 import { assetFromInfo } from './media/ingest'
 import { crossCorrelationLag, isFastStart } from './testFixtures'
 import { loadPage, preloadPath } from './windows/recorderWindow'
-import { BT709, check, checkEffects, countFrames, detailEnergy, frameRgb, FX_BLOCK, FX_BLUR, FX_OUTSIDE, FX_SOLID, FX_TARJA, gen, pcmOf, psnr, rmsDb, settingsHash, streamInfo, type EffectsOut, type ExportOut } from './editorExportTestMode'
+import { BT709, check, checkEffects, countFrames, detailEnergy, frameRgb, FX_BLOCK, FX_BLUR, FX_OUTSIDE, FX_PIXEL, FX_PIXEL_STRENGTH, FX_SOLID, FX_TARJA, gen, NOISE_LUMA_VAR, pcmOf, PIXEL_GUARD_CODEC, PIXEL_MIN_BLOCKS, PIXEL_STEP_MIN, PIXEL_VAR_MAX_CODEC, pixelateCheck, pixelateText, psnr, rmsDb, settingsHash, streamInfo, type EffectsOut, type ExportOut } from './editorExportTestMode'
 import { editorExportCounts } from './quitGuard'
 
 // Teste de integração dos formatos extras da exportação do editor (CIALIGHT_TEST=editor-formats,
 // `npm run test:editor-formats`). Projeto 1920×1080: ruído em células de 4 px + blur (0–3 s) + blur INVERTIDO
-// (3–6 s, buraco nítido na mesma região) + tarja #123456 (0–6 s, por cima); áudio: tom de 440 Hz (0–2,5 s), tom
-// de 660 Hz (3,5–6 s) e uma faixa MUDA com 1 kHz o tempo todo. Trecho I–O = [1 s, 5 s).
+// (3–6 s, buraco nítido na mesma região) + tarja #123456 (0–6 s, por cima) + pixelização (0–3 s, faixa de cima);
+// áudio: tom de 440 Hz (0–2,5 s), tom de 660 Hz (3,5–6 s) e uma faixa MUDA com 1 kHz o tempo todo. Trecho I–O =
+// [1 s, 5 s).
 //  1. GIF 480 px / 12 fps: codec gif 480×270, quadros = frameCount (±0), loop infinito, tarja ±8 da cor em todo
 //     quadro, blur com energia de detalhe ≤ a calibrada pelo PNG do mesmo instante reduzido, invertido escondendo
-//     o fora do buraco; cancelamentos (quadros e finalização) sem .gif, .part ou temporários.
-//  2. PNG em 1,5 s: 1920×1080, alfa 255, tarja exata (±0), = preview (readPixels do compositor; ≤ 1).
+//     o fora do buraco, pixelização com blocos uniformes na grade do compositor (pixelateCheck) em todo quadro
+//     em que está ativa; cancelamentos (quadros e finalização) sem .gif, .part ou temporários.
+//  2. PNG em 1,5 s: 1920×1080, alfa 255, tarja exata (±0), pixelização exata (variância 0 por bloco), = preview
+//     (readPixels do compositor; ≤ 1).
 //  3. Só áudio wav/mp3/m4a: codec, 48 kHz estéreo, duração (wav: amostras exatas), RMS dos tons = áudio da
 //     exportação de vídeo do mesmo trecho (≤ 0,5 dB), silêncio no vão ≤ −60 dB, m4a com faststart.
 //  4. Fila (F7 Task 4): 4 itens pela fila do app — vídeo 720p I–O, GIF, wav e um vídeo 360p com o MESMO nome do
@@ -37,8 +40,8 @@ import { editorExportCounts } from './quitGuard'
 //     (marcado como A), quadros = frameCount = A, duração = A ± 1 quadro, AAC 48 kHz estéreo, faststart; pixels A × B
 //     em 6 instantes (PSNR ≥ 35 dB, média |dif.| ≤ 3 por canal) e sem deslocamento de quadro (1º quadro nítido do
 //     buraco do invertido = 60 nos dois); privacidade em B (checkEffects da variante 1080p/12 Mbps, tarja ±3 em todo
-//     bloco e blur/invertido em cada instante, tarja ±3 em TODO quadro de 1–3 s); áudio A × B (RMS dos tons ≤ 0,5 dB,
-//     atraso 0 ± 1 ms); B cancelado no meio sem .mp4/.part/áudio temporário e uma nova exportação terminando; tamanho
+//     bloco, blur/invertido e pixelização em cada instante, tarja ±3 em TODO quadro de 1–3 s do arquivo e
+//     pixelização em TODO quadro em que está ativa); áudio A × B (RMS dos tons ≤ 0,5 dB, atraso 0 ± 1 ms); B cancelado no meio sem .mp4/.part/áudio temporário e uma nova exportação terminando; tamanho
 //     alvo de 4 MB no projeto de 20 s pela reserva (2 passadas, final ≤ alvo).
 //  6. settings.json intocado.
 
@@ -64,6 +67,11 @@ const TONE2 = [2.7, 3.8] as const
 // Medido: GIF 0,04 × PNG 0,09 (blur) e 0,06 × 0,17 (invertido) — a paleta não pontilha o degradê liso a ponto de
 // devolver detalhe; o ruído de fora mede ~21 400. Margem de 1 nível² para variação de paleta/pontilhado.
 const BLUR_GIF_MARGIN = 1
+// pixelização no GIF (pixelateCheck, guard de 1 px nas bordas do bloco): medido 0,00 em todo quadro (a paleta tem a
+// cor de cada bloco liso e o pontilhado sierra2_4a não age em área lisa); 1 cobre uma troca para a cor vizinha da
+// paleta (1–2 níveis) em parte do bloco, e continua 1/5400 da variância do ruído da fonte. Degrau medido 8,4
+const PIXEL_GUARD_GIF = 1
+const PIXEL_VAR_MAX_GIF = 1
 // marcador de ORIENTAÇÃO: tarja #a05030 fora do centro (terço de cima, à esquerda); o espelho vertical dela (y = 0,85)
 // é ruído/borrado. Um GIF de cabeça para baixo (readPixels sem desvirar) põe a cor no lugar errado e falha.
 // Bordas em pixels inteiros a 480×270 (x 96–192, y 27–54) e a 1920×1080.
@@ -80,6 +88,8 @@ const X264_MEAN_DIFF_MAX = 3
 // tarja densa: todo quadro de 1–3 s do arquivo
 const DENSE_FROM = 30
 const DENSE_TO = 89
+// pixelização ativa na timeline 0–3 s: quadros 0–59 de B (trecho I–O a partir de 1 s)
+const PIXEL_LAST_FRAME = 59
 
 type Region = { x: number; y: number; w: number; h: number }
 interface FileOut { path?: string; size?: number; error?: string; warnings?: string[]; frames?: number; width?: number; height?: number }
@@ -247,6 +257,9 @@ async function buildProject(dir: string, projects: ProjectStore): Promise<void> 
   const inverted: EffectItem = { ...createEffectItem('blur', 3_000_000, 3_000_000, FX_BLUR), invert: true }
   const solid: EffectItem = { ...createEffectItem('solid', 0, 6_000_000, FX_SOLID), color: '#123456', feather: 0 }
   const marker: EffectItem = { ...createEffectItem('solid', 0, 6_000_000, MARKER), color: '#a05030', feather: 0 }
+  // pixelização só com o blur comum (0–3 s): de 3 a 6 s o invertido borra o quadro inteiro fora do buraco — inclusive
+  // o que está sob ela — e os blocos ficariam todos da mesma média (sem degrau para provar a grade)
+  const pixel: EffectItem = { ...createEffectItem('pixelate', 0, 3_000_000, FX_PIXEL), strength: { value: FX_PIXEL_STRENGTH }, feather: 0 }
   let p: Project = { ...createEmptyProject('Formatos', { width: W, height: H, fps: FPS, background: '#203040' }), id: PROJECT_ID }
   for (const a of [aNoise, a440, a660, a1k]) p = addAsset(p, a)
   p = {
@@ -257,6 +270,7 @@ async function buildProject(dir: string, projects: ProjectStore): Promise<void> 
       vt('t_invertido', inverted),
       vt('t_tarja', solid),
       vt('t_marcador', marker),
+      vt('t_pixelizar', pixel),
       at('t_440', audioItem(a440, 0, 2_500_000)),
       at('t_660', audioItem(a660, 3_500_000, 2_500_000)),
       at('t_mudo', audioItem(a1k, 0, 6_000_000), true)
@@ -405,6 +419,16 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
     console.log(`GIF invertido: fora ${eInvOut.map((e) => e.toFixed(1)).join(' ')} | buraco ${eHole.map((e) => e.toFixed(0)).join(' ')} | PNG reduzido fora ${pngInvOutE.toFixed(2)}`)
     check(maxInvOut < 0.1 * minHole, `GIF: blur invertido — fora do buraco ${maxInvOut.toFixed(1)} < 10 % do buraco nítido ${minHole.toFixed(1)} em todo quadro`, failures)
     check(Number.isFinite(pngInvOutE) && maxInvOut <= pngInvOutE + BLUR_GIF_MARGIN, `GIF: blur invertido — fora do buraco ≤ o PNG reduzido + ${BLUR_GIF_MARGIN} (pior ${maxInvOut.toFixed(2)}; PNG ${pngInvOutE.toFixed(2)})`, failures)
+
+    // pixelização (quadros 0–23 = 1,0–2,9 s, todo quadro em que ela está ativa): blocos uniformes na grade do
+    // compositor a 480×270 (bloco pela altura do GIF)
+    const pix = frames.slice(0, 24).map((f) => pixelateCheck(f, GIF_W, GIF_H, 0, 0, GIF_W, GIF_H, FX_PIXEL, FX_PIXEL_STRENGTH, PIXEL_GUARD_GIF))
+    const pw = pix.reduce((a, b) => (b.worstVar > a.worstVar ? b : a))
+    const pk = pix.indexOf(pw)
+    const minStep = Math.min(...pix.map((p) => p.step))
+    const minBlocks = Math.min(...pix.map((p) => p.blocks))
+    console.log(`GIF pixelização: variância pior por quadro ${pix.map((p) => p.worstVar.toFixed(2)).join(' ')} | degrau ${pix.map((p) => p.step.toFixed(1)).join(' ')}`)
+    check(pix.length === 24 && minBlocks >= PIXEL_MIN_BLOCKS && pw.worstVar <= PIXEL_VAR_MAX_GIF && minStep >= PIXEL_STEP_MIN, `GIF: pixelização com blocos uniformes na grade do compositor em TODO quadro em que ela está ativa (0–23) — pior no quadro ${pk}: ${pixelateText(pw)}; mín. ${minBlocks} blocos, degrau mín. ${minStep.toFixed(1)} (variância ≤ ${PIXEL_VAR_MAX_GIF} a ${PIXEL_GUARD_GIF} px das bordas do bloco, paleta/pontilhado; ruído da fonte ≈ ${NOISE_LUMA_VAR})`, failures)
   }
   for (const [name, c, d] of [['nos quadros', r.gifCancel, cancelDir], ['na finalização', r.gifCancelPalette, cancelPaletteDir]] as const) {
     const left = existsSync(d) ? readdirSync(d) : []
@@ -436,6 +460,11 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
     let tw = 0
     for (let y = sb.y; y < sb.y + sb.h; y++) for (let x = sb.x; x < sb.x + sb.w; x++) for (let c = 0; c < 3; c++) tw = Math.max(tw, Math.abs(rgba[(y * W + x) * 4 + c] - FX_TARJA[c]))
     check(tw === 0, `PNG em ${name}: tarja com a cor EXATA #123456 (${sb.w}×${sb.h} px; desvio máximo ${tw})`, failures)
+    // pixelização (ativa em 0–3 s: o PNG de 1,5 s) exata (sem perdas): cada bloco da grade do compositor com UMA cor (variância 0), degrau entre vizinhos
+    const rgb = new Uint8Array(W * H * 3)
+    for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) rgb.set(rgba.subarray(i, i + 3), j)
+    const pix = pixelateCheck(rgb, W, H, 0, 0, W, H, FX_PIXEL, FX_PIXEL_STRENGTH, 0)
+    if (tUs < 3_000_000) check(pix.blocks >= PIXEL_MIN_BLOCKS && pix.worstVar <= 1e-6 && pix.step >= PIXEL_STEP_MIN, `PNG em ${name}: pixelização exata — cada bloco inteiro de uma cor só (variância 0 em todo pixel do bloco): ${pixelateText(pix)}`, failures)
     const v = png?.vsPreview
     check(!!v && v.maxDiff <= 1 && v.blurMaxDiff <= 1 && v.alphaMin === 255 && v.tarja.worst === 0, `PNG em ${name}: = preview (readPixels do compositor no mesmo instante): dif. máx ${v?.maxDiff} (${v?.diffPixels} px diferentes), região do blur ${v?.blurMaxDiff}, tarja ${v?.tarja.worst} (${v?.tarja.pixels} px), alfa mín ${v?.alphaMin}`, failures)
   }
@@ -483,7 +512,7 @@ export async function testEditorFormats(projects: ProjectStore, outDir: string):
 
   // ---------------- 4. Fila ----------------
   const qs = r.queueSnapshot
-  check(!!qs && qs.storeEffects === 0 && qs.itemEffects === 4 && qs.sameAsSnapshot && qs.frozen, `fila: instantâneo — efeitos apagados do editor depois de enfileirar e o item com os 4 do momento, mesmo objeto, congelado (${JSON.stringify(qs)})`, failures)
+  check(!!qs && qs.storeEffects === 0 && qs.itemEffects === 5 && qs.sameAsSnapshot && qs.frozen, `fila: instantâneo — efeitos apagados do editor depois de enfileirar e o item com os 5 do momento, mesmo objeto, congelado (${JSON.stringify(qs)})`, failures)
   const q = r.queue
   const qi = q?.items ?? []
   check(qi.length === 4 && qi.every((i) => i.state === 'done'), `fila: 4 itens concluídos (${JSON.stringify(qi.map((i) => [i.kind, i.state, i.message]))})`, failures)
@@ -604,11 +633,13 @@ async function checkX264(r: Report, dir: string, x264Dir: string, x264CancelDir:
     const eOut = detailEnergy(crop(img, 1920, outside), outside.w, outside.h)
     // blur (< 60): a região borrada ≪ o ruído de fora; invertido (≥ 60): o de fora borrado ≪ o buraco nítido
     const hidden = n < 60 ? eIn < 0.1 * eOut : eOut < 0.1 * eIn
-    const ok = tj.inner <= 3 && tj.ring <= 3 && tj.n > 100 && hidden
+    const pix = pixelateCheck(img, 1920, 1080, 0, 0, 1920, 1080, FX_PIXEL, FX_PIXEL_STRENGTH, PIXEL_GUARD_CODEC)
+    const pixOk = n >= 60 || (pix.blocks >= PIXEL_MIN_BLOCKS && pix.worstVar <= PIXEL_VAR_MAX_CODEC && pix.step >= PIXEL_STEP_MIN)
+    const ok = tj.inner <= 3 && tj.ring <= 3 && tj.n > 100 && hidden && pixOk
     privOk &&= ok
-    priv.push(`q${n}: tarja ${tj.inner}/${tj.ring} (${tj.n} blocos), ${n < 60 ? 'blur' : 'invertido'} região ${eIn.toFixed(1)} × fora ${eOut.toFixed(1)}${ok ? '' : ' FALHA'}`)
+    priv.push(`q${n}: tarja ${tj.inner}/${tj.ring} (${tj.n} blocos), ${n < 60 ? 'blur' : 'invertido'} região ${eIn.toFixed(1)} × fora ${eOut.toFixed(1)}${n < 60 ? `, pixelização ${pix.worstVar.toFixed(2)}/${pix.step.toFixed(1)} (${pix.blocks} blocos)` : ''}${ok ? '' : ' FALHA'}`)
   }
-  check(privOk, `reserva: privacidade em B em cada instante — tarja ±3 em todo macrobloco (miolo/anel) e blur/invertido escondendo (energia < 10 %): ${priv.join('; ')}`, failures)
+  check(privOk, `reserva: privacidade em B em cada instante — tarja ±3 em todo macrobloco (miolo/anel), blur/invertido escondendo (energia < 10 %) e pixelização uniforme por bloco onde ativa (< 60; variância ≤ ${PIXEL_VAR_MAX_CODEC}, degrau ≥ ${PIXEL_STEP_MIN}): ${priv.join('; ')}`, failures)
   const tc: Region = { x: grid.bx0 * FX_BLOCK, y: grid.by0 * FX_BLOCK, w: (grid.bx1 - grid.bx0 + 1) * FX_BLOCK, h: (grid.by1 - grid.by0 + 1) * FX_BLOCK }
   const dense = await framesRgb(fb, DENSE_FROM, DENSE_TO, tc, join(dir, 'reserva-tarja-densa.rgb'))
   let dWorst = 0
@@ -622,6 +653,14 @@ async function checkX264(r: Report, dir: string, x264Dir: string, x264CancelDir:
     }
   }
   check(dense.length === DENSE_TO - DENSE_FROM + 1 && dWorst <= 3, `reserva: tarja ±3 em todo macrobloco de TODO quadro de 1–3 s de B (${dense.length} quadros; pior desvio ${dWorst} no quadro ${dAt})`, failures)
+  // pixelização em TODO quadro de B em que ela está ativa (timeline 1–3 s = quadros 0–59): recorte da caixa da região
+  const pc = pxRegion(FX_PIXEL, 1920, 1080, 0)
+  const pFrames = await framesRgb(fb, 0, PIXEL_LAST_FRAME, pc, join(dir, 'reserva-pixelizacao-densa.rgb'))
+  const pDense = pFrames.map((f) => pixelateCheck(f, pc.w, pc.h, pc.x, pc.y, 1920, 1080, FX_PIXEL, FX_PIXEL_STRENGTH, PIXEL_GUARD_CODEC))
+  const pdw = pDense.length ? pDense.reduce((a, b) => (b.worstVar > a.worstVar ? b : a)) : null
+  const pdMinStep = Math.min(...pDense.map((p) => p.step))
+  const pdMinBlocks = Math.min(...pDense.map((p) => p.blocks))
+  check(pDense.length === PIXEL_LAST_FRAME + 1 && !!pdw && pdMinBlocks >= PIXEL_MIN_BLOCKS && pdw.worstVar <= PIXEL_VAR_MAX_CODEC && pdMinStep >= PIXEL_STEP_MIN, `reserva: pixelização uniforme por bloco em TODO quadro de B em que ela está ativa (0–${PIXEL_LAST_FRAME}: ${pDense.length} quadros; pior no quadro ${pdw ? pDense.indexOf(pdw) : -1}: ${pdw ? pixelateText(pdw) : '—'}; mín. ${pdMinBlocks} blocos, degrau mín. ${pdMinStep.toFixed(1)}; variância ≤ ${PIXEL_VAR_MAX_CODEC})`, failures)
 
   // ---- áudio A × B ----
   const la = { t1: await rmsDb(fa, ...TONE1), t2: await rmsDb(fa, ...TONE2) }

@@ -58,6 +58,23 @@ export const FX_SOLID = { x: 0.72, y: 0.5, w: 0.3, h: 0.4 }
 export const FX_BLUR = { x: 0.3, y: 0.5, w: 0.3, h: 0.4 }
 // trecho só de ruído, longe do blur e da tarja (energia de detalhe de referência)
 export const FX_OUTSIDE = { x: 0.065, y: 0.5, w: 0.11, h: 0.8 }
+// pixelização (preset padrão: intensidade 50, sem feather) na faixa de cima, longe do blur, da tarja, do recorte
+// "fora" e do marcador do test:editor-formats: x 0,6–0,8, y 0,07–0,21. Pequena de propósito (2,8 % do quadro): com
+// 0,36 × 0,2 (7 %) o H.264 por hardware do item de 720p da fila codificava pior o anel da tarja (medido 4 > ±3,
+// em qualquer posição, intensidade ou ordem de faixa; provavelmente a quantização adaptativa vendo a área lisa)
+export const FX_PIXEL = { x: 0.7, y: 0.14, w: 0.2, h: 0.14 }
+export const FX_PIXEL_STRENGTH = 50
+// oráculo da pixelização (pixelateCheck): ruído da fonte com variância de luma ≈ 255²/12 ≈ 5400 por bloco; depois do
+// encoder (H.264/HEVC/libx264, guard de 2 px nas bordas do bloco contra o deblocking e o croma 4:2:0) a variância
+// dentro do bloco fica ≤ PIXEL_VAR_MAX_CODEC — medido: H.264 720p 0,11, WhatsApp 720p 0,32, HEVC 1080p 0,01, fila
+// 720p 0,22, libx264 1080p 0,13 (pior de 60 quadros); 2 dá folga ~6× e continua 1/2700 da variância do ruído.
+// Entre blocos vizinhos o degrau médio das médias (medido 4,7–4,8 a 720p, 6,6–6,7 a 1080p, 8,4 no GIF) ≥ 2
+export const NOISE_LUMA_VAR = 5400
+export const PIXEL_GUARD_CODEC = 2
+export const PIXEL_VAR_MAX_CODEC = 2
+export const PIXEL_STEP_MIN = 2
+// blocos inteiros dentro da região que o oráculo exige (medido 14 em todas as saídas, do GIF 480×270 ao 1080p)
+export const PIXEL_MIN_BLOCKS = 8
 // velocidade (F3): testsrc2 + voz sintética de 6 s a 2× com tom preservado
 const SPEED_ID = 'p-editor-export-velocidade'
 const VOICE_HZ = 220
@@ -272,6 +289,93 @@ export function detailEnergy(d: Uint8Array, w: number, h: number): number {
   return n ? s / n : 0
 }
 
+/**
+ * Lado do bloco da pixelização em 1/256 px numa saída W×H — a regra do compositor (effectsMath.effectPixelBlockPx +
+ * pixelCellQ) reescrita aqui de propósito (oráculo independente; o main não importa o renderer):
+ * max(2 + s·(max(2, H/12) − 2), 0,35 × menor lado da região × s) px, s = intensidade/100, nunca abaixo de 2 px.
+ */
+export function pixelCellQ(strength: number, r: { w: number; h: number }, W: number, H: number): number {
+  const s = Math.min(100, Math.max(0, strength)) / 100
+  const byHeight = 2 + s * (Math.max(2, H / 12) - 2)
+  const byRegion = 0.35 * Math.min(Math.min(Math.abs(r.w), 1) * W, Math.min(Math.abs(r.h), 1) * H) * s
+  return Math.max(512, Math.round(Math.max(byHeight, byRegion) * 256))
+}
+
+export interface PixelateResult { cellPx: number; blocks: number; worstVar: number; worstAt: number[]; meanVar: number; step: number }
+
+/**
+ * Oráculo da pixelização numa imagem RGB24 `iw`×`ih` cuja origem é (ox, oy) num quadro W×H. Grade presa ao quadro,
+ * como nos shaders: o pixel i é do bloco ⌊(2i + 1)·128/q⌋ (q = pixelCellQ na saída). Só blocos inteiros a ≥ 1 px
+ * dentro da região (borda dura) e dentro da imagem. Em cada bloco: variância de luma dos pixels a ≥ `guard` px das
+ * bordas do bloco (≈ 0: o detalhe da fonte sumiu; o guard tira o deblocking/croma 4:2:0 do encoder na fronteira
+ * entre blocos). Entre blocos vizinhos: degrau médio |Δmédia| — os blocos são da grade esperada (um
+ * borrão ou uma cor lisa daria ≈ 0; uma grade deslocada/de outro tamanho poria o degrau dentro dos blocos).
+ */
+export function pixelateCheck(img: Uint8Array, iw: number, ih: number, ox: number, oy: number, W: number, H: number, region: Region, strength: number, guard: number): PixelateResult {
+  const q = pixelCellQ(strength, region, W, H)
+  const blk = (i: number): number => Math.floor(((2 * i + 1) * 128) / q)
+  // [início, fim] (inclusivo) de cada bloco numa dimensão, só os inteiros dentro de [lo + 1, hi − 1] e da imagem
+  const spans = (n: number, lo: number, hi: number, o: number, len: number): [number, number][] => {
+    const out: [number, number][] = []
+    let start = 0
+    for (let i = 1; i <= n; i++) {
+      if (i < n && blk(i) === blk(start)) continue
+      const end = i - 1
+      if (start >= lo + 1 && end + 1 <= hi - 1 && start >= o && end < o + len) out.push([start, end])
+      start = i
+    }
+    return out
+  }
+  const xs = spans(W, (region.x - region.w / 2) * W, (region.x + region.w / 2) * W, ox, iw)
+  const ys = spans(H, (region.y - region.h / 2) * H, (region.y + region.h / 2) * H, oy, ih)
+  const means: number[][] = ys.map(() => xs.map(() => NaN))
+  const res: PixelateResult = { cellPx: q / 256, blocks: 0, worstVar: 0, worstAt: [], meanVar: 0, step: 0 }
+  let varSum = 0
+  ys.forEach(([y0, y1], j) => {
+    xs.forEach(([x0, x1], k) => {
+      let s = 0
+      let s2 = 0
+      let n = 0
+      for (let y = y0 + guard; y <= y1 - guard; y++) {
+        for (let x = x0 + guard; x <= x1 - guard; x++) {
+          const i = ((y - oy) * iw + (x - ox)) * 3
+          const l = 0.299 * img[i] + 0.587 * img[i + 1] + 0.114 * img[i + 2]
+          s += l
+          s2 += l * l
+          n++
+        }
+      }
+      if (!n) return
+      const m = s / n
+      const v = Math.max(0, s2 / n - m * m)
+      means[j][k] = m
+      res.blocks++
+      varSum += v
+      if (v > res.worstVar || res.worstAt.length === 0) Object.assign(res, { worstVar: Math.max(v, res.worstVar), worstAt: [x0, y0] })
+    })
+  })
+  res.meanVar = res.blocks ? varSum / res.blocks : NaN
+  let stepSum = 0
+  let pairs = 0
+  for (let j = 0; j < ys.length; j++) {
+    for (let k = 0; k < xs.length; k++) {
+      for (const [dj, dk] of [[0, 1], [1, 0]]) {
+        const a = means[j][k]
+        const b = means[j + dj]?.[k + dk]
+        if (!Number.isFinite(a) || b === undefined || !Number.isFinite(b)) continue
+        const d = Math.abs(a - b)
+        stepSum += d
+        pairs++
+      }
+    }
+  }
+  res.step = pairs ? stepSum / pairs : 0
+  return res
+}
+
+/** Pixelização como texto para o log/a mensagem do check. */
+export const pixelateText = (p: PixelateResult): string => `bloco ${p.cellPx.toFixed(2)} px, ${p.blocks} blocos, variância no bloco pior ${p.worstVar.toFixed(3)} (em ${p.worstAt}) / média ${p.meanVar.toFixed(3)}, degrau entre blocos ${p.step.toFixed(1)}`
+
 /** Faixa de vídeo pelo ffprobe (codec, tag, taxa de quadros, resolução). */
 export function streamInfo(file: string): Promise<{ codec_name?: string; codec_tag_string?: string; r_frame_rate?: string; avg_frame_rate?: string; width?: number; height?: number } | null> {
   return new Promise((resolve) => {
@@ -291,7 +395,8 @@ export function streamInfo(file: string): Promise<{ codec_name?: string; codec_t
  * w×h: tarja com a cor exata (±3, centro de cada macrobloco inteiro na região), área borrada/tarjada no mesmo
  * lugar do preview reduzido (IoU dos blocos de baixa variância ≥ 0,9), miolo borrado ≈ preview reduzido (PSNR >
  * 30; raio ∝ altura), energia de detalhe do miolo borrado < 10 % da do ruído de fora, e o ruído de fora intacto
- * (energia ≥ 50 % da do preview reduzido: nada borrado fora da região).
+ * (energia ≥ 50 % da do preview reduzido: nada borrado fora da região); pixelização (FX_PIXEL) com blocos
+ * uniformes na grade do compositor e degrau entre vizinhos (pixelateCheck).
  */
 export async function checkEffects(label: string, what: string, fx: EffectsOut | undefined, expect: { w: number; h: number; codec: 'h264' | 'hevc'; ringTol?: number }, dir: string, failures: string[]): Promise<void> {
   const out = fx?.export?.path
@@ -334,7 +439,16 @@ export async function checkEffects(label: string, what: string, fx: EffectsOut |
   const LOW = 300
   let inter = 0
   let union = 0
+  // os blocos da pixelização (que o preview reduzido de 1080p tem numa grade de outro tamanho) ficam fora do IoU:
+  // ele continua medindo só o blur e a tarja; a pixelização tem o oráculo próprio abaixo
+  const cols = Math.floor(OW / FX_BLOCK)
+  const px0 = Math.floor(((FX_PIXEL.x - FX_PIXEL.w / 2) * OW) / FX_BLOCK) - 1
+  const px1 = Math.floor(((FX_PIXEL.x + FX_PIXEL.w / 2) * OW) / FX_BLOCK) + 1
+  const py0 = Math.floor(((FX_PIXEL.y - FX_PIXEL.h / 2) * OH) / FX_BLOCK) - 1
+  const py1 = Math.floor(((FX_PIXEL.y + FX_PIXEL.h / 2) * OH) / FX_BLOCK) + 1
+  const inPixel = (k: number): boolean => k % cols >= px0 && k % cols <= px1 && Math.floor(k / cols) >= py0 && Math.floor(k / cols) <= py1
   for (let k = 0; k < Math.min(pv.length, exportVar.length); k++) {
+    if (inPixel(k)) continue
     const a = pv[k] < LOW
     const b = exportVar[k] < LOW
     if (a && b) inter++
@@ -356,6 +470,10 @@ export async function checkEffects(label: string, what: string, fx: EffectsOut |
   const pe = fx.previewEnergy
   check(eBlur < 0.1 * eOut, `${label}: energia de detalhe do miolo borrado ${eBlur.toFixed(1)} < 10 % da do ruído de fora ${eOut.toFixed(1)} (preview: ${pe?.blur} / ${pe?.outside})`, failures)
   check(!!pe && eOut >= 0.5 * pe.outside, `${label}: fora da região o ruído continua (energia ${eOut.toFixed(1)} ≥ 50 % da do preview reduzido ${pe?.outside})`, failures)
+  // pixelização: blocos uniformes na grade do compositor (tamanho pela altura da SAÍDA), com degrau entre vizinhos
+  const pix = pixelateCheck(img, OW, OH, 0, 0, OW, OH, FX_PIXEL, FX_PIXEL_STRENGTH, PIXEL_GUARD_CODEC)
+  console.log(`${label}: pixelização ${pixelateText(pix)}`)
+  check(pix.blocks >= PIXEL_MIN_BLOCKS && pix.worstVar <= PIXEL_VAR_MAX_CODEC && pix.step >= PIXEL_STEP_MIN, `${label}: pixelização com blocos uniformes na grade do compositor — ${pixelateText(pix)} (variância ≤ ${PIXEL_VAR_MAX_CODEC} a ${PIXEL_GUARD_CODEC} px das bordas do bloco; degrau ≥ ${PIXEL_STEP_MIN}; ruído da fonte ≈ ${NOISE_LUMA_VAR})`, failures)
 }
 
 function scenarioProject(video: Asset, red: Asset): Project {
@@ -413,17 +531,18 @@ export async function testEditorExport(projects: ProjectStore, sessions: Session
 
   // efeitos: ruído 1920×1080 em células de 4 px (detalhe em todo bloco: a máscara de baixa variância é exatamente
   // a área borrada/tarjada; ruído por pixel esgota os bits do H.264 a 8 Mbps e suja a tarja) + blur (preset
-  // padrão) + tarja #123456 sem feather
+  // padrão) + tarja #123456 sem feather + pixelização (preset padrão, F7 final)
   const noise = join(dir, 'ruido.png')
   await gen(['-f', 'lavfi', '-i', 'nullsrc=s=480x270,format=gray,geq=lum=random(1)*255,scale=1920:1080:flags=neighbor', '-frames:v', '1', '-update', '1', noise], 'editor-export: ruído')
   const aNoise = assetFromInfo('a_noise', noise, statSync(noise), await probe(noise))
   const noiseItem: MediaItem = { ...createMediaItem(aNoise, 0, 'video'), durationUs: 2_000_000 }
   const blurFx: EffectItem = createEffectItem('blur', 0, 2_000_000, FX_BLUR)
   const solidFx: EffectItem = { ...createEffectItem('solid', 0, 2_000_000, FX_SOLID), color: '#123456', feather: 0 }
+  const pixelFx: EffectItem = { ...createEffectItem('pixelate', 0, 2_000_000, FX_PIXEL), strength: { value: FX_PIXEL_STRENGTH }, feather: 0 }
   const vt = (id: string, item: MediaItem | EffectItem): Track => ({ id, kind: 'video', name: id, muted: false, hidden: false, locked: false, volume: 1, items: [item] })
   const fxp: Project = {
     ...addAsset({ ...createEmptyProject('Efeitos', { width: 1920, height: 1080, fps: FPS, background: '#000000' }), id: EFFECTS_ID }, aNoise),
-    tracks: [vt('t_ruido', noiseItem), vt('t_blur', blurFx), vt('t_tarja', solidFx)]
+    tracks: [vt('t_ruido', noiseItem), vt('t_blur', blurFx), vt('t_tarja', solidFx), vt('t_pixelizar', pixelFx)]
   }
   rmSync(projects.dirOf(EFFECTS_ID), { recursive: true, force: true })
   projects.create(fxp)
