@@ -1631,9 +1631,9 @@ export function keyframeTimesUs(item: Item): Us[] {
     }
     all = merged
   }
-  const out: Us[] = []
-  for (const t of all) if (out.length === 0 || t - out[out.length - 1] > 1) out.push(t)
-  return out
+  // como antes da fusão: um instante entra se estiver a mais de 1 µs do ANTERIOR da lista (não do último mantido) — uma
+  // cadeia t, t+1, t+2 (degraus de 1 µs do "Seguir conteúdo") é um losango só, em t
+  return all.filter((t, i) => i === 0 || t - all[i - 1] > 1)
 }
 
 /** Aplica `fn` a cada propriedade animável do item (draft); null = não muda. Recusa faixa bloqueada. */

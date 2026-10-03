@@ -34,7 +34,7 @@ const row = (k: number, ownAmp = 9): Tex => {
 const TEXT = ((): Tex => { const w = waves(3, 6, 0.2, 0.7, 20); return (u, v) => 140 + w(u, v) })()
 
 interface Box { x0: number; y0: number; x1: number; y1: number }
-interface Obj { path: (t: number) => { x: number; y: number }; pw: number; ph: number; tex: Tex; zoom?: (t: number) => number }
+interface Obj { path: (t: number) => { x: number; y: number }; pw: number; ph: number; tex: Tex; zoom?: (t: number) => number; on?: (t: number) => boolean }
 interface Adv {
   bg: Float32Array
   target: Obj
@@ -63,6 +63,7 @@ const blocksBg = ((): Float32Array => {
 })()
 
 function draw(d: Float32Array, o: Obj, t: number): void {
+  if (o.on && !o.on(t)) return
   const c = o.path(t), z = o.zoom?.(t) ?? 1
   const pw = o.pw * z, ph = o.ph * z, x0 = c.x - pw / 2, y0 = c.y - ph / 2
   for (let y = Math.max(0, Math.floor(y0)); y < Math.min(AH, Math.ceil(y0 + ph)); y++) {
@@ -167,6 +168,47 @@ describe('oráculo adversarial (R19/R20)', () => {
     for (const invert of [false, true]) {
       it(`${name}${invert ? ' — invertido' : ''}`, () => {
         const r = run(invert ? inverted : normal, t0, t1, invert)
+        expect(r.fails, `${r.worst} | estados ${r.results.map((x) => x.state[0]).join('')}`).toBe(0)
+      })
+    }
+  }
+})
+
+// ---------------------------------------------------------------- R21: cópia idêntica e recuperação (re-revisão)
+
+// alvo 60×20 parado em (200, 100) coberto a partir de 0,4 s; uma cópia idêntica aparece a 30 px enquanto ele está
+// escondido (sementes: /tmp/rerev5/probe.ts da re-revisão)
+const TGT: Obj = { path: () => ({ x: 200, y: 100 }), pw: 60, ph: 20, tex: TEXT }
+// B: a faixa sobe de 1,2 s a 1,6 s revelando o alvo aos poucos (de baixo para cima); a cópia fica
+const REVEAL: Adv = {
+  bg: flatBg(40), target: TGT,
+  others: [{ path: () => ({ x: 200, y: 130 }), pw: 60, ph: 20, tex: TEXT, on: (t) => t >= 0.45 && t < 1.8 }],
+  occl: (t) => (t >= 0.4 && t < 1.2 ? [{ x0: 160, y0: 70, x1: 240, y1: 115 }] : t >= 1.2 && t < 1.6 ? [{ x0: 160, y0: 70, x1: 240, y1: 110 - 50 * (t - 1.2) }] : [])
+}
+// C: a cópia ("fantasma de arrasto") se afasta depois de 1 s; o alvo reaparece longe dela em 1,6 s
+const DRAG: Adv = {
+  bg: flatBg(40), target: TGT,
+  others: [{ path: (t) => ({ x: 200 + (t > 1 ? 150 * (t - 1) : 0), y: 130 + (t > 1 ? 60 * (t - 1) : 0) }), pw: 60, ph: 20, tex: TEXT, on: (t) => t >= 0.45 }],
+  occl: (t) => (t >= 0.4 && t < 1.6 ? [{ x0: 160, y0: 80, x1: 240, y1: 120 }] : [])
+}
+// sem perda antes: uma cópia idêntica DENTRO do portão de movimento (5 px ao lado, por baixo do alvo) e o alvo coberto
+// aos poucos de cima para baixo a partir de 0,5 s — a região nunca sai do alvo, ou o rastreamento se perde
+const NEAR: Adv = {
+  bg: flatBg(40), target: TGT,
+  others: [{ path: () => ({ x: 205, y: 100 }), pw: 60, ph: 20, tex: TEXT, on: (t) => t >= 0.3 }],
+  occl: (t) => (t >= 0.5 ? [{ x0: 150, y0: 85, x1: 250, y1: Math.min(115, 90 + 25 * (t - 0.5)) }] : [])
+}
+
+describe('oráculo adversarial (R21: sem recuperação automática)', () => {
+  const cases: [string, Adv, number][] = [
+    ['cópia idêntica parada, alvo revelado aos poucos', REVEAL, 1.9],
+    ['cópia idêntica que se afasta (fantasma de arrasto)', DRAG, 2],
+    ['sem perda antes: cópia dentro do portão, alvo coberto aos poucos', NEAR, 1.6]
+  ]
+  for (const [name, sc, t1] of cases) {
+    for (const invert of [false, true]) {
+      it(`${name}${invert ? ' — invertido' : ''}`, () => {
+        const r = run(sc, 0, t1, invert)
         expect(r.fails, `${r.worst} | estados ${r.results.map((x) => x.state[0]).join('')}`).toBe(0)
       })
     }

@@ -255,3 +255,13 @@ describe('keyframeTimesUs com curvas densas (invariante 6)', () => {
     expect(best).toBeLessThan(80)
   })
 })
+
+describe('keyframeTimesUs: ±1 µs contra o key ANTERIOR (semântica de antes da fusão)', () => {
+  it('cadeia t, t+1, t+2 vira um instante só (t); t, t+2 são dois', () => {
+    const at = (ts: number[]): Anim<number> => ({ value: 0, keys: ts.map((tUs) => ({ tUs, value: 0, ease: 'linear' as const })) })
+    const fx = (x: number[], w: number[]): Item => ({ id: 'fx', type: 'effect', effect: 'blur', startUs: 0, durationUs: 10 * S, strength: { value: 80 }, feather: 0, color: '#000', invert: false, scope: 'below', region: { shape: 'rect', x: at(x), y: { value: 0 }, w: at(w), h: { value: 0 }, rotation: { value: 0 } } }) as unknown as Item
+    expect(ops.keyframeTimesUs(fx([100, 102], [101]))).toEqual([100])
+    expect(ops.keyframeTimesUs(fx([100, 102], []))).toEqual([100, 102])
+    expect(ops.keyframeTimesUs(fx([100, 101, 102, 500], [499]))).toEqual([100, 499])
+  })
+})

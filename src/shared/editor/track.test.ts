@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { evalAnim } from './anim'
+import { evalAnim, setValue } from './anim'
 import { createEffectItem, createEmptyProject, createMediaItem } from './factory'
 import { applyTrackedRegion, EditError, findItem, moveItems } from './ops'
 import type { Anim, Asset, EffectItem, EffectRegion, Project, Us } from './project'
@@ -266,12 +266,15 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
       expect(area).toBeGreaterThanOrEqual(prevArea) // só cresce enquanto perdido
       prevArea = area
     }
-    // a recuperação só encolhe num key em que a caixa confiante nova ⊆ caixa ampliada
-    const rec = results.findIndex((r, i) => i > firstLost && r.state === 'ok')
-    expect(rec).toBeGreaterThan(firstLost)
-    const grown = region(fx1, results[rec].tUs - 1)
-    const now = region(fx1, results[rec].tUs)
-    for (const [x, y] of outline(now, 'rect')) expect(inside(grown, 'rect', x, y)).toBe(true)
+    // R21: sem recuperação — perdido até o fim (mesmo depois que o conteúdo reaparece), a região nunca encolhe
+    expect(results.slice(firstLost).every((r) => r.state !== 'ok')).toBe(true)
+    expect(results.slice(firstLost + 1).every((r) => r.state === 'lost')).toBe(true)
+    let prev = 0
+    for (let t = results[firstLost].tUs; t < fx1.durationUs; t += 4_167) {
+      const v = region(fx1, t)
+      expect(v.w * v.h).toBeGreaterThanOrEqual(prev)
+      prev = v.w * v.h
+    }
   })
 
   it('perda (invertido): o buraco fecha (NO_HOLE), nunca cresce', () => {
@@ -321,6 +324,33 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
     }
   })
 
+  it('R21: depois de uma perda, reposicionar e rodar de novo a partir de um quadro posterior — os keys de antes ficam', () => {
+    const sc: Scene = { path: occludedPath, pw: 60, ph: 40, occluder: OCCLUDER }
+    // 1ª passada: perde atrás do oclusor e fica ampliada até o fim
+    const first = run(sc, 0, 2)
+    expect(first.lost).toHaveLength(1)
+    // o conteúdo já saiu de trás do oclusor em 1,7 s: o usuário reposiciona a região sobre ele nesse quadro
+    const t2 = 1.7, a = usOf(t2)
+    const c = sc.path(t2)
+    const box = { x: c.x / AW, y: c.y / AH, w: sc.pw / AW, h: sc.ph / AH }
+    const r1 = first.fx1.region
+    const user: EffectItem = { ...first.fx1, region: { ...r1, x: setValue(r1.x, a, box.x), y: setValue(r1.y, a, box.y), w: setValue(r1.w, a, box.w), h: setValue(r1.h, a, box.h) } }
+    // 2ª passada a partir de 1,7 s
+    const res2 = trackFrames(frames(sc, t2, 2), boxAt(sc, t2))
+    expect(res2.every((r) => r.state === 'ok')).toBe(true)
+    const out2 = trackToKeys(user, res2, GEO)
+    expect(out2.lost).toEqual([])
+    const fx2 = { ...user, region: out2.region }
+    // antes de 1,7 s a curva (1ª passada + a edição do usuário) é a mesma, e os keys de antes ficam iguais
+    for (const ch of ['x', 'y', 'w', 'h'] as const) {
+      expect(fx2.region[ch].keys!.filter((k) => k.tUs < a - 1)).toEqual(user.region[ch].keys!.filter((k) => k.tUs < a - 1))
+      for (let t = 0; t < a; t += 7_919) expect(evalAnim(fx2.region[ch], t)).toBeCloseTo(evalAnim(user.region[ch], t), 12)
+      const ts = fx2.region[ch].keys!.map((k) => k.tUs)
+      for (let i = 1; i < ts.length; i++) expect(ts[i]).toBeGreaterThan(ts[i - 1])
+    }
+    // de 1,7 s ao fim, o conteúdo está coberto (oráculo denso)
+    expect(oracle(sc, effectOn(sc, t2, 2), fx2, t2, 2)).toEqual([])
+  })
   it('mescla: keys fora do trecho rastreado ficam; antes do início a curva não muda', () => {
     const sc: Scene = { path: linear, pw: 60, ph: 40 }
     const base = effectOn(sc, 0.5, 1.5)
@@ -341,26 +371,28 @@ describe('trackToKeys: perda (R4), espaçamento (R4b) e mescla', () => {
     expect(new Set(ts).size).toBe(ts.length)
   })
 
-  it('degrau conservador mesmo com só 2 µs entre os quadros (M1): o instante do meio já é o seguro', () => {
+  it('degrau conservador mesmo com só 2 µs entre os quadros (M1); depois da perda nada volta (R21, mesmo se a entrada disser ok)', () => {
     const sc: Scene = { path: linear, pw: 60, ph: 40 }
     const r = (tUs: number, state: 'ok' | 'lost'): TrackResult => ({ tUs, x: 120, y: 90, w: 60, h: 40, scale: 1, scaleLo: 1, scaleHi: 1, confidence: state === 'ok' ? 1 : 0.1, state, reach: state === 'ok' ? 0 : 40 })
-    // invertido: perde em 2 µs e recupera em 4 µs → 1 e 3 µs já são o buraco nulo
+    const input = [r(0, 'ok'), r(2, 'lost'), r(4, 'ok'), r(6, 'ok')]
+    // invertido: perde em 2 µs → 1 µs já é o buraco nulo, e ele fica fechado até o fim
     const inv = { ...effectOn(sc, 0, 1, { invert: true }) }
-    const ri = trackToKeys(inv, [r(0, 'ok'), r(2, 'lost'), r(4, 'ok'), r(6, 'ok')], GEO).region
-    for (const t of [1, 2, 3]) expect([evalAnim(ri.w, t), evalAnim(ri.h, t), evalAnim(ri.x, t)]).toEqual([0, 0, 0])
-    // normal: 1 µs já é a região ampliada; 3 µs ainda é a ampliada (encolhe só no key de 4 µs)
+    const ri = trackToKeys(inv, input, GEO).region
+    for (const t of [1, 2, 3, 4, 5, 6, 500_000]) expect([evalAnim(ri.w, t), evalAnim(ri.h, t), evalAnim(ri.x, t)]).toEqual([0, 0, 0])
+    // normal: 1 µs já é a região ampliada, e ela não encolhe depois
     const nor = effectOn(sc, 0, 1)
-    const rn = trackToKeys(nor, [r(0, 'ok'), r(2, 'lost'), r(4, 'ok'), r(6, 'ok')], GEO).region
+    const out = trackToKeys(nor, input, GEO)
+    const rn = out.region
     expect(evalAnim(rn.w, 1)).toBe(evalAnim(rn.w, 2))
-    expect(evalAnim(rn.w, 3)).toBeGreaterThanOrEqual(evalAnim(rn.w, 2))
-    expect(evalAnim(rn.w, 4)).toBeLessThan(evalAnim(rn.w, 3))
+    for (const t of [3, 4, 5, 6]) expect(evalAnim(rn.w, t)).toBeGreaterThanOrEqual(evalAnim(rn.w, 2))
+    expect(out.lost).toEqual([{ tUs: 2 }])
+    expect(out.samples.map((x) => x.state)).toEqual(['ok', 'lost', 'lost', 'lost'])
   })
-
   it('formato do toast da perda', () => {
     expect(formatTrackTime(2_216_667)).toBe('00:02,2')
     expect(formatTrackTime(83_950_000)).toBe('01:23,9')
-    expect(lossMessage({ tUs: 2_216_667 }, false)).toBe('Rastreamento perdido em 00:02,2 — a região foi ampliada; revise')
-    expect(lossMessage({ tUs: 2_216_667 }, true)).toBe('Rastreamento perdido em 00:02,2 — o buraco foi fechado; revise')
+    expect(lossMessage({ tUs: 2_216_667 }, false)).toBe('Rastreamento perdido em 00:02,2 — a região foi ampliada até o fim; reposicione e use “Seguir conteúdo” de novo a partir daí')
+    expect(lossMessage({ tUs: 2_216_667 }, true)).toBe('Rastreamento perdido em 00:02,2 — o buraco foi fechado até o fim; reposicione e use “Seguir conteúdo” de novo a partir daí')
   })
 })
 

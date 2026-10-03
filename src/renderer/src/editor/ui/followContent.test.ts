@@ -66,12 +66,12 @@ describe('followContent', () => {
     st().open(base())
     vi.mocked(runContentTracking).mockResolvedValue(out([{ tUs: 1_250_000 }]))
     await followContent('fx')
-    expect(vi.mocked(toast.warning).mock.calls[0][0]).toBe('Rastreamento perdido em 00:01,2 — a região foi ampliada; revise')
+    expect(vi.mocked(toast.warning).mock.calls[0][0]).toBe('Rastreamento perdido em 00:01,2 — a região foi ampliada até o fim; reposicione e use “Seguir conteúdo” de novo a partir daí')
     st().close()
     st().open(base({ invert: true }))
     vi.mocked(runContentTracking).mockResolvedValue(out([{ tUs: 1_250_000 }]))
     await followContent('fx')
-    expect(vi.mocked(toast.warning).mock.calls[1][0]).toBe('Rastreamento perdido em 00:01,2 — o buraco foi fechado; revise')
+    expect(vi.mocked(toast.warning).mock.calls[1][0]).toBe('Rastreamento perdido em 00:01,2 — o buraco foi fechado até o fim; reposicione e use “Seguir conteúdo” de novo a partir daí')
   })
 
   it('cancelar: nada aplicado, nenhum passo no histórico', async () => {

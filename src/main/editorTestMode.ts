@@ -728,10 +728,12 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(sc5?.frames === TRACK_SCENE.durationS * fps5, `seguir conteúdo: o worker real analisou todos os quadros do 0 ao fim (${sc5?.frames}, ${sc5?.analysis?.width}×${sc5?.analysis?.height}, ${sc5?.trackMs} ms)`, failures)
   const lostAt5 = sc5?.lost ?? []
   check(lostAt5.length === 1 && lostAt5[0] >= TRACK_SCENE.occludeFrom * 1e6 - 1 && lostAt5[0] <= TRACK_SCENE.occludeFrom * 1e6 + 2e6 / fps5, `seguir conteúdo: uma perda, no início da oclusão (${TRACK_SCENE.occludeFrom} s): ${JSON.stringify(lostAt5)}`, failures)
-  check(!!sc5?.lossMessage && sc5.lossMessage.startsWith('Rastreamento perdido em 00:02,2 — a região foi ampliada'), `seguir conteúdo: toast da perda "${sc5?.lossMessage}"`, failures)
+  check(!!sc5?.lossMessage && sc5.lossMessage === 'Rastreamento perdido em 00:02,2 — a região foi ampliada até o fim; reposicione e use “Seguir conteúdo” de novo a partir daí', `seguir conteúdo: toast da perda "${sc5?.lossMessage}"`, failures)
   const tl5 = sc5?.timeline ?? ''
-  const before5 = tl5.slice(0, Math.round(TRACK_SCENE.occludeFrom * fps5) - 1), after5 = tl5.slice(Math.round((TRACK_SCENE.occludeTo + 0.2) * fps5))
-  check(before5.length > 0 && !before5.includes('l') && after5.length > 0 && !after5.includes('l'), `seguir conteúdo: confiante antes da oclusão e reencontrado depois dela (${tl5})`, failures)
+  // R21: sem recuperação automática — confiante até a oclusão, perdido dali até o fim (mesmo com o texto de volta)
+  const lostAt5i = tl5.search(/[wl]/)
+  const before5 = lostAt5i < 0 ? tl5 : tl5.slice(0, lostAt5i), after5 = lostAt5i < 0 ? '' : tl5.slice(lostAt5i + 1)
+  check(lostAt5i === Math.round(TRACK_SCENE.occludeFrom * fps5) && /^o+$/.test(before5) && /^l+$/.test(after5), `seguir conteúdo: confiante até a oclusão e perdido dali até o fim, sem recuperação (R21) (${tl5})`, failures)
   check((sc5?.keys ?? 0) >= TRACK_SCENE.durationS * fps5, `seguir conteúdo: um key por quadro analisado (${sc5?.keys})`, failures)
   const unreadableL = (l?: Legib): boolean => !!l && l.c < 0.15 && l.lap < 0.2
   for (const pv of sc5?.preview ?? []) check(unreadableL(pv.tracked), `seguir conteúdo (preview, quadro ${pv.frame}): texto ilegível sob o blur rastreado (contraste ${pv.tracked.c}, laplaciano ${pv.tracked.lap})`, failures)

@@ -11,19 +11,19 @@
 // da previsão (posição + movimento recente), de grosso a fino (pirâmide 2×2 só da região da busca; os melhores máximos
 // do nível grosso refinados por subida 3×3; no nível 0 só dentro da janela), subpixel por parábola. Um quadro só é
 // 'ok' (verde) e move a região se TODOS valem:
-// - confiança ≥ recoverAbove (0,85; texto fino reamostrado a 480 px com deslocamento subpixel fica em ~0,9);
+// - confiança ≥ okAbove (0,85; texto fino reamostrado a 480 px com deslocamento subpixel fica em ~0,9);
 // - não ambíguo: o 2º pico (fora de meio molde do 1º) fica a mais de ambiguityMargin (0,1) do melhor — conteúdo
 //   repetido/parecido na janela (linhas de tabela, cópia do valor) não decide nada;
 // - dentro do portão de movimento: ≤ 2·gateMinPx + 2·|v| da previsão (|v| = movimento entre os dois últimos 'ok');
 // - rígido: as células com textura do molde (~16 px) concordam com o casamento num ajuste translação + escala
 //   (resíduo ≤ 0,75 px; ≥ 2 discordando = dois movimentos dentro da região, como uma região folgada sobre fundo
 //   parado — nenhuma translação única cobre os dois).
-// Senão o quadro é 'weak' (âmbar: pico plausível perto da previsão, abaixo do 'ok') ou 'lost' (vermelho) — os dois com
-// a MESMA geometria de perda: a posição NUNCA é inventada (fica a última 'ok') e a cobertura (reach) cresce `growth`×
-// por quadro (até o quadro inteiro); a janela de busca nunca cresce por um quadro incerto. Recuperação só pelo caminho
-// guardado: o melhor pico dentro de um portão em volta da previsão segurada (posição + v·quadros perdidos), ≥
-// recoverAbove, rígido, sem NENHUM pico ambíguo em toda a área coberta (uma cópia idêntica coberta = continua perdido),
-// com o centro dentro da cobertura (caixa nova ⊆ ampliada) e confirmado por um 2º quadro seguido no mesmo lugar.
+// Senão o rastreamento confiante ACABA (ruling R21): desse quadro até o fim do trecho a posição fica segurada (a
+// última 'ok' — nunca inventada), a cobertura (reach) cresce `growth`× por quadro até o quadro inteiro (normal) e o
+// buraco do invertido é o nulo. Não há recuperação automática: um conteúdo idêntico (cópia, fantasma de arrasto) que
+// aparece enquanto o alvo está escondido seria indistinguível dele. Para continuar, o usuário reposiciona a região num
+// quadro posterior e roda "Seguir conteúdo" de novo dali (a mescla mantém os keys de antes). O 1º quadro da perda é
+// 'weak' (âmbar) quando havia um pico plausível perto da previsão, senão 'lost'; o resto é 'lost'.
 // Escala (R20) sempre estimada: passos de scaleStep (3 %) a partir da atual enquanto o NCC melhora ≥ 0,003
 // (histerese: sem deriva); as sondas vizinhas que não se separam da escolhida são incerteza não resolvida, [scaleLo,
 // scaleHi] — a região normal usa a maior e o buraco do invertido a menor, mais meio passo de folga.
@@ -39,8 +39,7 @@
 // tamanho, vira o buraco nulo (NO_HOLE, a convenção de conservativeRegion) — nunca maior.
 // Transições em degrau (keys a 1 µs — também quando os quadros estão a só 2 µs; nenhum instante inteiro fica entre o
 // último seguro e o degrau): normal, ao perder a região ampliada vale logo
-// depois do último quadro confiante; ao recuperar, a ampliada (alargada até conter a caixa nova) vale até 1 µs antes do
-// key da caixa nova — só encolhe num key em que a caixa nova ⊆ ampliada. Invertido: o buraco fecha/abre em degrau
+// depois do último quadro confiante (e não encolhe mais: R21). Invertido: o buraco fecha/abre em degrau
 // (interpolar até NO_HOLE moveria o buraco para o canto, fora do conteúdo).
 // Mescla: keys antigos ANTES do início ficam (com um key exato 1 µs antes do início: a curva anterior não muda); do
 // início ao fim do efeito, só os novos (o rastreamento vai sempre até o fim; cancelar não aplica nada).
@@ -67,19 +66,19 @@ export interface TrackOpts {
   growth: number
   /** Passo das sondas de escala (relativo à escala atual): s·(1 ± passo). A região leva meio passo de folga. */
   scaleStep: number
-  /** Piso do 'weak' (âmbar): abaixo disso o conteúdo foi perdido. */
+  /** Piso do 'weak' (âmbar, só no 1º quadro da perda: havia um pico plausível perto da previsão). */
   lostBelow: number
-  /** Confiança alta: 'ok' (verde) e mínimo para recuperar uma perda. */
-  recoverAbove: number
+  /** Confiança mínima de um quadro 'ok' (verde). */
+  okAbove: number
   /** Ambíguo: o 2º pico (fora da vizinhança do 1º) a menos disso do melhor → perda (R19). */
   ambiguityMargin: number
-  /** Portão de movimento mínimo (px da análise): 'ok' até 2·gateMinPx + 2·|v| da previsão; 'weak' só até gateMinPx. */
+  /** Portão de movimento mínimo (px da análise): 'ok' até 2·gateMinPx + 2·|v| da previsão; o 1º quadro da perda é 'weak' só até gateMinPx. */
   gateMinPx: number
   /** Desvio-padrão mínimo do molde (níveis de cinza): abaixo disso a região é lisa demais para seguir. */
   minStd: number
 }
 
-export const DEFAULT_TRACK_OPTS: TrackOpts = { searchPx: 40, growth: 2, scaleStep: 0.03, lostBelow: 0.7, recoverAbove: 0.85, ambiguityMargin: 0.1, gateMinPx: 4, minStd: 3 }
+export const DEFAULT_TRACK_OPTS: TrackOpts = { searchPx: 40, growth: 2, scaleStep: 0.03, lostBelow: 0.7, okAbove: 0.85, ambiguityMargin: 0.1, gateMinPx: 4, minStd: 3 }
 
 export type TrackState = 'ok' | 'weak' | 'lost'
 
@@ -270,12 +269,9 @@ export interface Tracker {
   /** Movimento por quadro entre os dois últimos quadros 'ok' seguidos (px da análise); null = desconhecido. */
   readonly v: { x: number; y: number } | null
   readonly lastOk: boolean
+  /** Perdido (R21: até o fim do trecho) e o alcance da cobertura (raio, px da análise) do último quadro. */
   readonly lost: boolean
-  /** Quadros perdidos seguidos e o alcance da cobertura (raio, px da análise) do último. */
-  readonly lostFrames: number
   readonly reach: number
-  /** Recuperação: o 1º quadro que passou nas condições (precisa de um 2º consistente antes de encolher). */
-  readonly pending: { x: number; y: number } | null
 }
 
 /** Pico de NCC refinado no nível 0: canto (u, v) inteiro e centro na imagem (px da análise). */
@@ -518,16 +514,15 @@ export function startTracker(first: GrayImage, box: TrackBox, tUs: Us, opts: Par
   if (std(patch) < o.minStd) throw new EditError('invalid', 'A região está sobre uma área lisa, sem detalhe para seguir: posicione-a sobre o conteúdo a esconder.')
   const tracker: Tracker = {
     opts: o, box, c0x: x0 + patch.w / 2, c0y: y0 + patch.h / 2, patch, set: tplSet(patch, 1),
-    pos: { x: box.x, y: box.y }, scale: 1, v: null, lastOk: true, lost: false, lostFrames: 0, reach: 0, pending: null
+    pos: { x: box.x, y: box.y }, scale: 1, v: null, lastOk: true, lost: false, reach: 0
   }
   return { tracker, result: { tUs, x: box.x, y: box.y, w: box.w, h: box.h, scale: 1, scaleLo: 1, scaleHi: 1, confidence: 1, state: 'ok', reach: 0 } }
 }
 
 /**
- * Um quadro (rulings R19/R20; ver o topo do arquivo): 'ok' só com confiança alta, sem ambiguidade, dentro do portão de
- * movimento e rígido; senão 'weak'/'lost' com a geometria da perda (posição segurada, cobertura crescendo). A
- * recuperação passa pelo caminho guardado (portão em volta da previsão segurada, nenhum pico ambíguo na área coberta,
- * caixa nova ⊆ cobertura, confirmação por um 2º quadro).
+ * Um quadro (rulings R19/R20/R21; ver o topo do arquivo): 'ok' só com confiança alta, sem ambiguidade, dentro do portão
+ * de movimento e rígido. O primeiro quadro que não passa encerra o rastreamento confiante: dali até o fim do trecho a
+ * posição fica segurada e a cobertura cresce (normal) / buraco nulo (invertido), sem recuperação automática.
  */
 export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Tracker; result: TrackResult } {
   const o = tr.opts
@@ -535,55 +530,34 @@ export function trackNext(tr: Tracker, img: GrayImage, tUs: Us): { tracker: Trac
   const offX = tr.c0x - tr.box.x, offY = tr.c0y - tr.box.y
   const vx = tr.v?.x ?? 0, vy = tr.v?.y ?? 0, vlen = Math.hypot(vx, vy)
   const res = (x: number, y: number, scale: number, lo: number, hi: number, state: TrackState, reach: number, confidence: number): TrackResult => ({ tUs, x, y, w: tr.box.w * scale, h: tr.box.h * scale, scale, scaleLo: lo, scaleHi: hi, confidence, state, reach })
-  const accept = (f: Found): { tracker: Tracker; result: TrackResult } => {
+  const lose = (reach: number, conf: number, state: TrackState): { tracker: Tracker; result: TrackResult } => ({
+    tracker: { ...tr, lost: true, lastOk: false, reach },
+    result: res(tr.pos.x, tr.pos.y, tr.scale, tr.scale, tr.scale, state, reach, conf)
+  })
+
+  // R21: perdido é até o fim do trecho — sem busca, sem recuperação; só a cobertura continua crescendo em volta da
+  // última posição 'ok' (o conteúdo escondido pode estar andando)
+  if (tr.lost) return lose(Math.min(maxR, tr.reach * o.growth), 0, 'lost')
+
+  const px = tr.pos.x + vx, py = tr.pos.y + vy
+  const { peaks, L0 } = findPeaks(tr.set, img, px + offX, py + offY, o.searchPx)
+  const best = peaks[0]
+  // a janela buscada é centrada na previsão: a cobertura da perda parte de lá (centro segurado + |v| + janela)
+  const reach0 = Math.min(maxR, o.searchPx + Math.max(Math.abs(vx), Math.abs(vy)))
+  if (!best || !L0) return lose(reach0, 0, 'lost')
+  const f = refinePeak(tr, L0, best)
+  const conf = Math.max(0, Math.min(1, f.score))
+  const ambiguous = peaks.length > 1 && peaks[1].s >= best.s - o.ambiguityMargin
+  const d = Math.hypot(f.ix - offX - px, f.iy - offY - py)
+  const gate = tr.v ? 2 * o.gateMinPx + 2 * vlen : Infinity
+  if (!ambiguous && conf >= o.okAbove && d <= gate && rigid(L0, f)) {
     const x = f.ix - offX, y = f.iy - offY
-    // movimento recente: só entre dois quadros 'ok' seguidos
-    const v = tr.lastOk && !tr.lost ? { x: x - tr.pos.x, y: y - tr.pos.y } : tr.v
-    const next: Tracker = { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v, lastOk: true, lost: false, lostFrames: 0, reach: 0, pending: null }
-    return { tracker: next, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
+    // movimento recente: entre dois quadros 'ok' seguidos
+    const v = tr.lastOk ? { x: x - tr.pos.x, y: y - tr.pos.y } : tr.v
+    return { tracker: { ...tr, set: f.set, pos: { x, y }, scale: f.scale, v, lastOk: true }, result: res(x, y, f.scale, f.lo, f.hi, 'ok', 0, f.score) }
   }
-  // incerto ('weak': há um pico plausível, mas abaixo de recoverAbove) e perdido têm a MESMA geometria: posição
-  // segurada e cobertura crescendo; só a cor da faixa muda
-  const lose = (reach: number, conf: number, pending: { x: number; y: number } | null, plausible: boolean): { tracker: Tracker; result: TrackResult } => {
-    const next: Tracker = { ...tr, lost: true, lastOk: false, lostFrames: tr.lostFrames + 1, reach, pending }
-    return { tracker: next, result: res(tr.pos.x, tr.pos.y, tr.scale, tr.scale, tr.scale, plausible && conf >= o.lostBelow ? 'weak' : 'lost', reach, conf) }
-  }
-
-  if (!tr.lost) {
-    const px = tr.pos.x + vx, py = tr.pos.y + vy
-    const { peaks, L0 } = findPeaks(tr.set, img, px + offX, py + offY, o.searchPx)
-    const best = peaks[0]
-    // a janela buscada é centrada na previsão: a cobertura da perda parte de lá (centro segurado + |v| + janela)
-    const reach0 = Math.min(maxR, o.searchPx + Math.max(Math.abs(vx), Math.abs(vy)))
-    if (!best || !L0) return lose(reach0, 0, null, false)
-    const f0 = refinePeak(tr, L0, best)
-    const conf = Math.max(0, Math.min(1, f0.score))
-    const ambiguous = peaks.length > 1 && peaks[1].s >= best.s - o.ambiguityMargin
-    const d = Math.hypot(f0.ix - offX - px, f0.iy - offY - py)
-    const gate = tr.v ? 2 * o.gateMinPx + 2 * vlen : Infinity
-    if (!ambiguous && conf >= o.recoverAbove && d <= gate && rigid(L0, f0)) return accept(f0)
-    // incerto só se o pico plausível está perto da previsão (portão mínimo): longe dela, é perda mesmo
-    return lose(reach0, conf, null, !ambiguous && d <= o.gateMinPx)
-  }
-
-  // perdido: cobertura crescendo em volta da posição segurada; procura em toda ela (ambiguidade) e recupera só no portão
-  const reach = Math.min(maxR, tr.reach * o.growth)
-  const k = tr.lostFrames + 1
-  const gx = tr.pos.x + vx * k, gy = tr.pos.y + vy * k
-  // o erro da previsão cresce com os quadros perdidos (movimento desconhecido ou mudando): o portão também, até a janela
-  const gateRec = Math.min(o.searchPx, 2 * o.gateMinPx + k * (o.gateMinPx + 0.5 * vlen))
-  const { peaks, L0 } = findPeaks(tr.set, img, tr.pos.x + offX, tr.pos.y + offY, reach)
-  const cand = peaks.find((p) => Math.hypot(p.ix - offX - gx, p.iy - offY - gy) <= gateRec)
-  if (!cand || !L0) return lose(reach, peaks[0] ? Math.max(0, peaks[0].s) : 0, null, false)
-  const f0 = refinePeak(tr, L0, cand)
-  const conf = Math.max(0, Math.min(1, f0.score))
-  const ambiguous = peaks.some((p) => p !== cand && p.s >= cand.s - o.ambiguityMargin)
-  const x = f0.ix - offX, y = f0.iy - offY
-  const inside = Math.max(Math.abs(x - tr.pos.x), Math.abs(y - tr.pos.y)) <= reach
-  if (ambiguous || conf < o.recoverAbove || !inside || !rigid(L0, f0)) return lose(reach, conf, null, !ambiguous && inside)
-  // confirmação: um 2º quadro seguido, no mesmo lugar (± o portão mínimo + o movimento)
-  if (!tr.pending || Math.hypot(x - tr.pending.x, y - tr.pending.y) > 2 * o.gateMinPx + vlen) return lose(reach, conf, { x, y }, true)
-  return accept(f0)
+  // o 1º quadro da perda: âmbar se havia um pico plausível perto da previsão (abaixo do 'ok'), senão vermelho
+  return lose(reach0, conf, !ambiguous && d <= o.gateMinPx && conf >= o.lostBelow ? 'weak' : 'lost')
 }
 
 /** Rastreia uma sequência de quadros (o 1º define o molde). */
@@ -733,9 +707,18 @@ function merged(prev: Anim<number>, a: Us, fresh: Keyframe<number>[]): Anim<numb
 }
 
 /** Resultado do rastreamento → região com keys (ver o topo do arquivo: R4, R4b, degraus e mescla). */
-export function trackToKeys(fx: EffectItem, results: readonly TrackResult[], g: TrackGeometry, o: TrackKeysOpts = {}): TrackKeysResult {
+export function trackToKeys(fx: EffectItem, input: readonly TrackResult[], g: TrackGeometry, o: TrackKeysOpts = {}): TrackKeysResult {
   if (fx.attach) throw new EditError('invalid', TRACK_ATTACHED_MESSAGE)
-  if (results.length === 0) return { region: fx.region, lost: [], samples: [] }
+  if (input.length === 0) return { region: fx.region, lost: [], samples: [] }
+  // R21: a partir do primeiro quadro que não é 'ok', tudo é perda até o fim, mesmo se a entrada disser outra coisa —
+  // posição e escala do primeiro quadro perdido (a última 'ok', segurada) e cobertura que nunca diminui
+  let firstBad = input.findIndex((r) => r.state !== 'ok')
+  if (firstBad < 0) firstBad = input.length
+  const results: TrackResult[] = input.slice(0, firstBad + 1)
+  for (let i = firstBad + 1; i < input.length; i++) {
+    const held = results[firstBad], prev = results[i - 1]
+    results.push({ ...held, tUs: input[i].tUs, confidence: input[i].confidence, state: 'lost', reach: Math.max(input[i].reach, prev.reach) })
+  }
   const W = g.canvasW, H = g.canvasH
   const kx = W / g.analysisW, ky = H / g.analysisH
   const unit = Math.max(kx, ky) // 1 px da análise no quadro
@@ -745,7 +728,7 @@ export function trackToKeys(fx: EffectItem, results: readonly TrackResult[], g: 
   const R0 = valuesAt(fx.region, a)
   const r0 = results[0]
   const n = results.length
-  const conf = (i: number): boolean => i >= 0 && i < n && results[i].state === 'ok'
+  const conf = (i: number): boolean => i >= 0 && i < n && i < firstBad
   // escala do tamanho: a maior das empatadas (normal, cobre mais) / a menor (invertido, buraco menor) — R20
   const sz = (r: TrackResult): number => (fx.invert ? (r.scaleLo ?? r.scale) : (r.scaleHi ?? r.scale))
   const placed = (r: TrackResult): RegionValues => ({ x: R0.x + (r.x - r0.x) / g.analysisW, y: R0.y + (r.y - r0.y) / g.analysisH, w: R0.w * sz(r), h: R0.h * sz(r), rotation: R0.rotation })
@@ -776,12 +759,7 @@ export function trackToKeys(fx: EffectItem, results: readonly TrackResult[], g: 
       if (t - tp >= 2) {
         if (fx.invert) samples.push(kind(i) === 'closed' ? { t: tp + 1, v: NO_HOLE } : { t: t - 1, v: NO_HOLE })
         else if (kind(i) === 'grown') samples.push({ t: tp + 1, v: vals[i] })
-        else {
-          // recuperação: a ampliada (centro segurado) alargada até conter a caixa nova vale até 1 µs antes dela
-          const held = results[i - 1], cur = results[i]
-          const need = D[i] + disp(cur, held)
-          samples.push({ t: t - 1, v: inflate(placed(held), shape, Math.max(D[i - 1], need), W, H)! })
-        }
+        // (perda → 'ok' não acontece: R21, perdido até o fim)
       }
     }
     samples.push({ t, v: vals[i] })
@@ -792,7 +770,7 @@ export function trackToKeys(fx: EffectItem, results: readonly TrackResult[], g: 
   const region: EffectRegion = { shape, x: merged(r.x, a, keysOf('x')), y: merged(r.y, a, keysOf('y')), w: merged(r.w, a, keysOf('w')), h: merged(r.h, a, keysOf('h')), rotation }
   const lost: { tUs: Us }[] = []
   for (let i = 0; i < n; i++) if (!conf(i) && conf(i - 1)) lost.push({ tUs: results[i].tUs })
-  return { region, lost, samples: results.map((x) => ({ tUs: x.tUs - fx.startUs, confidence: x.confidence, state: x.state })) }
+  return { region, lost, samples: results.map((x, i) => ({ tUs: x.tUs - fx.startUs, confidence: x.confidence, state: x.state })) }
 }
 
 // ---------------------------------------------------------------- textos
@@ -804,7 +782,7 @@ export function formatTrackTime(us: Us): string {
   return `${p2(Math.floor(tenths / 600))}:${p2(Math.floor(tenths / 10) % 60)},${tenths % 10}`
 }
 
-/** Toast da perda (instante absoluto da timeline). */
+/** Toast da perda (instante absoluto da timeline; R21: vale até o fim do trecho rastreado). */
 export function lossMessage(l: { tUs: Us }, invert: boolean): string {
-  return `Rastreamento perdido em ${formatTrackTime(l.tUs)} — ${invert ? 'o buraco foi fechado' : 'a região foi ampliada'}; revise`
+  return `Rastreamento perdido em ${formatTrackTime(l.tUs)} — ${invert ? 'o buraco foi fechado' : 'a região foi ampliada'} até o fim; reposicione e use “Seguir conteúdo” de novo a partir daí`
 }

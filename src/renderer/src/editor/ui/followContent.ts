@@ -61,7 +61,7 @@ export async function followContent(itemId: string): Promise<void> {
     if (out.lost.length) {
       const first = out.lost[0]
       toast.warning(lossMessage(first, invert), {
-        description: `${out.lost.length > 1 ? `${out.lost.length} perdas no total. ` : ''}${invert ? 'Fechado, o buraco esconde o quadro inteiro.' : 'Ampliada, a região esconde mais do que o conteúdo.'} A faixa vermelha no item mostra onde. Ctrl+Z desfaz.`,
+        description: `${invert ? 'Fechado, o buraco esconde o quadro inteiro' : 'Ampliada, a região esconde mais do que o conteúdo'} daí até o fim do efeito (faixa vermelha no item). Para voltar a seguir, vá a um quadro em que o conteúdo apareça, ajuste a região sobre ele e use “Seguir conteúdo” de novo — os keyframes de antes ficam. Ctrl+Z desfaz.`,
         duration: 12_000,
         action: { label: 'Ir para', onClick: () => useEditorStore.getState().setPlayhead(first.tUs) }
       })
