@@ -44,7 +44,12 @@ export const REFINE_TPL_MAX_ASPECT = 8
 export type ScanPhase = 'amostrando' | 'lendo' | 'analisando'
 export interface ScanProgress { phase: ScanPhase; done: number; total: number }
 export type ScanErrorCode = 'ocrUnavailable' | 'ffmpeg' | 'busy' | 'invalid'
-export interface ScanError { code: ScanErrorCode; message: string }
+/**
+ * Motivo do 'ocrUnavailable' (a UI escolhe a dica): falta idioma de OCR; o PowerShell/helper não partiu (bloqueado por
+ * política, ausente, sem resposta, WinRT indisponível); o reconhecimento parou no meio da busca.
+ */
+export type ScanErrorReason = 'noLanguage' | 'powershell' | 'stopped'
+export interface ScanError { code: ScanErrorCode; message: string; reason?: ScanErrorReason }
 
 /** Uma amostra (quadro lido pelo OCR, ou reaproveitado se não mudou). SÓ NO MAIN: as detecções têm o valor. */
 export interface ScanSample { tUs: Us; detections: Detection[] }

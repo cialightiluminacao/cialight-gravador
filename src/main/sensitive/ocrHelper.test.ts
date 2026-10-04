@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { join } from 'path'
-import { OcrHelper, OcrUnavailableError } from './ocrHelper'
+import { OcrHelper, OcrUnavailableError, powershellPath } from './ocrHelper'
 
 const FAKE = join(__dirname, '__fixtures__', 'fakeOcrHelper.mjs')
 const start = (mode: string, extra: { frameTimeoutMs?: number } = {}): Promise<OcrHelper> =>
@@ -43,16 +43,35 @@ describe('OcrHelper (helper falso com o mesmo protocolo)', () => {
     expect((e as OcrUnavailableError).code).toBe('ocrUnavailable')
     expect((e as Error).message).toMatch(/reconhecimento de texto do Windows não está disponível/)
     expect((e as Error).message).toMatch(/xx-XX/)
+    // falta de idioma: a UI mostra "instale o idioma"
+    expect((e as OcrUnavailableError).reason).toBe('noLanguage')
   })
-  it('executável inexistente → OcrUnavailableError', async () => {
+  it('ready:false por outra causa (WinRT/PowerShell restrito) → motivo powershell, sem texto cru na mensagem', async () => {
+    const e = await start('notready-other').catch((x: unknown) => x)
+    expect(e).toBeInstanceOf(OcrUnavailableError)
+    expect((e as OcrUnavailableError).reason).toBe('powershell')
+    expect((e as Error).message).not.toMatch(/Exception|Add-Type/)
+  })
+  it('executável inexistente → OcrUnavailableError (motivo powershell)', async () => {
     const e = await OcrHelper.start({ script: '', command: join(__dirname, 'nao-existe.exe'), args: [], readyTimeoutMs: 5000 }).catch((x: unknown) => x)
     expect(e).toBeInstanceOf(OcrUnavailableError)
+    expect((e as OcrUnavailableError).reason).toBe('powershell')
+  })
+  it('helper que sai antes do ready → motivo powershell (bloqueado por política)', async () => {
+    const e = await start('exit').catch((x: unknown) => x)
+    expect((e as OcrUnavailableError).reason).toBe('powershell')
+  })
+  it('powershell.exe pelo caminho absoluto do sistema (nunca pela pasta atual/PATH); sem SystemRoot, o nome', () => {
+    expect(powershellPath({ SystemRoot: 'C:\\Windows' })).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    expect(powershellPath({ SYSTEMROOT: 'D:\\Win\\' })).toBe('D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    expect(powershellPath({})).toBe('powershell.exe')
   })
   it('quadro travado: tempo esgotado mata SÓ o PID iniciado e vira ocrUnavailable', async () => {
     const h = await start('hang', { frameTimeoutMs: 300 })
     const pid = h.pid!
     const e = await h.recognize(new Uint8Array(16), 4, 4).catch((x: unknown) => x)
     expect(e).toBeInstanceOf(OcrUnavailableError)
+    expect((e as OcrUnavailableError).reason).toBe('stopped')
     expect(await waitGone(pid, 2000)).toBe(true)
     // depois da falha, novos pedidos falham na hora
     await expect(h.recognize(new Uint8Array(16), 4, 4)).rejects.toBeInstanceOf(OcrUnavailableError)

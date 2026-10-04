@@ -370,6 +370,8 @@ describe('varredura real (ffmpeg + Windows.Media.Ocr)', () => {
     const res = await runScan({ filePath: statics[0].file, fromUs: 0, toUs: 1_000_000 }, deps({ helperLang: 'xx-XX' }))
     expect(res.error?.code).toBe('ocrUnavailable')
     expect(res.error?.message).toMatch(/reconhecimento de texto do Windows não está disponível/)
+    // a UI mostra "instale o idioma" só para este motivo (achado #4 da revisão final)
+    expect(res.error?.reason).toBe('noLanguage')
     expect(res.occurrences).toEqual([])
   })
 

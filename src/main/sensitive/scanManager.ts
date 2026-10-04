@@ -106,3 +106,53 @@ export class SensitiveScans {
     this.current?.ac.abort()
   }
 }
+
+/** O que a varredura usa do webContents de quem pediu (injetável: testado com um EventEmitter). */
+export interface ScanSender {
+  isDestroyed(): boolean
+  send(channel: string, payload: unknown): void
+  on(event: string, listener: (...args: unknown[]) => void): unknown
+  removeListener(event: string, listener: (...args: unknown[]) => void): unknown
+}
+
+/**
+ * Começa a varredura pedida por uma página: progresso/fim vão para ela, e a varredura (com os processos dela) acaba
+ * junto com a página — janela fechada, renderer caído ou página recarregada/navegada (quadro principal, outro
+ * documento). Os ouvintes saem quando a varredura termina (nada se acumula a cada busca).
+ */
+export function startScanForSender(scans: SensitiveScans, wc: ScanSender, raw: unknown, channels: { progress: string; done: string }): { scanId: string; error?: ScanError } {
+  const send = (channel: string, payload: unknown): void => {
+    if (!wc.isDestroyed()) wc.send(channel, payload)
+  }
+  let scanId = ''
+  let finished = false
+  const cancel = (): void => {
+    if (scanId) scans.cancel(scanId)
+  }
+  const onNavigate = (...args: unknown[]): void => {
+    // Electron atual: 1º argumento traz isMainFrame/isSameDocument; forma antiga: (evento, url, isInPlace, isMainFrame)
+    const d = args[0] as { isMainFrame?: unknown; isSameDocument?: unknown } | undefined
+    const main = typeof d?.isMainFrame === 'boolean' ? d.isMainFrame : args[3] === true
+    const same = typeof d?.isSameDocument === 'boolean' ? d.isSameDocument : args[2] === true
+    if (main && !same) cancel()
+  }
+  const unbind = (): void => {
+    wc.removeListener('destroyed', cancel)
+    wc.removeListener('render-process-gone', cancel)
+    wc.removeListener('did-start-navigation', onNavigate)
+  }
+  const r = scans.start(raw, {
+    progress: (p) => send(channels.progress, p),
+    done: (d) => {
+      finished = true
+      unbind()
+      send(channels.done, d)
+    }
+  })
+  if (r.error || finished) return r
+  scanId = r.scanId
+  wc.on('destroyed', cancel)
+  wc.on('render-process-gone', cancel)
+  wc.on('did-start-navigation', onNavigate)
+  return r
+}

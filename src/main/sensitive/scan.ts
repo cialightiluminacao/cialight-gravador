@@ -169,7 +169,7 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
     const started = await Promise.race([helperP, aborted]).catch((e: unknown) => e)
     if (onAbortStart) signal?.removeEventListener('abort', onAbortStart)
     if (started === 'aborted') return finish({ cancelled: true })
-    if (!(started instanceof OcrHelper)) return finish({ error: { code: 'ocrUnavailable', message: started instanceof OcrUnavailableError ? started.message : OCR_UNAVAILABLE_MESSAGE } })
+    if (!(started instanceof OcrHelper)) return finish({ error: started instanceof OcrUnavailableError ? { code: 'ocrUnavailable', message: started.message, reason: started.reason } : { code: 'ocrUnavailable', message: OCR_UNAVAILABLE_MESSAGE, reason: 'powershell' } })
     helper = started
     lang = helper.lang
     timings.startMs = Math.round(performance.now() - t0)
@@ -226,11 +226,14 @@ export async function runScan(req: ScanRequest, deps: ScanDeps, opts: ScanRunOpt
       samples.push({ tUs: f.tUs, detections: lastDets })
       progress({ phase: 'lendo', done: framesSampled, total })
     }
+    // os quadros guardados para a retropropagação (até HISTORY_MAX_BYTES) não servem ao refinamento: soltos já
+    history.length = 0
+    lastFrame = null
     if (signal?.aborted) return finish({ cancelled: true })
     const groupCtx = { fromUs, toUs, sourceW: W, sourceH: H, intervalUs: SAMPLE_INTERVAL_US, idPrefix: opts.scanId ? `${opts.scanId}:` : '' }
     if (ocrError) {
       stream.kill()
-      return finish({ error: { code: 'ocrUnavailable', message: ocrError.message } })
+      return finish({ error: { code: 'ocrUnavailable', message: ocrError.message, reason: ocrError.reason } })
     }
     const res = await stream.done
     if (res.code !== 0 && !res.killed) {

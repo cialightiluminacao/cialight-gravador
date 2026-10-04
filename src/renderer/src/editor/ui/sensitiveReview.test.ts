@@ -15,6 +15,8 @@ import {
   formatSpan,
   hideRows,
   hideToast,
+  OCR_LANG_HINT,
+  ocrUnavailableHint,
   kindCounts,
   mergeRanges,
   parseCustomWords,
@@ -169,7 +171,30 @@ describe('aplicação', () => {
     expect(o.itemIds).toHaveLength(0)
     expect(o.notHidden).toBe(2)
     expect([...o.notHiddenIds].sort()).toEqual(['x:o1', 'x:o2'])
-    expect(hideToast({ requested: 3, notHidden: 1, itemIds: ['e1', 'e2'] })).toEqual({ title: '2 dados escondidos (2 efeitos criados)', description: '1 não pôde ser escondido (faixa bloqueada)' })
+    expect(hideToast(o)).toEqual({ title: '0 dados escondidos (0 efeitos criados)', description: '2 não puderam ser escondidos (faixa bloqueada)' })
+    expect(hideToast({ requested: 3, notHidden: 1, itemIds: ['e1', 'e2'], skipped: [{ occurrenceId: 'a', reason: 'locked' }] })).toEqual({ title: '2 dados escondidos (2 efeitos criados)', description: '1 não pôde ser escondido (faixa bloqueada)' })
+  })
+  it('aviso diz o motivo real de cada pulo (fora dos clipes × faixa bloqueada)', () => {
+    const notIn = { requested: 2, notHidden: 1, itemIds: ['e1'], skipped: [{ occurrenceId: 'a', reason: 'notInClip' as const }] }
+    expect(hideToast(notIn).description).toBe('1 não pôde ser escondido (o trecho não aparece em nenhum clipe da linha do tempo)')
+    expect(hideToast(notIn).description).not.toMatch(/bloqueada/)
+    // ocorrência com os dois motivos conta como bloqueada (é o que o usuário pode resolver); as partes somam o total
+    const mixed = {
+      requested: 5, notHidden: 3, itemIds: ['e1', 'e2'],
+      skipped: [{ occurrenceId: 'a', reason: 'locked' as const }, { occurrenceId: 'b', reason: 'notInClip' as const }, { occurrenceId: 'c', reason: 'notInClip' as const }, { occurrenceId: 'a', reason: 'notInClip' as const }]
+    }
+    expect(hideToast(mixed).description).toBe('3 não puderam ser escondidos (1 em faixa bloqueada; 2 não aparecem em nenhum clipe da linha do tempo)')
+    // ponta a ponta: asset sem clipe → notInClip
+    const p = project([A], [vtrack('v1', [])])
+    const o = hideRows(p, buildRows(project([A], [vtrack('v1', [clip(A, 'a1', 0, 10 * S)])]), [{ assetId: 'A', occurrences: [occ('x:o1', 'cpf', 2 * S, 3 * S)] }]), 'blur')
+    expect(o.skipped.map((s) => s.reason)).toEqual(['notInClip'])
+    expect(hideToast(o).description).toMatch(/não aparece em nenhum clipe/)
+  })
+  it('dica do OCR indisponível conforme o motivo (idioma só quando falta idioma)', () => {
+    expect(ocrUnavailableHint('noLanguage')).toBe(OCR_LANG_HINT)
+    for (const r of ['powershell', 'stopped', undefined] as const) expect(ocrUnavailableHint(r)).not.toBe(OCR_LANG_HINT)
+    expect(ocrUnavailableHint('powershell')).toMatch(/PowerShell do Windows pode estar bloqueado/)
+    expect(ocrUnavailableHint('stopped')).toMatch(/Tente de novo/)
   })
 })
 

@@ -24,6 +24,16 @@ function three(): { p: Project; ids: string[]; lab: Map<string, string> } {
   })
   return { p, ids, lab }
 }
+/** Como `shape`, com o grupo de cada item (L0, L1… na ordem em que aparecem; '-' = sem vínculo). */
+function shapeLinks(q: Project, lab: Map<string, string>): string[] {
+  const names = new Map<string, string>()
+  const link = (id: string | undefined): string => {
+    if (!id) return '-'
+    if (!names.has(id)) names.set(id, `L${names.size}`)
+    return names.get(id)!
+  }
+  return q.tracks.map((t) => t.items.map((i) => `${lab.get(i.id) ?? '?'}@${i.startUs / S}+${i.durationUs / S}:${link(i.linkId)}`).join(' '))
+}
 const shape = (q: Project, lab: Map<string, string>): string[] => q.tracks.map((t) => t.items.map((i) => `${lab.get(i.id) ?? '?'}@${i.startUs / S}+${i.durationUs / S}`).join(' '))
 
 describe('edições sobre projeto congelado (resultado igual ao de antes da otimização)', () => {
@@ -44,7 +54,10 @@ describe('edições sobre projeto congelado (resultado igual ao de antes da otim
   it('mover inserindo duas vezes seguidas e com o grupo religado (linkItems) também escreve no lugar', () => {
     const { p, ids, lab } = three()
     const q = moveItems(moveItems(linkItems(p, [ids[1], ids[2]]), [ids[0]], 20 * S, { mode: 'insert' }), [ids[1]], 5 * S, { mode: 'insert' })
-    expect(shape(q, lab).length).toBe(2)
+    // estrutura inteira (posições, durações e grupos), gerada com o ops.ts de antes da otimização (873c1c8): o
+    // linkItems tira v1/v2 dos grupos com o áudio (a1/a2 ficam soltos e são empurrados/recortados por conta própria)
+    expect(shapeLinks(q, lab)).toEqual(['v1@15+10:L0 v2@35+10:L0 v0@50+10:L1', 'a1@10+5:- ?@45+5:- a0@50+10:L1 a2@60+10:-'])
+    expect(Object.isFrozen(q.tracks[0].items[0])).toBe(true)
   })
 })
 

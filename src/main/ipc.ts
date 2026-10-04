@@ -29,7 +29,7 @@ import { encoderFallbackChain } from '@shared/encoderCache'
 import type { AudioProcessOpts } from '@shared/editor/audioProcess'
 import { ffmpegPath, ffprobePath, ocrScriptPath, rnnoiseDir } from './export/ffmpegPath'
 import { runScan } from './sensitive/scan'
-import { probeVideoStream, SensitiveScans, type StreamInfo } from './sensitive/scanManager'
+import { probeVideoStream, SensitiveScans, startScanForSender, type StreamInfo } from './sensitive/scanManager'
 import { MissingModelError, missingModelMessage } from './media/audioProcess'
 import { buildReviewAssets } from './export/reviewAssets'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -659,16 +659,8 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       }
     }
   )
-  ipcMain.handle(IPC.editorSensitive.start, (e, req: unknown) => {
-    const wc = e.sender
-    const send = (channel: string, payload: unknown): void => {
-      if (!wc.isDestroyed()) wc.send(channel, payload)
-    }
-    const r = sensitiveScans.start(req, { progress: (p) => send(IPC.editorSensitive.progress, p), done: (d) => send(IPC.editorSensitive.done, d) })
-    // janela fechada no meio: a varredura (e os processos dela) acaba junto
-    if (!r.error) wc.once('destroyed', () => sensitiveScans.cancel(r.scanId))
-    return r
-  })
+  // janela fechada, renderer caído ou recarregado no meio: a varredura (e os processos dela) acaba junto
+  ipcMain.handle(IPC.editorSensitive.start, (e, req: unknown) => startScanForSender(sensitiveScans, e.sender, req, IPC.editorSensitive))
   ipcMain.handle(IPC.editorSensitive.cancel, (_e, scanId: unknown) => typeof scanId === 'string' && sensitiveScans.cancel(scanId))
   app.on('will-quit', () => sensitiveScans.cancelAll())
 

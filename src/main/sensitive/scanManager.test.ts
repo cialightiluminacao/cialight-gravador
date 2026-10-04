@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { ScanResult } from '@shared/editor/sensitiveScan'
 import type { ScanRequest, ScanRunOpts } from './scan'
-import { MAX_CUSTOM_TERMS, probeVideoStream, SensitiveScans, validateScanRequest } from './scanManager'
+import { EventEmitter } from 'events'
+import { MAX_CUSTOM_TERMS, probeVideoStream, SensitiveScans, startScanForSender, validateScanRequest } from './scanManager'
 
 const FILE = 'C:\\videos\\gravacao.mp4'
 const isFile = (p: string): boolean => p === FILE
@@ -119,6 +120,85 @@ describe('SensitiveScans', () => {
     m.start(ok, { progress: () => {}, done: (d) => done.push(d) })
     await new Promise((r) => setTimeout(r, 0))
     expect(done[0].result.error?.code).toBe('ffmpeg')
+    expect(m.running).toBeNull()
+  })
+})
+
+describe('startScanForSender (achado #2 da revisão final: a varredura segue a vida da página)', () => {
+  /** webContents falso: EventEmitter + isDestroyed/send. */
+  class FakeWc extends EventEmitter {
+    destroyed = false
+    sent: [string, unknown][] = []
+    isDestroyed(): boolean {
+      return this.destroyed
+    }
+    send(channel: string, payload: unknown): void {
+      this.sent.push([channel, payload])
+    }
+  }
+  const EVENTS = ['destroyed', 'render-process-gone', 'did-start-navigation'] as const
+  const listeners = (wc: FakeWc): number => EVENTS.reduce((n, e) => n + wc.listenerCount(e), 0)
+  const cancellable = (): { run: (r: ScanRequest, o: ScanRunOpts) => Promise<ScanResult>; finish: () => void } => {
+    let finish = (): void => {}
+    return {
+      run: (_r, o) => new Promise((res) => {
+        finish = () => res(empty)
+        o.signal?.addEventListener('abort', () => res({ ...empty, cancelled: true }))
+      }),
+      finish: () => finish()
+    }
+  }
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
+  const ch = { progress: 'p', done: 'd' }
+
+  it('ao terminar, os ouvintes do webContents saem (sem MaxListenersExceededWarning após muitas buscas)', async () => {
+    const wc = new FakeWc()
+    for (let i = 0; i < 15; i++) {
+      const c = cancellable()
+      const m = new SensitiveScans(c.run, isFile)
+      const r = startScanForSender(m, wc, ok, ch)
+      expect(r.error).toBeUndefined()
+      expect(listeners(wc)).toBe(3)
+      c.finish()
+      await tick()
+      expect(listeners(wc)).toBe(0)
+    }
+    expect(wc.sent.filter(([c]) => c === 'd')).toHaveLength(15)
+  })
+  it('erro imediato (busy/invalid) não deixa ouvinte', () => {
+    const wc = new FakeWc()
+    const m = new SensitiveScans(cancellable().run, isFile)
+    expect(startScanForSender(m, wc, { ...ok, toUs: NaN }, ch).error?.code).toBe('invalid')
+    expect(listeners(wc)).toBe(0)
+  })
+  for (const [name, emit] of [
+    ['janela fechada (destroyed)', (wc: FakeWc) => { wc.destroyed = true; wc.emit('destroyed') }],
+    ['renderer caiu (render-process-gone)', (wc: FakeWc) => wc.emit('render-process-gone', {}, { reason: 'crashed' })],
+    ['recarregou (did-start-navigation do quadro principal)', (wc: FakeWc) => wc.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false, url: 'app://x' })]
+  ] as const) {
+    it(`${name} cancela a varredura e libera a próxima`, async () => {
+      const wc = new FakeWc()
+      const m = new SensitiveScans(cancellable().run, isFile)
+      const r = startScanForSender(m, wc, ok, ch)
+      emit(wc)
+      await tick()
+      expect(m.running).toBeNull()
+      expect(listeners(wc)).toBe(0)
+      if (!wc.destroyed) expect(wc.sent.find(([c]) => c === 'd')?.[1]).toMatchObject({ scanId: r.scanId, result: { cancelled: true } })
+      else expect(wc.sent).toEqual([])
+    })
+  }
+  it('navegação de subquadro ou na mesma página (hash) não cancela', async () => {
+    const wc = new FakeWc()
+    const c = cancellable()
+    const m = new SensitiveScans(c.run, isFile)
+    const r = startScanForSender(m, wc, ok, ch)
+    wc.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false, url: 'x' })
+    wc.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true, url: '#a' })
+    await tick()
+    expect(m.running).toBe(r.scanId)
+    c.finish()
+    await tick()
     expect(m.running).toBeNull()
   })
 })

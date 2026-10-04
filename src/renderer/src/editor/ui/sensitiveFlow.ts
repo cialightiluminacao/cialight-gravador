@@ -8,7 +8,7 @@ import { useSensitiveScan } from '../state/sensitiveScan'
 import { seekTo } from './editorActions'
 import { makeThumbs } from './sensitiveThumbs'
 import { scanOnce } from './sensitiveScanIpc'
-import { buildRows, hideRows, hideToast, OCR_LANG_HINT, parseCustomWords, planScan, SCAN_DISCLAIMER, type ReviewRow, type ScanOutcome } from './sensitiveReview'
+import { buildRows, hideRows, hideToast, ocrUnavailableHint, parseCustomWords, planScan, SCAN_DISCLAIMER, type ReviewRow, type ScanOutcome } from './sensitiveReview'
 
 // Fluxo do "Procurar dados sensíveis" (G3): varreduras em sequência pelo IPC (uma por arquivo/trecho), cancelamento,
 // miniaturas e a aplicação (um passo de desfazer). PRIVACIDADE: termos e resultados só na memória (state/sensitiveScan);
@@ -89,7 +89,7 @@ export async function startSensitiveScan(): Promise<void> {
       }
       if (result.error) {
         ss().patch({ step: 'setup', progress: null })
-        if (result.error.code === 'ocrUnavailable') toast.error(result.error.message, { description: OCR_LANG_HINT, duration: 15_000 })
+        if (result.error.code === 'ocrUnavailable') toast.error(result.error.message, { description: ocrUnavailableHint(result.error.reason), duration: 15_000 })
         else toast.error('A busca de dados sensíveis falhou', { description: `${result.error.message}${multi ? ' Nenhum resultado foi mantido.' : ''}` })
         return
       }

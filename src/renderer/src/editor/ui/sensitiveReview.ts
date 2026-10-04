@@ -6,7 +6,7 @@
 import type { Asset, MediaItem, Project, Us } from '@shared/editor/project'
 import { SENSITIVE_KIND_LABELS, type OcrBox, type SensitiveKind } from '@shared/editor/sensitive'
 import { hideOccurrences, occurrenceSpans, type HideResult } from '@shared/editor/sensitiveEffects'
-import { occurrenceRegionAt, type Occurrence, type ScanPhase } from '@shared/editor/sensitiveScan'
+import { occurrenceRegionAt, type Occurrence, type ScanErrorReason, type ScanPhase } from '@shared/editor/sensitiveScan'
 import { sourceTimeUs } from '@shared/editor/sourceTime'
 import { formatTimecodeUs, frameDurUs, itemEndUs } from '@shared/editor/time'
 
@@ -22,6 +22,15 @@ export const ALL_KINDS = Object.keys(SENSITIVE_KIND_LABELS) as SensitiveKind[]
 
 export const SCAN_DISCLAIMER = 'A busca é uma ajuda: confira o vídeo — textos muito pequenos ou em fonte monoespaçada podem escapar.'
 export const OCR_LANG_HINT = 'Instale o idioma Português ou Inglês nas configurações do Windows'
+export const OCR_POWERSHELL_HINT = 'O PowerShell do Windows pode estar bloqueado ou ausente neste computador (política da empresa ou antivírus); o reconhecimento de texto depende dele'
+export const OCR_STOPPED_HINT = 'O reconhecimento parou no meio da busca. Tente de novo; se continuar, reinicie o computador'
+
+/** Dica do erro 'ocrUnavailable' conforme o motivo vindo do main (a do idioma só quando falta o idioma). */
+export function ocrUnavailableHint(reason: ScanErrorReason | undefined): string {
+  if (reason === 'noLanguage') return OCR_LANG_HINT
+  if (reason === 'stopped') return OCR_STOPPED_HINT
+  return OCR_POWERSHELL_HINT
+}
 
 // ---------------------------------------------------------------- o que varrer
 
@@ -259,12 +268,20 @@ export function hideRows(p: Project, rows: readonly ReviewRow[], style: 'blur' |
   return { project, itemIds, skipped, requested: rows.length, notHidden: notHiddenIds.size, notHiddenIds }
 }
 
-/** Texto do aviso do resultado (nunca silêncio). */
-export function hideToast(o: Pick<HideOutcome, 'requested' | 'notHidden' | 'itemIds'>): { title: string; description?: string } {
+/** Texto do aviso do resultado (nunca silêncio), com o motivo real de cada ocorrência pulada. */
+export function hideToast(o: Pick<HideOutcome, 'requested' | 'notHidden' | 'itemIds' | 'skipped'>): { title: string; description?: string } {
   const n = o.requested - o.notHidden, m = o.itemIds.length
   const title = `${n === 1 ? '1 dado escondido' : `${n} dados escondidos`} (${m === 1 ? '1 efeito criado' : `${m} efeitos criados`})`
   if (!o.notHidden) return { title }
-  return { title, description: `${o.notHidden === 1 ? '1 não pôde ser escondido' : `${o.notHidden} não puderam ser escondidos`} (faixa bloqueada)` }
+  // uma ocorrência pulada por mais de um motivo conta como bloqueada (é o que o usuário pode resolver)
+  const locked = new Set(o.skipped.filter((s) => s.reason === 'locked').map((s) => s.occurrenceId))
+  const notIn = new Set(o.skipped.filter((s) => s.reason === 'notInClip' && !locked.has(s.occurrenceId)).map((s) => s.occurrenceId))
+  const head = o.notHidden === 1 ? '1 não pôde ser escondido' : `${o.notHidden} não puderam ser escondidos`
+  let why: string
+  if (locked.size && notIn.size) why = `${locked.size} em faixa bloqueada; ${notIn.size} ${notIn.size === 1 ? 'não aparece' : 'não aparecem'} em nenhum clipe da linha do tempo`
+  else if (notIn.size) why = `o trecho não aparece em nenhum clipe da linha do tempo`
+  else why = 'faixa bloqueada'
+  return { title, description: `${head} (${why})` }
 }
 
 // ---------------------------------------------------------------- formatos

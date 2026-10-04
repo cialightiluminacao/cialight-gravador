@@ -1,11 +1,16 @@
 // Helper de OCR FALSO (testes de ocrHelper.ts): fala o protocolo do resources/ocr/ocr-winrt.ps1 sem OCR.
-// Modo (argv[2]): ok | notready | hang (não responde quadros) | ignorequit (não sai com quit) | garbage (resposta não-JSON)
+// Modo (argv[2]): ok | notready | notready-other (falha do WinRT/PowerShell) | exit (sai antes do ready) | hang (não responde quadros) | ignorequit (não sai com quit) | garbage (resposta não-JSON)
 const mode = process.argv[2] ?? 'ok'
 const send = (o) => process.stdout.write(typeof o === 'string' ? o + '\n' : JSON.stringify(o) + '\n')
 if (mode === 'notready') {
   send({ ready: false, error: 'idioma de OCR não instalado: xx-XX' })
   process.exit(2)
 }
+if (mode === 'notready-other') {
+  send({ ready: false, error: 'Add-Type : Cannot add type. Exception calling LoadWithPartialName' })
+  process.exit(2)
+}
+if (mode === 'exit') process.exit(1)
 send({ ready: true, lang: 'en-US', maxDim: 10000, startMs: 5 })
 let buf = Buffer.alloc(0)
 let need = null
