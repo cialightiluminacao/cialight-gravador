@@ -831,7 +831,9 @@ async function runTracking(job: TrackJobSpec, signal: AbortSignal): Promise<Trac
 /**
  * G1: a exportação decodifica em software — os quadros I420 ficam na CPU e sobem pelo caminho YUV do compositor
  * (sem o NV12 de hardware → RGBA do Chromium); fonte que não decodifica em software cai para hardware no pool. Vale
- * para o vídeo e para os quadros (GIF / reserva libx264): o mesmo decoder e a mesma conversão em todos os formatos.
+ * para o vídeo e para os quadros (GIF / reserva libx264). O quadro único (PNG, `exportStill`) NÃO passa por aqui: roda numa
+ * instância própria (renderStill) com o decoder sem preferência (hardware) e a conversão do Chromium — pode diferir em
+ * até 2 níveis do mesmo quadro no MP4.
  * Esta instância do worker é só da exportação (o preview tem a dele, que fica em hardware — medição no topo do arquivo).
  * `decoder: 'hardware'` (só QA, A/B do benchmark) força o caminho antigo.
  */
