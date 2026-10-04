@@ -417,12 +417,13 @@ async function main(truth) {
     const r = await ev(`await T.clearToasts(); const before = JSON.stringify(T.caps()); const p0 = T.past(); await T.openGenerate(); await T.pickMode('replace')
       await T.click(T.el('[data-generate-start]'))
       let s = null
-      for (let i = 0; i < 600; i++) { s = T.step(); if (s && (s.startsWith('Transcrevendo') || s === 'Extraindo áudio')) break; await T.wait(50) }
+      for (let i = 0; i < 600; i++) { s = T.step(); if (s && s.startsWith('Transcrevendo')) break; await T.wait(50) }
+      const focusOnCancel = document.activeElement === T.el('[data-generate-cancel]')
       await T.click(T.el('[data-generate-cancel]'))
       const toast = await T.waitToast((t) => t.includes('Geração de legendas cancelada'), 20000)
       await T.wait(1500)
-      return { s, toast, same: JSON.stringify(T.caps()) === before, past: T.past(), p0, open: !!T.gen(), running: !!T.gen()?.querySelector('[data-generate-progress]') }`)
-    check(`cancelado em "${r.s}": toast, nada aplicado, nenhum passo novo`, !!r.toast && r.same && r.past === r.p0 && !r.running, r)
+      return { s, focusOnCancel, toast, same: JSON.stringify(T.caps()) === before, past: T.past(), p0, open: !!T.gen(), running: !!T.gen()?.querySelector('[data-generate-progress]') }`)
+    check(`cancelado em "${r.s}" (Transcrevendo): foco no Cancelar, toast, nada aplicado, nenhum passo novo`, /^Transcrevendo/.test(r.s || '') && r.focusOnCancel === true && !!r.toast && r.same && r.past === r.p0 && !r.running, r)
     // Esc com o diálogo aberto (parado) fecha
     const esc = await ev(`T.dialog().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true })); await T.wait(300); return !!T.gen()`)
     check('Esc fecha o diálogo', esc === false, esc)

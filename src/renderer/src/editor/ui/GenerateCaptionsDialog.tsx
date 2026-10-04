@@ -40,6 +40,12 @@ export function GenerateCaptionsDialog({ open, onOpenChange, captionCount }: { o
   const [stage, setStage] = useState<GenerateStage | null>(null)
   const runRef = useRef<RunToken | null>(null)
   const running = stage !== null
+  const cancelBtnRef = useRef<HTMLButtonElement>(null)
+
+  // "Gerar" vira "Cancelar": o foco do teclado vai junto (o botão focado some do DOM)
+  useEffect(() => {
+    if (running) cancelBtnRef.current?.focus()
+  }, [running])
 
   useEffect(() => {
     if (!open) return
@@ -119,8 +125,11 @@ export function GenerateCaptionsDialog({ open, onOpenChange, captionCount }: { o
       }
       if ('cancelled' in res || token.cancelled) return cancelled()
       setStage({ kind: 'build' })
-      // projeto trocado no meio (outro projeto aberto): nada a aplicar
-      if (st().project?.id !== p.id) return
+      // projeto trocado no meio (outro projeto aberto): nada a aplicar (avisa — nenhuma ação silenciosa)
+      if (st().project?.id !== p.id) {
+        toast.info('As legendas não foram aplicadas: outro projeto foi aberto durante a transcrição.')
+        return
+      }
       const words = res.words
       let out: BuildResult | null = null
       const applied = st().apply((cur) => {
@@ -231,7 +240,7 @@ export function GenerateCaptionsDialog({ open, onOpenChange, captionCount }: { o
 
           <div className="flex justify-end gap-2">
             {running ? (
-              <Button variant="secondary" onClick={cancelRun} data-generate-cancel="">
+              <Button ref={cancelBtnRef} variant="secondary" onClick={cancelRun} data-generate-cancel="">
                 Cancelar
               </Button>
             ) : (
