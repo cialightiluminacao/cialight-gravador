@@ -22,6 +22,7 @@ import type { AssetToCopy, BrandTemplate } from './editor/brand'
 import type { PersistedQueueItem } from './exportQueueFile'
 import type { SensitiveKind } from './editor/sensitive'
 import type { ScanError, ScanProgress, ScanResult } from './editor/sensitiveScan'
+import type { SourceWord, TranscribeJob } from './editor/transcribePlan'
 
 export type Unsubscribe = () => void
 
@@ -78,6 +79,18 @@ export type GeneratedExt = 'm4a'
 export type IngestStep = 'probe' | 'proxy' | 'intermediate' | 'filmstrip' | 'peaks' | 'speech' | 'loudness' | 'audioProcess'
 /** Progresso de uma etapa da ingestão de um asset (0–100). `key`: chave do pré-processamento de áudio (step 'audioProcess'). */
 export interface IngestJob { projectId: string; assetId: string; step: IngestStep; percent: number; key?: string }
+// ---- legendas automáticas (whisper.cpp, G2) ----
+export type WhisperModelId = 'base' | 'small'
+export type TranscribeLanguage = 'pt' | 'en' | 'es' | 'auto'
+/** Modelo do catálogo: `present` = baixado e verificado (tamanho + carimbo do sha256). */
+export interface WhisperModelStatus { id: WhisperModelId; label: string; sizeBytes: number; present: boolean }
+export interface WhisperDownloadProgress { id: WhisperModelId; receivedBytes: number; totalBytes: number }
+/** Trechos da FONTE a transcrever (planTranscription → jobs) com o modelo e o idioma. */
+export interface TranscribeRequest { projectId: string; modelId: WhisperModelId; language: TranscribeLanguage; jobs: TranscribeJob[] }
+/** `fraction`: progresso total (0–1), ponderado pela duração dos trechos. */
+export interface TranscribeProgress { stage: 'extract' | 'transcribe'; jobIndex: number; jobCount: number; fraction: number }
+/** Palavras por asset em tempo da FONTE (o renderer leva à timeline com wordsToTimeline) e avisos em pt-BR. */
+export interface TranscribeResult { words: Record<string, SourceWord[]>; warnings: string[] }
 /** Resultado da ingestão de um asset: patch para ops.updateAsset (caminhos relativos à pasta do projeto). */
 export interface IngestDone { projectId: string; assetId: string; patch: Partial<Asset> }
 
@@ -474,6 +487,22 @@ export interface IpcApi {
     status(): Promise<HotkeyStatus[]>
     onStatus(cb: (s: HotkeyStatus[]) => void): Unsubscribe
   }
+  /**
+   * Legendas automáticas (whisper.cpp offline). `models`: catálogo com o estado de cada modelo. `downloadModel`: baixa
+   * (espelho, depois upstream; sha256 conferido) — rede só aqui; um download por vez; `{ cancelled: true }` se
+   * `cancelDownload` interrompeu. `run`: extrai cada trecho (16 kHz mono) e transcreve; uma transcrição por vez; modelo
+   * ausente, falha do whisper etc. rejeitam com mensagem pt-BR; `{ cancelled: true }` se `cancel` interrompeu.
+   * Progresso por `onDownloadProgress` / `onProgress` (só para a janela que pediu).
+   */
+  transcribe: {
+    models(): Promise<WhisperModelStatus[]>
+    downloadModel(id: WhisperModelId): Promise<{ ok: true } | { cancelled: true }>
+    cancelDownload(): Promise<void>
+    run(req: TranscribeRequest): Promise<TranscribeResult | { cancelled: true }>
+    cancel(): Promise<void>
+    onDownloadProgress(cb: (p: WhisperDownloadProgress) => void): Unsubscribe
+    onProgress(cb: (p: TranscribeProgress) => void): Unsubscribe
+  }
   update: {
     check(manual: boolean): Promise<void>
     download(): Promise<void>
@@ -593,6 +622,15 @@ export const IPC = {
     reviewAssetsProgress: 'export:reviewAssetsProgress'
   },
   hotkeys: { apply: 'hotkeys:apply', status: 'hotkeys:status', statusChanged: 'hotkeys:statusChanged' },
+  transcribe: {
+    models: 'transcribe:models',
+    downloadModel: 'transcribe:downloadModel',
+    cancelDownload: 'transcribe:cancelDownload',
+    run: 'transcribe:run',
+    cancel: 'transcribe:cancel',
+    downloadProgress: 'transcribe:downloadProgress',
+    progress: 'transcribe:progress'
+  },
   update: { check: 'update:check', download: 'update:download', install: 'update:install', status: 'update:status', statusChanged: 'update:statusChanged' }
 } as const
 

@@ -18,6 +18,11 @@ export const SPEECH_DEFAULTS = { thresholdDb: -35, minSilenceUs: 350_000, padUs:
 
 const toUs = (sec: string): Us => Math.round(Number(sec) * 1_000_000)
 
+/** Filtro do ffmpeg da detecção de silêncio (ingestão e transcrição usam o mesmo critério). */
+export function silencedetectFilter(thresholdDb: number = SPEECH_DEFAULTS.thresholdDb, minSilenceUs: Us = SPEECH_DEFAULTS.minSilenceUs): string {
+  return `silencedetect=n=${thresholdDb}dB:d=${minSilenceUs / 1_000_000}`
+}
+
 /** Lê os `silence_start` / `silence_end` do stderr (aceita CRLF). Início negativo (offset do stream) vira 0. */
 export function parseSilencedetect(stderr: string): Silence[] {
   const out: Silence[] = []

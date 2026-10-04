@@ -18,6 +18,7 @@ import { projectFromSession } from '@shared/editor/fromSession'
 import { newId, newProjectId } from '@shared/editor/ids'
 import { parseProject } from '@shared/editor/schema'
 import { IngestQueue, assetFromInfo, type IngestInput } from './media/ingest'
+import { resolveAssetInput, type AssetInputDeps } from './media/assetInput'
 import { findRelinkCandidates, relinkQuery } from './project/relinkSearch'
 import { IMAGE_EXTENSIONS, probe } from './media/probe'
 import { getRecorderWindow, showRecorder, displayIdOfWindow, setEditorMode, isQuitting } from './windows/recorderWindow'
@@ -29,7 +30,7 @@ import { applyHotkeys, getHotkeyStatus } from './hotkeys/globalShortcuts'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { encoderFallbackChain } from '@shared/encoderCache'
 import type { AudioProcessOpts } from '@shared/editor/audioProcess'
-import { ffmpegPath, ffprobePath, ocrScriptPath, rnnoiseDir } from './export/ffmpegPath'
+import { ffmpegPath, ffprobePath, ocrScriptPath, rnnoiseDir, whisperCliPath } from './export/ffmpegPath'
 import { runScan } from './sensitive/scan'
 import { probeVideoStream, SensitiveScans, startScanForSender, type StreamInfo } from './sensitive/scanManager'
 import { MissingModelError, missingModelMessage } from './media/audioProcess'
@@ -43,6 +44,9 @@ import { decodeSrtBytes, encodeSrtFile, writeSrtBesideFile } from './captions/sr
 import { sanitizeFileName } from '@shared/filenames'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
+import { DownloadCancelledError, cleanupDownloadPartsSync, downloadModel, isWhisperModelId, modelFileIfPresent, modelStatus, whisperModelsDir } from './transcribe/whisperModels'
+import { TranscribeCancelledError, TranscribeService, transcribeInputOf } from './transcribe/transcribeService'
+import type { TranscribeLanguage, TranscribeRequest } from '@shared/ipc'
 import { trayBalloon } from './tray'
 import { ExportQueueStates, setExportCountsSource } from './quitGuard'
 import { cursorBegin, cursorDiscard, cursorPause, cursorResume, cursorStop } from './cursor/cursorCapture'
@@ -76,21 +80,12 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   // Projeto aberto em cada janela do editor (webContents.id → projectId|null).
   const openProjects = new Map<number, string | null>()
   const watchedContents = new Set<number>()
-  const resolveIngestInput = (projectId: string, a: Asset): IngestInput => {
-    switch (a.source.type) {
-      case 'file':
-        return { path: a.source.path }
-      case 'generated':
-        return { path: projects.filePath(projectId, a.source.file) }
-      case 'session': {
-        // rec.mp4 multi-faixa: índice por tipo vem de session.tracks; gravação do app dispensa proxy
-        const tracks = store.get(a.source.sessionId)?.tracks
-        const idx = tracks?.[a.source.stream] ?? 0
-        const isVideo = a.source.stream === 'screen' || a.source.stream === 'webcam'
-        return { path: store.filePath(a.source.sessionId, 'rec.mp4'), analyzeOnly: true, ...(isVideo ? { videoMap: `0:v:${idx}` } : { audioMap: `0:a:${idx}` }) }
-      }
-    }
+  const assetInputDeps: AssetInputDeps = {
+    projectFile: (projectId, rel) => projects.filePath(projectId, rel),
+    sessionFile: (sessionId, name) => store.filePath(sessionId, name),
+    sessionTracks: (sessionId) => store.get(sessionId)?.tracks
   }
+  const resolveIngestInput = (projectId: string, a: Asset): IngestInput => resolveAssetInput(assetInputDeps, projectId, a)
   /** `asset.cursor` da tela da gravação (cursor.json válido na pasta dela) ou null. */
   const cursorRefOf = (sessionId: string): string | null => {
     const dir = sessionDirFor((id) => store.dirOf(id), sessionId)
@@ -670,6 +665,97 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     const r = await writeSrtBesideFile(videoPath, text)
     if (r.path) editorExports.consumeCompletedOutput(videoPath)
     return r
+  })
+
+  // ---- legendas automáticas (whisper.cpp) ----
+  // Rede só em downloadModel (ação do usuário). Progresso vai só para a janela que pediu; janela fechada/recarregada
+  // cancela o que ela pediu (processos filhos mortos, temporários apagados).
+  const transcriber = new TranscribeService({
+    resolveInput: (projectId, assetId) => transcribeInputOf(assetInputDeps, projectId, projects.cached(projectId).assets.find((x) => x.id === assetId), assetId),
+    ffmpegPath,
+    whisperCliPath,
+    modelsDir: whisperModelsDir,
+    log
+  })
+  let downloadCtl: AbortController | null = null
+  let transcribeCtl: AbortController | null = null
+  const abortWhenGone = (wc: Electron.WebContents, ctl: AbortController): (() => void) => {
+    const abort = (): void => ctl.abort()
+    wc.once('destroyed', abort)
+    wc.on('render-process-gone', abort)
+    wc.on('did-navigate', abort)
+    return () => {
+      wc.removeListener('destroyed', abort)
+      wc.removeListener('render-process-gone', abort)
+      wc.removeListener('did-navigate', abort)
+    }
+  }
+  ipcMain.handle(IPC.transcribe.models, () => modelStatus())
+  ipcMain.handle(IPC.transcribe.downloadModel, async (e, id: unknown) => {
+    if (!isWhisperModelId(id)) throw new Error('Modelo de transcrição desconhecido.')
+    if (downloadCtl) throw new Error('Já existe um download de modelo em andamento.')
+    // já baixado e verificado (carimbo): nada a fazer, sem rede
+    if (modelFileIfPresent(id)) return { ok: true as const }
+    const wc = e.sender
+    const ctl = (downloadCtl = new AbortController())
+    const release = abortWhenGone(wc, ctl)
+    try {
+      await downloadModel(id, (p) => {
+        if (!wc.isDestroyed()) wc.send(IPC.transcribe.downloadProgress, { id, ...p })
+      }, ctl.signal)
+      log.info(`modelo de transcrição ${id} baixado e verificado em ${whisperModelsDir()}`)
+      return { ok: true as const }
+    } catch (err) {
+      if (err instanceof DownloadCancelledError) return { cancelled: true as const }
+      log.warn(`download do modelo ${id} falhou`, err)
+      throw err
+    } finally {
+      release()
+      if (downloadCtl === ctl) downloadCtl = null
+    }
+  })
+  ipcMain.handle(IPC.transcribe.cancelDownload, () => {
+    downloadCtl?.abort()
+  })
+  const LANGS: TranscribeLanguage[] = ['pt', 'en', 'es', 'auto']
+  const parseTranscribeRequest = (r: unknown): TranscribeRequest => {
+    const o = (r ?? {}) as Partial<TranscribeRequest>
+    if (typeof o.projectId !== 'string' || !isWhisperModelId(o.modelId) || !LANGS.includes(o.language as TranscribeLanguage) || !Array.isArray(o.jobs)) throw new Error('Pedido de transcrição inválido.')
+    const jobs = o.jobs.map((j) => {
+      if (!j || typeof j.assetId !== 'string' || !Number.isSafeInteger(j.fromUs) || !Number.isSafeInteger(j.toUs) || j.fromUs < 0 || j.toUs <= j.fromUs) throw new Error('Pedido de transcrição inválido.')
+      return { assetId: j.assetId, fromUs: j.fromUs, toUs: j.toUs }
+    })
+    return { projectId: o.projectId, modelId: o.modelId, language: o.language as TranscribeLanguage, jobs }
+  }
+  ipcMain.handle(IPC.transcribe.run, async (e, r: unknown) => {
+    const req = parseTranscribeRequest(r)
+    if (transcriber.busy) throw new Error('Já existe uma transcrição em andamento. Aguarde terminar ou cancele.')
+    const wc = e.sender
+    const ctl = (transcribeCtl = new AbortController())
+    const release = abortWhenGone(wc, ctl)
+    try {
+      return await transcriber.transcribe(req, (p) => {
+        if (!wc.isDestroyed()) wc.send(IPC.transcribe.progress, p)
+      }, ctl.signal)
+    } catch (err) {
+      if (err instanceof TranscribeCancelledError) return { cancelled: true as const }
+      throw err
+    } finally {
+      release()
+      if (transcribeCtl === ctl) transcribeCtl = null
+    }
+  })
+  ipcMain.handle(IPC.transcribe.cancel, () => {
+    transcribeCtl?.abort()
+  })
+  // saindo: will-quit não espera os finally assíncronos → mata o whisper/ffmpeg e apaga a pasta temporária da
+  // transcrição e o .part do download já, de forma síncrona (caminhos explícitos)
+  app.on('will-quit', () => {
+    transcribeCtl?.abort()
+    downloadCtl?.abort()
+    const tmp = transcriber.killAndCleanupSync()
+    const parts = cleanupDownloadPartsSync()
+    if (tmp || parts.length) log.info(`saída: limpeza da transcrição (${tmp ?? "—"}) e do download (${parts.join(", ") || "—"})`)
   })
 
   // saindo no meio de uma exportação/remux: interrompe, apaga os parciais e só então sai

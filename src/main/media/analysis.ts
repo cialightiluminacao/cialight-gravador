@@ -4,7 +4,7 @@ import { ffmpegPath } from '../export/ffmpegPath'
 import { jpegScaleColorOpts, type SourceColor } from '@shared/editor/sourceColor'
 import { FfmpegError, probeFile, runFfmpeg } from '../export/ffmpegRunner'
 import { log } from '../log'
-import { parseEbur128, parseSilencedetect, SPEECH_DEFAULTS, type Loudness, type SpeechFile } from '@shared/editor/speech'
+import { parseEbur128, parseSilencedetect, silencedetectFilter, SPEECH_DEFAULTS, type Loudness, type SpeechFile } from '@shared/editor/speech'
 
 // Análises para a timeline: filmstrip (sprite horizontal de miniaturas), peaks de áudio
 // (min/max por 10 ms) e a miniatura do projeto. Saídas são escritas em <arquivo>.part e
@@ -273,7 +273,7 @@ export interface SpeechOpts extends AnalysisOpts {
 export async function buildSpeech(input: string, outJson: string, durationUs: number, opts: SpeechOpts = {}): Promise<SpeechFile> {
   const thresholdDb = opts.thresholdDb ?? SPEECH_DEFAULTS.thresholdDb
   const minSilenceUs = opts.minSilenceUs ?? SPEECH_DEFAULTS.minSilenceUs
-  const filter = `silencedetect=n=${thresholdDb}dB:d=${minSilenceUs / 1_000_000}`
+  const filter = silencedetectFilter(thresholdDb, minSilenceUs)
   const text = await runAnalysisFilter(input, opts.map ?? '0:a:0', filter, /silence_(start|end)/, durationUs, opts, 'speech')
   const result: SpeechFile = { version: 1, thresholdDb, minSilenceUs, silences: parseSilencedetect(text), durationUs }
   const tmp = partPath(outJson)

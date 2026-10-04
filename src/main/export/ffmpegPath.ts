@@ -26,3 +26,11 @@ export function rnnoiseDir(): string {
 export function ocrScriptPath(): string {
   return app.isPackaged ? join(process.resourcesPath, 'ocr', 'ocr-winrt.ps1') : join(app.getAppPath(), 'resources', 'ocr', 'ocr-winrt.ps1')
 }
+// whisper.cpp (legendas automáticas): resources/whisper/ em dev (scripts/fetch-whisper.mjs, também no `npm run dev`);
+// empacotado, process.resourcesPath/whisper (extraResources).
+export function whisperDir(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'whisper') : join(app.getAppPath(), 'resources', 'whisper')
+}
+export function whisperCliPath(): string {
+  return join(whisperDir(), 'whisper-cli.exe')
+}

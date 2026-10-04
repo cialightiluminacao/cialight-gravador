@@ -5,6 +5,9 @@ resources/ffmpeg/*
 !resources/ffmpeg/VERSION.json
 resources/models/*
 !resources/models/models.json
+resources/whisper/*
+!resources/whisper/VERSION.json
+!resources/whisper/LICENSE
 spike-out/
 *.log
 .env

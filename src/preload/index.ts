@@ -182,6 +182,15 @@ const api: IpcApi = {
     status: () => ipcRenderer.invoke(IPC.hotkeys.status),
     onStatus: (cb) => on(IPC.hotkeys.statusChanged, cb)
   },
+  transcribe: {
+    models: () => ipcRenderer.invoke(IPC.transcribe.models),
+    downloadModel: (id) => ipcRenderer.invoke(IPC.transcribe.downloadModel, id),
+    cancelDownload: () => ipcRenderer.invoke(IPC.transcribe.cancelDownload),
+    run: (req) => ipcRenderer.invoke(IPC.transcribe.run, req),
+    cancel: () => ipcRenderer.invoke(IPC.transcribe.cancel),
+    onDownloadProgress: (cb) => on(IPC.transcribe.downloadProgress, cb),
+    onProgress: (cb) => on(IPC.transcribe.progress, cb)
+  },
   update: {
     check: (manual) => ipcRenderer.invoke(IPC.update.check, manual),
     download: () => ipcRenderer.invoke(IPC.update.download),

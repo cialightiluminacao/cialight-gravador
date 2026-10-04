@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { createHash } from 'crypto'
+import { execFile } from 'child_process'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, join } from 'path'
 import type { ExportOptions, ExportPresetId, Session } from '@shared/types'
@@ -24,8 +25,10 @@ import { log } from './log'
 import { testEditorRender } from './editorTestMode'
 import { testEditorExport } from './editorExportTestMode'
 import { testEditorFormats } from './editorFormatsTestMode'
+import { testTranscribe } from './transcribeTestMode'
+import { checkFolderImports } from './transcribe/peImports'
 import { crossCorrelationLag, isFastStart, makeSyntheticSession, makeVoiceFixture } from './testFixtures'
-import { rnnoiseDir } from './export/ffmpegPath'
+import { rnnoiseDir, whisperCliPath, whisperDir } from './export/ffmpegPath'
 import { DENOISE_DELAY_SAMPLES, processAudioFile } from './media/audioProcess'
 import { DENOISE_MODEL } from '@shared/editor/audioProcess'
 import { tmpdir } from 'os'
@@ -36,7 +39,7 @@ import { parseProject, toDiskProject } from '@shared/editor/schema'
 import { parseProjectV13 } from '@shared/__fixtures__/projectSchemaV13'
 import { checkCursorAfterRecording, checkCursorRealSourceAndOverhead, installCursorTest } from './cursor/cursorTestChecks'
 
-// Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render|editor-export|models). Roda no Electron
+// Modo de teste de integração (CIALIGHT_TEST=ffmpeg|capture|ingest|editor-render|editor-export|models|transcribe). Roda no Electron
 // real com o ffmpeg embutido; escreve um relatório JSON em test-out/ e sai com
 // código 0 (sucesso) ou 1 (falha). Chamado por `npm run test:ffmpeg|test:capture|test:ingest|test:editor`.
 
@@ -777,7 +780,23 @@ async function testModels(): Promise<number> {
   } catch (e) {
     ok(false, `denoise com o modelo empacotado falhou: ${e instanceof Error ? e.message : String(e)}`, failures)
   }
-  writeFileSync(join(dir, 'models-report.json'), JSON.stringify({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, rnnoiseDir: rnnoiseDir(), model, sha, failures }, null, 2))
+  // whisper.cpp (legendas automáticas): binário na pasta de recursos, todo import PE na pasta ou no Windows (runtime
+  // do Visual C++ app-local) e `--version` sai com 0
+  const wcli = whisperCliPath()
+  ok(existsSync(wcli), `whisper-cli em ${wcli}`, failures)
+  let whisperImports: ReturnType<typeof checkFolderImports> | null = null
+  try {
+    whisperImports = checkFolderImports(whisperDir())
+    ok(whisperImports.files >= 17 && whisperImports.missing.length === 0, `imports PE da pasta do whisper (${whisperImports.files} arquivos; ausentes: ${whisperImports.missing.map((m) => `${m.file}→${m.dll}`).join(', ') || 'nenhum'})`, failures)
+    for (const d of ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'vcomp140.dll']) ok(existsSync(join(whisperDir(), d)), `runtime VC++ ${d} ao lado do whisper-cli`, failures)
+  } catch (e) {
+    ok(false, `imports PE da pasta do whisper: ${e instanceof Error ? e.message : String(e)}`, failures)
+  }
+  const ver = await new Promise<{ code: number | null; out: string }>((res) => {
+    execFile(wcli, ['--version'], { windowsHide: true, timeout: 20_000 }, (err, stdout, stderr) => res({ code: err ? (typeof (err as { code?: unknown }).code === 'number' ? ((err as { code?: unknown }).code as number) : -1) : 0, out: `${stdout}${stderr}` }))
+  })
+  ok(ver.code === 0 && /whisper\.cpp version/.test(ver.out), `whisper-cli --version sai com 0 (${ver.code}; ${ver.out.trim().split(/\r?\n/).pop() ?? ''})`, failures)
+  writeFileSync(join(dir, 'models-report.json'), JSON.stringify({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, rnnoiseDir: rnnoiseDir(), model, sha, whisperDir: whisperDir(), whisperImports, whisperVersion: ver, failures }, null, 2))
   console.log(failures.length ? `\nFALHAS (${failures.length}):\n - ${failures.join('\n - ')}` : '\nTESTE DE MODELOS PASSOU')
   return failures.length ? 1 : 0
 }
@@ -792,6 +811,7 @@ export async function runIntegrationTest(mode: string, store: SessionStore, proj
     else if (mode === 'editor-export') code = await testEditorExport(projects, store, outDir)
     else if (mode === 'editor-formats') code = await testEditorFormats(projects, outDir)
     else if (mode === 'models') code = await testModels()
+    else if (mode === 'transcribe') code = await testTranscribe(projects, outDir)
     else console.error(`modo de teste desconhecido: ${mode}`)
   } catch (e) {
     console.error('teste falhou com exceção:', e)

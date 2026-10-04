@@ -1,0 +1,17 @@
+{
+  "tag": "v1.9.4",
+  "zip": "whisper-bin-x64.zip",
+  "urls": [
+    "https://github.com/cialightiluminacao/cialight-gravador/releases/download/deps-whisper-v1.9.4/whisper-bin-x64.zip",
+    "https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-bin-x64.zip"
+  ],
+  "sha256": "f9ec6c52a2e949b62ab51fa21d0d497958f9e41c3010c157c4e42932d5316f3c",
+  "files": [
+    "Release/whisper-cli.exe",
+    "Release/whisper.dll",
+    "Release/ggml.dll",
+    "Release/ggml-base.dll",
+    "Release/ggml-cpu-*.dll"
+  ],
+  "note": "Build CPU oficial do whisper.cpp (sem BLAS: mais rápido neste PC e sem instalações extras). Só whisper-cli.exe + DLLs do ggml/whisper; ggml-cpu-*.dll são as variantes por conjunto de instruções escolhidas em tempo de execução. SDL2, llama, parakeet, server/stream e testes ficam de fora. LICENSE (MIT) versionado ao lado. Modelos ggml são baixados pelo app, não aqui. Espelho próprio primeiro; upstream como fallback."
+}

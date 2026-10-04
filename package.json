@@ -6,7 +6,7 @@
   "license": "MIT",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/fetch-whisper.mjs && electron-vite dev",
     "build": "electron-vite build",
     "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
     "typecheck:web": "tsc -p tsconfig.web.json --noEmit",
@@ -15,10 +15,11 @@
     "test:watch": "vitest",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "fetch:models": "node scripts/fetch-models.mjs",
+    "fetch:whisper": "node scripts/fetch-whisper.mjs",
     "vendor:signalsmith": "node scripts/vendor-signalsmith.mjs",
     "spike": "cross-env CIALIGHT_SPIKE=1 electron-vite dev",
     "spike:editor": "cross-env CIALIGHT_SPIKE=editor electron-vite dev",
-    "dist:win": "node scripts/fetch-models.mjs && electron-vite build && electron-builder --win",
+    "dist:win": "node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && electron-vite build && electron-builder --win",
     "postversion": "git push --follow-tags",
     "test:ffmpeg": "electron-vite build && cross-env CIALIGHT_TEST=ffmpeg CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:capture": "electron-vite build && cross-env CIALIGHT_TEST=capture CIALIGHT_RAW_DIR=test-out/raw electron .",
@@ -27,10 +28,11 @@
     "test:editor-export": "electron-vite build && cross-env CIALIGHT_TEST=editor-export CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:editor-formats": "electron-vite build && cross-env CIALIGHT_TEST=editor-formats CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:editor-narration": "electron-vite build && node scripts/qa/editor-f3-narration.mjs",
+    "test:transcribe": "node scripts/fetch-whisper.mjs && electron-vite build && cross-env CIALIGHT_TEST=transcribe CIALIGHT_RAW_DIR=test-out/raw CIALIGHT_WHISPER_MODELS_DIR=test-out/whisper-models electron .",
     "test:models": "node scripts/fetch-models.mjs && electron-vite build && cross-env CIALIGHT_TEST=models CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:sensitive": "vitest run --config vitest.ocr.config.ts",
     "icons": "node scripts/make-icons.mjs",
-    "release:publish": "node scripts/fetch-models.mjs && electron-vite build && electron-builder --win --publish always"
+    "release:publish": "node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && electron-vite build && electron-builder --win --publish always"
   },
   "dependencies": {
     "electron-log": "^5.4.4",
@@ -135,6 +137,16 @@
         "to": "ocr",
         "filter": [
           "*.ps1"
+        ]
+      },
+      {
+        "from": "resources/whisper",
+        "to": "whisper",
+        "filter": [
+          "*.exe",
+          "*.dll",
+          "LICENSE*",
+          "VERSION.json"
         ]
       },
       {
