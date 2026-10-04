@@ -165,8 +165,8 @@ function applyTransitions(p: Project, segs: AudioSegment[]): AudioSegment[] {
   return segs.map((s) => envs.get(s.itemId)?.reduce(multiplyGain, s) ?? s)
 }
 
-/** Segmentos de voz que soam (faixa `voice`, não mudos pela velocidade): a fonte da fala do ducking. */
-function voiceSegments(p: Project, segs: AudioSegment[]): AudioSegment[] {
+/** Segmentos de voz que soam (faixa `voice`, não mudos pela velocidade): a fonte da fala do ducking e da transcrição. */
+export function voiceSegments(p: Project, segs: AudioSegment[]): AudioSegment[] {
   const voice = new Set(p.tracks.filter((t) => t.role === 'voice').map((t) => t.id))
   return segs.filter((s) => voice.has(s.trackId) && s.mode !== 'mute')
 }
