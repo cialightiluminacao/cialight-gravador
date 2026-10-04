@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { Captions, FileDown, FileUp, Plus, Trash2, TriangleAlert, X } from 'lucide-react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Captions, FileDown, FileUp, Plus, Sparkles, Trash2, TriangleAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { addCaption, captionCues, deleteItems, importCaptions, isCaptionsTrack, setCaptionPosition, setCaptionStyle, setCaptionTimes, updateItem } from '@shared/editor/ops'
 import { TEXT_PRESETS } from '@shared/editor/factory'
@@ -7,7 +7,7 @@ import type { Project, TextItem, TextStyle, Track } from '@shared/editor/project
 import { formatCueTime, parseSrt, serializeSrt, type Cue } from '@shared/editor/srt'
 import { fileNameFromTitle } from '@shared/filenames'
 import { Button } from '@/components/ui/Button'
-import { Dialog, DialogContent, Select, Toggle } from '@/components/ui/primitives'
+import { Dialog, DialogContent, Segmented, Select, Toggle } from '@/components/ui/primitives'
 import { ipcErrorMessage } from '@/lib/ipcError'
 import { cn } from '@/lib/cn'
 import type { PlaybackController } from '../engine/PlaybackController'
@@ -18,6 +18,9 @@ import { NumberField } from './Inspector/NumberField'
 import { buildFontOptions, joinColor, splitColor } from './Inspector/textStyleEdit'
 import { planTextEdit } from './viewer/textEdit'
 import { nextCaptionAt, planTimeEdit, warningsSummary } from './captionsEdit'
+import { planTranscription } from '@shared/editor/transcribePlan'
+import { GenerateCaptionsDialog } from './GenerateCaptionsDialog'
+import { TranscriptView } from './TranscriptPanel'
 
 // Aba "Legendas" da biblioteca: a lista das legendas (início/fim em mm:ss,mmm e texto editáveis; clicar numa linha leva
 // o playhead ao início dela), "Nova legenda no playhead", Enter no texto da última cria a próxima e foca nela,
@@ -35,6 +38,9 @@ function captionsOf(p: Project | null): { track: Track | null; items: TextItem[]
 
 interface PendingImport { cues: Cue[]; warnings: string[]; name: string }
 
+// Lista ou Transcrição: lembrado durante a sessão
+let lastView: 'list' | 'transcript' = 'list'
+
 export function CaptionsPanel({ playback }: { playback: PlaybackController | null }): React.JSX.Element {
   const project = useEditorStore((s) => s.project)
   const selection = useEditorStore((s) => s.selection)
@@ -43,6 +49,15 @@ export function CaptionsPanel({ playback }: { playback: PlaybackController | nul
   const [pending, setPending] = useState<PendingImport | null>(null)
   const [importWarnings, setImportWarnings] = useState<{ name: string; list: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
+  const [generateOpen, setGenerateOpen] = useState(false)
+  const [view, setViewState] = useState<'list' | 'transcript'>(lastView)
+  const setView = (v: 'list' | 'transcript'): void => {
+    lastView = v
+    setViewState(v)
+  }
+  // nada a transcrever → botão desligado com o motivo
+  const noAudio = useMemo(() => (project ? planTranscription(project).scope === 'none' : true), [project])
+  const generateReason = !project ? null : locked ? 'A faixa de legendas está bloqueada' : noAudio ? 'Nenhum áudio de voz no projeto' : null
   // legenda recém-criada que deve receber o foco quando a linha aparecer
   const focusRef = useRef<string | null>(null)
 
@@ -136,6 +151,23 @@ export function CaptionsPanel({ playback }: { playback: PlaybackController | nul
         <Button variant="primary" size="sm" className="h-8 w-full" disabled={locked || !project} onClick={() => addAt(st().playheadUs)} data-caption-add="">
           <Plus className="h-3.5 w-3.5" /> Nova legenda no playhead
         </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="h-8 w-full"
+          disabled={!project || !!generateReason}
+          title={generateReason ?? 'Transcreve a fala do projeto e cria as legendas'}
+          aria-describedby={generateReason && !locked ? 'caption-generate-reason' : undefined}
+          onClick={() => setGenerateOpen(true)}
+          data-caption-generate=""
+        >
+          <Sparkles className="h-3.5 w-3.5" /> Gerar legendas…
+        </Button>
+        {generateReason && !locked ? (
+          <p id="caption-generate-reason" className="text-[10.5px] text-muted" data-caption-generate-reason="">
+            {generateReason}
+          </p>
+        ) : null}
         <div className="grid grid-cols-2 gap-1.5">
           <Button variant="secondary" size="sm" className="h-7 px-2 text-[11px]" disabled={busy || locked} onClick={() => void importSrt()} data-caption-import="">
             <FileUp className="h-3.5 w-3.5" /> Importar SRT…
@@ -167,6 +199,31 @@ export function CaptionsPanel({ playback }: { playback: PlaybackController | nul
       ) : null}
 
       {items.length ? (
+        <Segmented
+          size="sm"
+          ariaLabel="Exibir as legendas como"
+          className="self-start"
+          value={view}
+          onValueChange={setView}
+          options={[
+            { value: 'list', label: 'Lista' },
+            { value: 'transcript', label: 'Transcrição' }
+          ]}
+        />
+      ) : null}
+
+      {items.length && view === 'transcript' ? (
+        <>
+          <TranscriptView
+            items={items}
+            onSeek={(us, id) => {
+              seek(us)
+              if (!st().selection.includes(id)) st().select([id])
+            }}
+          />
+          <CaptionStyle items={items} locked={locked} />
+        </>
+      ) : items.length ? (
         <>
           <ol className="flex flex-col gap-1" aria-label="Legendas" data-captions-list="">
             {items.map((it, i) => (
@@ -188,9 +245,11 @@ export function CaptionsPanel({ playback }: { playback: PlaybackController | nul
       ) : (
         <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border-strong px-4 py-6 text-center text-muted">
           <Captions className="h-6 w-6" />
-          <span className="text-[11px] leading-relaxed">Nenhuma legenda ainda. Crie uma no playhead ou importe um arquivo SRT.</span>
+          <span className="text-[11px] leading-relaxed">Nenhuma legenda ainda. Gere a partir da fala, crie uma no playhead ou importe um arquivo SRT.</span>
         </div>
       )}
+
+      <GenerateCaptionsDialog open={generateOpen} onOpenChange={setGenerateOpen} captionCount={items.length} />
 
       <Dialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}>
         <DialogContent title="Importar legendas" className="w-[min(440px,92vw)]">

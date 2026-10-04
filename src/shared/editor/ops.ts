@@ -173,6 +173,16 @@ export function contentEndUs(p: Project): Us {
   return max
 }
 
+/**
+ * Fim do conteúdo sem a faixa de legendas (como contentEndUs): limite das legendas geradas, para elas nunca alongarem
+ * o vídeo além da mídia.
+ */
+export function nonCaptionContentEndUs(p: Project): Us {
+  let max = 0
+  for (const t of p.tracks) if (!t.hidden && !isCaptionsTrack(t)) for (const i of t.items) if (i.type !== 'effect' && i.enabled !== false) max = Math.max(max, end(i))
+  return max
+}
+
 // ---------------------------------------------------------------- helpers internos
 
 function mustFind(p: Project, itemId: string): NonNullable<ReturnType<typeof findItem>> {

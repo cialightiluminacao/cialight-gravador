@@ -294,3 +294,24 @@ describe('generateCaptions', () => {
     expect(parseProject(disk)).toEqual(r.project)
   })
 })
+
+describe('nonCaptionContentEndUs', () => {
+  it('fim do conteúdo sem a faixa de legendas (legenda depois da mídia não conta)', () => {
+    const p = withClip()
+    expect(ops.nonCaptionContentEndUs(p)).toBe(10 * S)
+    const withCap = ops.addCaption(p, 12 * S, 'depois do fim').project
+    expect(ops.contentEndUs(withCap)).toBe(14 * S)
+    expect(ops.nonCaptionContentEndUs(withCap)).toBe(10 * S)
+  })
+  it('como contentEndUs: ignora faixas ocultas, efeitos e itens desativados; projeto vazio = 0', () => {
+    expect(ops.nonCaptionContentEndUs(createEmptyProject('t'))).toBe(0)
+    let p = withClip()
+    const vt = p.tracks.find((t) => t.kind === 'video' && t.items.length)!
+    p = ops.updateItem(p, vt.items[0].id, (d) => { d.enabled = false })
+    const audioEnd = ops.nonCaptionContentEndUs(p)
+    // o áudio vinculado continua (10 s); desativar os dois zera
+    expect(audioEnd).toBe(10 * S)
+    for (const t of p.tracks) for (const i of t.items) p = ops.updateItem(p, i.id, (d) => { d.enabled = false })
+    expect(ops.nonCaptionContentEndUs(p)).toBe(0)
+  })
+})
