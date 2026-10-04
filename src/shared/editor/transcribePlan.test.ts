@@ -156,11 +156,25 @@ describe('planTranscription', () => {
     expect(vp.scope).toBe('voice')
     expect(vp.segments.map((s) => s.itemId)).toEqual([v.item])
     expect(vp.jobs.map((j) => j.assetId)).toEqual(['mic'])
-    // só música e efeitos sonoros → none
+    // só música e efeitos sonoros → o áudio de efeitos é a última camada (fallback); só música → none
     const only = setItem(p, videoItem, (d) => { d.audio.enabled = false })
-    expect(planTranscription(only)).toEqual({ segments: [], jobs: [], scope: 'none' })
+    expect(planTranscription(only).scope).toBe('fallback')
+    expect(planTranscription(only).jobs.map((j) => j.assetId)).toEqual(['sfx'])
     // projeto vazio → none
     expect(planTranscription(createEmptyProject('x'))).toEqual({ segments: [], jobs: [], scope: 'none' })
+  })
+
+  it('7b. só áudio do sistema (faixa sfx): última camada, escopo fallback; música nunca', () => {
+    let p = ops.addAsset(ops.addAsset(createEmptyProject('t'), aud('sys')), aud('mus'))
+    const m = addOn(p, 'mus', 'music')
+    expect(planTranscription(m.p).scope).toBe('none')
+    const s = addOn(m.p, 'sys', 'sfx')
+    const plan = planTranscription(s.p)
+    expect(plan.scope).toBe('fallback')
+    expect(plan.segments.map((x) => x.itemId)).toEqual([s.item])
+    expect(plan.jobs.map((j) => j.assetId)).toEqual(['sys'])
+    p = addOn(s.p, 'sys', 'voice').p
+    expect(planTranscription(p).scope).toBe('voice')
   })
 
   it('8. jobs: vão de 1 s emenda, 5 s separa; margem presa em 0 e na duração do asset; assets na ordem em que aparecem', () => {
@@ -255,5 +269,32 @@ describe('desempenho', () => {
     console.log(`[perf] transcribePlan 1 h / 2000 itens / 20000 palavras: ${best.toFixed(1)} ms (${out} palavras na timeline)`)
     expect(out).toBeGreaterThan(10000)
     expect(best).toBeLessThan(100)
+  }, 30_000)
+
+  it('11. uma palavra de 30 s no meio de 20 000 não alarga a varredura dos trechos: < 100 ms e resultado igual', () => {
+    const H = 3600 * S
+    const p = createEmptyProject('perf2')
+    p.assets = [aud('v', H)]
+    const step = H / 2000
+    const items: MediaItem[] = Array.from({ length: 2000 }, (_, i) => ({
+      id: `i${i}`, type: 'media', assetId: 'v', startUs: Math.round(i * step * 0.8), durationUs: Math.round(step * 0.7), inUs: Math.round(i * step),
+      speed: 1, reverse: false, audio: { enabled: true, volume: { value: 1 }, fadeInUs: 0, fadeOutUs: 0, preservePitch: true, denoise: false, normalize: false }
+    }))
+    p.tracks = [{ id: 'tv', kind: 'audio', name: 'Voz', role: 'voice', muted: false, hidden: false, locked: false, volume: 1, items }]
+    const words: SourceWord[] = Array.from({ length: 20000 }, (_, i) => ({ text: `p${i % 50}`, startUs: i * 180_000, endUs: i * 180_000 + 150_000, prob: 0.9 }))
+    words[10000] = { text: 'alucinação', startUs: words[10000].startUs, endUs: words[10000].startUs + 30 * S, prob: 0.1 }
+    const plan = planTranscription(p)
+    const ms = (): number => {
+      const t = performance.now()
+      wordsToTimeline(plan.segments, { v: words })
+      return performance.now() - t
+    }
+    let best = Infinity
+    for (let i = 0; i < 3 && best >= 100; i++) best = Math.min(best, ms())
+    console.log(`[perf] wordsToTimeline com 1 palavra de 30 s: ${best.toFixed(1)} ms`)
+    expect(best).toBeLessThan(100)
+    // a palavra longa entra só no trecho cujo meio cai nele
+    const out = wordsToTimeline(plan.segments, { v: words })
+    expect(out.filter((x) => x.text === 'alucinação').length).toBeGreaterThanOrEqual(1)
   }, 30_000)
 })

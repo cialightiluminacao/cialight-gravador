@@ -2306,6 +2306,38 @@ export function importCaptions(p: Project, cues: readonly Cue[], opts: { mode: '
   return { project, count: add.length, warnings }
 }
 
+/**
+ * Legendas geradas (G2) na faixa de legendas, num único passo de desfazer (a edição do importCaptions).
+ * `replace` troca todas; `fill` ("só onde não há legenda") descarta INTEIRAS as cues que encostam em alguma legenda
+ * existente (contadas em `skipped`, nunca encurtadas) e acrescenta o resto. Nada a acrescentar → o MESMO projeto
+ * (sem passo de desfazer vazio). Faixa bloqueada → EditError.
+ */
+export function generateCaptions(p: Project, cues: readonly Cue[], mode: 'replace' | 'fill'): { project: Project; count: number; skipped: number; warnings: string[] } {
+  const existing = p.tracks.find(isCaptionsTrack)
+  if (existing) assertUnlocked(existing)
+  let use = cues
+  let skipped = 0
+  if (mode === 'fill' && existing?.items.length) {
+    // legendas da faixa não se sobrepõem: ordenadas por início, os fins também ficam em ordem (busca binária)
+    const occ = [...existing.items].sort((a, b) => a.startUs - b.startUs)
+    use = cues.filter((c) => {
+      let lo = 0, hi = occ.length
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (end(occ[mid]) <= c.startUs) lo = mid + 1
+        else hi = mid
+      }
+      const hit = lo < occ.length && occ[lo].startUs < c.endUs
+      if (hit) skipped++
+      return !hit
+    })
+  }
+  if (!use.length) return { project: p, count: 0, skipped, warnings: [] }
+  const r = importCaptions(p, use, { mode: mode === 'replace' ? 'replace' : 'append' })
+  if (mode === 'fill' && r.count === 0) return { project: p, count: 0, skipped, warnings: r.warnings }
+  return { ...r, skipped }
+}
+
 /** Legendas habilitadas da faixa de legendas, em ordem (para exportar SRT). */
 export function captionCues(p: Project): Cue[] {
   const t = p.tracks.find(isCaptionsTrack)

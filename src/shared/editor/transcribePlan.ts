@@ -29,7 +29,7 @@ const maxGain = (s: AudioSegment): number => s.gain.reduce((m, g) => Math.max(m,
  * > 0 em algum ponto do envelope (faixa/item com volume 0 ficam de fora; faixa muda, áudio desligado e item
  * desativado já não entram no planAudio).
  *
- * Escopo: 'voice' = faixas `role: 'voice'`. Sem elas, 'fallback' = faixas que não são música nem efeitos sonoros. Numa
+ * Escopo: 'voice' = faixas `role: 'voice'`. Sem elas, 'fallback' = faixas que não são música nem efeitos sonoros e, se também não houver, as faixas 'sfx' (ex.: só áudio do sistema). Numa
  * gravação real (fromSession.ts) o microfone vira a faixa "mic" com papel 'voice' e o áudio do sistema a faixa
  * "system" com papel 'sfx' (nunca transcrita); a tela não tem áudio. O fallback cobre projetos sem microfone com mídia
  * importada: o áudio próprio de um vídeo (item com áudio ligado na faixa de vídeo) ou faixas de áudio sem papel.
@@ -42,6 +42,11 @@ export function planTranscription(p: Project): TranscribeSourcePlan {
     const excluded = new Set(p.tracks.filter((t) => t.role === 'music' || t.role === 'sfx').map((t) => t.id))
     segments = audible.filter((s) => !excluded.has(s.trackId))
     scope = 'fallback'
+    if (!segments.length) {
+      // última camada: só áudio do sistema (faixa 'sfx'), p.ex. gravação sem microfone; música nunca
+      const sfx = new Set(p.tracks.filter((t) => t.role === 'sfx').map((t) => t.id))
+      segments = audible.filter((s) => sfx.has(s.trackId))
+    }
   }
   if (!segments.length) return { segments: [], jobs: [], scope: 'none' }
 
@@ -75,16 +80,23 @@ export function planTranscription(p: Project): TranscribeSourcePlan {
   return { segments, jobs, scope }
 }
 
-/** Palavras ordenadas por início (cópia só se a entrada não estiver) e a maior duração (limite da busca binária). */
-interface SortedWords { list: readonly SourceWord[]; maxDur: Us }
+/**
+ * Palavras ordenadas por início (cópia só se a entrada não estiver) e o maior meio (início+fim, dobrado) até cada
+ * posição: monótono, então a 1ª palavra que pode entrar num trecho sai por busca binária exata — uma palavra muito
+ * longa (alucinação de 30 s) não alarga a varredura dos outros trechos.
+ */
+interface SortedWords { list: readonly SourceWord[]; maxMid2: Float64Array }
 function sortedWords(words: readonly SourceWord[]): SortedWords {
   let ordered = true
-  let maxDur = 0
-  for (let k = 0; k < words.length; k++) {
-    if (k > 0 && words[k].startUs < words[k - 1].startUs) ordered = false
-    maxDur = Math.max(maxDur, words[k].endUs - words[k].startUs)
+  for (let k = 1; k < words.length; k++) if (words[k].startUs < words[k - 1].startUs) { ordered = false; break }
+  const list = ordered ? words : [...words].sort((a, b) => a.startUs - b.startUs)
+  const maxMid2 = new Float64Array(list.length)
+  let m = -Infinity
+  for (let k = 0; k < list.length; k++) {
+    m = Math.max(m, list[k].startUs + list[k].endUs)
+    maxMid2[k] = m
   }
-  return { list: ordered ? words : [...words].sort((a, b) => a.startUs - b.startUs), maxDur }
+  return { list, maxMid2 }
 }
 
 /** Texto para comparar duplicatas: minúsculas, sem pontuação/símbolos, sem espaços nas pontas. */
@@ -113,16 +125,15 @@ export function wordsToTimeline(segments: readonly AudioSegment[], words: Readon
     if (!src?.length) continue
     let sw = cache.get(seg.assetId)
     if (!sw) cache.set(seg.assetId, (sw = sortedWords(src)))
-    const { list, maxDur } = sw
+    const { list, maxMid2 } = sw
     const srcLo = seg.srcInUs
     const srcHi = seg.srcInUs + seg.durationUs * seg.speed
     const segEnd = seg.startUs + seg.durationUs
-    // meio ≥ srcLo exige início ≥ srcLo − duração ≥ srcLo − maxDur: 1ª candidata por busca binária
-    const bound = srcLo - maxDur
+    // 1ª candidata (meio ≥ srcLo) por busca binária no maior meio acumulado (início+fim ≥ 2·srcLo)
     let lo = 0, hi = list.length
     while (lo < hi) {
       const mid = (lo + hi) >> 1
-      if (list[mid].startUs < bound) lo = mid + 1
+      if (maxMid2[mid] < 2 * srcLo) lo = mid + 1
       else hi = mid
     }
     // início ≥ srcHi → meio ≥ srcHi: acabou

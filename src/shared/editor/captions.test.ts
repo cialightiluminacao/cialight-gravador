@@ -233,3 +233,64 @@ describe('texto da biblioteca solto na faixa de legendas vira legenda', () => {
     expect(ops.isCaptionsTrack(ops.findItem(free.project, free.itemId)!.track)).toBe(false)
   })
 })
+
+describe('generateCaptions', () => {
+  const base = (): Project => ops.addCaption(ops.addCaption(withClip(), 2 * S, 'X', { durationUs: 2 * S }).project, 6 * S, 'Y', { durationUs: S }).project // [2,4) [6,7)
+
+  it('replace troca todas as legendas; um único projeto novo', () => {
+    const p = base()
+    const r = ops.generateCaptions(p, [cue(0, 1, 'a'), cue(1, 2, 'b')], 'replace')
+    expect(r.project).not.toBe(p)
+    expect(r.count).toBe(2)
+    expect(r.skipped).toBe(0)
+    expect(caps(r.project).map((i) => i.text)).toEqual(['a', 'b'])
+    // o original não muda (imutável: o desfazer volta a ele em um passo)
+    expect(caps(p).map((i) => i.text)).toEqual(['X', 'Y'])
+  })
+
+  it('fill: cues que encostam em legenda existente são puladas inteiras (contadas); as existentes ficam intactas', () => {
+    const p = base()
+    const before = caps(p).map((i) => ({ ...i }))
+    const r = ops.generateCaptions(p, [cue(0, 1, 'livre'), cue(1, 3, 'toca X'), cue(4, 5, 'encosta em X (fim=início)'), cue(5.5, 6.5, 'toca Y'), cue(8, 9, 'livre 2'), cue(1, 9, 'cobre tudo')], 'fill')
+    expect(r.skipped).toBe(3)
+    expect(r.count).toBe(3)
+    expect(caps(r.project).map((i) => [i.startUs / S, i.durationUs / S, i.text])).toEqual([
+      [0, 1, 'livre'], [2, 2, 'X'], [4, 1, 'encosta em X (fim=início)'], [6, 1, 'Y'], [8, 1, 'livre 2']
+    ])
+    for (const o of before) expect(caps(r.project).find((i) => i.id === o.id)).toEqual(o)
+    expect(r.warnings).toEqual([])
+  })
+
+  it('fill sem faixa ou faixa vazia: acrescenta tudo', () => {
+    const r = ops.generateCaptions(withClip(), [cue(0, 1, 'a'), cue(1, 2, 'b')], 'fill')
+    expect(r.count).toBe(2)
+    expect(r.skipped).toBe(0)
+  })
+
+  it('nada a acrescentar → o MESMO projeto (sem passo de desfazer vazio)', () => {
+    const p = base()
+    const none = ops.generateCaptions(p, [], 'replace')
+    expect(none.project).toBe(p)
+    expect(none.count).toBe(0)
+    const all = ops.generateCaptions(p, [cue(2, 3, 'a'), cue(6, 6.5, 'b')], 'fill')
+    expect(all.project).toBe(p)
+    expect(all.count).toBe(0)
+    expect(all.skipped).toBe(2)
+    const w = withClip()
+    expect(ops.generateCaptions(w, [], 'fill').project).toBe(w)
+  })
+
+  it('faixa de legendas bloqueada → EditError locked', () => {
+    const p = base()
+    const locked = ops.updateTrack(p, capTrack(p).id, { locked: true })
+    expect(code(() => ops.generateCaptions(locked, [cue(8, 9, 'a')], 'fill'))).toMatch(/^locked: /)
+    expect(code(() => ops.generateCaptions(locked, [cue(8, 9, 'a')], 'replace'))).toMatch(/^locked: /)
+  })
+
+  it('v1.3 lê o projeto com legendas geradas; ida e volta pelo disco', () => {
+    const r = ops.generateCaptions(base(), [cue(0, 1, 'Olá\nmundo'), cue(8, 9, 'Ação')], 'fill')
+    const disk = JSON.parse(JSON.stringify(toDiskProject(r.project)))
+    expect(parseProjectV13(disk).success).toBe(true)
+    expect(parseProject(disk)).toEqual(r.project)
+  })
+})
