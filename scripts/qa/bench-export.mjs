@@ -7,7 +7,8 @@
 //   node C:/Users/Eduardo/projetos/_locks/run-locked.mjs "node scripts/qa/bench-export.mjs --seconds 180 --blur"
 // `--decoder hardware|auto` (padrão auto): hardware força o caminho antigo da exportação (decoder de hardware, sem o
 // caminho YUV; CIALIGHT_QA_EXPORT_DECODER, só QA) para a comparação A/B intercalada com o mesmo build. Entra no nome do
-// JSON (bench-export-180s[-blur]-hw.json / -auto.json).
+// JSON (bench-export-180s[-blur]-hw.json / -auto.json). Antes desse sufixo o nome padrão era bench-export-180s.json.
+// `--reverse`: os itens de vídeo tocam de trás para frente (reverso em bloco no DecoderPool); sufixo -rev no JSON.
 // Tudo em test-out/qa-bench (apagado no fim); restaura o settings.json (hash).
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
@@ -18,6 +19,7 @@ import electronPath from 'electron'
 const args = process.argv.slice(2)
 const SECONDS = Number(args[args.indexOf('--seconds') + 1]) || 180
 const BLUR = args.includes('--blur')
+const REVERSE = args.includes('--reverse')
 const DECODER = args.includes('--decoder') ? args[args.indexOf('--decoder') + 1] : 'auto'
 if (DECODER !== 'hardware' && DECODER !== 'auto') throw new Error(`--decoder deve ser hardware ou auto (veio ${DECODER})`)
 const ROOT = resolve(import.meta.dirname, '..', '..')
@@ -111,6 +113,9 @@ try {
       const last = p.tracks.reduce((m, t, i) => (t.kind === 'video' ? i : m), -1)
       const tracks = [...p.tracks]; tracks.splice(last + 1, 0, ...${JSON.stringify(tracks)}); return { ...p, tracks } })`)
   }
+  if (REVERSE) {
+    await ev(`return window.__qaEditor.store.getState().apply((p) => ({ ...p, tracks: p.tracks.map((t) => t.kind !== 'video' ? t : { ...t, items: t.items.map((i) => (i.type === 'media' ? { ...i, reverse: true } : i)) }) }))`)
+  }
   await sleep(1500)
   await ev(`[...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar')).click(); return 1`)
   await waitFor(`return ${dialog} ? 1 : null`, 10000)
@@ -136,12 +141,12 @@ try {
   const yuvFrames = await ev(`const it = window.__qaEditor?.queue?.items ?? []; return it[it.length - 1]?.result?.yuvFrames ?? null`)
   const file = readdirSync(OUT).find((f) => f.endsWith('.mp4'))
   const result = {
-    seconds: SECONDS, blur: BLUR, decoder: DECODER, ok: text.includes('Vídeo exportado'), totalS: Math.round(total * 10) / 10,
+    seconds: SECONDS, blur: BLUR, reverse: REVERSE, decoder: DECODER, ok: text.includes('Vídeo exportado'), totalS: Math.round(total * 10) / 10,
     speedX: Math.round((SECONDS / total) * 100) / 100, fps: Math.round(((SECONDS * 30) / total) * 10) / 10,
     profile, yuvFrames, sizeMB: file ? Math.round(statSync(join(OUT, file)).size / 1e5) / 10 : null, done: text.replace(/\s+/g, ' ').slice(0, 220), samples
   }
   console.log(JSON.stringify(result, null, 2))
-  writeFileSync(join(ROOT, 'test-out', `bench-export-${SECONDS}s${BLUR ? '-blur' : ''}-${DECODER === 'hardware' ? 'hw' : 'auto'}${TAG}.json`), JSON.stringify(result, null, 2))
+  writeFileSync(join(ROOT, 'test-out', `bench-export-${SECONDS}s${BLUR ? '-blur' : ''}${REVERSE ? '-rev' : ''}-${DECODER === 'hardware' ? 'hw' : 'auto'}${TAG}.json`), JSON.stringify(result, null, 2))
   if (!result.ok) code = 1
 } catch (e) {
   console.error('falhou:', e)

@@ -455,7 +455,7 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
             total: m.total,
             percent: Math.min(98, (m.frame / m.total) * 98),
             speed: fpsDone ? fpsDone / req.fps : null,
-            etaS: fpsDone ? Math.max(0, (m.total - m.frame) / fpsDone) : null
+            etaS: meter.etaS(m.total, m.frame)
           })
           break
         }

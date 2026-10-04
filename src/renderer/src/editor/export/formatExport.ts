@@ -189,7 +189,7 @@ export function pipeFrames(
               render.chunkAck(jobId, seq)
               meter.add(performance.now(), seq)
               const fpsDone = meter.fps()
-              onFrame?.(seq, total, fpsDone ? fpsDone / req.fps : null, fpsDone ? Math.max(0, (total - seq) / fpsDone) : null)
+              onFrame?.(seq, total, fpsDone ? fpsDone / req.fps : null, meter.etaS(total, seq))
             },
             (e: unknown) => fail(new Error(`Falha ao gravar o arquivo: ${ipcErrorMessage(e)}`))
           )

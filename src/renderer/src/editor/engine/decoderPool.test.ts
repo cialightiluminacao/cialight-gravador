@@ -328,10 +328,11 @@ describe('DecoderPool: decoder em software (prefer-software)', () => {
   function accelOpen(opts: { failSoftware?: boolean; seekThrowsSoftware?: boolean } = {}) {
     const calls: Accel[] = []
     const live = { n: 0 }
-    const mk = (t: number): VideoSample => {
+    const mk = (t: number, sw = false): VideoSample => {
       live.n++
       let open = true
-      const s = { timestamp: t, duration: 1 / 30, close() { if (open) { open = false; live.n-- } }, clone() { return mk(t) } }
+      // sw: decodificado pelo sink de software (o teste do reverso confere de onde o quadro veio)
+      const s = { timestamp: t, duration: 1 / 30, sw, close() { if (open) { open = false; live.n-- } }, clone() { return mk(t, sw) } }
       return s as unknown as VideoSample
     }
     const open = async (_url: string, _ti: number | null, accel: Accel) => {
@@ -346,10 +347,10 @@ describe('DecoderPool: decoder em software (prefer-software)', () => {
         sink: {
           getSample: async (t: number) => {
             if (software && opts.seekThrowsSoftware) throw new Error('decoder em software quebrou')
-            return mk(t)
+            return mk(t, software)
           },
           samples: async function* (start = 0, end = Infinity) {
-            for (let i = Math.floor(start * 30 + 1e-6); i < 120 && i / 30 < end - 1e-9; i++) yield mk(i / 30)
+            for (let i = Math.floor(start * 30 + 1e-6); i < 120 && i / 30 < end - 1e-9; i++) yield mk(i / 30, software)
           }
         }
       }
@@ -448,6 +449,37 @@ describe('DecoderPool: decoder em software (prefer-software)', () => {
       s!.close()
       await new Promise((r) => setTimeout(r, 0))
     }
+    pool.dispose()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(o.live.n).toBe(0)
+  })
+
+  it('reverso numa entrada em software: o bloco é decodificado por um sink de HARDWARE e não entra em cpuFrames', async () => {
+    const o = accelOpen()
+    const pool = new DecoderPool(8, { open: o.open, detach: async (s: VideoSample) => s })
+    pool.setAcceleration('prefer-software')
+    pool.setSources({ a: 'x' })
+    const fwd = await pool.frameAt('a', 3_000_000, false)
+    expect((fwd as unknown as { sw: boolean }).sw).toBe(true) // para frente: software (caminho YUV)
+    expect(pool.isSoftware(fwd!)).toBe(true)
+    fwd!.close()
+    const served: { sw: boolean; marked: boolean }[] = []
+    for (let k = 1; k <= 12; k++) {
+      const s = await pool.frameAt('a', Math.round((3 - k / 30) * 1e6), true)
+      expect(Math.round(s!.timestamp * 30)).toBe(90 - k)
+      // 1º passo para trás = seek simples (ainda software); do 2º em diante, o bloco do reverso
+      if (k >= 2) served.push({ sw: (s as unknown as { sw: boolean }).sw, marked: pool.isSoftware(s!) })
+      s!.close()
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    expect(served.length).toBe(11)
+    expect(served.every((x) => !x.sw && !x.marked)).toBe(true)
+    // um único decoder de hardware aberto para o reverso dessa entrada (não um por bloco)
+    expect(o.calls).toEqual(['prefer-software', 'no-preference'])
+    // voltando para frente: software de novo
+    const again = await pool.frameAt('a', 1_000_000, false)
+    expect(pool.isSoftware(again!)).toBe(true)
+    again!.close()
     pool.dispose()
     await new Promise((r) => setTimeout(r, 0))
     expect(o.live.n).toBe(0)

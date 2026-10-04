@@ -31,6 +31,9 @@
 // (exportação: quadros I420 em memória de CPU, que o compositor sobe pelo caminho YUV — `isSoftware(sample)` diz
 // quais). Mudar a opção descarta as entradas abertas. Decoder em software que não abre/configura, ou que quebra no
 // meio, vira hardware naquela fonte (e fica em hardware: nada de tentar software de novo a cada quadro).
+// O reverso em bloco de uma entrada em software decodifica por um sink de HARDWARE próprio da entrada (`revOpened`,
+// aberto no 1º bloco): os quadros do bloco são copiados para RGBA (detach) e nunca usam o caminho YUV, então o
+// software ali só custaria CPU (GOP inteiro decodificado por bloco). Esses quadros não são marcados como software.
 import { ALL_FORMATS, Input, UrlSource, VideoSample, VideoSampleSink, type InputVideoTrack } from 'mediabunny'
 import type { Us } from '@shared/editor/project'
 import { decoderMatrixOverride } from '@shared/editor/sourceColor'
@@ -98,6 +101,8 @@ interface Entry {
   /** Passos sequenciais seguidos para trás e o tamanho do último (s). */
   backSteps: number
   lastStep: number
+  /** Reverso de entrada em software: sink de hardware da mesma fonte (aberto no 1º bloco; liberado com a entrada). */
+  revOpened: Promise<Opened> | null
   lock: Promise<unknown>
   busy: number // contado desde a aquisição (inclui a espera de `opened`): não é despejada
   lastUsed: number
@@ -191,12 +196,13 @@ export class DecoderPool {
           if (sequential) {
             // quadro do bloco do reverso em cache, sem esperar a fila da entrada (a pré-busca pode estar rodando nela)
             const rev = e.rev
+            // (quadros do bloco: do sink de hardware do reverso, ver revSource — não marcados como software)
             if (rev && usable(rev, t, back ? step : same ? e.lastStep : 0)) {
-              if (back) this.prefetchPrev(e, o)
-              return this.mark(o, pick(rev, t)!.clone())
+              if (back) this.prefetchPrev(e)
+              return pick(rev, t)!.clone()
             }
             // 2º passo seguido para trás: reverso em bloco; o 1º (pode ser só um ajuste) vai por seek simples
-            if (back && e.backSteps >= 2) return this.mark(o, await this.run(e, (oo) => this.reverse(e, oo, t, step)))
+            if (back && e.backSteps >= 2) return await this.run(e, async (oo) => this.reverse(e, await this.revSource(e, oo), t, step))
             if (back) return this.mark(o, await this.run(e, (oo) => {
               closeIter(e)
               return this.seek(oo, t)
@@ -294,7 +300,7 @@ export class DecoderPool {
       const trackIndex = this.trackIdx[assetId] ?? null
       e = {
         assetId, url, trackIndex, opened: this.openWith(url, trackIndex), openFailedAt: null, it: null, held: null, ahead: null, done: false,
-        rev: null, revPrev: null, revGen: 0, lastT: null, backSteps: 0, lastStep: 0, lock: Promise.resolve(), busy: 0, lastUsed: 0
+        rev: null, revPrev: null, revGen: 0, revOpened: null, lastT: null, backSteps: 0, lastStep: 0, lock: Promise.resolve(), busy: 0, lastUsed: 0
       }
       e.opened.catch(() => {}) // falha tratada em frameAt/prefetch
       this.entries.set(key, e)
@@ -377,7 +383,7 @@ export class DecoderPool {
     }
     const hit = pick(e.rev, t)
     if (!hit) return this.seek(o, t) // bloco vazio (fora do arquivo): o quadro mais próximo
-    this.prefetchPrev(e, o)
+    this.prefetchPrev(e)
     return hit.clone()
   }
 
@@ -442,20 +448,30 @@ export class DecoderPool {
   }
 
   /** Pré-busca (na fila da entrada) o bloco imediatamente anterior ao atual; descartada se o reverso for abandonado. */
-  private prefetchPrev(e: Entry, o: Opened): void {
+  private prefetchPrev(e: Entry): void {
     const cur = e.rev
     if (!cur || e.revPrev || cur.atStart || cur.frames.length === 0) return
     const gen = e.revGen
     const endS = cur.frames[0].timestamp
     // espaçamento pelo passo atual (não herdado do bloco atual)
     const stride = strideFor(e.lastStep, cur.frameS)
-    e.revPrev = this.run(e, () => this.decodeBlock(o, endS, stride))
+    e.revPrev = this.run(e, async (oo) => this.decodeBlock(await this.revSource(e, oo), endS, stride))
       .then((blk) => {
         if (gen === e.revGen) return blk
         closeBlock(blk)
         return null
       })
       .catch(() => null)
+  }
+
+  /**
+   * Fonte do reverso em bloco: a própria entrada, ou — entrada em software — um sink de hardware da mesma fonte, aberto
+   * uma vez por entrada. Se ele não abrir, o reverso segue no software (quadros RGBA copiados: caminho antigo).
+   */
+  private async revSource(e: Entry, o: Opened): Promise<Opened> {
+    if (!o.software) return o
+    e.revOpened ??= this.openFn(e.url, e.trackIndex, 'no-preference').catch(() => o)
+    return e.revOpened
   }
 
   private restart(e: Entry, o: Opened, t: number): void {
@@ -482,6 +498,8 @@ export class DecoderPool {
     void e.lock.then(() => {
       closeIter(e)
       e.opened.then((o) => o.input.dispose()).catch(() => {})
+      // sink de hardware do reverso (se for a própria entrada — abertura que falhou — já foi liberado acima)
+      void e.revOpened?.then((r) => e.opened.then((o) => (r !== o ? r.input.dispose() : undefined))).catch(() => {})
     })
   }
 }
