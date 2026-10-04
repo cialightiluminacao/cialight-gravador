@@ -25,6 +25,8 @@ const FORMATS: ReadonlySet<string> = new Set<YuvFormat>(['I420'])
 /**
  * Cor do quadro: `matrix`/`fullRange` do VideoFrame.colorSpace; matriz nula → regra das fontes sem marcação
  * (untaggedFamily pelas dimensões codificadas); faixa nula → limitada. Matriz sem suporte (rgb) → null (caminho antigo).
+ * BT.2020 (bt2020-ncl) também → caminho antigo: não há caso de paridade, e com transferência PQ/HLG o Chromium pode
+ * mapear tons/gamut, enquanto o caminho novo só aplicaria a matriz (mudança visível não medida).
  */
 export function resolveYuvColor(cs: { matrix?: string | null; fullRange?: boolean | null } | null | undefined, codedWidth: number, codedHeight: number): YuvColor | null {
   const fullRange = cs?.fullRange === true
@@ -32,7 +34,6 @@ export function resolveYuvColor(cs: { matrix?: string | null; fullRange?: boolea
   if (m === null) return { matrix: untaggedFamily(codedWidth, codedHeight), fullRange }
   if (m === 'bt709') return { matrix: 'bt709', fullRange }
   if (m === 'smpte170m' || m === 'bt470bg') return { matrix: 'bt601', fullRange }
-  if (m === 'bt2020-ncl') return { matrix: 'bt2020', fullRange }
   return null
 }
 

@@ -74,11 +74,15 @@ describe('coeficientes YUV→RGB', () => {
 })
 
 describe('resolveYuvColor (marcação do quadro; nulo → regra de sourceColor.ts)', () => {
-  it('matriz marcada: bt709 / smpte170m e bt470bg = BT.601 / bt2020-ncl', () => {
+  it('matriz marcada: bt709 / smpte170m e bt470bg = BT.601', () => {
     expect(resolveYuvColor({ matrix: 'bt709', fullRange: false }, 640, 480)).toEqual(BT709_L)
     expect(resolveYuvColor({ matrix: 'smpte170m', fullRange: true }, 1920, 1080)).toEqual(BT601_F)
     expect(resolveYuvColor({ matrix: 'bt470bg', fullRange: false }, 1920, 1080)).toEqual(BT601_L)
-    expect(resolveYuvColor({ matrix: 'bt2020-ncl', fullRange: null }, 3840, 2160)).toEqual(BT2020_L)
+  })
+
+  it('bt2020-ncl → null (caminho antigo): sem caso de paridade com o Chromium (PQ/HLG podem ter mapeamento de tons)', () => {
+    expect(resolveYuvColor({ matrix: 'bt2020-ncl', fullRange: null }, 3840, 2160)).toBeNull()
+    expect(resolveYuvColor({ matrix: 'bt2020-ncl', fullRange: true }, 1920, 1080)).toBeNull()
   })
 
   it('sem matriz: 1920×1080 → BT.709 limitada; 640×480 → BT.601 limitada (untaggedFamily, dimensões codificadas)', () => {
@@ -88,7 +92,8 @@ describe('resolveYuvColor (marcação do quadro; nulo → regra de sourceColor.t
     expect(resolveYuvColor({ matrix: null, fullRange: true }, 640, 480)).toEqual(BT601_F)
   })
 
-  it('matriz não suportada (rgb) → null (caminho antigo)', () => {
+  it('matriz não suportada (rgb, bt2020-cl) → null (caminho antigo)', () => {
+    expect(resolveYuvColor({ matrix: 'bt2020-cl', fullRange: false }, 3840, 2160)).toBeNull()
     expect(resolveYuvColor({ matrix: 'rgb', fullRange: true }, 1920, 1080)).toBeNull()
   })
 })
