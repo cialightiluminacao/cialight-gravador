@@ -32,9 +32,20 @@ describe('frameStreamArgs (ruling R23: a faixa de vídeo do asset)', () => {
   it('trecho, filtro e saída crua em cinza', () => {
     const a = frameStreamArgs({ ...base, stream: 1 })
     expect(a.slice(a.indexOf('-ss'), a.indexOf('-ss') + 2)).toEqual(['-ss', '1.000000'])
-    expect(a[a.indexOf('-t') + 1]).toBe('2.000000')
-    expect(a[a.indexOf('-vf') + 1]).toBe('fps=2:round=up,scale=8:8,format=gray')
+    expect(a).not.toContain('-t')
+    expect(a[a.indexOf('-frames:v') + 1]).toBe('4')
     expect(a.slice(-5)).toEqual(['-f', 'rawvideo', '-pix_fmt', 'gray', '-'])
+  })
+  it('grade ancorada em fromUs, em tempo absoluto do arquivo (achado #1 da revisão final)', () => {
+    const a = frameStreamArgs({ ...base, fromUs: 1_050_000 })
+    // tempos absolutos (mediabunny): sem o start_time do arquivo; -ss só posiciona (não descarta o quadro na tela)
+    expect(a.slice(0, a.indexOf('-i'))).toEqual(expect.arrayContaining(['-copyts', '-seek_timestamp', '1', '-noaccurate_seek']))
+    expect(a.indexOf('-copyts')).toBeLessThan(a.indexOf('-i'))
+    expect(a[a.indexOf('-vf') + 1]).toBe('setpts=PTS-1.050000/TB,fps=fps=2:round=up:start_time=0,scale=8:8,format=gray')
+    expect(a[a.indexOf('-fps_mode') + 1]).toBe('passthrough')
+    // sub-quadros: [from, to] inclusivo
+    const b = frameStreamArgs({ ...base, fromUs: 1_500_000, toUs: 2_000_000, fps: 10, inclusiveEnd: true })
+    expect(b[b.indexOf('-frames:v') + 1]).toBe('6')
   })
 })
 

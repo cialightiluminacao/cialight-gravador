@@ -43,6 +43,13 @@ const OCR_SCRIPT = join(ROOT, 'resources', 'ocr', 'ocr-winrt.ps1')
 const SETTINGS = join(process.env.APPDATA ?? '', 'cialight-gravador', 'settings.json')
 const W = 1920, H = 1080, FPS = 30, DUR_S = 10, NFRAMES = DUR_S * FPS
 const S = 1_000_000
+// 1º quadro da tela 2 quadros depois do 0 (como a faixa v:0 do rec.mp4 real: 0,0667 s) — achado #1 da revisão final:
+// a varredura tem de rotular cada amostra pelo instante em que o editor mostra aquele quadro (pts absoluto)
+const LATE_US = 66_667
+/** Quadro da fonte que o editor mostra no instante src (µs): o último com pts ≤ src; antes do 1º, o 1º. */
+const frameAt = (src) => Math.max(0, Math.min(NFRAMES - 1, Math.floor(((src - LATE_US) * FPS) / S + 1e-6)))
+// varredura em dois trechos com a emenda FORA da grade de quadros e no meio da rolagem (como um clipe aparado)
+const SCAN_SPLIT_US = 4_050_000
 const SCROLL = { n0: 120, n1: 240, px: 2 } // rolagem: 2 px/quadro para cima nos quadros (n0, n1]
 // métrica do F2/F6 (mesmos limites)
 const LEG = { contrast: 0.15, lap: 0.2, minSrcContrast: 120 }
@@ -110,7 +117,10 @@ function makeSession(items) {
   writeFileSync(join(GEN, 'none.filter.txt'), `${filter(items, false)},\nformat=gray`)
   writeFileSync(join(GEN, 'still.filter.txt'), `${filter(items, true)},\nformat=gray`)
   const rec = join(dir, 'rec.mp4')
-  ffmpegIn(['-y', '-f', 'lavfi', '-i', `color=c=0xF3F3F3:s=${W}x${H}:r=${FPS}:d=${DUR_S}`, '-/vf', 'full.filter.txt', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-g', '60', '-pix_fmt', 'yuv420p', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv', '-movflags', '+faststart', rec])
+  const rec0 = join(GEN, 'rec0.mp4')
+  ffmpegIn(['-y', '-f', 'lavfi', '-i', `color=c=0xF3F3F3:s=${W}x${H}:r=${FPS}:d=${DUR_S}`, '-/vf', 'full.filter.txt', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-g', '60', '-pix_fmt', 'yuv420p', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv', '-movflags', '+faststart', rec0])
+  // o 1º quadro em LATE_US (sem recodificar)
+  ffmpegIn(['-y', '-itsoffset', (LATE_US / S).toFixed(6), '-i', rec0, '-map', '0:v:0', '-c', 'copy', '-movflags', '+faststart', rec])
   // tinta de cada valor no quadro 0: pixels que diferem (> 24) entre "com valores" e "sem valores", na célula do item
   const still = (f) => ffmpegIn(['-f', 'lavfi', '-i', `color=c=0xF3F3F3:s=${W}x${H}:r=${FPS}:d=1`, '-/vf', f, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'])
   const full = still('still.filter.txt'), none = still('none.filter.txt')
@@ -203,7 +213,7 @@ function lapVar(gray, w, h, b, pad = 4) {
 function probe(file) {
   const p = JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file], { encoding: 'utf8' }))
   const vs = p.streams.find((s) => s.codec_type === 'video')
-  return { codec: vs?.codec_name, width: vs?.width, height: vs?.height, duration: Number(p.format.duration), frames: Number(vs?.nb_frames) }
+  return { codec: vs?.codec_name, width: vs?.width, height: vs?.height, duration: Number(p.format.duration), frames: Number(vs?.nb_frames), start: Number(vs?.start_time) }
 }
 /** sourceTimeUs (src/shared/editor/sourceTime.ts), a mesma conta do renderer: corte, velocidade, reverso, travas. */
 function sourceTimeUs(m, asset, tUs) {
@@ -315,6 +325,7 @@ async function main() {
   console.log('gravação sintética (formato do gravador) com 5 valores parados e 4 que rolam')
   const rec = makeSession(items)
   const pr = probe(rec)
+  check(`fonte: 1º quadro da tela em ${(LATE_US / 1000).toFixed(1)} ms (como o rec.mp4 real)`, Math.abs(pr.start * S - LATE_US) < 1000, pr)
   check(`fonte: H.264 ${W}×${H}, ${DUR_S} s, ${NFRAMES} quadros; tinta medida dos ${items.length} valores`, pr.codec === 'h264' && pr.width === W && pr.frames === NFRAMES && items.every((i) => i.ink && i.ink.x1 - i.ink.x0 > 40), { pr, ink: items.map((i) => i.ink) })
 
   // referência nítida (fonte): contraste e laplaciano de cada valor em cada quadro da fonte
@@ -387,22 +398,31 @@ async function main() {
     check('clipes montados num passo (A, B 1,5×, C reverso 2×, na mesma faixa)', clips.ok && clips.steps === 1 && clips.B.speed === 1.5 && clips.C.reverse && clips.C.speed === 2 && clips.A.track === clips.B.track && clips.B.track === clips.C.track, clips)
     result.clips = clips
 
-    console.log('varredura REAL pelo IPC (editor.sensitive.start no rec.mp4)')
+    console.log(`varredura REAL pelo IPC (editor.sensitive.start no rec.mp4), em [0, ${SCAN_SPLIT_US / S} s) e [${SCAN_SPLIT_US / S} s, ${DUR_S} s)`)
     const t0 = Date.now()
-    const scan = await ev(`return await new Promise((resolve) => {
+    const scanRange = (fromUs, toUs) => ev(`return await new Promise((resolve) => {
         let id = null; const early = []
         const off = window.api.editor.sensitive.onDone((d) => { if (id === null) early.push(d); else if (d.scanId === id) { off(); resolve(d.result) } })
-        window.api.editor.sensitive.start({ filePath: ${JSON.stringify(rec)}, fromUs: 0, toUs: ${DUR_S * S} }).then((r) => {
+        window.api.editor.sensitive.start({ filePath: ${JSON.stringify(rec)}, fromUs: ${fromUs}, toUs: ${toUs} }).then((r) => {
           if (r.error) { off(); resolve({ error: r.error, occurrences: [] }); return }
           id = r.scanId; const d = early.find((x) => x.scanId === id); if (d) { off(); resolve(d.result) }
         })
       })`)
+    const parts = [await scanRange(0, SCAN_SPLIT_US), await scanRange(SCAN_SPLIT_US, DUR_S * S)]
+    const scan = {
+      error: parts.find((x) => x.error)?.error, cancelled: parts.some((x) => x.cancelled), occurrences: parts.flatMap((x) => x.occurrences),
+      framesSampled: parts.reduce((n, x) => n + (x.framesSampled ?? 0), 0), framesOcr: parts.reduce((n, x) => n + (x.framesOcr ?? 0), 0), lang: parts[0].lang, timings: parts.map((x) => x.timings)
+    }
+    // rótulos das amostras na grade de cada trecho (0, 0,5…; 4,05, 4,55…)
+    // 1ª/última amostra do OCR de cada ocorrência na grade do seu trecho (0; 0,5…  4,05; 4,55…)
+    const onGrid = (t, from) => Math.abs((t - from) / 500_000 - Math.round((t - from) / 500_000)) < 1e-6
+    check('amostras do OCR rotuladas na grade de cada trecho (emenda fora da grade)', parts.every((x, i) => (x.occurrences ?? []).every((o) => onGrid(o.firstSeenUs, i ? SCAN_SPLIT_US : 0) && onGrid(o.lastSeenUs, i ? SCAN_SPLIT_US : 0))), null)
     const scanS = (Date.now() - t0) / 1000
     console.log(`  varredura: ${scanS.toFixed(1)} s, ${scan.occurrences.length} ocorrências, ${scan.framesSampled} amostras (${scan.framesOcr} no OCR), idioma ${scan.lang}, tempos ${JSON.stringify(scan.timings)}`)
     check('varredura sem erro', !scan.error && !scan.cancelled, scan.error)
     // recall: o valor i foi achado se alguma amostra de alguma ocorrência contém o centro da tinta dele naquele quadro
     const recall = items.map((it) => scan.occurrences.some((o) => o.samples.some((s) => {
-      const b = inkAt(it, Math.min(NFRAMES - 1, Math.floor((s.tUs * FPS) / S + 1e-6)))
+      const b = inkAt(it, frameAt(s.tUs))
       const cx = (b.x0 + b.x1 + 1) / 2 / W, cy = (b.y0 + b.y1 + 1) / 2 / H
       return cx >= s.box.x && cx <= s.box.x + s.box.w && cy >= s.box.y && cy <= s.box.y + s.box.h
     })))
@@ -444,7 +464,7 @@ async function main() {
       if (!c) { plan.push(null); continue }
       const src = sourceTimeUs(c, clips.asset, t)
       // quadro exibido em src (e os vizinhos: a caixa medida é a união — mais exigente, nunca menos)
-      const k = Math.min(NFRAMES - 1, Math.floor((src * FPS) / S + 1e-6))
+      const k = frameAt(src)
       const ks = [k - 1, k, k + 1].filter((x) => x >= 0 && x < NFRAMES)
       const boxes = items.map((it) => {
         const bs = ks.map((x) => inkAt(it, x))

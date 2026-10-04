@@ -4,9 +4,18 @@ import type { Us } from '@shared/editor/project'
 // Quadros da gravação em MEMÓRIA (ruling R1): o ffmpeg empacotado decodifica o trecho e escreve cinza 8 bits cru no
 // stdout; nada de arquivo temporário. Sem import de `electron` (o caminho do ffmpeg é injetado: testes em Node puro).
 //
-// Tempo de cada quadro: `fps=N:round=up` entrega em cada instante fromUs + k/N o ÚLTIMO quadro da origem com tempo ≤
-// esse instante — o quadro que está na tela nele (medido: com `round=near`, o padrão, o filtro entrega o último quadro
-// do intervalo centrado no instante, até meio intervalo DEPOIS — 233 ms a 2 qps —, o que desalinharia a caixa do tempo).
+// Tempo de cada quadro (o editor e a exportação leem pelo mediabunny: pts ABSOLUTO do arquivo, quadro mostrado em t =
+// o último com pts ≤ t): o quadro k entregue é o da origem na tela em fromUs + k/N.
+//  - `-copyts -seek_timestamp 1`: tempos absolutos (sem isso o -ss e os pts ficam relativos ao start_time do arquivo,
+//    que não é 0 em .ts, p.ex. 1,4 s);
+//  - `-noaccurate_seek`: o -ss só posiciona no quadro-chave ≤ fromUs (o corte exato descartaria o quadro que já está na
+//    tela em fromUs, com pts < fromUs);
+//  - `setpts=PTS-fromUs`: fromUs vira o instante 0, os quadros anteriores ficam negativos;
+//  - `fps=fps=N:round=up:start_time=0`: grade ancorada em 0 = fromUs (sem `start_time` a grade nasce no primeiro
+//    quadro decodificado e o 1º quadro saía ~0,5 s adiantado quando ele não estava exatamente em fromUs — rec.mp4 do
+//    app, v:0 em 0,067 s; clipes aparados). `round=up` entrega em cada instante o ÚLTIMO quadro com pts ≤ instante
+//    (com `round=near`, o padrão, até meio intervalo depois). Antes do 1º quadro, ele é repetido (o editor também o
+//    mostra). Medido no teste real frameSource.ffmpeg.test.ts.
 
 export interface RawFrame { tUs: Us; w: number; h: number; data: Uint8Array }
 
@@ -50,12 +59,12 @@ export function frameCountFor(fromUs: Us, toUs: Us, fps: number, inclusiveEnd: b
 
 /** Argumentos do ffmpeg do trecho (puro: testado). */
 export function frameStreamArgs(o: Omit<FrameStreamOpts, 'ffmpeg' | 'onSpawn' | 'w' | 'h'>): string[] {
-  const stepUs = 1_000_000 / o.fps
-  // meio passo a mais: o quadro em toUs (inclusivo) sai; sem ele, o último fica antes de toUs
-  const durUs = (o.toUs - o.fromUs) + (o.inclusiveEnd ? stepUs / 2 : 0)
+  const total = Math.max(1, frameCountFor(o.fromUs, o.toUs, o.fps, o.inclusiveEnd))
   const stream = Number.isInteger(o.stream) && o.stream! >= 0 ? o.stream! : 0
-  return ['-hide_banner', '-nostdin', '-loglevel', 'error', '-ss', sec(o.fromUs), '-i', o.file, '-t', sec(Math.max(1, Math.round(durUs))),
-    '-an', '-sn', '-dn', '-map', `0:v:${stream}`, '-vf', `fps=${o.fps}:round=up,${o.scale},format=gray`, '-f', 'rawvideo', '-pix_fmt', 'gray', '-']
+  const from = sec(o.fromUs)
+  return ['-hide_banner', '-nostdin', '-loglevel', 'error', '-copyts', '-seek_timestamp', '1', '-noaccurate_seek', '-ss', from, '-i', o.file,
+    '-an', '-sn', '-dn', '-map', `0:v:${stream}`, '-vf', `setpts=PTS-${from}/TB,fps=fps=${o.fps}:round=up:start_time=0,${o.scale},format=gray`,
+    '-frames:v', String(total), '-fps_mode', 'passthrough', '-f', 'rawvideo', '-pix_fmt', 'gray', '-']
 }
 
 export function frameStream(o: FrameStreamOpts): FrameStream {
