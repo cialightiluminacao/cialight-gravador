@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import * as Popover from '@radix-ui/react-popover'
-import { ArrowDown, ArrowUp, CircleCheckBig, Clock3, Copy, FolderOpen, ListVideo, LoaderCircle, ShieldAlert, TriangleAlert, X, XCircle } from 'lucide-react'
+import { ArrowDown, ArrowUp, CircleCheckBig, Clock3, Copy, FolderOpen, Hourglass, ListVideo, ShieldAlert, TriangleAlert, X, XCircle } from 'lucide-react'
 import { create } from 'zustand'
 import { exportQuitText } from '@shared/exportQuit'
 import { Button } from '@/components/ui/Button'
@@ -52,7 +52,8 @@ function stateText(it: QueueItem, position: number): string {
 }
 
 function StateIcon({ state }: { state: QueueItem['state'] }): React.JSX.Element {
-  if (state === 'running') return <LoaderCircle className="h-3.5 w-3.5 animate-spin text-accent-2" aria-hidden />
+  // estático de propósito: animação contínua durante a exportação a deixa presa a 60 quadros/s (ver ExportDialog.tsx)
+  if (state === 'running') return <Hourglass className="h-3.5 w-3.5 text-accent-2" aria-hidden />
   if (state === 'done') return <CircleCheckBig className="h-3.5 w-3.5 text-ok" aria-hidden />
   if (state === 'error') return <TriangleAlert className="h-3.5 w-3.5 text-danger" aria-hidden />
   if (state === 'cancelled') return <XCircle className="h-3.5 w-3.5 text-muted" aria-hidden />
@@ -105,7 +106,7 @@ function ItemRow({ it, position, first, last }: { it: QueueItem; position: numbe
       <span className={cn('truncate pl-5 text-[11px]', it.state === 'error' ? 'text-danger' : 'text-muted')} title={it.state === 'error' ? (it.message ?? undefined) : undefined}>
         {stateText(it, position)}
       </span>
-      {it.state === 'running' ? <Progress value={it.progress?.percent ?? 0} className="ml-5 h-1 w-auto" /> : null}
+      {it.state === 'running' ? <Progress value={it.progress?.percent ?? 0} smooth={false} className="ml-5 h-1 w-auto" /> : null}
       {it.privacy.length ? (
         <ul className="ml-5 flex flex-col gap-0.5 text-[11px] text-warn" aria-label="Avisos de privacidade" data-queue-privacy="">
           {it.privacy.map((w) => (
@@ -166,7 +167,7 @@ export function ExportQueueButton(): React.JSX.Element | null {
               {summary}
             </span>
           </div>
-          {prog.fraction != null && active.length ? <Progress value={prog.fraction * 100} className="h-1.5" /> : null}
+          {prog.fraction != null && active.length ? <Progress value={prog.fraction * 100} smooth={false} className="h-1.5" /> : null}
           <ol className="flex max-h-[min(60vh,420px)] flex-col gap-1.5 overflow-y-auto pr-0.5">
             {items.map((it) => {
               const k = pendingIds.indexOf(it.id)

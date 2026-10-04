@@ -66,11 +66,13 @@ export function Kbd({ children, className }: { children: string; className?: str
 }
 
 /* ---------- Progress ---------- */
-export function Progress({ value, className, tone = 'accent' }: { value: number; className?: string; tone?: 'accent' | 'ok' | 'info' }): React.JSX.Element {
+// `smooth={false}`: sem transição na largura — para barras atualizadas a cada ~200 ms (exportação do editor), em que
+// a transição de 200 ms vira animação contínua (ver o comentário em editor/ui/ExportDialog.tsx, RunningView).
+export function Progress({ value, className, tone = 'accent', smooth = true }: { value: number; className?: string; tone?: 'accent' | 'ok' | 'info'; smooth?: boolean }): React.JSX.Element {
   const bar = tone === 'ok' ? 'bg-ok' : tone === 'info' ? 'bg-info' : 'bg-accent'
   return (
     <ProgressPrimitive.Root value={value} className={cn('relative h-2 w-full overflow-hidden rounded-full bg-surface-3', className)}>
-      <ProgressPrimitive.Indicator className={cn('h-full rounded-full transition-[width] duration-200', bar)} style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+      <ProgressPrimitive.Indicator className={cn('h-full rounded-full', smooth && 'transition-[width] duration-200', bar)} style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
     </ProgressPrimitive.Root>
   )
 }

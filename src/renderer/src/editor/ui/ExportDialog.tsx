@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { Captions, ChevronDown, CircleCheckBig, Copy, FolderOpen, ListPlus, LoaderCircle, ShieldAlert, SlidersHorizontal, TriangleAlert, Upload, X } from 'lucide-react'
+import { Captions, ChevronDown, CircleCheckBig, Copy, FolderOpen, Hourglass, ListPlus, ShieldAlert, SlidersHorizontal, TriangleAlert, Upload, X } from 'lucide-react'
 import { fileNameFromTitle, sanitizeFileName } from '@shared/filenames'
 import { captionCues, contentEndUs, findItem, isCaptionsTrack } from '@shared/editor/ops'
 import { privacyWarnings, type PrivacyWarning } from '@shared/editor/privacy'
@@ -892,6 +892,12 @@ function stageLabel(format: ExportFormat, progress: EditorExportProgress | null)
   return `Quadro ${progress.frame} de ${progress.total}`
 }
 
+/**
+ * Sem animação contínua (spinner, transição da barra) de propósito: com a janela redesenhando a cada vsync (o
+ * diálogo tem o fundo com desfoque), o processo de GPU espera o vsync a cada quadro apresentado e o encoder da
+ * exportação andava junto — a exportação ficava presa em 60 quadros/s (G1, Task 3b: ~58 → 90–130 quadros/s sem as
+ * animações, 1080p; relatório em .superpowers/sdd/2026-10-03-editor-g1-export-speed/task-3b-report.md).
+ */
 function RunningView({ format, progress, cancelling, onCancel, onBackground }: { format: ExportFormat; progress: EditorExportProgress | null; cancelling: boolean; onCancel: () => void; onBackground?: () => void }): React.JSX.Element {
   const pct = progress?.percent ?? 0
   const finalizing = progress?.stage === 'finalize'
@@ -899,12 +905,12 @@ function RunningView({ format, progress, cancelling, onCancel, onBackground }: {
     <div className="flex flex-col gap-3">
       <div className="flex items-baseline justify-between gap-3">
         <span className="flex items-center gap-2 text-[13px] text-fg-2">
-          <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+          <Hourglass className="h-3.5 w-3.5" aria-hidden />
           {cancelling ? 'Cancelando…' : stageLabel(format, progress)}
         </span>
         <span className="font-mono text-[13px] font-semibold tabular-nums text-fg">{Math.floor(pct)}%</span>
       </div>
-      <Progress value={pct} />
+      <Progress value={pct} smooth={false} />
       <div className="flex justify-between text-[11px] text-muted">
         <span>{progress?.speed ? `${progress.speed.toLocaleString('pt-BR', { maximumFractionDigits: 1, minimumFractionDigits: 1 })}× tempo real` : '—'}</span>
         <span>{progress?.etaS != null && !finalizing ? `faltam ${formatClock(progress.etaS * 1000, false)}` : ''}</span>
