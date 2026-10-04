@@ -29,6 +29,11 @@ export interface SensitiveScanRequest {
   filePath: string; fromUs: Us; toUs: Us; kinds?: SensitiveKind[]; customTerms?: string[]
   /** Faixa de vídeo do arquivo (0:v:N; `asset.videoTrackIndex` — rec.mp4 da sessão: tela 0, webcam 1). Ausente = 0. */
   videoStreamIndex?: number
+  /**
+   * O asset tem intermediário (é ele que o editor decodifica): o main varre o intermediário deste asset (faixa v:0) no
+   * lugar de `filePath`, e recusa se não o achar. Os tempos ficam os do editor (o intermediário começa em 0).
+   */
+  intermediate?: { projectId: string; assetId: string }
 }
 export type SensitiveScanProgress = ScanProgress & { scanId: string }
 export interface SensitiveScanDone { scanId: string; result: ScanResult }

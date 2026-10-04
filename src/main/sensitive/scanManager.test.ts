@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ScanResult } from '@shared/editor/sensitiveScan'
 import type { ScanRequest, ScanRunOpts } from './scan'
 import { EventEmitter } from 'events'
-import { MAX_CUSTOM_TERMS, probeVideoStream, SensitiveScans, startScanForSender, validateScanRequest } from './scanManager'
+import { MAX_CUSTOM_TERMS, probeVideoStream, resolveScanSource, SCAN_INTERMEDIATE_MESSAGE, SensitiveScans, startScanForSender, validateScanRequest } from './scanManager'
 
 const FILE = 'C:\\videos\\gravacao.mp4'
 const isFile = (p: string): boolean => p === FILE
@@ -47,6 +47,45 @@ describe('validateScanRequest', () => {
   })
   it('50 termos de 100 caracteres passam', () => {
     expect(validateScanRequest({ ...ok, customTerms: Array.from({ length: 50 }, () => 'y'.repeat(100)) }, isFile).ok).toBe(true)
+  })
+})
+
+describe('resolveScanSource: varre o arquivo que o editor decodifica (intermediário)', () => {
+  const INTER = 'C:\\proj\\p1\\proxies\\A.intermediate.mp4'
+  const resolver = (projectId: string, assetId: string): string | null => (projectId === 'p1' && assetId === 'A' ? INTER : null)
+  it('sem `intermediate`: o pedido passa como veio (original, faixa pedida)', () => {
+    const raw = { ...ok, videoStreamIndex: 1 }
+    expect(resolveScanSource(raw, resolver)).toEqual({ ok: true, raw })
+    expect(resolveScanSource(null, resolver)).toEqual({ ok: true, raw: null })
+  })
+  it('com `intermediate`: troca o arquivo pelo intermediário do projeto e usa a faixa v:0 dele (a única)', () => {
+    const r = resolveScanSource({ ...ok, videoStreamIndex: 1, intermediate: { projectId: 'p1', assetId: 'A' } }, resolver)
+    expect(r).toEqual({ ok: true, raw: { ...ok, filePath: INTER, videoStreamIndex: 0 } })
+  })
+  it.each([
+    ['asset sem intermediário', { projectId: 'p1', assetId: 'B' }],
+    ['formato errado', { projectId: 1, assetId: 'A' }],
+    ['vazio', {}],
+    ['não-objeto', 'A']
+  ])('recusa (nunca varre o original no lugar): %s', (_n, intermediate) => {
+    const r = resolveScanSource({ ...ok, intermediate }, resolver)
+    expect(r).toEqual({ ok: false, error: { code: 'invalid', message: SCAN_INTERMEDIATE_MESSAGE } })
+  })
+  it('resolvedor ausente ou que lança: recusa', () => {
+    expect(resolveScanSource({ ...ok, intermediate: { projectId: 'p1', assetId: 'A' } }).ok).toBe(false)
+    expect(resolveScanSource({ ...ok, intermediate: { projectId: 'p1', assetId: 'A' } }, () => { throw new Error('x') }).ok).toBe(false)
+  })
+  it('SensitiveScans varre o intermediário (validado como arquivo existente) e recusa sem ele', async () => {
+    const seen: ScanRequest[] = []
+    const run = (r: ScanRequest): Promise<ScanResult> => (seen.push(r), Promise.resolve(empty))
+    const m = new SensitiveScans(run, (p) => p === FILE || p === INTER, resolver)
+    const sink = { progress: () => {}, done: () => {} }
+    expect(m.start({ ...ok, videoStreamIndex: 1, intermediate: { projectId: 'p1', assetId: 'A' } }, sink).error).toBeUndefined()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(seen).toEqual([{ ...ok, filePath: INTER, videoStreamIndex: 0 }])
+    const bad = m.start({ ...ok, intermediate: { projectId: 'p1', assetId: 'B' } }, sink)
+    expect(bad.error).toEqual({ code: 'invalid', message: SCAN_INTERMEDIATE_MESSAGE })
+    expect(seen).toHaveLength(1)
   })
 })
 

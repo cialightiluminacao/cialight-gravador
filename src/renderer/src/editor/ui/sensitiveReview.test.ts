@@ -21,7 +21,11 @@ import {
   mergeRanges,
   parseCustomWords,
   planScan,
+  SCAN_CONVERSION_PENDING,
+  SCAN_COVERAGE_CHANGED,
   SCAN_MERGE_GAP_US,
+  scanBlockedReason,
+  scanCoverageChanged,
   thumbCrop,
   visibleRows,
   type ReviewRow
@@ -68,6 +72,62 @@ describe('o que varrer', () => {
     // menu do clipe: só ele
     expect(planScan(p, 'a2').jobs).toEqual([{ assetId: 'A', videoStreamIndex: 0, clipIds: ['a2'], ranges: [{ fromUs: 10 * S, toUs: 13 * S }] }])
     expect(planScan(p, 'off').jobs).toEqual([])
+  })
+})
+
+describe('fonte da varredura = o que o editor decodifica (intermediário)', () => {
+  it('asset com intermediário: o pedido marca `intermediate` e usa a faixa v:0 (a única do intermediário)', () => {
+    const X = file('X', { intermediate: 'proxies/X.intermediate.mp4', videoTrackIndex: 1 })
+    const p = project([X], [vtrack('v1', [clip(X, 'x1', 0, 2 * S)])])
+    expect(planScan(p).jobs).toEqual([{ assetId: 'X', videoStreamIndex: 0, intermediate: true, clipIds: ['x1'], ranges: [{ fromUs: 0, toUs: 2 * S }] }])
+  })
+  it('conversão pendente (vídeo ou áudio não decodificável e sem intermediário): recusa com motivo', () => {
+    const v = file('V', { video: { ...file('V').video!, decodable: false } })
+    const a = file('U', { audio: { sampleRate: 48000, channels: 2, codec: 'ac-3', decodable: false } } as Partial<Asset>)
+    expect(scanBlockedReason(v)).toBe(SCAN_CONVERSION_PENDING)
+    expect(scanBlockedReason(a)).toBe(SCAN_CONVERSION_PENDING)
+    expect(scanBlockedReason({ ...v, intermediate: 'proxies/V.intermediate.mp4' })).toBeNull()
+    expect(scanBlockedReason(file('A'))).toBeNull()
+    expect(SCAN_CONVERSION_PENDING).toMatch(/convers/)
+  })
+})
+
+describe('trechos varridos × clipes de agora (aviso ao esconder)', () => {
+  const A = file('A')
+  const o = occ('s:o1', 'cpf', 12 * S, 13 * S)
+  const scanOf = (p: Project, onlyClipId?: string) => {
+    const j = planScan(p, onlyClipId).jobs[0]
+    return { assetId: j.assetId, ...(onlyClipId ? { clipIds: j.clipIds } : {}), scanned: { ranges: j.ranges, clipIds: j.clipIds }, occurrences: [o] }
+  }
+  it('clipes iguais aos da busca: sem aviso', () => {
+    const p = project([A], [vtrack('v1', [clip(A, 'a1', 0, 10 * S, { inUs: 10 * S })])])
+    const rows = buildRows(p, [scanOf(p)])
+    expect(rows[0].scanned).toEqual({ ranges: [{ fromUs: 10 * S, toUs: 20 * S }], clipIds: ['a1'] })
+    expect(scanCoverageChanged(p, rows)).toBe(false)
+    // clipe encurtado continua coberto
+    const shorter = project([A], [vtrack('v1', [clip(A, 'a1', 0, 5 * S, { inUs: 12 * S })])])
+    expect(scanCoverageChanged(shorter, rows)).toBe(false)
+  })
+  it('clipe alongado para fora do trecho varrido: avisa', () => {
+    const p = project([A], [vtrack('v1', [clip(A, 'a1', 0, 10 * S, { inUs: 10 * S })])])
+    const rows = buildRows(p, [scanOf(p)])
+    const longer = project([A], [vtrack('v1', [clip(A, 'a1', 0, 15 * S, { inUs: 10 * S })])])
+    expect(scanCoverageChanged(longer, rows)).toBe(true)
+    // um clipe novo do mesmo arquivo, fora do trecho, também recebe efeitos: avisa
+    const added = project([A], [vtrack('v1', [clip(A, 'a1', 0, 10 * S, { inUs: 10 * S }), clip(A, 'n', 10 * S, 5 * S, { inUs: 90 * S, enabled: false })])])
+    expect(scanCoverageChanged(added, rows)).toBe(true)
+  })
+  it('busca pelo menu do clipe e o clipe varrido sumiu (dividido): avisa; o clipe-alvo é só o pedido', () => {
+    const p = project([A], [vtrack('v1', [clip(A, 'a1', 0, 10 * S, { inUs: 10 * S }), clip(A, 'a2', 10 * S, 10 * S, { inUs: 60 * S })])])
+    const rows = buildRows(p, [scanOf(p, 'a1')])
+    expect(scanCoverageChanged(p, rows)).toBe(false) // a2 fora do trecho, mas não é alvo
+    const split = project([A], [vtrack('v1', [clip(A, 'a1b', 0, 10 * S, { inUs: 10 * S }), clip(A, 'a2', 10 * S, 10 * S, { inUs: 60 * S })])])
+    expect(scanCoverageChanged(split, rows)).toBe(true)
+    expect(SCAN_COVERAGE_CHANGED).toBe('O clipe mudou desde a busca; procure de novo para cobrir o trecho novo.')
+  })
+  it('linhas sem registro do trecho varrido (antigas): sem aviso', () => {
+    const p = project([A], [vtrack('v1', [clip(A, 'a1', 0, 10 * S, { inUs: 10 * S })])])
+    expect(scanCoverageChanged(p, buildRows(p, [{ assetId: 'A', occurrences: [o] }]))).toBe(false)
   })
 })
 

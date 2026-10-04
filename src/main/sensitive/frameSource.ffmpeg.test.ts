@@ -2,13 +2,17 @@
 // fromUs + k·passo — o último quadro da origem com pts ≤ esse instante, em tempo ABSOLUTO do arquivo (o do mediabunny,
 // que o editor e a exportação usam). Fontes sintéticas com o número do quadro gravado no nível de cinza:
 //  - mp4 cuja faixa v:0 começa tarde (0,067 s, como a tela do rec.mp4 do app) e v:1 em 0;
-//  - .ts com start_time 1,4 s (o -ss do ffmpeg é relativo ao start_time; o mediabunny usa o pts absoluto).
+//  - .ts com start_time 1,4 s (o -ss do ffmpeg é relativo ao start_time; o mediabunny usa o pts absoluto);
+//  - o intermediário desse .ts (intermediateArgs, o que o editor decodifica quando o codec não é decodificável): ele
+//    começa em 0 (sem -copyts), então varrer o ORIGINAL rotularia os quadros 1,4 s adiantados — a varredura lê ele.
 // Sem o ffmpeg baixado (resources/ffmpeg não é versionado) o bloco é pulado.
 import { beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'child_process'
 import { existsSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
 import { sampleFrames, subFrames, type FrameStream, type RawFrame } from './frameSource'
+import { parseFfprobe } from '../media/probe'
+import { intermediateArgs } from '../media/proxyPolicy'
 
 const ROOT = resolve(__dirname, '../../..')
 const FFMPEG = join(ROOT, 'resources', 'ffmpeg', 'ffmpeg.exe')
@@ -16,6 +20,7 @@ const FFPROBE = join(ROOT, 'resources', 'ffmpeg', 'ffprobe.exe')
 const OUT = join(ROOT, 'test-out', 'g3-frametime')
 const MP4 = join(OUT, 'late-v0.mp4')
 const TS = join(OUT, 'start14.ts')
+const INTER = join(OUT, 'start14.intermediate.mp4')
 const SIZE = 16
 // nível de cinza do quadro N da origem: 20 + 3·N (a conversão gray→yuv420p erra ±1; o passo 3 separa os quadros)
 const indexOf = (gray: number): number => Math.round((gray - 20) / 3)
@@ -104,4 +109,22 @@ describe.skipIf(!has)('frameSource com ffmpeg real: conteúdo do quadro k = orig
     // antes do primeiro quadro: o editor mostra o primeiro
     expectAligned(await collect(sample(TS, 0, 2_000_000)), tsPts, 0, 500_000, 4)
   })
+
+  it('intermediário do .ts (o que o editor mostra): começa em 0; a varredura dele dá o quadro do editor, a do original não', async () => {
+    const info = parseFfprobe(JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', TS], { encoding: 'utf8', windowsHide: true })), TS)
+    execFileSync(FFMPEG, intermediateArgs(TS, INTER, info, 'libx264'), { windowsHide: true, stdio: 'ignore' })
+    const interPts = framePtsUs(INTER, 0)
+    const shift = tsPts[0] - interPts[0]
+    // pré-condição: o intermediário foi deslocado pelo start_time do original (é o tempo que o editor usa)
+    expect(interPts[0]).toBeLessThan(50_000)
+    expect(shift).toBeGreaterThan(1_000_000)
+    // quadro da origem visível no editor em t (tempo do intermediário) = o do original em t + shift
+    const sampled = await collect(sample(INTER, 250_000, 2_750_000))
+    expectAligned(sampled, interPts, 250_000, 500_000, 5)
+    expect(sampled.map((f) => indexOf(mean(f)))).toEqual(sampled.map((f) => shownAt(tsPts, f.tUs + shift)))
+    expectAligned(await collect(sub(INTER, 1_033_333, 1_333_333)), interPts, 1_033_333, 100_000, 4)
+    // o original lido nos mesmos instantes mostra outro quadro (o erro de S que a troca de fonte evita)
+    const wrong = await collect(sample(TS, 250_000, 2_750_000))
+    expect(wrong.map((f) => indexOf(mean(f)))).not.toEqual(sampled.map((f) => indexOf(mean(f))))
+  }, 60_000)
 })

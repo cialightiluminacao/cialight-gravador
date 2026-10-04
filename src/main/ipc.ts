@@ -657,6 +657,14 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
       } catch {
         return false
       }
+    },
+    // o editor decodifica o intermediário quando ele existe (mediaUrls): a varredura lê o mesmo arquivo
+    (projectId, assetId) => {
+      try {
+        return projects.assetPath(projects.cached(projectId), assetId, 'intermediate', store)
+      } catch {
+        return null
+      }
     }
   )
   // janela fechada, renderer caído ou recarregado no meio: a varredura (e os processos dela) acaba junto

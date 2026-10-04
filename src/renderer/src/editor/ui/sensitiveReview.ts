@@ -79,8 +79,13 @@ export function mergeRanges(ranges: readonly { fromUs: Us; toUs: Us }[], gapUs: 
 
 export interface ScanJob {
   assetId: string
-  /** Faixa de vídeo do arquivo (ruling R23). */
+  /** Faixa de vídeo do arquivo (ruling R23); com intermediário, 0 (ele só leva a faixa 0:v:0 do original). */
   videoStreamIndex: number
+  /**
+   * O editor decodifica o intermediário deste asset (mediaUrls): a varredura lê ELE (o main resolve o caminho), cujo
+   * tempo é o do editor — o original pode ter start_time ≠ 0 (.ts) e os quadros sairiam rotulados S adiantados.
+   */
+  intermediate?: true
   ranges: { fromUs: Us; toUs: Us }[]
   /** Clipes varridos deste arquivo (os efeitos vão só neles quando a busca é pelo menu do clipe). */
   clipIds: string[]
@@ -108,8 +113,20 @@ export function planScan(p: Project, onlyClipId?: string | null): ScanPlan {
   }
   const jobs = [...byAsset.values()]
     .sort((a, b) => a.first - b.first)
-    .map((e) => ({ assetId: e.asset.id, videoStreamIndex: e.asset.videoTrackIndex ?? 0, ranges: mergeRanges(e.ranges), clipIds: e.clipIds }))
+    .map((e) => ({ assetId: e.asset.id, ...(e.asset.intermediate ? { videoStreamIndex: 0, intermediate: true as const } : { videoStreamIndex: e.asset.videoTrackIndex ?? 0 }), ranges: mergeRanges(e.ranges), clipIds: e.clipIds }))
   return { jobs, unsupported }
+}
+
+export const SCAN_CONVERSION_PENDING = 'Este vídeo ainda não tem a cópia convertida para edição (conversão em andamento ou com erro). Aguarde a conversão terminar para procurar dados sensíveis: a busca lê a mesma cópia que o editor mostra.'
+
+/**
+ * O arquivo não pode ser varrido AGORA: vídeo ou áudio que o WebCodecs não decodifica ganha um intermediário (que passa
+ * a ser o que o editor mostra, com outro tempo quando o original tem start_time ≠ 0); antes dele existir, varrer o
+ * original daria tempos que não valem depois. null = pode.
+ */
+export function scanBlockedReason(a: Asset): string | null {
+  if (a.intermediate) return null
+  return a.video?.decodable === false || a.audio?.decodable === false ? SCAN_CONVERSION_PENDING : null
 }
 
 // ---------------------------------------------------------------- palavras personalizadas
@@ -137,10 +154,18 @@ export function parseCustomWords(text: string): { words: string[]; dropped: numb
 
 // ---------------------------------------------------------------- lista de revisão
 
+/** O que a busca leu de um arquivo: os trechos da fonte e os clipes de então. */
+export interface ScannedSpan {
+  ranges: { fromUs: Us; toUs: Us }[]
+  clipIds: string[]
+}
+
 export interface ScanOutcome {
   assetId: string
   /** Só estes clipes recebem efeitos (menu do clipe); ausente = todos os do arquivo. */
   clipIds?: string[]
+  /** Trechos varridos e clipes de então (aviso se os clipes mudarem até a aplicação). */
+  scanned?: ScannedSpan
   occurrences: Occurrence[]
 }
 
@@ -149,6 +174,7 @@ export interface ReviewRow {
   id: string
   assetId: string
   clipIds?: string[]
+  scanned?: ScannedSpan
   occ: Occurrence
   kind: SensitiveKind
   /** Clipe onde ela aparece primeiro e o instante (timeline) para onde o playhead vai. */
@@ -207,7 +233,7 @@ export function buildRows(p: Project, outcomes: readonly ScanOutcome[]): ReviewR
         at = Math.max(m.startUs, best.a)
         box = occurrenceRegionAt(occ, sourceTimeUs(m, asset, at)) ?? occ.samples[0]?.box ?? { x: 0, y: 0, w: 0, h: 0 }
       }
-      rows.push({ id: occ.id, assetId: o.assetId, ...(o.clipIds ? { clipIds: o.clipIds } : {}), occ, kind: occ.kind, clipId: m.id, atUs: at, box, fromUs: best.a, toUs: best.b, clips: n })
+      rows.push({ id: occ.id, assetId: o.assetId, ...(o.clipIds ? { clipIds: o.clipIds } : {}), ...(o.scanned ? { scanned: o.scanned } : {}), occ, kind: occ.kind, clipId: m.id, atUs: at, box, fromUs: best.a, toUs: best.b, clips: n })
     }
   }
   return rows.sort((a, b) => a.atUs - b.atUs || a.box.y - b.box.y || a.box.x - b.box.x)
@@ -266,6 +292,41 @@ export function hideRows(p: Project, rows: readonly ReviewRow[], style: 'blur' |
   }
   const notHiddenIds = new Set(skipped.map((s) => s.occurrenceId))
   return { project, itemIds, skipped, requested: rows.length, notHidden: notHiddenIds.size, notHiddenIds }
+}
+
+export const SCAN_COVERAGE_CHANGED = 'O clipe mudou desde a busca; procure de novo para cobrir o trecho novo.'
+
+/**
+ * Os clipes mudaram desde a busca de forma que parte do que vai receber efeitos nunca foi lida: algum clipe-alvo (os
+ * que hideOccurrences usa: visuais do arquivo, só os do menu quando a busca foi por clipe) mostra um trecho da fonte
+ * fora dos trechos varridos, ou algum clipe varrido não existe mais (dividido/apagado). Os efeitos da parte coberta
+ * continuam valendo; quem chama avisa (nunca silêncio).
+ */
+export function scanCoverageChanged(p: Project, rows: readonly ReviewRow[]): boolean {
+  const groups = new Map<string, { assetId: string; clipIds?: string[]; scanned: ScannedSpan }>()
+  for (const r of rows) {
+    if (!r.scanned) continue
+    const key = `${r.assetId}|${r.clipIds?.join(',') ?? '*'}`
+    if (!groups.has(key)) groups.set(key, { assetId: r.assetId, ...(r.clipIds ? { clipIds: r.clipIds } : {}), scanned: r.scanned })
+  }
+  if (groups.size === 0) return false
+  const ids = new Set<string>()
+  for (const t of p.tracks) for (const it of t.items) ids.add(it.id)
+  for (const g of groups.values()) {
+    if (g.scanned.clipIds.some((id) => !ids.has(id))) return true
+    const asset = p.assets.find((a) => a.id === g.assetId)
+    if (!asset) return true
+    const only = g.clipIds ? new Set(g.clipIds) : null
+    for (const t of p.tracks) {
+      if (t.kind !== 'video') continue
+      for (const it of t.items) {
+        if (it.type !== 'media' || it.assetId !== asset.id || !it.visual || (only && !only.has(it.id))) continue
+        const r = clipSourceRange(it, asset)
+        if (!g.scanned.ranges.some((s) => s.fromUs <= r.fromUs && r.toUs <= s.toUs)) return true
+      }
+    }
+  }
+  return false
 }
 
 /** Texto do aviso do resultado (nunca silêncio), com o motivo real de cada ocorrência pulada. */

@@ -8,7 +8,7 @@ import { useSensitiveScan } from '../state/sensitiveScan'
 import { seekTo } from './editorActions'
 import { makeThumbs } from './sensitiveThumbs'
 import { scanOnce } from './sensitiveScanIpc'
-import { buildRows, hideRows, hideToast, ocrUnavailableHint, parseCustomWords, planScan, SCAN_DISCLAIMER, type ReviewRow, type ScanOutcome } from './sensitiveReview'
+import { buildRows, hideRows, hideToast, ocrUnavailableHint, parseCustomWords, planScan, SCAN_COVERAGE_CHANGED, SCAN_DISCLAIMER, scanBlockedReason, scanCoverageChanged, type ReviewRow, type ScanOutcome } from './sensitiveReview'
 
 // Fluxo do "Procurar dados sensíveis" (G3): varreduras em sequência pelo IPC (uma por arquivo/trecho), cancelamento,
 // miniaturas e a aplicação (um passo de desfazer). PRIVACIDADE: termos e resultados só na memória (state/sensitiveScan);
@@ -40,6 +40,15 @@ export async function startSensitiveScan(): Promise<void> {
     toast.error('Nada para procurar', { description: plan.unsupported ? 'Os clipes visuais são imagens ou mídia indisponível: a busca lê só vídeos.' : 'Não há clipes de vídeo ativos.' })
     return
   }
+  // conversão pendente: o que o editor vai mostrar ainda não existe (tempos do original não valeriam) — recusa
+  for (const job of plan.jobs) {
+    const a = p.assets.find((x) => x.id === job.assetId)
+    const why = a ? scanBlockedReason(a) : null
+    if (why) {
+      toast.error('Não dá para procurar dados sensíveis neste vídeo agora', { description: `${a!.name}: ${why}` })
+      return
+    }
+  }
   const { words, dropped, tooLong } = parseCustomWords(s.wordsText)
   if (dropped || tooLong) toast.warning('Algumas palavras personalizadas ficaram de fora', { description: `Até 50 termos, cada um com até 100 caracteres (${dropped + tooLong} ignorado${dropped + tooLong === 1 ? '' : 's'}).` })
   // termo digitado entra mesmo com o tipo "Termo personalizado" desmarcado (foi pedido explicitamente)
@@ -69,7 +78,7 @@ export async function startSensitiveScan(): Promise<void> {
     for (let j = 0; j < job.ranges.length; j++) {
       const r = job.ranges[j]
       ss().patch({ progress: { file: i + 1, files, range: j + 1, ranges: job.ranges.length, phase: 'amostrando', done: 0, total: 0 } })
-      const req: SensitiveScanRequest = { filePath: path, fromUs: r.fromUs, toUs: r.toUs, kinds, ...(words.length ? { customTerms: words } : {}), videoStreamIndex: job.videoStreamIndex }
+      const req: SensitiveScanRequest = { filePath: path, fromUs: r.fromUs, toUs: r.toUs, kinds, ...(words.length ? { customTerms: words } : {}), videoStreamIndex: job.videoStreamIndex, ...(job.intermediate ? { intermediate: { projectId: p.id, assetId: job.assetId } } : {}) }
       const run = scanOnce(window.api.editor.sensitive, req, {
         onProgress: (pr) => {
           if (my === gen) ss().patch({ progress: { file: i + 1, files, range: j + 1, ranges: job.ranges.length, phase: pr.phase, done: pr.done, total: pr.total } })
@@ -95,7 +104,7 @@ export async function startSensitiveScan(): Promise<void> {
       }
       occurrences.push(...result.occurrences)
     }
-    outcomes.push({ assetId: job.assetId, ...(s.clipId ? { clipIds: job.clipIds } : {}), occurrences })
+    outcomes.push({ assetId: job.assetId, ...(s.clipId ? { clipIds: job.clipIds } : {}), scanned: { ranges: job.ranges, clipIds: job.clipIds }, occurrences })
   }
   const project = es().project
   if (!project || my !== gen) return
@@ -144,6 +153,9 @@ export function closeSensitiveDialog(): void {
 export function hideSensitiveRows(rows: readonly ReviewRow[]): void {
   if (rows.length === 0) return
   const style = ss().style
+  const before = es().project
+  // clipes alongados/divididos desde a busca: a parte nova nunca foi lida (a coberta ainda recebe os efeitos)
+  const changed = before ? scanCoverageChanged(before, rows) : false
   let out: ReturnType<typeof hideRows> | null = null
   const ok = es().apply((p) => {
     out = hideRows(p, rows, style)
@@ -151,6 +163,7 @@ export function hideSensitiveRows(rows: readonly ReviewRow[]): void {
   })
   const o = out as ReturnType<typeof hideRows> | null
   if (!ok || !o) return
+  if (changed) toast.warning(SCAN_COVERAGE_CHANGED, { duration: 10_000 })
   // as não escondidas (faixa bloqueada) ficam na lista, marcadas: desbloquear e tentar de novo
   const failed = new Set(ss().notHidden)
   for (const id of o.notHiddenIds) failed.add(id)

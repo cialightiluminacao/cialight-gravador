@@ -48,6 +48,34 @@ export function validateScanRequest(raw: unknown, isFile: (p: string) => boolean
   }
 }
 
+export const SCAN_INTERMEDIATE_MESSAGE = 'Não foi possível achar a cópia convertida deste vídeo (a que o editor mostra) para procurar dados sensíveis. Aguarde a conversão terminar ou reimporte o vídeo.'
+
+/** Caminho do intermediário do asset no projeto (null = não há). */
+export type IntermediateResolver = (projectId: string, assetId: string) => string | null
+
+/**
+ * Fonte da varredura = o arquivo que o editor DECODIFICA (mediaUrls: o intermediário, se houver, senão o original).
+ * O intermediário é transcodificado sem -copyts (tempo = pts do original − start_time do arquivo, e CFR quando VFR) e
+ * só leva a faixa 0:v:0: varrer o original rotularia os quadros S (start_time, milhares de segundos num .ts de TV)
+ * adiantados em relação ao que o editor mostra. Com `intermediate`, o arquivo vira o intermediário do projeto (faixa
+ * v:0); sem ele resolvido, RECUSA (nunca varre o original no lugar, em silêncio).
+ */
+export function resolveScanSource(raw: unknown, resolveIntermediate?: IntermediateResolver): { ok: true; raw: unknown } | { ok: false; error: ScanError } {
+  if (!raw || typeof raw !== 'object' || !('intermediate' in raw) || (raw as { intermediate?: unknown }).intermediate === undefined) return { ok: true, raw }
+  const { intermediate, ...rest } = raw as Record<string, unknown>
+  const refuse = { ok: false as const, error: { code: 'invalid' as const, message: SCAN_INTERMEDIATE_MESSAGE } }
+  const ref = intermediate as { projectId?: unknown; assetId?: unknown } | null
+  if (!ref || typeof ref !== 'object' || typeof ref.projectId !== 'string' || typeof ref.assetId !== 'string' || !ref.projectId || !ref.assetId || !resolveIntermediate) return refuse
+  let path: string | null
+  try {
+    path = resolveIntermediate(ref.projectId, ref.assetId)
+  } catch {
+    path = null
+  }
+  if (!path) return refuse
+  return { ok: true, raw: { ...rest, filePath: path, videoStreamIndex: 0 } }
+}
+
 export interface StreamInfo { video?: { width: number; height: number; rotation?: number }; durationUs: number | null }
 
 /**
@@ -72,7 +100,7 @@ export type ScanRunner = (req: ScanRequest, opts: ScanRunOpts) => Promise<ScanRe
 export class SensitiveScans {
   private current: { scanId: string; ac: AbortController } | null = null
 
-  constructor(private readonly run: ScanRunner, private readonly isFile: (p: string) => boolean) {}
+  constructor(private readonly run: ScanRunner, private readonly isFile: (p: string) => boolean, private readonly resolveIntermediate?: IntermediateResolver) {}
 
   get running(): string | null {
     return this.current?.scanId ?? null
@@ -81,7 +109,9 @@ export class SensitiveScans {
   /** Começa uma varredura; erro imediato (busy/invalid) volta aqui e NÃO gera `done`. */
   start(raw: unknown, sink: ScanSink): { scanId: string; error?: ScanError } {
     if (this.current) return { scanId: '', error: { code: 'busy', message: SCAN_BUSY_MESSAGE } }
-    const v = validateScanRequest(raw, this.isFile)
+    const src = resolveScanSource(raw, this.resolveIntermediate)
+    if (!src.ok) return { scanId: '', error: src.error }
+    const v = validateScanRequest(src.raw, this.isFile)
     if (!v.ok) return { scanId: '', error: v.error }
     const scanId = randomUUID()
     const ac = new AbortController()
