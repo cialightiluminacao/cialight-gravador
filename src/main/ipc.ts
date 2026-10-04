@@ -39,7 +39,7 @@ import { decodeSrtBytes, encodeSrtFile, writeSrtBesideFile } from './captions/sr
 import { sanitizeFileName } from '@shared/filenames'
 import { check as updateCheck, download as updateDownload, getUpdateStatus, install as updateInstall } from './update/autoUpdater'
 import { logsDir, log } from './log'
-import { DownloadCancelledError, downloadModel, isWhisperModelId, modelFileIfPresent, modelStatus, whisperModelsDir } from './transcribe/whisperModels'
+import { DownloadCancelledError, cleanupDownloadPartsSync, downloadModel, isWhisperModelId, modelFileIfPresent, modelStatus, whisperModelsDir } from './transcribe/whisperModels'
 import { TranscribeCancelledError, TranscribeService, transcribeInputOf } from './transcribe/transcribeService'
 import type { TranscribeLanguage, TranscribeRequest } from '@shared/ipc'
 import { trayBalloon } from './tray'
@@ -710,10 +710,14 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
   ipcMain.handle(IPC.transcribe.cancel, () => {
     transcribeCtl?.abort()
   })
-  // saindo: mata o whisper/ffmpeg da transcrição e interrompe o download (o .part é apagado)
+  // saindo: will-quit não espera os finally assíncronos → mata o whisper/ffmpeg e apaga a pasta temporária da
+  // transcrição e o .part do download já, de forma síncrona (caminhos explícitos)
   app.on('will-quit', () => {
     transcribeCtl?.abort()
     downloadCtl?.abort()
+    const tmp = transcriber.killAndCleanupSync()
+    const parts = cleanupDownloadPartsSync()
+    if (tmp || parts.length) log.info(`saída: limpeza da transcrição (${tmp ?? "—"}) e do download (${parts.join(", ") || "—"})`)
   })
 
   // saindo no meio de uma exportação/remux: interrompe, apaga os parciais e só então sai

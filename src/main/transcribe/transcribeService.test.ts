@@ -5,7 +5,7 @@ import { constants, tmpdir } from 'os'
 import { join } from 'path'
 import type { spawn } from 'child_process'
 import type { TranscribeProgress, TranscribeRequest } from '@shared/ipc'
-import { LOW_VOICE_WARNING, TranscribeCancelledError, TranscribeService, WHISPER_START_ERROR, mergeWords, transcribeInputOf, whisperThreads, type TranscribeDeps } from './transcribeService'
+import { LOW_VOICE_WARNING, TranscribeCancelledError, TranscribeService, WHISPER_START_ERROR, mergeWords, parseWhisperProgress, transcribeInputOf, whisperThreads, type TranscribeDeps } from './transcribeService'
 import type { Asset } from '@shared/editor/project'
 
 let root: string
@@ -67,7 +67,7 @@ function fake(behave: { extract?: Behavior; silence?: Behavior; whisper?: Behavi
     const child = new FakeChild(++pid)
     const c: Call = { cmd, args, opts, child }
     calls.push(c)
-    const kind = cmd.endsWith('whisper-cli.exe') ? 'whisper' : args.includes('-af') ? 'silence' : 'extract'
+    const kind = cmd.endsWith('whisper-cli.exe') ? 'whisper' : args.at(-1) === '-' ? 'silence' : 'extract'
     const def: Behavior =
       kind === 'extract'
         ? (x) => {
@@ -126,13 +126,15 @@ describe('TranscribeService', () => {
     const r = await svc.transcribe(req([{ assetId: 'a1', fromUs: 10_000_000, toUs: 16_000_000 }]), (p) => prog.push(p))
     expect(f.calls.map((c) => c.cmd)).toEqual(['C:/ff/ffmpeg.exe', 'C:/ff/ffmpeg.exe', 'C:/wh/whisper-cli.exe'])
     const ex = f.calls[0].args
-    expect(ex.slice(ex.indexOf('-ss'), ex.indexOf('-ss') + 2)).toEqual(['-ss', '10.000000'])
+    // origem = pts do contêiner (como o mixer): -copyts, -ss absoluto só para buscar 1 s antes, corte exato no atrim
+    expect(ex.slice(0, ex.indexOf('-i'))).toEqual(['-hide_banner', '-nostdin', '-v', 'error', '-y', '-copyts', '-seek_timestamp', '1', '-noaccurate_seek', '-ss', '9.000000'])
+    expect(ex[ex.indexOf('-af') + 1]).toBe('atrim=start=10.000000:end=16.000000,asetpts=PTS-10.000000/TB,aresample=16000:async=1:first_pts=0')
     expect(ex.slice(ex.indexOf('-t'), ex.indexOf('-t') + 2)).toEqual(['-t', '6.000000'])
-    expect(ex).toEqual(expect.arrayContaining(['-map', '0:a:1', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le']))
+    expect(ex).toEqual(expect.arrayContaining(['-map', '0:a:1', '-ac', '1', '-c:a', 'pcm_s16le']))
     expect(f.calls[1].args.join(' ')).toContain('silencedetect=n=-35dB:d=0.35')
     const w = f.calls[2]
     const wav = join(temps[0], 'job0.wav')
-    expect(w.args).toEqual(['-m', 'ggml-base.bin', '-f', wav, '-l', 'pt', '-t', '8', '-bs', '1', '-bo', '1', '--dtw', 'base', '-nfa', '-np', '-ojf', '-of', join(temps[0], 'job0')])
+    expect(w.args).toEqual(['-m', 'ggml-base.bin', '-f', wav, '-l', 'pt', '-t', '8', '-bs', '1', '-bo', '1', '--dtw', 'base', '-nfa', '-np', '-pp', '-ojf', '-of', join(temps[0], 'job0')])
     expect(w.opts.cwd).toBe('C:/modelos')
     expect(f.priorities).toEqual([[w.child.pid, constants.priority.PRIORITY_BELOW_NORMAL]])
     // tchau: t_dtw anterior? 1ª do segmento → offsets.from 5100 ms (fala volta em 5 s − 120 ms) → +10 s
@@ -257,6 +259,60 @@ describe('TranscribeService', () => {
   })
 })
 
+describe('rodada 1: progresso do -pp, palavras além do trecho, limpeza síncrona', () => {
+  it('parseWhisperProgress lê "progress = N%" do -pp', () => {
+    expect(parseWhisperProgress('whisper_print_progress_callback: progress =  34%')).toBe(34)
+    expect(parseWhisperProgress('whisper_print_progress_callback: progress = 100%')).toBe(100)
+    expect(parseWhisperProgress('whisper_full_with_state: auto-detected language')).toBeNull()
+    expect(parseWhisperProgress('progress = 250%')).toBeNull()
+  })
+
+  it('progresso dentro do trecho pelo stderr do whisper (linhas partidas entre pedaços)', async () => {
+    const f = fake({
+      whisper: (x) => {
+        const out = x.args[x.args.indexOf('-of') + 1]
+        setTimeout(() => x.child.stderr.emit('data', Buffer.from('whisper_print_progress_callback: progr')), 1)
+        setTimeout(() => x.child.stderr.emit('data', Buffer.from('ess =  50%\nwhisper_print_progress_callback: progress = 100%\n')), 2)
+        setTimeout(() => {
+          writeFileSync(`${out}.json`, JSON.stringify({ transcription: [] }))
+          x.child.emit('close', 0)
+        }, 4)
+      }
+    })
+    const prog: TranscribeProgress[] = []
+    await service(f).svc.transcribe(req([{ assetId: 'a1', fromUs: 0, toUs: 6_000_000 }]), (p) => prog.push(p))
+    expect(prog.map((p) => [p.stage, +p.fraction.toFixed(3)])).toEqual([['extract', 0], ['transcribe', 0.05], ['transcribe', 0.525], ['transcribe', 1], ['transcribe', 1]])
+  })
+
+  it('palavra que começa no fim do trecho ou depois é descartada; nunca fim ≤ início', async () => {
+    const f = fake({
+      whisper: (x) => {
+        const out = x.args[x.args.indexOf('-of') + 1]
+        // trecho de 6 s: "d" começa em 5,95 s; "e" em 6,2 s (margem do whisper além do trecho)
+        writeFileSync(`${out}.json`, JSON.stringify({ transcription: [seg(5400, 7000, [['a', 560], ['b', 570], ['c', 595], ['d', 620], ['e', 640]])] }))
+        setTimeout(() => x.child.emit('close', 0), 1)
+      },
+      silence: (x) => setTimeout(() => x.child.emit('close', 0), 1)
+    })
+    const r = await service(f).svc.transcribe(req([{ assetId: 'a1', fromUs: 10_000_000, toUs: 16_000_000 }]), () => {})
+    expect(r.words.a1.map((w) => [w.text, w.startUs, w.endUs])).toEqual([['a', 15_500_000, 15_600_000], ['b', 15_600_000, 15_700_000], ['c', 15_700_000, 15_950_000], ['d', 15_950_000, 16_000_000]])
+  })
+
+  it('killAndCleanupSync (saída do app): mata o filho desta execução e apaga a pasta temporária na hora', async () => {
+    let whisperChild: FakeChild | null = null
+    const f = fake({ whisper: (x) => (whisperChild = x.child) })
+    const { svc, temps } = service(f)
+    expect(svc.killAndCleanupSync()).toBeNull()
+    const p = svc.transcribe(req([{ assetId: 'a1', fromUs: 0, toUs: 6_000_000 }]), () => {})
+    while (!whisperChild) await new Promise((r) => setTimeout(r, 2))
+    expect(existsSync(temps[0])).toBe(true)
+    expect(svc.killAndCleanupSync()).toBe(temps[0])
+    expect(existsSync(temps[0])).toBe(false) // síncrono: já apagada
+    expect((whisperChild as FakeChild | null)?.killed).toBe(true)
+    p.catch(() => {}) // o filho morto fecha sem JSON: a execução falha (o app está saindo)
+  })
+})
+
 describe('transcribeInputOf / mergeWords', () => {
   const deps = { projectFile: (p: string, r: string) => `P/${p}/${r}`, sessionFile: (s: string, n: string) => `S/${s}/${n}`, sessionTracks: () => ({ screen: 0, mic: 0, system: 1 }) }
   const base = { id: 'a', name: 'x.mp4', durationUs: 1, status: 'ready' } as const
@@ -265,6 +321,16 @@ describe('transcribeInputOf / mergeWords', () => {
     expect(transcribeInputOf(deps, 'p', { ...base, kind: 'audio', source: { type: 'session', sessionId: 's1', stream: 'system' } } as Asset, 'a')).toEqual({ path: 'S/s1/rec.mp4', audioMap: '0:a:1', name: 'x.mp4' })
     expect(() => transcribeInputOf(deps, 'p', { ...base, kind: 'video', source: { type: 'file', path: 'C:/v.mp4' } } as Asset, 'a')).toThrow('“x.mp4” não tem áudio para transcrever.')
     expect(() => transcribeInputOf(deps, 'p', undefined, 'zz')).toThrow(/não encontrada/)
+  })
+  it('faixa de áudio = a do mixer: audioTrackIndex quando definido; gravação mic/sistema; tela com áudio → principal', () => {
+    // arquivo multi-faixa com audioTrackIndex (o mixer toca a:1; a ingestão sozinha diria a:0)
+    expect(transcribeInputOf(deps, 'p', { ...base, kind: 'video', audio: {} as Asset['audio'], audioTrackIndex: 1, source: { type: 'file', path: 'C:/v.mp4' } } as Asset, 'a').audioMap).toBe('0:a:1')
+    // gravação: mic = a:0, sistema = a:1 (session.tracks), com o audioTrackIndex do fromSession
+    expect(transcribeInputOf(deps, 'p', { ...base, kind: 'audio', audioTrackIndex: 0, source: { type: 'session', sessionId: 's1', stream: 'mic' } } as Asset, 'a').audioMap).toBe('0:a:0')
+    expect(transcribeInputOf(deps, 'p', { ...base, kind: 'audio', audioTrackIndex: 1, source: { type: 'session', sessionId: 's1', stream: 'system' } } as Asset, 'a').audioMap).toBe('0:a:1')
+    // tela da gravação: sem `audio` (fromSession) → fora; se tivesse, o mixer tocaria a faixa principal (a:0)
+    expect(() => transcribeInputOf(deps, 'p', { ...base, kind: 'video', source: { type: 'session', sessionId: 's1', stream: 'screen' } } as Asset, 'a')).toThrow(/não tem áudio/)
+    expect(transcribeInputOf(deps, 'p', { ...base, kind: 'video', audio: {} as Asset['audio'], source: { type: 'session', sessionId: 's1', stream: 'screen' } } as Asset, 'a')).toEqual({ path: 'S/s1/rec.mp4', audioMap: '0:a:0', name: 'x.mp4' })
   })
   it('mergeWords ordena e remove início + texto repetidos', () => {
     expect(mergeWords([{ text: 'b', startUs: 2, endUs: 3 }, { text: 'a', startUs: 1, endUs: 2 }, { text: 'b', startUs: 2, endUs: 3 }, { text: 'c', startUs: 2, endUs: 4 }]).map((w) => w.text)).toEqual(['a', 'b', 'c'])

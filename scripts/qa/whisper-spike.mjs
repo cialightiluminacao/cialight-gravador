@@ -165,7 +165,8 @@ export function snapToSpeech(words, speech) {
 // filtro: (1) segmento só com anotação entre colchetes/parênteses ("[Música]", "(risos)") → descarta;
 //         (2) segmento com < 50 % dos tokens (t_dtw) dentro de fala (silencedetect −35 dB / 0,35 s, padding 120 ms, como a ingestão) → descarta.
 //         (a sobreposição do intervalo do segmento é só informativa: os offsets do segmento invadem a pausa.)
-export const isAnnotationOnly = (text) => /^\s*([[(*♪].*[\])*♪]\s*)+$/u.test(text)
+// (corrigido na G2 T4: o `.*` guloso descartava " [Música] vamos começar [Música]"; agora só blocos inteiros)
+export const isAnnotationOnly = (text) => /^\s*(?:(?:\[[^\]]*\]|\([^)]*\)|\*[^*]*\*|♪[^♪]*♪)\s*)+$/u.test(text)
 export function tokenSpeechRatio(seg, speech) {
   const toks = (seg.tokens ?? []).filter((t) => !/^\[_.*\]$/.test(t.text) && t.t_dtw >= 0)
   if (!toks.length) return 0

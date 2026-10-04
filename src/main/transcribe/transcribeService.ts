@@ -11,7 +11,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, r
 import { constants as osConstants, cpus, setPriority as osSetPriority, tmpdir } from 'os'
 import { join } from 'path'
 import type { Asset } from '@shared/editor/project'
-import { parseSilencedetect, speechIntervals, SPEECH_DEFAULTS, type SpeechInterval } from '@shared/editor/speech'
+import { parseSilencedetect, silencedetectFilter, speechIntervals, SPEECH_DEFAULTS, type SpeechInterval } from '@shared/editor/speech'
 import type { SourceWord } from '@shared/editor/transcribePlan'
 import type { TranscribeLanguage, TranscribeProgress, TranscribeRequest, TranscribeResult, WhisperModelId } from '@shared/ipc'
 import { resolveAssetInput, type AssetInputDeps } from '../media/assetInput'
@@ -60,17 +60,40 @@ export function whisperThreads(logicalCpus: number): number {
 
 /** Linha de comando do spike; o modelo vai relativo (cwd = pasta dos modelos: contorna caminhos não ASCII). */
 export function whisperArgs(o: { modelId: WhisperModelId; wav: string; language: TranscribeLanguage; threads: number; outBase: string }): string[] {
-  return ['-m', WHISPER_MODELS[o.modelId].file, '-f', o.wav, '-l', o.language, '-t', String(o.threads), '-bs', '1', '-bo', '1', '--dtw', o.modelId, '-nfa', '-np', '-ojf', '-of', o.outBase]
+  // -pp: progresso no stderr ("whisper_print_progress_callback: progress =  34%"), compatível com -np (verificado na G2 T4)
+  return ['-m', WHISPER_MODELS[o.modelId].file, '-f', o.wav, '-l', o.language, '-t', String(o.threads), '-bs', '1', '-bo', '1', '--dtw', o.modelId, '-nfa', '-np', '-pp', '-ojf', '-of', o.outBase]
+}
+
+/** Percentual (0–100) de uma linha de progresso do whisper-cli (-pp), ou null. */
+export function parseWhisperProgress(line: string): number | null {
+  const m = /progress\s*=\s*(\d{1,3})\s*%/.exec(line)
+  if (!m) return null
+  const n = Number(m[1])
+  return n >= 0 && n <= 100 ? n : null
 }
 
 const sec = (us: number): string => (us / 1_000_000).toFixed(6)
 
+/** Busca rápida começa até 1 s antes do trecho (o corte exato é do atrim). */
+const SEEK_LEAD_US = 1_000_000
+
+/**
+ * Extração de [fromUs, toUs) em tempo da FONTE como o editor o entende: o mixer (mediabunny) usa o timestamp real do
+ * contêiner (pts, com edit list), que não começa em 0 quando o áudio começa depois do vídeo (gravação, -itsoffset) ou
+ * o arquivo tem start_time ≠ 0. Por isso: -copyts (pts originais), -ss como timestamp absoluto (-seek_timestamp 1, só
+ * busca rápida, sem o corte do -ss), atrim no pts exato, pts − fromUs e aresample com first_pts=0 (preenche com
+ * silêncio o começo que não tem áudio). A amostra n do WAV = pts fromUs + n/16 000 s.
+ */
 export function extractArgs(input: TranscribeInput, fromUs: number, toUs: number, wav: string): string[] {
-  return ['-hide_banner', '-nostdin', '-v', 'error', '-y', '-ss', sec(fromUs), '-i', input.path, '-t', sec(toUs - fromUs), '-map', input.audioMap, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-map_metadata', '-1', wav]
+  const af = `atrim=start=${sec(fromUs)}:end=${sec(toUs)},asetpts=PTS-${sec(fromUs)}/TB,aresample=16000:async=1:first_pts=0`
+  return [
+    '-hide_banner', '-nostdin', '-v', 'error', '-y', '-copyts', '-seek_timestamp', '1', '-noaccurate_seek', '-ss', sec(Math.max(0, fromUs - SEEK_LEAD_US)),
+    '-i', input.path, '-map', input.audioMap, '-vn', '-af', af, '-ac', '1', '-c:a', 'pcm_s16le', '-t', sec(toUs - fromUs), '-map_metadata', '-1', wav
+  ]
 }
 
 export function silenceArgs(wav: string): string[] {
-  return ['-hide_banner', '-nostdin', '-i', wav, '-af', `silencedetect=n=${SPEECH_DEFAULTS.thresholdDb}dB:d=${SPEECH_DEFAULTS.minSilenceUs / 1_000_000}`, '-f', 'null', '-']
+  return ['-hide_banner', '-nostdin', '-i', wav, '-af', silencedetectFilter(), '-f', 'null', '-']
 }
 
 /** Duração (µs) do PCM 16 kHz mono s16 de um WAV: bytes depois do cabeçalho do chunk "data". */
@@ -95,24 +118,54 @@ export function wavPcmDurationUs(file: string): number {
 }
 
 /**
- * Asset → entrada da transcrição: imagem ou vídeo sem áudio → erro pt-BR; stream de áudio pela regra da ingestão
- * (resolveAssetInput; padrão '0:a:0').
+ * Asset → entrada da transcrição: imagem ou vídeo sem áudio → erro pt-BR. Arquivo pela regra da ingestão
+ * (resolveAssetInput); faixa de áudio = a que o mixer toca (audio.worker sourceFor): `asset.audioTrackIndex` quando
+ * definido (gravações: mic/sistema = session.tracks; arquivos multi-faixa), senão a da ingestão, senão a principal (a:0).
+ * Assets de tela/webcam de uma gravação não têm `audio` (fromSession) e não entram no plano; se tivessem, o mixer
+ * tocaria a faixa principal e a transcrição segue a mesma regra.
  */
 export function transcribeInputOf(deps: AssetInputDeps, projectId: string, a: Asset | undefined, assetId: string): TranscribeInput {
   if (!a) throw new Error(`Mídia não encontrada no projeto (${assetId}).`)
   if (a.kind === 'image' || (a.kind !== 'audio' && !a.audio)) throw new Error(`“${a.name}” não tem áudio para transcrever.`)
   const input = resolveAssetInput(deps, projectId, a)
-  return { path: input.path, audioMap: input.audioMap ?? '0:a:0', name: a.name }
+  const audioMap = a.audioTrackIndex !== undefined ? `0:a:${a.audioTrackIndex}` : (input.audioMap ?? '0:a:0')
+  return { path: input.path, audioMap, name: a.name }
 }
 
 interface ChildResult { code: number | null; tail: string; kept: string[] }
+interface ChildOpts { keep?: RegExp; cwd?: string; onLine?: (line: string) => void }
 
 export class TranscribeService {
   private running = false
+  /** Processos filhos vivos e a pasta temporária da execução atual (limpeza síncrona ao sair do app). */
+  private readonly children = new Set<ChildProcess>()
+  private tmpDir: string | null = null
   constructor(private readonly deps: TranscribeDeps) {}
 
   get busy(): boolean {
     return this.running
+  }
+
+  /**
+   * Saída do app no meio de uma transcrição (will-quit não espera promessas): mata os filhos desta execução e apaga a
+   * pasta temporária JÁ, de forma síncrona (caminho explícito). Devolve a pasta apagada (ou null se não havia).
+   */
+  killAndCleanupSync(): string | null {
+    for (const c of this.children) {
+      try {
+        c.kill()
+      } catch {
+        // já saiu
+      }
+    }
+    const dir = this.tmpDir
+    if (!dir) return null
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    } catch (e) {
+      this.deps.log?.warn(`transcrição: não foi possível apagar ${dir} ao sair`, e)
+    }
+    return dir
   }
 
   async transcribe(req: TranscribeRequest, onProgress: (p: TranscribeProgress) => void, signal?: AbortSignal): Promise<TranscribeResult> {
@@ -143,6 +196,7 @@ export class TranscribeService {
     })
 
     const tmp = mkdtempSync(join((d.tmpRoot ?? tmpdir)(), 'cialight-whisper-'))
+    this.tmpDir = tmp
     d.hooks?.onTempDir?.(tmp)
     const threads = whisperThreads((d.cpuCount ?? (() => cpus().length))())
     const totalUs = jobs.reduce((s, j) => s + Math.max(0, j.toUs - j.fromUs), 0) || 1
@@ -158,7 +212,7 @@ export class TranscribeService {
 
         progress('extract', 0)
         const wav = join(tmp, `job${i}.wav`)
-        const ex = await this.runChild(d.ffmpegPath(), extractArgs(input, job.fromUs, job.toUs, wav), 'ffmpeg', signal)
+        const ex = await this.runChild(d.ffmpegPath(), extractArgs(input, job.fromUs, job.toUs, wav), 'ffmpeg', signal, {})
         if (ex.code !== 0 || !existsSync(wav)) {
           d.log?.error(`transcrição: ffmpeg (extração) saiu com código ${ex.code}\n${ex.tail}`)
           throw new Error(`Não foi possível ler o áudio de “${input.name}”.`)
@@ -169,7 +223,7 @@ export class TranscribeService {
           doneUs += durUs
           continue
         }
-        const sd = await this.runChild(d.ffmpegPath(), silenceArgs(wav), 'ffmpeg', signal, /silence_(start|end)/)
+        const sd = await this.runChild(d.ffmpegPath(), silenceArgs(wav), 'ffmpeg', signal, { keep: /silence_(start|end)/ })
         if (sd.code !== 0) {
           d.log?.error(`transcrição: ffmpeg (silencedetect) saiu com código ${sd.code}\n${sd.tail}`)
           throw new Error(`Não foi possível analisar o áudio de “${input.name}”.`)
@@ -181,7 +235,15 @@ export class TranscribeService {
         const args = whisperArgs({ modelId: req.modelId, wav, language: req.language, threads, outBase })
         let wr: ChildResult
         try {
-          wr = await this.runChild(d.whisperCliPath(), args, 'whisper', signal, undefined, modelsDir)
+          // progresso dentro do trecho pelo -pp (uma linha por janela de 30 s)
+          let lastPct = -1
+          const onLine = (line: string): void => {
+            const pct = parseWhisperProgress(line)
+            if (pct === null || pct <= lastPct) return
+            lastPct = pct
+            progress('transcribe', EXTRACT_WEIGHT + (1 - EXTRACT_WEIGHT) * (pct / 100))
+          }
+          wr = await this.runChild(d.whisperCliPath(), args, 'whisper', signal, { cwd: modelsDir, onLine })
         } catch (e) {
           if (e instanceof TranscribeCancelledError) throw e
           d.log?.error('transcrição: whisper-cli não iniciou', e)
@@ -203,8 +265,11 @@ export class TranscribeService {
         if (parsed.unfiltered && !result.warnings.includes(LOW_VOICE_WARNING)) result.warnings.push(LOW_VOICE_WARNING)
         const list = (result.words[job.assetId] ??= [])
         for (const w of parsed.words) {
-          const startUs = Math.min(job.toUs, w.startUs + job.fromUs)
-          const endUs = Math.max(startUs, Math.min(job.toUs, w.endUs + job.fromUs))
+          // palavra que começa no fim do trecho ou depois (margem do whisper) fica de fora; fim nunca ≤ início
+          const startUs = w.startUs + job.fromUs
+          if (startUs >= job.toUs) continue
+          const endUs = Math.min(job.toUs, w.endUs + job.fromUs)
+          if (endUs <= startUs) continue
           list.push({ ...w, startUs, endUs })
         }
         d.log?.info(`transcrição: trecho ${i + 1}/${jobs.length} (${(durUs / 1e6).toFixed(1)} s) → ${parsed.words.length} palavras, ${parsed.dropped} segmentos descartados`)
@@ -220,11 +285,13 @@ export class TranscribeService {
       } catch (e) {
         d.log?.warn(`transcrição: não foi possível apagar ${tmp}`, e)
       }
+      if (this.tmpDir === tmp) this.tmpDir = null
     }
   }
 
   /** Roda um processo filho; abortar mata ESTE processo (child.kill), espera o fechamento e rejeita com cancelamento. */
-  private runChild(cmd: string, args: string[], kind: 'ffmpeg' | 'whisper', signal: AbortSignal | undefined, keep?: RegExp, cwd?: string): Promise<ChildResult> {
+  private runChild(cmd: string, args: string[], kind: 'ffmpeg' | 'whisper', signal: AbortSignal | undefined, opts: ChildOpts): Promise<ChildResult> {
+    const { keep, cwd, onLine } = opts
     const d = this.deps
     if (signal?.aborted) return Promise.reject(new TranscribeCancelledError())
     d.log?.info(`transcrição [${kind}]: ${args.join(' ')}`)
@@ -250,6 +317,7 @@ export class TranscribeService {
         }
       }
       signal?.addEventListener('abort', onAbort, { once: true })
+      this.children.add(child)
       if (child.pid) {
         d.hooks?.onChild?.(child.pid, kind)
         if (kind === 'whisper') {
@@ -263,23 +331,31 @@ export class TranscribeService {
       child.stderr?.on('data', (b: Buffer) => {
         const text = b.toString('utf8')
         tail = (tail + text).slice(-4000)
-        if (keep) {
+        if (keep || onLine) {
           const lines = (pending + text).split(/\r?\n/)
           pending = lines.pop() ?? ''
-          for (const l of lines) if (keep.test(l)) kept.push(l)
+          for (const l of lines) {
+            if (keep?.test(l)) kept.push(l)
+            onLine?.(l)
+          }
         }
       })
       child.on('error', (e) => {
+        this.children.delete(child)
         if (settled) return
         settled = true
         signal?.removeEventListener('abort', onAbort)
         reject(cancelled ? new TranscribeCancelledError() : e)
       })
       child.on('close', (code) => {
+        this.children.delete(child)
         if (settled) return
         settled = true
         signal?.removeEventListener('abort', onAbort)
-        if (keep && pending && keep.test(pending)) kept.push(pending)
+        if (pending) {
+          if (keep?.test(pending)) kept.push(pending)
+          onLine?.(pending)
+        }
         if (cancelled) reject(new TranscribeCancelledError())
         else resolve({ code, tail, kept })
       })

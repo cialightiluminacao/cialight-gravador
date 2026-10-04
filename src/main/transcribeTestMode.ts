@@ -4,7 +4,7 @@
 // a 2ª execução pular); cancelamento do download (small, pasta descartável); transcrição de [10 s, 50 s) com precisão e
 // carimbos medidos; cancelamento da transcrição; 10 s de silêncio. Tudo em test-out/ (nunca o userData real).
 import { app } from 'electron'
-import { spawn } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, join, resolve } from 'path'
@@ -16,7 +16,7 @@ import type { ProjectStore } from './project/projectStore'
 import { gen } from './editorExportTestMode'
 import { probe } from './media/probe'
 import { assetFromInfo } from './media/ingest'
-import { ffmpegPath, whisperCliPath } from './export/ffmpegPath'
+import { ffmpegPath, ffprobePath, whisperCliPath } from './export/ffmpegPath'
 import { log } from './log'
 import { DownloadCancelledError, WHISPER_MODELS, downloadModel, modelStatus, whisperModelsDir } from './transcribe/whisperModels'
 import { TranscribeCancelledError, TranscribeService, transcribeInputOf } from './transcribe/transcribeService'
@@ -190,6 +190,8 @@ export async function testTranscribe(projects: ProjectStore, outDir: string): Pr
   ok(words.length > 0 && words.every((w) => w.startUs >= FROM && w.endUs <= TO && w.endUs >= w.startUs && Number.isInteger(w.startUs)), 'palavras em tempo da FONTE (dentro de [10 s, 50 s), µs inteiros)', failures)
   ok(r.warnings.length === 0, `sem avisos (${r.warnings.join('; ') || 'nenhum'})`, failures)
   ok(prog.length >= 2 && prog.at(-1)?.fraction === 1 && prog.every((x, i) => i === 0 || x.fraction >= prog[i - 1].fraction), 'progresso crescente até 1', failures)
+  const inRun = prog.filter((x) => x.stage === 'transcribe' && x.fraction > 0.05 && x.fraction < 1)
+  ok(inRun.length >= 1, `progresso dentro do whisper pelo -pp (${inRun.map((x) => `${Math.round(x.fraction * 100)} %`).join(', ') || 'nenhum'})`, failures)
   ok(temps.length === 1 && !existsSync(temps[0]), 'pasta temporária da execução apagada', failures)
   ok(pids.some((x) => x.kind === 'whisper') && pids.every((x) => !alive(x.pid)), 'nenhum processo filho vivo depois da transcrição', failures)
 
@@ -226,6 +228,47 @@ export async function testTranscribe(projects: ProjectStore, outDir: string): Pr
   ok(temps.length === 1 && !existsSync(temps[0]), `pasta temporária apagada após cancelar (${temps[0]})`, failures)
   ok(whisperPids.length === 1 && whisperPids.every((pid) => !alive(pid)), `processo do whisper (PID ${whisperPids.join(', ')}) encerrado`, failures)
   report.cancel = { cancelMs, whisperPids }
+
+  // g. origem do tempo da fonte (rodada 1): áudio que não começa em 0 no contêiner. O editor (mixer/mediabunny) usa o
+  // pts real; a transcrição tem de extrair na mesma origem. (1) áudio atrasado 2 s em relação ao vídeo (como uma
+  // gravação em que o áudio começa depois); (2) arquivo inteiro com start_time 5 s.
+  const offsetCases = [
+    { id: 'a_atrasada', file: join(dir, 'fala-atrasada.mp4'), shiftUs: 2_000_000, args: (out: string) => ['-f', 'lavfi', '-i', 'color=c=gray:s=320x240:r=10', '-itsoffset', '2', '-i', wav, '-map', '0:v', '-map', '1:a', '-t', String(truth.durationUs / 1e6 + 2), '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', out], job: { fromUs: 0, toUs: 30_000_000 } },
+    { id: 'a_offset5', file: join(dir, 'fala-offset5.mp4'), shiftUs: 5_000_000, args: (out: string) => ['-f', 'lavfi', '-i', 'color=c=gray:s=320x240:r=10', '-i', wav, '-map', '0:v', '-map', '1:a', '-shortest', '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-output_ts_offset', '5', out], job: { fromUs: 15_000_000, toUs: 45_000_000 } }
+  ]
+  const { ALL_FORMATS, FilePathSource, Input } = await import('mediabunny')
+  const originReport: unknown[] = []
+  for (const c of offsetCases) {
+    await gen(c.args(c.file), `transcribe: ${basename(c.file)}`)
+    const asset: Asset = { ...assetFromInfo(c.id, c.file, statSync(c.file), await probe(c.file)), status: 'ready' }
+    projects.save({ ...projects.cached(PROJECT_ID), assets: [...projects.cached(PROJECT_ID).assets.filter((a) => a.id !== c.id), asset] })
+    // origem do editor: 1º timestamp da faixa de áudio no mediabunny (o mesmo que o mixer usa) × start_time do ffprobe
+    const input = new Input({ source: new FilePathSource(c.file), formats: ALL_FORMATS })
+    const mbFirstS = await (await input.getPrimaryAudioTrack())!.getFirstTimestamp()
+    input.dispose()
+    const ffStart = await new Promise<number>((res) =>
+      execFile(ffprobePath(), ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=start_time', '-of', 'csv=p=0', c.file], { windowsHide: true }, (_e, out) => res(Number(String(out).trim())))
+    )
+    ok(Math.abs(mbFirstS - ffStart) < 0.005 && Math.abs(mbFirstS * 1e6 - c.shiftUs) < 60_000, `${c.id}: 1º timestamp do áudio no mediabunny ${mbFirstS.toFixed(3)} s = start_time do ffprobe ${ffStart.toFixed(3)} s ≈ deslocamento ${c.shiftUs / 1e6} s`, failures)
+    const rr = await svc.transcribe({ projectId: PROJECT_ID, modelId: 'base', language: 'pt', jobs: [{ assetId: c.id, ...c.job }] }, () => {})
+    const ws = rr.words[c.id] ?? []
+    const refShift = truth.words.map((w) => ({ ...w, startUs: w.startUs + c.shiftUs })).filter((w) => w.startUs >= c.job.fromUs && w.startUs < c.job.toUs)
+    const sc = scoreWords(refShift, ws)
+    console.log(`${c.id} [${c.job.fromUs / 1e6} s, ${c.job.toUs / 1e6} s): ${ws.length} palavras; precisão ${(sc.accuracy * 100).toFixed(1)} %; início mediana ${(sc.startErrMedianUs / 1000).toFixed(0)} ms, p90 ${(sc.startErrP90Us / 1000).toFixed(0)} ms, ≤ 300 ms ${(sc.within300 * 100).toFixed(1)} %`)
+    ok(sc.accuracy >= 0.8 && sc.within300 >= 0.9 && sc.startErrMedianUs <= 300_000, `${c.id}: palavras na origem do editor (±0,3 s em ${(sc.within300 * 100).toFixed(1)} %, precisão ${(sc.accuracy * 100).toFixed(1)} %)`, failures)
+    originReport.push({ id: c.id, shiftUs: c.shiftUs, mbFirstS, ffStart, score: sc })
+  }
+  report.origin = originReport
+
+  // h. faixa de áudio = a do mixer (rodada 1): arquivo com 2 faixas (a:0 silêncio, a:1 fala) e audioTrackIndex 1
+  const multi = join(dir, 'duas-faixas.mp4')
+  await gen(['-f', 'lavfi', '-i', 'color=c=gray:s=320x240:r=10', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-i', wav, '-map', '0:v', '-map', '1:a', '-map', '2:a', '-t', String(truth.durationUs / 1e6), '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-ar', '48000', multi], 'transcribe: duas-faixas.mp4')
+  const aMulti: Asset = { ...assetFromInfo('a_multi', multi, statSync(multi), await probe(multi)), status: 'ready', audioTrackIndex: 1 }
+  projects.save({ ...projects.cached(PROJECT_ID), assets: [...projects.cached(PROJECT_ID).assets.filter((a) => a.id !== 'a_multi'), aMulti] })
+  const rm = await svc.transcribe({ projectId: PROJECT_ID, modelId: 'base', language: 'pt', jobs: [{ assetId: 'a_multi', fromUs: 10_000_000, toUs: 30_000_000 }] }, () => {})
+  const sm = scoreWords(truth.words.filter((w) => w.startUs >= 10_000_000 && w.startUs < 30_000_000), rm.words.a_multi ?? [])
+  ok(sm.accuracy >= 0.8, `a_multi (audioTrackIndex 1): transcreve a faixa a:1 que o mixer toca (precisão ${(sm.accuracy * 100).toFixed(1)} %, ${(rm.words.a_multi ?? []).length} palavras)`, failures)
+  report.multiTrack = { score: sm }
 
   // f. 10 s de silêncio → nenhuma palavra, sem erro
   let silErr: unknown = null

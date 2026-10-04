@@ -177,7 +177,9 @@ Escolha: **(c'')** — atende ±0,3 s em ≥ 96,6 % das palavras, inclusive apó
 
 Filtro recomendado (aplicado por segmento do JSON):
 1. **Anotação pura**: texto que só contém blocos `[…]`, `(…)`, `*…*` ou `♪…♪` → descarta
-   (`/^\s*([[(*♪].*[\])*♪]\s*)+$/u`).
+   (`/^\s*(?:(?:\[[^\]]*\]|\([^)]*\)|\*[^*]*\*|♪[^♪]*♪)\s*)+$/u`). Correção (G2 T4): a 1ª versão,
+   `/^\s*([[(*♪].*[\])*♪]\s*)+$/u`, tinha `.*` guloso e descartava segmentos com fala entre anotações
+   (" [Música] vamos começar [Música]"); no app, blocos de anotação dentro de um segmento mantido também saem das palavras.
 2. **Fora da fala**: menos de 50 % dos tokens não especiais com `t_dtw ≥ 0` têm `t_dtw×10 ms` dentro dos intervalos
    de fala (silencedetect −35 dB / 0,35 s, folga 120 ms) → descarta. (Os `offsets` do segmento invadem pausas e não
    servem para isso; os `t_dtw` sim.)
@@ -210,7 +212,11 @@ whisper-cli.exe -m ggml-<modelo>.bin -f <trecho.wav> -l pt -t <threads> -bs 1 -b
 ```
 
 `<modelo>` = `base` | `small` (o mesmo valor em `-m` e `--dtw`). Saída: `<saída>.json`. `-np` silencia o texto no
-stdout. Sem `-sns`, `-nf`, `-nth` (seção 5). Progresso não foi avaliado neste spike.
+stdout. Sem `-sns`, `-nf`, `-nth` (seção 5).
+
+Progresso (verificado na G2 T4): `-pp` (`--print-progress`) funciona junto com `-np`; o whisper-cli escreve no stderr
+`whisper_print_progress_callback: progress =  34%` (uma linha por janela de 30 s, até 100 %), sem mudar o JSON. O app
+passa `-pp` e usa esse percentual para o progresso dentro do trecho.
 
 ### Threads e prioridade
 

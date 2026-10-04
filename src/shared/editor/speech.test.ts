@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Asset } from './project'
-import { audioAnalysisComplete, parseEbur128, parseSilencedetect, speechFromFile, speechIntervals, type SpeechFile } from './speech'
+import { audioAnalysisComplete, parseEbur128, parseSilencedetect, speechFromFile, speechIntervals, silencedetectFilter, type SpeechFile } from './speech'
 
 // Saídas reais do ffmpeg 8.1 (stderr), capturadas com os mesmos filtros da ingestão.
 // Ruído rosa em 1–2,5 s, 4–5 s e 6,2–8 s num arquivo de 10 s.
@@ -146,5 +146,12 @@ describe('audioAnalysisComplete', () => {
   it('sem áudio (vídeo mudo, imagem): sempre completo', () => {
     expect(audioAnalysisComplete({ ...base, audio: undefined })).toBe(true)
     expect(audioAnalysisComplete({ ...base, kind: 'image', audio: undefined })).toBe(true)
+  })
+})
+
+describe('silencedetectFilter', () => {
+  it('mesmo filtro da ingestão e da transcrição (−35 dB / 0,35 s por padrão)', () => {
+    expect(silencedetectFilter()).toBe('silencedetect=n=-35dB:d=0.35')
+    expect(silencedetectFilter(-40, 500_000)).toBe('silencedetect=n=-40dB:d=0.5')
   })
 })

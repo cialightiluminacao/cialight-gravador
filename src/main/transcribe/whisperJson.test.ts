@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { parseWhisperJson, type WhisperJson } from './whisperJson'
+import { isAnnotationOnly, MIN_WORD_US, parseWhisperJson, type WhisperJson } from './whisperJson'
 import { scoreWords } from './wordScore'
 
 const fx = (name: string): string => readFileSync(join(__dirname, '__fixtures__', name), 'utf8')
@@ -110,12 +110,42 @@ describe('parseWhisperJson — regras', () => {
     expect(parseWhisperJson({ transcription: [j.transcription[0]] }, []).unfiltered).toBe(false)
   })
 
-  it('fim da palavra = início da próxima do segmento ou o fim do segmento; nunca antes do início', () => {
+  it('fim da palavra = início da próxima do segmento ou o fim do segmento; nunca ≤ início (mínimo MIN_WORD_US)', () => {
     const j: WhisperJson = { transcription: [seg(0, 500, ' a b', [tok(' a', 100, 70), tok(' b', 700, 90)])] }
     const r = parseWhisperJson(j, ALL)
     expect(r.words).toEqual([
       { text: 'a', startUs: 100_000, endUs: 700_000, prob: 0.9 },
-      { text: 'b', startUs: 700_000, endUs: 700_000, prob: 0.9 }
+      { text: 'b', startUs: 700_000, endUs: 700_000 + MIN_WORD_US, prob: 0.9 }
     ])
+    // palavras com o mesmo início (ajuste à fala): ainda assim fim > início
+    const k: WhisperJson = { transcription: [seg(0, 5000, ' x y z w v', [tok(' x', 1000, 150), tok(' y', 1500, 155), tok(' z', 1600, 320), tok(' w', 0, 330), tok(' v', 0, 340)])] }
+    const r2 = parseWhisperJson(k, [{ fromUs: 0, toUs: 1_000_000 }, { fromUs: 3_000_000, toUs: 5_000_000 }])
+    expect(r2.words.map((w) => w.startUs)).toEqual([3_000_000, 3_000_000, 3_000_000, 3_200_000, 3_300_000])
+    for (const w of r2.words) expect(w.endUs).toBeGreaterThan(w.startUs)
+  })
+
+  it('regex de anotação pura: só blocos inteiros; fala entre anotações NÃO descarta o segmento', () => {
+    for (const t of [' [Música]', ' (risos)', ' *tosse*', ' ♪ lá lá ♪', ' [Música] (aplausos)', '  [MÚSICA DE FUNDO]  ']) expect(isAnnotationOnly(t)).toBe(true)
+    for (const t of [' (risos) Olá mundo (aplausos)', ' [Música] vamos começar [Música]', ' *tosse* bom dia *tosse*', ' Olá', ' [Música] fim']) expect(isAnnotationOnly(t)).toBe(false)
+  })
+
+  it('segmento com fala entre anotações: mantido, e os blocos de anotação não viram palavras', () => {
+    const j: WhisperJson = {
+      transcription: [
+        seg(0, 4000, ' [Música] vamos começar [MÚSICA DE FUNDO]', [tok(' [', 0, 10), tok('Mús', 50, 20), tok('ica', 80, 30), tok(']', 90, 60), tok(' vamos', 600, 100), tok(' começar', 1000, 150), tok(' [', 1500, 200), tok('MÚSICA', 1600, 220), tok(' DE', 1700, 240), tok(' FUNDO', 1800, 260), tok(']', 1900, 300)]),
+        seg(4000, 6000, ' (risos) Olá mundo (aplausos).', [tok(' (', 4000, 410), tok('risos', 4100, 420), tok(')', 4200, 430), tok(' Olá', 4300, 450), tok(' mundo', 4500, 480), tok(' (', 4800, 500), tok('aplausos', 4900, 520), tok(').', 5000, 540)])
+      ]
+    }
+    const r = parseWhisperJson(j, ALL)
+    expect(r.words.map((w) => w.text)).toEqual(['vamos', 'começar', 'Olá', 'mundo'])
+    expect(r.dropped).toBe(0)
+    // "começar" termina onde começa a anotação seguinte (não se estende sobre a música)
+    expect(r.words[1]).toMatchObject({ startUs: 1_000_000, endUs: 1_500_000 })
+    expect(r.words[3]).toMatchObject({ startUs: 4_500_000, endUs: 4_800_000 })
+  })
+
+  it('bloco sem fechamento não é removido', () => {
+    const j: WhisperJson = { transcription: [seg(0, 2000, ' (vamos lá', [tok(' (', 0, 10), tok('vamos', 50, 50), tok(' lá', 600, 90)])] }
+    expect(parseWhisperJson(j, ALL).words.map((w) => w.text)).toEqual(['(vamos', 'lá'])
   })
 })

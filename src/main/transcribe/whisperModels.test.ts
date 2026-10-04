@@ -5,7 +5,7 @@ import { createServer, type Server } from 'http'
 import type { AddressInfo } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { WHISPER_MODELS, downloadModel, modelStatus, whisperModelsDir, type WhisperModelSpec } from './whisperModels'
+import { WHISPER_MODELS, cleanupDownloadPartsSync, downloadModel, modelStatus, whisperModelsDir, type WhisperModelSpec } from './whisperModels'
 
 let dir: string
 beforeEach(() => {
@@ -31,6 +31,8 @@ async function server(): Promise<{ url: (p: string) => string; close: () => Prom
       b[10] = 1
       res.writeHead(200, { 'content-length': b.length })
       res.end(b)
+    } else if (req.url === '/hang') {
+      // aceita a conexão e nunca responde
     } else if (req.url === '/slow') {
       res.writeHead(200, { 'content-length': body.length })
       res.write(body.subarray(0, 100_000))
@@ -162,6 +164,60 @@ describe('downloadModel', () => {
       downloadModel('base', () => {}, undefined, { dir, catalog: { base: spec(['http://x']) }, freeBytes: async () => 50 * 1048576, fetch: (async () => { called = true; throw new Error('x') }) as typeof fetch })
     ).rejects.toThrow(/Espaço insuficiente.*101 MB/)
     expect(called).toBe(false)
+  })
+
+  it('URL que para de mandar bytes (ou nem responde) → abandonada após a inatividade; usa a próxima', async () => {
+    const srv = await server()
+    try {
+      await downloadModel('base', () => {}, undefined, { dir, catalog: { base: spec([srv.url('/slow'), srv.url('/hang'), srv.url('/ok')]) }, freeBytes: plenty, stallMs: 300 })
+      expect(srv.hits).toEqual(['/slow', '/hang', '/ok'])
+      expect(readFileSync(join(dir, 'ggml-base.bin')).equals(body)).toBe(true)
+      expect(existsSync(join(dir, 'ggml-base.bin.part'))).toBe(false)
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('todas paradas → erro pt-BR citando a inatividade, sem sobras', async () => {
+    const srv = await server()
+    try {
+      await expect(downloadModel('base', () => {}, undefined, { dir, catalog: { base: spec([srv.url('/slow')]) }, freeBytes: plenty, stallMs: 1000 })).rejects.toThrow(/Não foi possível baixar o modelo: .*sem dados por 1 s/)
+      expect(readdirSync(dir)).toEqual([])
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('cancelar durante a espera continua sendo "Download cancelado" (não tenta a próxima URL)', async () => {
+    const srv = await server()
+    try {
+      const ac = new AbortController()
+      setTimeout(() => ac.abort(), 100)
+      await expect(downloadModel('base', () => {}, ac.signal, { dir, catalog: { base: spec([srv.url('/hang'), srv.url('/ok')]) }, freeBytes: plenty, stallMs: 5000 })).rejects.toThrow('Download cancelado')
+      expect(srv.hits).toEqual(['/hang'])
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('cleanupDownloadPartsSync (saída do app): apaga na hora o .part em gravação', async () => {
+    const srv = await server()
+    try {
+      const ac = new AbortController()
+      let started: () => void = () => {}
+      const got = new Promise<void>((r) => (started = r))
+      const p = downloadModel('base', (pr) => { if (pr.receivedBytes > 0) started() }, ac.signal, { dir, catalog: { base: spec([srv.url('/slow')]) }, freeBytes: plenty })
+      await got
+      const part = join(dir, 'ggml-base.bin.part')
+      expect(existsSync(part)).toBe(true)
+      expect(cleanupDownloadPartsSync()).toEqual([part])
+      expect(existsSync(part)).toBe(false)
+      ac.abort()
+      await expect(p).rejects.toThrow('Download cancelado')
+      expect(cleanupDownloadPartsSync()).toEqual([])
+    } finally {
+      await srv.close()
+    }
   })
 
   it('modelo desconhecido → erro', async () => {

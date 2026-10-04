@@ -29,6 +29,21 @@ export const WHISPER_MODELS: Record<WhisperModelId, WhisperModelSpec> = {
 /** Folga além do tamanho do modelo exigida antes de baixar. */
 export const DOWNLOAD_HEADROOM_BYTES = 100 * 1048576
 const PROGRESS_MIN_MS = 100 // no máximo 10 eventos/s
+/** Sem nenhum byte por este tempo (inclusive antes da resposta), a URL atual é abandonada e a próxima é tentada. */
+export const DOWNLOAD_STALL_MS = 30_000
+
+/** .part em gravação agora (limpeza síncrona ao sair do app). */
+const activeParts = new Set<string>()
+
+/**
+ * Saída do app no meio de um download (will-quit não espera promessas): apaga já, de forma síncrona, os .part em
+ * gravação (caminhos explícitos). Devolve os caminhos tratados.
+ */
+export function cleanupDownloadPartsSync(): string[] {
+  const out = [...activeParts]
+  for (const p of out) removeQuiet(p)
+  return out
+}
 
 export function whisperModelsDir(): string {
   const env = process.env.CIALIGHT_WHISPER_MODELS_DIR
@@ -75,6 +90,8 @@ export interface DownloadDeps {
   fetch?: typeof fetch
   freeBytes?: (dir: string) => Promise<number>
   now?: () => number
+  /** Inatividade máxima por URL (padrão DOWNLOAD_STALL_MS). */
+  stallMs?: number
 }
 
 const fmtMB = (b: number): string => `${Math.ceil(b / 1048576).toLocaleString('pt-BR')} MB`
@@ -92,9 +109,34 @@ function removeQuiet(path: string): void {
   }
 }
 
+/** Uma URL, com cão de guarda de inatividade: sem bytes por stallMs → aborta só esta URL (o chamador tenta a próxima). */
 async function fetchTo(url: string, part: string, m: WhisperModelSpec, onProgress: (p: DownloadProgress) => void, signal: AbortSignal | undefined, deps: DownloadDeps): Promise<void> {
+  const stallMs = deps.stallMs ?? DOWNLOAD_STALL_MS
+  const urlCtl = new AbortController()
+  let stalled = false
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const arm = (): void => {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      stalled = true
+      urlCtl.abort()
+    }, stallMs)
+  }
+  try {
+    arm()
+    await fetchBody(url, part, m, onProgress, signal ? AbortSignal.any([signal, urlCtl.signal]) : urlCtl.signal, deps, arm)
+  } catch (e) {
+    if (stalled && !signal?.aborted) throw new Error(`sem dados por ${Math.round(stallMs / 1000)} s`)
+    throw e
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+async function fetchBody(url: string, part: string, m: WhisperModelSpec, onProgress: (p: DownloadProgress) => void, signal: AbortSignal, deps: DownloadDeps, onBytes: () => void): Promise<void> {
   const res = await (deps.fetch ?? fetch)(url, { signal, redirect: 'follow' })
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+  onBytes()
   const now = deps.now ?? Date.now
   const hash = createHash('sha256')
   const fh = await fsp.open(part, 'w')
@@ -105,6 +147,7 @@ async function fetchTo(url: string, part: string, m: WhisperModelSpec, onProgres
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
+      onBytes()
       received += value.byteLength
       if (received > m.sizeBytes) {
         await reader.cancel().catch(() => {})
@@ -152,6 +195,7 @@ export async function downloadModel(id: WhisperModelId, onProgress: (p: Download
       removeQuiet(part)
       throw new DownloadCancelledError()
     }
+    activeParts.add(part)
     try {
       await fetchTo(url, part, m, onProgress, signal, deps)
       renameSyncRetry(part, final)
@@ -163,6 +207,8 @@ export async function downloadModel(id: WhisperModelId, onProgress: (p: Download
       removeQuiet(part)
       if (signal?.aborted) throw new DownloadCancelledError()
       errors.push(`${new URL(url).host}: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      activeParts.delete(part)
     }
   }
   if (existsSync(part)) removeQuiet(part)
