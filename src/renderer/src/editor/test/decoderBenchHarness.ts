@@ -9,7 +9,8 @@ import { mediaUrlsFor } from '../engine/mediaUrls'
 // worker (frameMs = quadro inteiro, decodificação inclusa; drawMs = compositor + GPU), canvas 1920×1080 como o
 // preview. As rodadas se alternam (hw, sw, hw, sw) para a carga da máquina pesar igual nos dois. Só registra os
 // números (decisão do preview: trocar para software só se o p95 de frameMs não piorar em nenhuma resolução) — sem
-// asserção de tempo.
+// asserção de tempo. Fora da rodada normal do test:editor: liga com CIALIGHT_DECODER_BENCH=1, ex.:
+//   node C:/Users/Eduardo/projetos/_locks/run-locked.mjs "npx cross-env CIALIGHT_DECODER_BENCH=1 npm run test:editor"
 
 export const DECODER_BENCH_PROJECT_ID = 'p-editor-decoder-bench'
 const W = 1920

@@ -36,7 +36,7 @@ declare global {
 const W = 1920
 const H = 1080
 
-export async function runRenderHarness(projectId: string, outDir: string | null = null): Promise<void> {
+export async function runRenderHarness(projectId: string, outDir: string | null = null, opts: { decoderBench?: boolean } = {}): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
   const errors = report.errors as string[]
   let ok = false
@@ -113,8 +113,9 @@ export async function runRenderHarness(projectId: string, outDir: string | null 
     const exportUrls = mediaUrlsFor(project, 'export')
     const sdProject = await window.api.project.load(SPEED_SD_PROJECT_ID)
     report.yuv = await yuvCheck({ hd: exportUrls.a_video?.original, rot: exportUrls.a_rot?.original, sd: mediaUrlsFor(sdProject, 'export').a_sd?.original })
-    // G1: reprodução com decoder em software × hardware (1080p e 4K), só números para a decisão do preview
-    report.decoderBench = await decoderBenchCheck()
+    // G1: reprodução com decoder em software × hardware (1080p e 4K), só números para a decisão do preview; só com
+    // CIALIGHT_DECODER_BENCH=1 (o main passa &decoderBench=1 e gera o projeto 4K)
+    if (opts.decoderBench) report.decoderBench = await decoderBenchCheck()
     // por último: decodificação 1080p contínua (a CPU desta máquina estrangula depois de alguns segundos de carga)
     report.speed = await speedCheck()
     ok = true
