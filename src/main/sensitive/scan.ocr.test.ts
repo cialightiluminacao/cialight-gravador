@@ -265,6 +265,8 @@ describe('varredura real (ffmpeg + Windows.Media.Ocr)', () => {
     metrics.scroll_worstPx = worst
     report.push(`## Rolagem (8 s, 4 px/quadro)\nAmostrados ${res.framesSampled}, lidos ${res.framesOcr}, ${res.ms} ms → ${(res.framesOcr / (res.ms / 1000)).toFixed(2)} quadros lidos/s de ponta a ponta, ${(metrics.scroll as { samplingOcrPerSec: number }).samplingOcrPerSec.toFixed(2)}/s na amostragem (OCR ${((res.timings?.ocrMs ?? 0) / res.framesOcr).toFixed(0)} ms/quadro; partida ${res.timings?.startMs} ms; refinamento ${res.timings?.refineMs} ms); ocorrências refinadas pelo NCC: ${(metrics.scroll as { refinedOcc: number }).refinedOcc}, jobs no teto: ${res.refineCapped}, com perda: ${(metrics.scroll as { lostOcc: number }).lostOcc}`, table('Rolagem', es))
     // invariante 2 (privacidade): a tinta de um item achado fica dentro da região em TODO quadro visível (Task 3b)
+    // Uma falha intermitente aqui é DEFEITO (leitura parcial numa ponta ou numa âncora do NCC, Task 3b fix 1), não ruído
+    // de carga: a cobertura não pode depender do teto do refinamento. Não afrouxar.
     expect(cov).toBe(req)
   })
 

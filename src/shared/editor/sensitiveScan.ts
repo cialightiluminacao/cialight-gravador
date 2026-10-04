@@ -444,12 +444,25 @@ function grownSpan(occ: Occurrence, a: OcrBox, b: OcrBox): OcrBox {
  * Com uma amostra só, o movimento é o dominante da tela naquela amostra (`motion`).
  */
 export function occurrenceKeys(occ: Occurrence): RegionKey[] {
+  // Leitura parcial (Task 3b, fix 1): o OCR pode ler só um pedaço do valor numa amostra (caractere engolido, token
+  // cortado, rotulado truncado) e a pré/pós-rolagem, a janela de movimento e os pontos do NCC (que herdam a largura da
+  // âncora) partiriam dessa caixa curta, deixando tinta de fora. Toda caixa cresce, de CADA lado, pelo déficit até a
+  // maior largura/altura lida pelo OCR na ocorrência: o pedaço que falta pode estar à esquerda ou à direita. Caixas
+  // inteiras não mudam. Só as leituras contam: a ponte é a união das vizinhas (numa rolagem, alta por construção) e os
+  // pontos do NCC têm a largura da âncora.
+  let maxW = 0, maxH = 0
+  for (const x of occ.samples) {
+    if (x.src !== undefined && x.src !== 'ocr') continue
+    maxW = Math.max(maxW, x.box.w); maxH = Math.max(maxH, x.box.h)
+  }
+  const full = (b: OcrBox): OcrBox => (b.w >= maxW && b.h >= maxH ? b : grow(b, Math.max(0, maxW - b.w), Math.max(0, maxH - b.h)))
   // amostras no mesmo instante (não deveria haver, mas a região nunca perde uma delas): uma só, com a união
   const s: { tUs: Us; box: OcrBox }[] = []
   for (const x of occ.samples) {
     const prev = s[s.length - 1]
-    if (prev && prev.tUs === x.tUs) prev.box = unionBox(prev.box, x.box)
-    else s.push({ tUs: x.tUs, box: x.box })
+    const box = full(x.box)
+    if (prev && prev.tUs === x.tUs) prev.box = unionBox(prev.box, box)
+    else s.push({ tUs: x.tUs, box })
   }
   if (s.length === 0) return []
   const n = s.length

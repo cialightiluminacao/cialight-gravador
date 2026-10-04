@@ -548,3 +548,112 @@ describe('Task 3b: e-mail rolando com o "_" engolido na 1ª leitura (rente à bo
     expect(checked).toBeGreaterThan(30)
   })
 })
+
+describe('Task 3b, fix 1: leitura parcial numa ponta ou numa âncora de movimento (detecções injetadas)', () => {
+  // Tinta x 1157..1419 (262 px); a leitura inteira dá x1157/w263 e a parcial x1218/w202 (o começo do valor perdido).
+  const FULL = { x: 1157, w: 263 }, PART = { x: 1218, w: 202 }
+  const email = (b: { x: number; w: number }, y: number, value: string): Detection => det(px(b.x, y, b.w, 20), value, 'email', 'pattern')
+  /** Quadros a 30 qps de [startUs, endUs] em que a tinta (visível) não está contida na região. */
+  const uncovered = (o: Occurrence, inkAt: (tUs: number) => OcrBox): { n: number; checked: number } => {
+    let n = 0, checked = 0
+    for (let k = 0; k < 30 * 10; k++) {
+      const t = Math.round((k * 1_000_000) / 30)
+      if (t < o.startUs || t > o.endUs) continue
+      const ink = inkAt(t)
+      if (ink.y < 0 || (ink.y + ink.h) * H > H + 1e-6) continue
+      checked++
+      const r = occurrenceRegionAt(o, t)
+      if (!r || !boxContains(r, ink)) n++
+    }
+    return { n, checked }
+  }
+  const staticInk = (): OcrBox => px(1157, 500, 262, 20)
+
+  it('(a) estático, 1ª leitura parcial: a pré-rolagem cobre a tinta inteira', () => {
+    const occ = groupOccurrences([
+      { tUs: 1_000_000, detections: [email(PART, 500, 'parte')] },
+      { tUs: 1_500_000, detections: [email(FULL, 500, 'inteiro')] },
+      { tUs: 2_000_000, detections: [email(FULL, 500, 'inteiro')] }
+    ], ctx)
+    expect(occ).toHaveLength(1)
+    expect(occ[0].startUs).toBe(500_000)
+    const u = uncovered(occ[0], staticInk)
+    expect(u.checked).toBeGreaterThan(50)
+    expect(u.n).toBe(0)
+  })
+
+  it('(b) estático, última leitura parcial: a pós-rolagem cobre a tinta inteira', () => {
+    const occ = groupOccurrences([
+      { tUs: 1_000_000, detections: [email(FULL, 500, 'inteiro')] },
+      { tUs: 1_500_000, detections: [email(FULL, 500, 'inteiro')] },
+      { tUs: 2_000_000, detections: [email(PART, 500, 'parte')] }
+    ], ctx)
+    expect(occ).toHaveLength(1)
+    expect(occ[0].endUs).toBe(2_500_000)
+    const u = uncovered(occ[0], staticInk)
+    expect(u.checked).toBeGreaterThan(50)
+    expect(u.n).toBe(0)
+  })
+
+  describe('(c) rolagem de 4 px/quadro (120 px/s), CPF e telefone dão o movimento dominante, leitura parcial em 5,5 s', () => {
+    const V = 120 / 1_000_000 // px/µs, para cima
+    const yAt = (tUs: number): number => 900 - V * (tUs - 5_000_000)
+    const inkAt = (tUs: number): OcrBox => px(1157, yAt(tUs), 262, 20)
+    const samples = (): ScanSample[] => [4_000_000, 4_500_000, 5_000_000, 5_500_000, 6_000_000, 6_500_000, 7_000_000].map((t) => ({
+      tUs: t,
+      detections: [
+        email(t === 5_500_000 ? PART : FULL, yAt(t), t === 5_500_000 ? 'parte' : 'inteiro'),
+        det(px(280, yAt(t), 139, 16), 'cpf1'),
+        det(px(1590, yAt(t), 106, 16), 'tel1', 'phone')
+      ]
+    }))
+    const occ = (): Occurrence => {
+      const o = groupOccurrences(samples(), ctx).filter((x) => x.kind === 'email')
+      expect(o).toHaveLength(1)
+      return o[0]
+    }
+    /** Pontos `track` de cada job, um a cada 100 ms, com a caixa da âncora deslocada 12 px (o rastreio "melhor"). */
+    const tracked = (o: Occurrence): Occurrence => {
+      let out = o
+      for (const j of refinementJobs(o)) {
+        const points = refineTimes(j.fromUs, j.toUs)
+          .filter((t) => t !== j.anchorUs && !(j.kind === 'move' && t === j.toUs))
+          .map((t) => ({ tUs: t, box: { ...j.anchorBox, y: j.anchorBox.y - (V * (t - j.anchorUs)) / H }, src: 'track' as const }))
+        out = applyRefinement(out, { points })
+      }
+      return out
+    }
+
+    it('sem refinamento (regra conservadora / teto): 100 %', () => {
+      const u = uncovered(occ(), inkAt)
+      expect(u.checked).toBeGreaterThan(80)
+      expect(u.n).toBe(0)
+    })
+
+    it('com pontos de rastreio da largura da âncora (a âncora parcial de 5,5 s inclusive): 100 %', () => {
+      const o = occ()
+      expect(refinementJobs(o).some((j) => j.kind === 'move' && j.anchorUs === 5_500_000)).toBe(true)
+      const u = uncovered(tracked(o), inkAt)
+      expect(u.checked).toBeGreaterThan(80)
+      expect(u.n).toBe(0)
+    })
+  })
+
+  it('caixas inteiras não mudam; a ponte (união das vizinhas numa rolagem) não infla as outras', () => {
+    const occ = groupOccurrences([
+      { tUs: 1_000_000, detections: [email(FULL, 600, 'inteiro')] },
+      { tUs: 1_500_000, detections: [] },
+      { tUs: 2_000_000, detections: [email(FULL, 480, 'inteiro')] }
+    ], ctx)[0]
+    expect(occ.samples.map((s) => s.src)).toEqual(['ocr', 'bridge', 'ocr'])
+    const k = occurrenceKeys(occ)
+    // pós-rolagem [2,0 s, 2,5 s]: a última caixa unida à extrapolada (sobe 120 px/s → y 420), só com a margem de 3 px —
+    // sem crescer pela altura da ponte (140 px)
+    const key = k[k.length - 1]
+    expect(key.tUs).toBe(2_000_000)
+    expect(key.box.x * W).toBeCloseTo(1157 - 3, 6)
+    expect(key.box.w * W).toBeCloseTo(263 + 6, 6)
+    expect(key.box.y * H).toBeCloseTo(420 - 3, 6)
+    expect((key.box.y + key.box.h) * H).toBeCloseTo(500 + 3, 6)
+  })
+})

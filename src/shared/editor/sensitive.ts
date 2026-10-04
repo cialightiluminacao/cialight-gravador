@@ -690,6 +690,8 @@ function detectUuidTolerant(p: Pass, out: Cand[]): void {
 
 /** Palavra que pode ser um pedaço da parte local de um e-mail (sem "@"). */
 const EMAIL_LOCAL_WORD = /^[A-Za-z0-9._%+-]+$/
+/** E-mail com caractere da parte local engolido: no máximo tantas palavras anteriores entram na caixa (Task 3b). */
+const EMAIL_BACK_MAX_WORDS = 2
 
 function detectEmail(p: Pass, out: Cand[]): void {
   const t = p.t
@@ -1068,10 +1070,17 @@ function detectWords(words: readonly OcrWord[], enabled: ReadonlySet<SensitiveKi
       // baixo lido "xxxxxx" + "yyyyy@…", 12,5 px de vão): a palavra anterior colada, só com caracteres de parte local, com vão MAIOR que
       // um espaço normal (≥ 1 caractere; o espaço de fonte proporcional dá ~0,7) e ≤ 2 caracteres, entra na CAIXA
       // (privacidade: cobrir a mais é aceitável, a menos não). O valor fica o lido (não se adivinha o caractere perdido).
-      // Monoespaçada: o espaço normal também tem ~1,3 caractere — a prosa antes do e-mail pode ser coberta junto.
+      // Monoespaçada: o espaço normal também tem ~1,2 caractere. Por isso a extensão vai a no máximo
+      // EMAIL_BACK_MAX_WORDS palavras e, numa linha com ≥ 2 outros vãos, o vão precisa ser > 1,5 × a mediana deles
+      // (o "_" engolido é um vão FORA do padrão da linha; "git config user.email joao@…" não estende).
       const w0 = texts[wa]!.toLowerCase()
       const startsAtWord = value.startsWith(w0) || w0.startsWith(value.slice(0, value.indexOf('@') + 1))
-      while (startsAtWord && wa > 0 && EMAIL_LOCAL_WORD.test(texts[wa - 1]!) && gaps[wa - 1]! >= medW && near[wa - 1]!) wa--
+      const outOfPattern = (i: number): boolean => {
+        const others = gaps.filter((_, k) => k !== i)
+        return others.length < 2 || gaps[i]! > 1.5 * median(others)
+      }
+      const minWa = c.wa - EMAIL_BACK_MAX_WORDS
+      while (startsAtWord && wa > 0 && wa > minWa && EMAIL_LOCAL_WORD.test(texts[wa - 1]!) && gaps[wa - 1]! >= medW && near[wa - 1]! && outOfPattern(wa - 1)) wa--
     }
     out.push({
       kind: c.kind,

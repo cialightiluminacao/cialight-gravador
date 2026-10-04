@@ -1441,6 +1441,25 @@ describe('Task 2c: leituras reais do OCR (recall de ponta a ponta)', () => {
       const mt = detectSensitive([ocr([['abc', 1000, 1024], ['mailto:joao@exemplo.com', 1036, 1220]], 1054, 20)])
       expect(left(only(mt, 'email')[0]!.box)).toBeGreaterThanOrEqual(1036)
     })
+    it('monoespaçada: o espaço normal (~1,2 caractere) não encadeia a extensão pela linha inteira (fix 2)', () => {
+      // Consolas 11 px/caractere, vão de 13,2 px entre todas as palavras: o vão antes do e-mail é igual aos outros
+      const words: [string, number, number][] = []
+      let x = 100
+      for (const t of ['git', 'config', 'user.email', 'joao@exemplo.com']) { words.push([t, x, x + 11 * t.length]); x += 11 * t.length + 13.2 }
+      const ds = only(detectSensitive([ocr(words, 500, 16)]), 'email')
+      expect(ds).toHaveLength(1)
+      expect(left(ds[0]!.box)).toBeGreaterThanOrEqual(348)
+    })
+    it('a extensão para trás vai a no máximo 2 palavras (fix 2)', () => {
+      // prosa com espaço normal (6,5 px), depois três pedaços colados com vão de 12 px antes do e-mail
+      const words: [string, number, number][] = []
+      let x = 100
+      const parts: [string, number][] = [['aaaa', 6.5], ['bbbb', 6.5], ['cccc', 6.5], ['xxx', 12], ['yyy', 12], ['zzz', 12], ['costa@teste.io', 0]]
+      for (const [t, g] of parts) { words.push([t, x, x + 8 * t.length]); x += 8 * t.length + g }
+      const ds = only(detectSensitive([ocr(words, 500, 20)]), 'email')
+      expect(ds).toHaveLength(1)
+      expect(left(ds[0]!.box)).toBe(Math.round(words[4]![1])) // "yyy": 2 palavras antes do e-mail
+    })
   })
 
   describe('5: placa e CEP', () => {
