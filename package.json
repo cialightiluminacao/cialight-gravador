@@ -6,7 +6,7 @@
   "license": "MIT",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/fetch-whisper.mjs && electron-vite dev",
     "build": "electron-vite build",
     "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
     "typecheck:web": "tsc -p tsconfig.web.json --noEmit",
@@ -28,6 +28,7 @@
     "test:editor-export": "electron-vite build && cross-env CIALIGHT_TEST=editor-export CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:editor-formats": "electron-vite build && cross-env CIALIGHT_TEST=editor-formats CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:editor-narration": "electron-vite build && node scripts/qa/editor-f3-narration.mjs",
+    "test:transcribe": "node scripts/fetch-whisper.mjs && electron-vite build && cross-env CIALIGHT_TEST=transcribe CIALIGHT_RAW_DIR=test-out/raw CIALIGHT_WHISPER_MODELS_DIR=test-out/whisper-models electron .",
     "test:models": "node scripts/fetch-models.mjs && electron-vite build && cross-env CIALIGHT_TEST=models CIALIGHT_RAW_DIR=test-out/raw electron .",
     "icons": "node scripts/make-icons.mjs",
     "release:publish": "node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && electron-vite build && electron-builder --win --publish always"

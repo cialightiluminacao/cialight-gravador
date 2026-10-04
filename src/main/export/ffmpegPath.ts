@@ -21,3 +21,12 @@ export function modelsDir(): string {
 export function rnnoiseDir(): string {
   return join(modelsDir(), 'rnnoise')
 }
+
+// whisper.cpp (legendas automáticas): resources/whisper/ em dev (scripts/fetch-whisper.mjs, também no `npm run dev`);
+// empacotado, process.resourcesPath/whisper (extraResources).
+export function whisperDir(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'whisper') : join(app.getAppPath(), 'resources', 'whisper')
+}
+export function whisperCliPath(): string {
+  return join(whisperDir(), 'whisper-cli.exe')
+}
