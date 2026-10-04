@@ -2318,6 +2318,7 @@ export function generateCaptions(p: Project, cues: readonly Cue[], mode: 'replac
   let use = cues
   let skipped = 0
   if (mode === 'fill' && existing?.items.length) {
+    // (legendas desativadas também contam como ocupadas: "onde não há legenda")
     // legendas da faixa não se sobrepõem: ordenadas por início, os fins também ficam em ordem (busca binária)
     const occ = [...existing.items].sort((a, b) => a.startUs - b.startUs)
     use = cues.filter((c) => {

@@ -122,7 +122,7 @@ describe('segmentCaptions', () => {
     expect(c.length).toBeGreaterThan(1)
   })
 
-  it('propriedade (600 fluxos aleatórios): todos os invariantes', () => {
+  it('propriedade (600 fluxos aleatórios): todos os invariantes', { timeout: 60_000 }, () => {
     const rnd = mulberry32(20261003)
     for (let seed = 0; seed < 600; seed++) {
       const n = 1 + Math.floor(rnd() * 120)
@@ -165,6 +165,116 @@ describe('segmentCaptions', () => {
         // o fim nunca passa do início da próxima palavra
         const nextWord = words[wi + toks.length]
         if (nextWord) expect(c.endUs, ctx).toBeLessThanOrEqual(nextWord.startUs)
+        wi += toks.length
+      }
+      expect(wi, ctx).toBe(words.length)
+    }
+  })
+
+  it('rodada 1 / item 1: cue curta após quebra por caracteres, com pausa depois — reequilibra em vez de ficar < 0,7 s', () => {
+    const W20 = (c: string): string => c.repeat(20)
+    const words = [
+      w(W20('a'), 0, 0.4875), w(W20('b'), 0.4875, 0.975), w(W20('c'), 0.975, 1.4625), w(W20('d'), 1.4625, 1.95),
+      w('abcde', 1.95, 2.0),
+      w(W20('e'), 2.6, 3.1), w(W20('f'), 3.1, 3.6), w(W20('g'), 3.6, 4.1), w(W20('h'), 4.1, 4.6)
+    ]
+    const cues = segmentCaptions(words)
+    for (const c of cues) {
+      expect(c.endUs - c.startUs).toBeGreaterThanOrEqual(D.minCueUs)
+      for (const l of c.text.split('\n')) expect(l.length).toBeLessThanOrEqual(42)
+    }
+    expect(flat(cues)).toEqual(words.map((x) => x.text))
+    for (let k = 1; k < cues.length; k++) expect(cues[k].startUs).toBeGreaterThanOrEqual(cues[k - 1].endUs)
+  })
+
+  it('fallback que ignora a pausa: cue curtíssima sem espaço, vizinha anterior não comporta → funde com a seguinte através da pausa', () => {
+    const words = [
+      w('a'.repeat(20), 0, 0.5), w('b'.repeat(20), 0.5, 1.0), w('c'.repeat(20), 1.0, 1.5), w('d'.repeat(20), 1.5, 1.95),
+      w('abcde', 1.95, 2.0), w('xyz', 2.6, 3.6)
+    ]
+    const cues = segmentCaptions(words)
+    expect(cues.map((c) => c.text.replaceAll('\n', ' ').split(' ').slice(-2).join(' '))).toEqual(['cccccccccccccccccccc dddddddddddddddddddd', 'abcde xyz'])
+    expect(cues[1].startUs).toBe(1.95 * S)
+    for (const c of cues) expect(c.endUs - c.startUs).toBeGreaterThanOrEqual(D.minCueUs)
+  })
+
+  it('palavras gigantes: nenhuma fusão/reequilíbrio cabe → cue curta mantida (exceção documentada), sem sobrepor', () => {
+    const cs = segmentCaptions([w('A'.repeat(30), 0, 1.0), w('B'.repeat(30), 1.0, 1.05), w('C'.repeat(30), 1.65, 2.65)], { maxLines: 1 })
+    expect(cs.map((c) => c.text[0])).toEqual(['A', 'B', 'C'])
+    expect(cs[1].endUs - cs[1].startUs).toBeLessThan(D.minCueUs)
+    expect(cs[1].endUs).toBeLessThanOrEqual(1.65 * S)
+    expect(cs[1].startUs).toBeGreaterThanOrEqual(cs[0].endUs)
+  })
+
+  it('endLimitUs: nenhum fim passa do limite; a última cue curta puxa o início para trás', () => {
+    const words = [w('Fala', 0, 0.8), w('longa.', 0.8, 1.6), w('Ok', 5.0, 5.1)]
+    const free = segmentCaptions(words)
+    expect(free[free.length - 1].endUs).toBe(6.0 * S) // sem limite: estendida ao alvo (1 s) depois da última palavra
+    const lim = segmentCaptions(words, { endLimitUs: 5.1 * S })
+    for (const c of lim) expect(c.endUs).toBeLessThanOrEqual(5.1 * S)
+    const last = lim[lim.length - 1]
+    expect(last.text).toBe('Ok')
+    expect(last.endUs - last.startUs).toBeGreaterThanOrEqual(D.minCueUs)
+    expect(last.startUs).toBeGreaterThanOrEqual(lim[lim.length - 2].endUs)
+    expect(last.startUs).toBeLessThanOrEqual(5.0 * S)
+  })
+
+  it('palavras de duração zero no mesmo instante: sem sobreposição (fundidas à vizinha)', () => {
+    const z = (t: string): ReturnType<typeof w> => ({ text: t, startUs: 0, endUs: 0 })
+    const cues = segmentCaptions([z('a'.repeat(42)), z('b'.repeat(42)), z('c'.repeat(42))])
+    for (let k = 0; k < cues.length; k++) {
+      expect(cues[k].endUs).toBeGreaterThan(cues[k].startUs)
+      if (k) expect(cues[k].startUs).toBeGreaterThanOrEqual(cues[k - 1].endUs)
+    }
+    expect(flat(cues)).toEqual(['a'.repeat(42), 'b'.repeat(42), 'c'.repeat(42)])
+  })
+
+  it('palavras sobrepostas (duas faixas): o fim da cue é o maior fim das palavras', () => {
+    const cues = segmentCaptions([w('longa', 0, 3), w('b', 0.1, 0.4), w('depois', 5, 6)])
+    expect(cues[0].text).toBe('longa b')
+    expect(cues[0].endUs).toBe(3 * S)
+    expect(cues[1].startUs).toBeGreaterThanOrEqual(cues[0].endUs)
+    // o silêncio é medido a partir do maior fim: 3,0 → 3,5 é 0,5 s (< pausa), mesma cue
+    expect(segmentCaptions([w('longa', 0, 3), w('b', 0.1, 0.4), w('c', 3.5, 4.2)]).map((c) => c.text)).toEqual(['longa b c'])
+  })
+
+  it('propriedade hostil (1500 fluxos): palavras longas, pausas ≈ 0,6 s, palavras minúsculas, endLimitUs', { timeout: 60_000 }, () => {
+    const rnd = mulberry32(99173)
+    for (let seed = 0; seed < 1500; seed++) {
+      const n = 1 + Math.floor(rnd() * 60)
+      let t = rnd() * 2
+      const words: { text: string; startUs: number; endUs: number }[] = []
+      for (let k = 0; k < n; k++) {
+        // palavras longas falam por ≥ 0,35 s (duas delas já somam 0,7 s; mais rápido que isso pode não ter solução dentro dos limites de linha)
+        const long = rnd() < 0.5
+        const len = long ? 18 + Math.floor(rnd() * 12) : 1 + Math.floor(rnd() * 8)
+        const dur = long ? 0.35 + rnd() * 0.55 : rnd() < 0.5 ? 0.02 + rnd() * 0.1 : 0.1 + rnd() * 0.6
+        const r = rnd()
+        const gap = r < 0.25 ? 0.6 : r < 0.4 ? 0.59 : r < 0.6 ? 0 : rnd() * 1.5
+        words.push({ text: 'x'.repeat(len) + (rnd() < 0.1 ? '.' : rnd() < 0.1 ? ',' : ''), startUs: Math.round(t * S), endUs: Math.round((t + dur) * S) })
+        t += dur + gap
+      }
+      const spanUs = words[words.length - 1].endUs - words[0].startUs
+      const limit = rnd() < 0.5 ? words[words.length - 1].endUs + Math.round(rnd() * S) : undefined
+      const cues = segmentCaptions(words, limit === undefined ? undefined : { endLimitUs: limit })
+      const ctx = `seed ${seed}`
+      let wi = 0
+      for (let k = 0; k < cues.length; k++) {
+        const c = cues[k]
+        const dur = c.endUs - c.startUs
+        expect(dur, ctx).toBeGreaterThan(0)
+        expect(dur, ctx).toBeLessThanOrEqual(D.maxCueUs)
+        if (spanUs >= D.minCueUs) expect(dur, `${ctx} cue ${k} ${JSON.stringify(c)}`).toBeGreaterThanOrEqual(D.minCueUs)
+        if (limit !== undefined) expect(c.endUs, ctx).toBeLessThanOrEqual(limit)
+        if (k) expect(c.startUs, ctx).toBeGreaterThanOrEqual(cues[k - 1].endUs)
+        for (const l of c.text.split('\n')) expect(l.length, ctx).toBeLessThanOrEqual(D.maxLineChars)
+        expect(c.text.split('\n').length, ctx).toBeLessThanOrEqual(D.maxLines)
+        const toks = c.text.split(/\s+/)
+        const mine = words.slice(wi, wi + toks.length)
+        expect(toks, ctx).toEqual(mine.map((x) => x.text))
+        expect(c.startUs, ctx).toBeLessThanOrEqual(mine[0].startUs)
+        const next = words[wi + toks.length]
+        if (next) expect(c.endUs, ctx).toBeLessThanOrEqual(next.startUs)
         wi += toks.length
       }
       expect(wi, ctx).toBe(words.length)

@@ -271,7 +271,7 @@ describe('desempenho', () => {
     expect(best).toBeLessThan(100)
   }, 30_000)
 
-  it('11. uma palavra de 30 s no meio de 20 000 não alarga a varredura dos trechos: < 100 ms e resultado igual', () => {
+  it('11. uma palavra de 30 s no meio de 20 000 não alarga a varredura dos trechos: < 100 ms; ela entra uma vez só', () => {
     const H = 3600 * S
     const p = createEmptyProject('perf2')
     p.assets = [aud('v', H)]
@@ -295,6 +295,6 @@ describe('desempenho', () => {
     expect(best).toBeLessThan(100)
     // a palavra longa entra só no trecho cujo meio cai nele
     const out = wordsToTimeline(plan.segments, { v: words })
-    expect(out.filter((x) => x.text === 'alucinação').length).toBeGreaterThanOrEqual(1)
+    expect(out.filter((x) => x.text === 'alucinação').length).toBe(1)
   }, 30_000)
 })
