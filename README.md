@@ -140,6 +140,8 @@ Testes reais dos formatos (GIF, PNG, só áudio, fila e codificador de reserva):
 
 Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/`, `docs/qa/editor-f4/`, `docs/qa/editor-f5/`, `docs/qa/editor-f6/` e `docs/qa/editor-f7/`. Os scripts restauram o `settings.json` do usuário se algo mudar.
 
+**Legendas automáticas:** na aba **Legendas**, **Gerar legendas…** transcreve a fala do projeto e preenche a faixa de legendas (até 2 linhas, 0,7 a 6 s cada; as pausas abrem uma legenda nova), com os tempos certos mesmo depois de cortes, silêncios removidos e velocidades. É tudo **offline**: o áudio não sai do computador. No primeiro uso o app baixa o modelo, só depois que você confirma: **Base** (148 MB, rápido, padrão) ou **Preciso** (488 MB, mais lento e mais exato); ele fica em `%APPDATA%\cialight-gravador\models\whisper`. Um `Ctrl+Z` desfaz a geração inteira. Veja também a visão **Transcrição** (busca, clique para ir ao trecho e copiar o texto). Detalhes na seção 26 da [especificação](docs/superpowers/specs/2026-10-01-editor-design.md).
+
 ## Estrutura
 
 ```
@@ -154,4 +156,4 @@ docs           especificação, plano, pesquisa, guia de UI, instalação
 
 ## Licença
 
-MIT. O ffmpeg embutido é distribuído sob GPLv3 (build BtbN; código-fonte em https://ffmpeg.org e https://github.com/BtbN/FFmpeg-Builds) e roda como processo separado. Atribuições de terceiros (mediabunny MPL-2.0, twgl.js, signalsmith-stretch MIT, modelo RNNoise, immer etc.) em [NOTICE](NOTICE).
+MIT. O ffmpeg embutido é distribuído sob GPLv3 (build BtbN; código-fonte em https://ffmpeg.org e https://github.com/BtbN/FFmpeg-Builds) e roda como processo separado. Atribuições de terceiros (mediabunny MPL-2.0, twgl.js, signalsmith-stretch MIT, modelo RNNoise, whisper.cpp/ggml e modelos Whisper MIT, runtime do VC++, immer etc.) em [NOTICE](NOTICE).
