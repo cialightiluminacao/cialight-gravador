@@ -25,6 +25,8 @@ import type { VideoCodecChoice } from './exportPresets'
 import { EditorExportCancelled, finalizeOrCancel, isCancelledReply, settleOrCancel, type Finalized } from './finalize'
 import { firstEncodeStep, needsAvcCheck, nextEncodeStep, X264_FALLBACK_WARNING, X264_VIDEO_CODEC, x264PipeSpec, type EncodeStep } from './encodeChain'
 import { pipeAudioBlocks, pipeFrames } from './formatExport'
+import { RateMeter } from './rateMeter'
+import { qaExportDecoder } from './qaDecoder'
 import { editorExportRunning, withExportLock } from './exportLock'
 import { ipcErrorMessage } from '@/lib/ipcError'
 
@@ -107,6 +109,8 @@ export interface EditorExportResult {
   srtPath?: string
   /** .srt pedido e não gravado (já existia um com o nome, nada no trecho, falha): o motivo, para um toast. */
   srtWarning?: string
+  /** Testes/QA (G1): camadas da última passada que subiram pelo caminho YUV (decoder em software); ausente no libx264. */
+  yuvFrames?: number
 }
 
 export { EditorExportCancelled }
@@ -199,6 +203,7 @@ async function runLocked(input: EditorExportRequest, opts: { onProgress?: OnProg
       fellBackToX264: step.kind === 'x264',
       passes: pass,
       warnings: [...warnings],
+      ...(enc.yuvFrames !== undefined ? { yuvFrames: enc.yuvFrames } : {}),
       ...(srt?.path ? { srtPath: srt.path } : {}),
       ...(srt?.warning ? { srtWarning: srt.warning } : {})
     }
@@ -228,6 +233,7 @@ interface Encoded {
   fellBack: boolean
   fellBackFromHevc: boolean
   warnings: string[]
+  yuvFrames?: number
 }
 
 type EncodedBase = Omit<Encoded, 'step' | 'fellBack' | 'fellBackFromHevc'>
@@ -341,6 +347,8 @@ interface AttemptDone {
   audioCodec: 'aac' | 'opus' | null
   audioBitrate: number
   warnings: string[]
+  /** Camadas que subiram pelo caminho YUV (decoder em software, G1). */
+  yuvFrames?: number
 }
 
 /** Uma tentativa completa (workers próprios, descartados no fim). */
@@ -372,6 +380,7 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
     toUs: req.toUs,
     video: { codec: codec === 'hevc' ? 'hevc' : 'avc', bitrate: req.videoBitrate, hw, keyFrameIntervalS: req.keyFrameIntervalS ?? KEYFRAME_INTERVAL_S },
     audio: hasAudio ? { bitrate: req.audioBitrate } : null,
+    decoder: qaExportDecoder(),
     ...(req.simulateHwFailure ? { simulateHwFailure: true } : {}),
     ...(req.simulateSoftwareFailure ? { simulateSoftwareFailure: true } : {}),
     ...(req.simulateHevcFailure ? { simulateHevcFailure: true } : {})
@@ -381,8 +390,9 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
     let writes: Promise<void> = Promise.resolve()
     let settled = false
     let total = 0
-    // velocidade/ETA medidas a partir do 1º quadro codificado (sem a abertura de decoders/encoder)
-    let first: { t: number; frame: number } | null = null
+    // velocidade/ETA pela taxa dos últimos 10 s (rateMeter.ts), a partir do 1º quadro codificado (sem a abertura de
+    // decoders/encoder)
+    const meter = new RateMeter()
 
     const finish = (outcome: { ok: true; value: AttemptDone } | { ok: false; error: Error }): void => {
       if (settled) return
@@ -437,18 +447,15 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
         case 'exportProgress': {
           if (m.jobId !== jobId) return
           total = m.total
-          const now = performance.now()
-          if (!first) first = { t: now, frame: m.frame }
-          const elapsedS = (now - first.t) / 1000
-          const frames = m.frame - first.frame
-          const fpsDone = elapsedS > 0.3 && frames > 0 ? frames / elapsedS : null
+          meter.add(performance.now(), m.frame)
+          const fpsDone = meter.fps()
           onProgress?.({
             stage,
             frame: m.frame,
             total: m.total,
             percent: Math.min(98, (m.frame / m.total) * 98),
             speed: fpsDone ? fpsDone / req.fps : null,
-            etaS: fpsDone ? Math.max(0, (m.total - m.frame) / fpsDone) : null
+            etaS: meter.etaS(m.total, m.frame)
           })
           break
         }
@@ -460,7 +467,7 @@ function attempt(req: EditorExportRequest, jobId: string, codec: VideoCodecChoic
               const ann = m.missingAnnotations.length ? [`As anotações de ${m.missingAnnotations.length === 1 ? 'uma gravação' : `${m.missingAnnotations.length} gravações`} não puderam ser lidas e ficaram de fora.`] : []
               const fonts = missingFontWarnings(m.missingFonts)
               const rate = audioRateWarning(req.audioBitrate, m.audioBitrate, m.audioCodec)
-              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, audioBitrate: m.audioBitrate, warnings: [...media, ...ann, ...fonts, ...audioWarnings, ...(rate ? [rate] : [])] } })
+              finish({ ok: true, value: { total, videoCodec: m.videoCodec, audioCodec: m.audioCodec, audioBitrate: m.audioBitrate, yuvFrames: m.yuvFrames ?? 0, warnings: [...media, ...ann, ...fonts, ...audioWarnings, ...(rate ? [rate] : [])] } })
             },
             () => {}
           )

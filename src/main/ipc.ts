@@ -127,7 +127,9 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     isPackaged: app.isPackaged,
-    paths: { output: outputDir(), raw: rawDir(), logs: logsDir(), userData: app.getPath('userData') }
+    paths: { output: outputDir(), raw: rawDir(), logs: logsDir(), userData: app.getPath('userData') },
+    // A/B do benchmark de exportação (scripts/qa/bench-export.mjs --decoder hardware): só QA fora do pacote
+    ...(!app.isPackaged && process.env.CIALIGHT_QA && process.env.CIALIGHT_QA_EXPORT_DECODER === 'hardware' ? { qaExportDecoder: 'hardware' as const } : {})
   }))
   ipcMain.handle(IPC.app.openExternal, (_e, url: string) => {
     if (/^(https?:|ms-settings:)/.test(url)) return shell.openExternal(url)

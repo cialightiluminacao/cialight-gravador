@@ -19,6 +19,9 @@ import { trackingCheck } from './trackingHarness'
 import { memoryCheck } from './memoryHarness'
 import { transitionCheck } from './transitionHarness'
 import { textCheck } from './textHarness'
+import { yuvCheck } from './yuvHarness'
+import { decoderBenchCheck } from './decoderBenchHarness'
+import { SPEED_SD_PROJECT_ID } from './speedHarness'
 
 // Teste de integração do render (CIALIGHT_TEST=editor-render), rota index.html#editor-test/<projectId>?out=<pasta>:
 // monta só o RenderClient sobre um canvas 1920×1080, pede quadros e devolve leituras de pixels ao
@@ -33,7 +36,7 @@ declare global {
 const W = 1920
 const H = 1080
 
-export async function runRenderHarness(projectId: string, outDir: string | null = null): Promise<void> {
+export async function runRenderHarness(projectId: string, outDir: string | null = null, opts: { decoderBench?: boolean } = {}): Promise<void> {
   const report: Record<string, unknown> = { errors: [] as string[] }
   const errors = report.errors as string[]
   let ok = false
@@ -106,6 +109,13 @@ export async function runRenderHarness(projectId: string, outDir: string | null 
     report.memory = await memoryCheck()
     report.transition = await transitionCheck(outDir)
     report.text = await textCheck(outDir)
+    // caminho de upload YUV (G1): paridade com o caminho antigo e custo por quadro
+    const exportUrls = mediaUrlsFor(project, 'export')
+    const sdProject = await window.api.project.load(SPEED_SD_PROJECT_ID)
+    report.yuv = await yuvCheck({ hd: exportUrls.a_video?.original, rot: exportUrls.a_rot?.original, sd: mediaUrlsFor(sdProject, 'export').a_sd?.original })
+    // G1: reprodução com decoder em software × hardware (1080p e 4K), só números para a decisão do preview; só com
+    // CIALIGHT_DECODER_BENCH=1 (o main passa &decoderBench=1 e gera o projeto 4K)
+    if (opts.decoderBench) report.decoderBench = await decoderBenchCheck()
     // por último: decodificação 1080p contínua (a CPU desta máquina estrangula depois de alguns segundos de carga)
     report.speed = await speedCheck()
     ok = true

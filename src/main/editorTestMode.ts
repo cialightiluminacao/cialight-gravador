@@ -10,6 +10,7 @@ import { ANIM_TIMES, measureShot, type AnimShot } from '@shared/testing/animShot
 import { occludedFrame, TEXT_X_EXPR, textX, TRACK_SCENE } from '@shared/testing/trackingScene'
 import { meanDiffPerChannel, paritySample, type TransitionReport } from '@shared/testing/transitionOracle'
 import type { PxBounds, TextReport } from '@shared/testing/textReport'
+import type { YuvReport } from '@shared/testing/yuvReport'
 import type { ProjectStore } from './project/projectStore'
 import type { SessionStore } from './session/sessionStore'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -31,6 +32,9 @@ const STRETCH_PROJECT_ID = 'p-editor-stretch-test'
 const SPEED_PROJECT_ID = 'p-editor-speed-test'
 // paridade do reverso numa fonte SD sem marcação de cor
 const SPEED_SD_PROJECT_ID = 'p-editor-speed-sd-test'
+const DECODER_BENCH_PROJECT_ID = 'p-editor-decoder-bench'
+/** Medição do decoder em software × hardware no preview (decoderBenchHarness): só com CIALIGHT_DECODER_BENCH=1. */
+const DECODER_BENCH = process.env.CIALIGHT_DECODER_BENCH === '1'
 // zoom/pan (F4): PNG escuro com um quadrado vermelho de 12 px em (1300, 350); o harness aplica o zoom (zoomHarness.ts)
 const ZOOM_PROJECT_ID = 'p-editor-zoom-test'
 // zoom automático nos cliques (F6): vídeo de 6 s do mesmo alvo do zoom; o harness monta a trilha do cursor em memória
@@ -80,6 +84,8 @@ interface HarnessReport {
   memory?: MemoryReport
   transition?: TransitionReport
   text?: TextReport
+  yuv?: YuvReport
+  decoderBench?: DecoderBenchReport
   watchdog?: { error?: string; before?: number[]; after?: number[]; restartMs?: number; swapped?: boolean; renderedBeforeStall?: number; renderedAfterRestart?: number; playing?: boolean }
   playback?: {
     error?: string; peak?: { l: number; r: number }; frames?: number; driftLastUs?: number | null; driftMaxTailUs?: number | null
@@ -312,6 +318,21 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   const sdProject: Project = addMediaFromAsset(addAsset({ ...createEmptyProject('Paridade SD', { width: 1920, height: 1080, fps: 30, background: '#000000' }), id: SPEED_SD_PROJECT_ID }, aSd), aSd.id, 0).project
   rmSync(projects.dirOf(SPEED_SD_PROJECT_ID), { recursive: true, force: true })
   projects.create(sdProject)
+  // G1: preview com decoder em software × hardware — 1080p (o marcador de 8 s) e 4K (testsrc2 3840×2160, 4 s); só com
+  // CIALIGHT_DECODER_BENCH=1 (medição para decisão, sem asserção de tempo: fora da rodada normal)
+  if (DECODER_BENCH) {
+    const uhd = join(dir, 'testsrc2-4k.mp4')
+    await gen(['-f', 'lavfi', '-i', 'testsrc2=size=3840x2160:rate=30', '-t', '4', '-c:v', 'libx264', '-preset', 'veryfast', '-g', '30', '-pix_fmt', 'yuv420p', uhd], 'editor: testsrc2 4K')
+    const a4k: Asset = { ...assetFromInfo('a_4k', uhd, statSync(uhd), await probe(uhd)), status: 'ready' }
+    const benchProject: Project = {
+      ...createEmptyProject('Decoder software × hardware', { width: 1920, height: 1080, fps: 30, background: '#000000' }),
+      id: DECODER_BENCH_PROJECT_ID,
+      assets: [{ ...aMarker, id: 'a_hd' }, a4k],
+      tracks: []
+    }
+    rmSync(projects.dirOf(DECODER_BENCH_PROJECT_ID), { recursive: true, force: true })
+    projects.create(benchProject)
+  }
   // zoom: fundo escuro + quadrado vermelho 12×12 centrado em (1300, 350) + caixa verde (detalhe que não é o alvo)
   const zoomPng = join(dir, 'zoom-alvo.png')
   await gen(['-f', 'lavfi', '-i', 'color=c=0x203040:s=1920x1080', '-vf', 'drawbox=x=1294:y=344:w=12:h=12:color=red:t=fill,drawbox=x=300:y=700:w=200:h=120:color=0x40a060:t=fill', '-frames:v', '1', '-update', '1', zoomPng], 'editor: alvo do zoom')
@@ -403,7 +424,7 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
     win.webContents.on('console-message', (e) => {
       if (e.level === 'error' || e.level === 'warning') console.log(`[renderer] ${e.message}`)
     })
-    loadPage(win, `index.html#editor-test/${PROJECT_ID}?out=${encodeURIComponent(dir)}`)
+    loadPage(win, `index.html#editor-test/${PROJECT_ID}?out=${encodeURIComponent(dir)}${DECODER_BENCH ? '&decoderBench=1' : ''}`)
   })
   // paridade do zoom: quadro do instante final (1,5 s) da exportação, lido antes de fechar a janela (sem janelas, o
   // app encerra enquanto o ffmpeg roda)
@@ -886,6 +907,9 @@ export async function testEditorRender(projects: ProjectStore, sessions: Session
   check(!!tb && !tb.error && !!tb.crossfade && !!tb.blur && tb.crossfade.mean < 20 && tb.blur.mean < 20, `transições: 1080p < 20 ms/quadro (compositor + GPU; alvo 12) — crossfade média ${tb?.crossfade?.mean} / p95 ${tb?.crossfade?.p95}, blur média ${tb?.blur?.mean} / p95 ${tb?.blur?.p95} ${tb?.error ?? ''}`, failures)
 
   checkText(r.text, failures)
+  checkYuv(r.yuv, failures)
+  if (DECODER_BENCH) checkDecoderBench(r.decoderBench, failures)
+  else console.log('decoder software × hardware (preview): pulado (CIALIGHT_DECODER_BENCH=1 para medir)')
 
   const wd = r.watchdog
   console.log(`watchdog: ${JSON.stringify(wd)}`)
@@ -911,6 +935,57 @@ function boundsRgb(d: Uint8Array, W: number, H: number, pred: (r: number, g: num
     x0 = Math.min(x0, x); x1 = Math.max(x1, x + 1); y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1)
   }
   return n ? { x0, y0, x1, y1, n } : null
+}
+
+/**
+ * Caminho de upload YUV (G1, yuvHarness; R4: só I420). O caminho antigo é medido nos dois modos de envio do Chromium:
+ * completo (texImage2D, 1º quadro de um item) e parcial (texSubImage2D, quadros seguintes). I420 marcado como CPU: o
+ * desenho passou mesmo pelo caminho YUV; contra o envio parcial, ≤ 2 em TODOS os pixels; contra o completo, ≤ 2 (ou
+ * a exceção do brief: 1 px nas bordas de cor presentes nas duas imagens, com p99 ≤ 1). Única linha medida à parte: a
+ * última visível do SD real, onde o envio completo do Chromium difere do parcial do mesmo quadro — lá o novo tem de
+ * bater com a conta pelos planos visíveis (≤ 2) e com o envio parcial (medido: o envio completo do Chromium interpola o
+ * croma da última linha com a linha codificada abaixo do visibleRect). NV12/I420A marcados: caem no caminho antigo
+ * (idêntico ao envio parcial). Casos informativos só no log.
+ */
+type BenchStats = { n: number; median: number; p95: number; max: number }
+/** G1 (decoderBenchHarness): reprodução com decoder em software × hardware; frameMs inclui a decodificação. */
+interface DecoderBenchReport {
+  error?: string
+  runs: { res: string; accel: string; frameMs: BenchStats; drawMs: BenchStats; error?: string }[]
+  summary?: Record<string, { hwP95: number; swP95: number; hwMedian: number; swMedian: number }>
+}
+
+/** Só números (decisão do preview no relatório da G1): a medição tem de ter rodado sem erro, sem limite de tempo. */
+function checkDecoderBench(d: DecoderBenchReport | undefined, failures: string[]): void {
+  for (const r of d?.runs ?? []) console.log(`decoder ${r.res} ${r.accel}: frameMs ${JSON.stringify(r.frameMs)} drawMs ${JSON.stringify(r.drawMs)} ${r.error ?? ''}`)
+  console.log(`decoder software × hardware (pior rodada, frameMs): ${JSON.stringify(d?.summary)}`)
+  check(!!d && !d.error && d.runs.length === 8 && d.runs.every((r) => !r.error && r.frameMs.n > 0), `preview com decoder em software × hardware medido em 1080p e 4K (${d?.runs.length ?? 0} rodadas) ${d?.error ?? d?.runs.find((r) => r.error)?.error ?? ''}`, failures)
+}
+
+function checkYuv(y: YuvReport | undefined, failures: string[]): void {
+  check(!!y && !y.error, `YUV: harness sem erro (${y?.error ?? ''})`, failures)
+  check((y?.cases.filter((c) => !c.informative).length ?? 0) === 13, `YUV: 13 casos medidos (${y?.cases.filter((c) => !c.informative).length})`, failures)
+  for (const c of y?.cases ?? []) {
+    const lr = c.lastRow
+    const lrMsg = lr ? ` [última linha à parte: × envio completo ${lr.oldVsNew}, × envio parcial ${lr.oldSubVsNew}, completo × parcial ${lr.oldFullVsSub}; × conta pelos planos visíveis (${lr.refPx} px): novo ${lr.newRef}, completo ${lr.oldRef}, parcial ${lr.oldSubRef}${lr.oldLeakRef !== undefined ? `; × croma com ¼ da linha codificada abaixo do visível: completo ${lr.oldLeakRef}, novo ${lr.newLeakRef}` : ''}]` : ''
+    const msg = `YUV ${c.name} [${c.format} ${JSON.stringify(c.colorSpace)}] esperado ${c.expect}: caminho YUV usado ${c.yuv}; × envio completo máx. ${c.max} / p99 ${c.p99} (${c.over} valores > 2), fora das bordas máx. ${c.maxOffEdge} (${c.edgePx} px de borda); × envio parcial máx. ${c.subMax} / p99 ${c.subP99}${lrMsg}; × conta de referência: antigo ${c.refOld ?? '-'}, novo ${c.refNew ?? '-'}; média do quadro ${c.mean} ${c.error ?? ''}`
+    const parity = c.max !== undefined && (c.max <= 2 || (c.maxOffEdge !== undefined && c.maxOffEdge <= 2 && (c.p99 ?? 99) <= 1))
+    let ok: boolean
+    // fallback: o 3º desenho (marcado como CPU) é o caminho antigo no mesmo modo de envio do 2º (parcial): idêntico.
+    // (Contra o envio completo, o próprio Chromium difere no NV12/I420A — medido: até 12 níveis por dentro e 138 nas
+    // bordas de croma — por isso a comparação é no mesmo modo.)
+    if (c.expect === 'fallback') ok = !c.error && c.yuv === false && c.subMax === 0 && (c.mean ?? 0) > 10
+    else {
+      ok = !c.error && c.yuv === true && parity && c.subMax !== undefined && c.subMax <= 2 && (c.mean ?? 0) > 10
+      if (c.refNew !== undefined) ok &&= c.refNew <= 2
+      if (lr) ok &&= lr.newRef !== undefined && lr.newRef <= 2 && (lr.refPx ?? 0) >= 100 && lr.oldSubVsNew !== undefined && lr.oldSubVsNew <= 2
+    }
+    if (!parity && c.expect !== 'fallback') console.log(`YUV diagnóstico ${c.name}: pior ${JSON.stringify(c.worst)} caixa > 2 ${JSON.stringify(c.box)}`)
+    if (c.informative) console.log(`(informativo) ${msg}`)
+    else check(ok, msg, failures)
+  }
+  const t = y?.timing
+  console.log(`YUV — custo por quadro 1080p I420 (decoder em software, com gl.finish): caminho antigo ${t?.oldMs} ms × novo ${t?.newMs} ms (copyTo ${t?.copyMs} + upload/conversão/desenho ${t?.drawMs}) em ${t?.frames} quadros`)
 }
 
 /** Texto e formas (F5 Task 4): verificações das medidas do textHarness. */

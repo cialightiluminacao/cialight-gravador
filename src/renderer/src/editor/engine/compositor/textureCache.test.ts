@@ -163,4 +163,75 @@ describe('TextureCache', () => {
     expect(performance.now() - t0).toBeLessThan(50)
     expect(c.stats().textureCount).toBe(2001)
   })
+
+  it('recursos extras da entrada (planos YUV + buffer de CPU): contados em bytes, reaproveitados e liberados com a entrada (descarte e clear)', () => {
+    interface Extra { id: number }
+    const deletedExtras: number[] = []
+    let nextExtra = 0
+    const base = fakeOps()
+    const ops: TexOps<FakeTex, Extra> = {
+      create: () => base.create(),
+      delete: (t) => base.delete(t),
+      upload(tex, src, sub, slot) {
+        base.upload(tex, src, sub, { extra: null, extraBytes: 0 })
+        if ((src as { yuv?: boolean }).yuv && !slot.extra) {
+          slot.extra = { id: ++nextExtra }
+          slot.extraBytes = 1000
+        }
+      },
+      deleteExtra: (x) => deletedExtras.push(x.id)
+    }
+    const c = new TextureCache(ops, { budgetBytes: 3 * MB })
+    const one = (key: string, yuv: boolean): void => {
+      c.beginFrame()
+      c.use(key, { yuv }, 512, 512, false)
+      c.endFrame()
+    }
+    one('v', true)
+    expect(c.stats().textureBytes).toBe(MB + 1000)
+    expect(c.peekExtra('v')).toEqual({ id: 1 })
+    one('v', true) // mesma entrada: extra reaproveitado, sem recontar
+    one('v', false) // caminho antigo na mesma entrada: o extra fica (próximo quadro YUV reaproveita)
+    expect(c.stats().textureBytes).toBe(MB + 1000)
+    expect(nextExtra).toBe(1)
+    expect(c.peekExtra('nada')).toBeNull()
+    one('a', false)
+    one('b', false)
+    one('c', false) // 4 MiB + extra > 3 MiB: v (a mais antiga) sai com o extra
+    expect(deletedExtras).toEqual([1])
+    expect(c.stats().textureBytes).toBe(3 * MB)
+    one('w', true)
+    c.clear()
+    expect(deletedExtras).toEqual([1, 2])
+    expect(c.stats()).toMatchObject({ textureBytes: 0, textureCount: 0 })
+  })
+
+  it('envio que lança numa entrada nova: textura e extra apagados, sem entrada nem bytes (o chamador cai no caminho antigo)', () => {
+    const deletedExtras: string[] = []
+    const base = fakeOps()
+    const ops: TexOps<FakeTex, string> = {
+      create: () => base.create(),
+      delete: (t) => base.delete(t),
+      upload(tex, src, sub, slot) {
+        if ((src as { fail?: boolean }).fail) {
+          slot.extra = 'planos'
+          slot.extraBytes = 10
+          throw new Error('falhou')
+        }
+        base.upload(tex, src, sub, { extra: null, extraBytes: 0 })
+      },
+      deleteExtra: (x) => deletedExtras.push(x)
+    }
+    const c = new TextureCache(ops)
+    c.beginFrame()
+    expect(() => c.use('k', { fail: true }, 512, 512, false)).toThrow('falhou')
+    expect(c.stats()).toMatchObject({ textureBytes: 0, textureCount: 0 })
+    expect(base.deleted).toEqual([1])
+    expect(deletedExtras).toEqual(['planos'])
+    const t = c.use('k', {}, 512, 512, false) // reserva: textura nova, envio completo
+    c.endFrame()
+    expect(t.id).toBe(2)
+    expect(base.uploads).toEqual([{ id: 2, sub: false }])
+    expect(c.stats().textureBytes).toBe(MB)
+  })
 })

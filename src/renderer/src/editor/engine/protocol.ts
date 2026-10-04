@@ -5,8 +5,11 @@ import type { Project, Us } from '@shared/editor/project'
 import type { TrackBox, TrackOpts, TrackResult } from '@shared/editor/track'
 import type { MediaUrls } from './mediaUrls'
 import type { CompositorMemStats } from './compositor/compositor'
+import type { DecoderAccel } from './decoderPool'
 
 export type HwPref = 'prefer-hardware' | 'prefer-software'
+/** Decoder da exportação: 'auto' = software (caminho YUV, G1); 'hardware' só no QA (A/B do benchmark, caminho antigo). */
+export type ExportDecoder = 'auto' | 'hardware'
 
 export interface ExportJobSpec {
   jobId: string
@@ -20,6 +23,8 @@ export interface ExportJobSpec {
   video: { codec: 'avc' | 'hevc'; bitrate: number; hw: HwPref; keyFrameIntervalS: number }
   /** null: sem faixa de áudio (projeto sem áudio). Codec escolhido no worker: AAC, ou Opus se AAC indisponível. */
   audio: { bitrate: number } | null
+  /** QA: decoder da exportação (ausente = 'auto'). */
+  decoder?: ExportDecoder
   /** Testes: simula falha do encoder de hardware antes do 1º pacote. */
   simulateHwFailure?: boolean
   /** Testes: simula falha do encoder H.264 em software antes do 1º pacote (exercita o codificador de reserva). */
@@ -39,6 +44,8 @@ export interface FramesJobSpec {
   fps: number
   fromUs: Us
   toUs: Us
+  /** QA: decoder da exportação (ausente = 'auto'). */
+  decoder?: ExportDecoder
 }
 
 /**
@@ -85,6 +92,8 @@ export type RenderIn =
   | { t: 'testStall'; ms: number }
   // testes: reprodução sequencial de `frames` quadros a partir de tUs medindo desenho + GPU (sync) por quadro
   | { t: 'testBench'; id: number; tUs: Us; frames: number; fps: number }
+  // testes: aceleração dos decoders desta instância (medição preview software × hardware, G1)
+  | { t: 'testDecoder'; accel: DecoderAccel }
   // memória do compositor (QA/testes): texturas das camadas e do passe de efeitos
   | { t: 'memStats'; id: number }
   // testes: orçamento das texturas das camadas (null = o padrão, 512 MiB)
@@ -102,7 +111,7 @@ export type RenderOut =
   | { t: 'exportChunk'; jobId: string; seq: number; data: Uint8Array; position: number }
   // missing: assets desenhados como "mídia indisponível" (quadros por asset); missingAnnotations: gravações
   // cujas anotações não puderam ser lidas — viram avisos na tela de concluído
-  | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; audioBitrate: number; hardware: HwPref; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[] }
+  | { t: 'exportDone'; jobId: string; lastSeq: number; videoCodec: string; audioCodec: 'aac' | 'opus' | null; audioBitrate: number; hardware: HwPref; missing: { assetId: string; frames: number }[]; missingAnnotations: string[]; missingFonts: string[]; yuvFrames?: number }
   // encoderError: a falha veio do codificador; beforeFirstPacket: antes de qualquer pacote de vídeo
   // (só as duas juntas justificam tentar outro modo de hardware)
   | { t: 'exportError'; jobId: string; message: string; cancelled: boolean; beforeFirstPacket: boolean; encoderError: boolean }

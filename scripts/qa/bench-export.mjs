@@ -5,6 +5,14 @@
 //
 // uso (depois de `npm run build`, sob o lock):
 //   node C:/Users/Eduardo/projetos/_locks/run-locked.mjs "node scripts/qa/bench-export.mjs --seconds 180 --blur"
+// `--decoder hardware|auto` (padrão auto): hardware força o caminho antigo da exportação (decoder de hardware, sem o
+// caminho YUV; CIALIGHT_QA_EXPORT_DECODER, só QA) para a comparação A/B intercalada com o mesmo build. Entra no nome do
+// JSON (bench-export-180s[-blur]-hw.json / -auto.json). Antes desse sufixo o nome padrão era bench-export-180s.json.
+// `--reverse`: os itens de vídeo tocam de trás para frente (reverso em bloco no DecoderPool); sufixo -rev no JSON.
+// `--size LxA` (padrão 1920x1080): tamanho do vídeo sintético (CIALIGHT_QA_FIXTURE_SIZE); fora do padrão entra no nome
+// do JSON (ex.: -3840x2160). A exportação continua no "YouTube 1080p".
+// `--pip`: uma 2ª camada de vídeo (o mesmo vídeo, reduzido no canto, sem áudio) por cima da 1ª o tempo todo — dois
+// decoders ao mesmo tempo, como tela + webcam (o mesmo asset em duas camadas abre um decoder por camada); sufixo -pip.
 // Tudo em test-out/qa-bench (apagado no fim); restaura o settings.json (hash).
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
@@ -15,6 +23,12 @@ import electronPath from 'electron'
 const args = process.argv.slice(2)
 const SECONDS = Number(args[args.indexOf('--seconds') + 1]) || 180
 const BLUR = args.includes('--blur')
+const REVERSE = args.includes('--reverse')
+const PIP = args.includes('--pip')
+const SIZE = args.includes('--size') ? args[args.indexOf('--size') + 1] : '1920x1080'
+if (!/^\d+x\d+$/.test(SIZE ?? '')) throw new Error(`--size deve ser LxA, ex.: 3840x2160 (veio ${SIZE})`)
+const DECODER = args.includes('--decoder') ? args[args.indexOf('--decoder') + 1] : 'auto'
+if (DECODER !== 'hardware' && DECODER !== 'auto') throw new Error(`--decoder deve ser hardware ou auto (veio ${DECODER})`)
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9338'
 const TAG = process.env.BENCH_TAG ?? ''
@@ -29,7 +43,7 @@ const settingsBefore = existsSync(SETTINGS) ? readFileSync(SETTINGS) : null
 
 const app = spawn(electronPath, ['.', `--remote-debugging-port=${PORT}`], {
   cwd: ROOT,
-  env: { ...process.env, CIALIGHT_QA: 'editor-fixture', CIALIGHT_RAW_DIR: 'test-out/raw' + TAG, CIALIGHT_QA_FIXTURE_SECONDS: String(SECONDS), CIALIGHT_QA_FIXTURE_SIZE: '1920x1080' },
+  env: { ...process.env, CIALIGHT_QA: 'editor-fixture', CIALIGHT_RAW_DIR: 'test-out/raw' + TAG, CIALIGHT_QA_FIXTURE_SECONDS: String(SECONDS), CIALIGHT_QA_FIXTURE_SIZE: SIZE, CIALIGHT_QA_EXPORT_DECODER: DECODER === 'hardware' ? 'hardware' : '' },
   stdio: 'ignore'
 })
 
@@ -94,6 +108,17 @@ try {
   const ready = await waitFor(`const s = window.__qaEditor?.store.getState(); return s?.project?.assets?.length && s.project.assets.every((a) => a.status === 'ready')`, 600000)
   if (!ready) throw new Error('mídias do fixture não ficaram prontas')
   await ev(`window.__qaEditor.exportDir = ${JSON.stringify(OUT)}; return 1`)
+  if (PIP) {
+    // cópia do clipe de vídeo principal numa faixa de vídeo nova acima das outras, reduzida no canto inferior direito
+    await ev(`return window.__qaEditor.store.getState().apply((p) => {
+      const main = p.tracks.flatMap((t) => (t.kind === 'video' ? t.items : [])).find((i) => i.type === 'media' && i.assetId === 'a_qa_video')
+      if (!main) throw new Error('clipe de vídeo do fixture não encontrado')
+      const { linkId, ...rest } = main
+      const item = { ...rest, id: 'i_bench_pip', startUs: 0, visual: { ...main.visual, transform: { ...main.visual.transform, x: { value: 0.8 }, y: { value: 0.78 }, scale: { value: 0.3 } } } }
+      const track = { id: 't_bench_pip', kind: 'video', name: 'PiP', muted: true, hidden: false, locked: false, volume: 1, items: [item] }
+      const last = p.tracks.reduce((m, t, i) => (t.kind === 'video' ? i : m), -1)
+      const tracks = [...p.tracks]; tracks.splice(last + 1, 0, track); return { ...p, tracks } })`)
+  }
   if (BLUR) {
     const fx = (id, r) => ({
       id, type: 'effect', effect: 'blur', startUs: 0, durationUs: SECONDS * 1e6,
@@ -105,6 +130,9 @@ try {
     await ev(`return window.__qaEditor.store.getState().apply((p) => {
       const last = p.tracks.reduce((m, t, i) => (t.kind === 'video' ? i : m), -1)
       const tracks = [...p.tracks]; tracks.splice(last + 1, 0, ...${JSON.stringify(tracks)}); return { ...p, tracks } })`)
+  }
+  if (REVERSE) {
+    await ev(`return window.__qaEditor.store.getState().apply((p) => ({ ...p, tracks: p.tracks.map((t) => t.kind !== 'video' ? t : { ...t, items: t.items.map((i) => (i.type === 'media' ? { ...i, reverse: true } : i)) }) }))`)
   }
   await sleep(1500)
   await ev(`[...document.querySelectorAll('header button')].find((b) => b.textContent.includes('Exportar')).click(); return 1`)
@@ -127,14 +155,16 @@ try {
   }
   const total = (Date.now() - t0) / 1000
   const profile = await ev(`return globalThis.__exportProfile ?? null`)
+  // camadas que subiram pelo caminho YUV (G1): > 0 só com o decoder em software; 0 com --decoder hardware
+  const yuvFrames = await ev(`const it = window.__qaEditor?.queue?.items ?? []; return it[it.length - 1]?.result?.yuvFrames ?? null`)
   const file = readdirSync(OUT).find((f) => f.endsWith('.mp4'))
   const result = {
-    seconds: SECONDS, blur: BLUR, ok: text.includes('Vídeo exportado'), totalS: Math.round(total * 10) / 10,
+    seconds: SECONDS, size: SIZE, pip: PIP, blur: BLUR, reverse: REVERSE, decoder: DECODER, ok: text.includes('Vídeo exportado'), totalS: Math.round(total * 10) / 10,
     speedX: Math.round((SECONDS / total) * 100) / 100, fps: Math.round(((SECONDS * 30) / total) * 10) / 10,
-    profile, sizeMB: file ? Math.round(statSync(join(OUT, file)).size / 1e5) / 10 : null, done: text.replace(/\s+/g, ' ').slice(0, 220), samples
+    profile, yuvFrames, sizeMB: file ? Math.round(statSync(join(OUT, file)).size / 1e5) / 10 : null, done: text.replace(/\s+/g, ' ').slice(0, 220), samples
   }
   console.log(JSON.stringify(result, null, 2))
-  writeFileSync(join(ROOT, 'test-out', `bench-export-${SECONDS}s${BLUR ? '-blur' : ''}${TAG}.json`), JSON.stringify(result, null, 2))
+  writeFileSync(join(ROOT, 'test-out', `bench-export-${SECONDS}s${BLUR ? '-blur' : ''}${REVERSE ? '-rev' : ''}${SIZE !== '1920x1080' ? '-' + SIZE : ''}${PIP ? '-pip' : ''}-${DECODER === 'hardware' ? 'hw' : 'auto'}${TAG}.json`), JSON.stringify(result, null, 2))
   if (!result.ok) code = 1
 } catch (e) {
   console.error('falhou:', e)

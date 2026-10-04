@@ -27,6 +27,13 @@
 // Se o decoder de uma entrada saudável falhar (ex.: recuperado pelo Chromium), ela é recriada uma vez.
 // Abertura que falhou (arquivo preso por outro programa, ausente…) vira placeholder e é tentada de novo
 // depois de OPEN_RETRY_MS — não a cada quadro, nem nunca mais até a URL mudar.
+// Aceleração (G1): por pool, 'no-preference' (padrão: o Chromium escolhe, hardware quando há) ou 'prefer-software'
+// (exportação: quadros I420 em memória de CPU, que o compositor sobe pelo caminho YUV — `isSoftware(sample)` diz
+// quais). Mudar a opção descarta as entradas abertas. Decoder em software que não abre/configura, ou que quebra no
+// meio, vira hardware naquela fonte (e fica em hardware: nada de tentar software de novo a cada quadro).
+// O reverso em bloco de uma entrada em software decodifica por um sink de HARDWARE próprio da entrada (`revOpened`,
+// aberto no 1º bloco): os quadros do bloco são copiados para RGBA (detach) e nunca usam o caminho YUV, então o
+// software ali só custaria CPU (GOP inteiro decodificado por bloco). Esses quadros não são marcados como software.
 import { ALL_FORMATS, Input, UrlSource, VideoSample, VideoSampleSink, type InputVideoTrack } from 'mediabunny'
 import type { Us } from '@shared/editor/project'
 import { decoderMatrixOverride } from '@shared/editor/sourceColor'
@@ -49,10 +56,15 @@ const REV_DENSE_STEPS = 4
 // (lento → passo maior → bloco maior); com o teto o custo fica perto do de um seek
 const REV_SPARSE_SPAN_S = 1.5
 
+/** Preferência de aceleração do decoder por pool (VideoSampleSink `hardwareAcceleration`). */
+export type DecoderAccel = 'no-preference' | 'prefer-software'
+
 interface Opened {
   input: Input
   sink: Pick<VideoSampleSink, 'getSample' | 'samples'>
   firstS: number
+  /** Decoder em software (quadros em memória de CPU). */
+  software?: boolean
   /** Duração de um quadro (s) e bytes por quadro copiado (RGBA), para o tamanho do bloco do reverso. */
   meta: () => Promise<{ frameS: number; frameBytes: number }>
 }
@@ -89,12 +101,15 @@ interface Entry {
   /** Passos sequenciais seguidos para trás e o tamanho do último (s). */
   backSteps: number
   lastStep: number
+  /** Reverso de entrada em software: sink de hardware da mesma fonte (aberto no 1º bloco; liberado com a entrada). */
+  revOpened: Promise<Opened> | null
   lock: Promise<unknown>
   busy: number // contado desde a aquisição (inclui a espera de `opened`): não é despejada
   lastUsed: number
 }
 
 const keyOf = (assetId: string, slot: number): string => `${assetId}#${slot}`
+const srcKey = (url: string, trackIndex: number | null): string => `${url}#${trackIndex ?? ''}`
 
 export class DecoderPool {
   private urls: Record<string, string> = {}
@@ -103,15 +118,20 @@ export class DecoderPool {
   private images = new Map<string, { url: string; bmp: Promise<ImageBitmap | null> }>()
   private retired: Promise<ImageBitmap | null>[] = []
   private clock = 0
+  private accel: DecoderAccel = 'no-preference'
+  /** Fontes (url#faixa) cujo decoder em software falhou: abrem em hardware. */
+  private swFailed = new Set<string>()
+  /** Samples entregues por decoder em software (o chamador consulta com isSoftware). */
+  private soft = new WeakSet<VideoSample>()
 
   private readonly now: () => number
-  private readonly openFn: (url: string, trackIndex: number | null) => Promise<Opened>
+  private readonly openFn: (url: string, trackIndex: number | null, accel: DecoderAccel) => Promise<Opened>
   private readonly detach: (s: VideoSample) => Promise<VideoSample>
 
   /** deps: relógio, abertura e cópia dos quadros do bloco do reverso injetáveis (testes). */
   constructor(
     private readonly maxLive = 8,
-    deps: { now?: () => number; open?: (url: string, trackIndex: number | null) => Promise<Opened>; detach?: (s: VideoSample) => Promise<VideoSample> } = {}
+    deps: { now?: () => number; open?: (url: string, trackIndex: number | null, accel: DecoderAccel) => Promise<Opened>; detach?: (s: VideoSample) => Promise<VideoSample> } = {}
   ) {
     this.now = deps.now ?? (() => performance.now())
     this.openFn = deps.open ?? open
@@ -131,6 +151,22 @@ export class DecoderPool {
       this.images.delete(id)
       this.retired.push(img.bmp)
     }
+  }
+
+  get acceleration(): DecoderAccel {
+    return this.accel
+  }
+
+  /** Troca a aceleração dos decoders; as entradas abertas com a outra opção são descartadas. */
+  setAcceleration(accel: DecoderAccel): void {
+    if (accel === this.accel) return
+    this.accel = accel
+    for (const [key, e] of [...this.entries]) this.drop(key, e)
+  }
+
+  /** O sample veio de um decoder em software (VideoFrame em memória de CPU)? */
+  isSoftware(sample: VideoSample): boolean {
+    return this.soft.has(sample)
   }
 
   /** Sample em srcUs (maior timestamp ≤ srcUs). `sequential` reaproveita o iterador; null se fora/erro. */
@@ -160,23 +196,26 @@ export class DecoderPool {
           if (sequential) {
             // quadro do bloco do reverso em cache, sem esperar a fila da entrada (a pré-busca pode estar rodando nela)
             const rev = e.rev
+            // (quadros do bloco: do sink de hardware do reverso, ver revSource — não marcados como software)
             if (rev && usable(rev, t, back ? step : same ? e.lastStep : 0)) {
-              if (back) this.prefetchPrev(e, o)
+              if (back) this.prefetchPrev(e)
               return pick(rev, t)!.clone()
             }
             // 2º passo seguido para trás: reverso em bloco; o 1º (pode ser só um ajuste) vai por seek simples
-            if (back && e.backSteps >= 2) return await this.run(e, (oo) => this.reverse(e, oo, t, step))
-            if (back) return await this.run(e, (oo) => {
+            if (back && e.backSteps >= 2) return await this.run(e, async (oo) => this.reverse(e, await this.revSource(e, oo), t, step))
+            if (back) return this.mark(o, await this.run(e, (oo) => {
               closeIter(e)
               return this.seek(oo, t)
-            })
+            }))
           }
-          return await this.run(e, (oo) => {
+          return this.mark(o, await this.run(e, (oo) => {
             if (sequential) return this.sequential(e, oo, t)
             closeIter(e) // seek: o buffer de reprodução não serve mais
             return this.seek(oo, t)
-          })
+          }))
         } catch {
+          // decoder em software que quebrou: essa fonte passa a abrir em hardware
+          if (o.software) this.swFailed.add(srcKey(e.url, e.trackIndex))
           this.drop(key, e) // decoder perdido: recria uma vez
         }
       } finally {
@@ -260,8 +299,8 @@ export class DecoderPool {
     if (!e) {
       const trackIndex = this.trackIdx[assetId] ?? null
       e = {
-        assetId, url, trackIndex, opened: this.openFn(url, trackIndex), openFailedAt: null, it: null, held: null, ahead: null, done: false,
-        rev: null, revPrev: null, revGen: 0, lastT: null, backSteps: 0, lastStep: 0, lock: Promise.resolve(), busy: 0, lastUsed: 0
+        assetId, url, trackIndex, opened: this.openWith(url, trackIndex), openFailedAt: null, it: null, held: null, ahead: null, done: false,
+        rev: null, revPrev: null, revGen: 0, revOpened: null, lastT: null, backSteps: 0, lastStep: 0, lock: Promise.resolve(), busy: 0, lastUsed: 0
       }
       e.opened.catch(() => {}) // falha tratada em frameAt/prefetch
       this.entries.set(key, e)
@@ -270,6 +309,22 @@ export class DecoderPool {
     e.lastUsed = ++this.clock
     this.evict()
     return e
+  }
+
+  /** Abre com a aceleração do pool; software que não abre/configura → hardware (e a fonte fica em hardware). */
+  private openWith(url: string, trackIndex: number | null): Promise<Opened> {
+    const k = srcKey(url, trackIndex)
+    if (this.accel !== 'prefer-software' || this.swFailed.has(k)) return this.openFn(url, trackIndex, 'no-preference')
+    return this.openFn(url, trackIndex, 'prefer-software').catch(async () => {
+      const o = await this.openFn(url, trackIndex, 'no-preference')
+      this.swFailed.add(k) // só quando o hardware abre: falha do arquivo (preso/ausente) não marca a fonte
+      return o
+    })
+  }
+
+  private mark(o: Opened, s: VideoSample | null): VideoSample | null {
+    if (s && o.software) this.soft.add(s)
+    return s
   }
 
   /** Serializa operações por entrada (o iterador não é reentrante). */
@@ -328,7 +383,7 @@ export class DecoderPool {
     }
     const hit = pick(e.rev, t)
     if (!hit) return this.seek(o, t) // bloco vazio (fora do arquivo): o quadro mais próximo
-    this.prefetchPrev(e, o)
+    this.prefetchPrev(e)
     return hit.clone()
   }
 
@@ -393,20 +448,30 @@ export class DecoderPool {
   }
 
   /** Pré-busca (na fila da entrada) o bloco imediatamente anterior ao atual; descartada se o reverso for abandonado. */
-  private prefetchPrev(e: Entry, o: Opened): void {
+  private prefetchPrev(e: Entry): void {
     const cur = e.rev
     if (!cur || e.revPrev || cur.atStart || cur.frames.length === 0) return
     const gen = e.revGen
     const endS = cur.frames[0].timestamp
     // espaçamento pelo passo atual (não herdado do bloco atual)
     const stride = strideFor(e.lastStep, cur.frameS)
-    e.revPrev = this.run(e, () => this.decodeBlock(o, endS, stride))
+    e.revPrev = this.run(e, async (oo) => this.decodeBlock(await this.revSource(e, oo), endS, stride))
       .then((blk) => {
         if (gen === e.revGen) return blk
         closeBlock(blk)
         return null
       })
       .catch(() => null)
+  }
+
+  /**
+   * Fonte do reverso em bloco: a própria entrada, ou — entrada em software — um sink de hardware da mesma fonte, aberto
+   * uma vez por entrada. Se ele não abrir, o reverso segue no software (quadros RGBA copiados: caminho antigo).
+   */
+  private async revSource(e: Entry, o: Opened): Promise<Opened> {
+    if (!o.software) return o
+    e.revOpened ??= this.openFn(e.url, e.trackIndex, 'no-preference').catch(() => o)
+    return e.revOpened
   }
 
   private restart(e: Entry, o: Opened, t: number): void {
@@ -433,17 +498,26 @@ export class DecoderPool {
     void e.lock.then(() => {
       closeIter(e)
       e.opened.then((o) => o.input.dispose()).catch(() => {})
+      // sink de hardware do reverso (se for a própria entrada — abertura que falhou — já foi liberado acima)
+      void e.revOpened?.then((r) => e.opened.then((o) => (r !== o ? r.input.dispose() : undefined))).catch(() => {})
     })
   }
 }
 
-async function open(url: string, trackIndex: number | null): Promise<Opened> {
+async function open(url: string, trackIndex: number | null, accel: DecoderAccel): Promise<Opened> {
   const input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS })
   try {
     const track = trackIndex === null ? await input.getPrimaryVideoTrack() : ((await input.getVideoTracks())[trackIndex] ?? null)
     if (!track) throw new Error(trackIndex === null ? 'sem faixa de vídeo' : `faixa de vídeo v:${trackIndex} inexistente`)
     if (!(await track.canDecode())) throw new Error(`codec não decodificável: ${track.codec}`)
     await applySourceColorRule(track)
+    const software = accel === 'prefer-software'
+    if (software) {
+      // canDecode olha a configuração sem preferência: confere a de software (com a regra de cor já aplicada)
+      const config = await track.getDecoderConfig()
+      const ok = config && (await VideoDecoder.isConfigSupported({ ...config, hardwareAcceleration: 'prefer-software' }).catch(() => null))?.supported
+      if (!ok) throw new Error(`decoder em software indisponível: ${track.codec}`)
+    }
     const firstS = await track.getFirstTimestamp()
     // medido só no primeiro uso do reverso
     let meta: Promise<{ frameS: number; frameBytes: number }> | null = null
@@ -453,7 +527,7 @@ async function open(url: string, trackIndex: number | null): Promise<Opened> {
         const frameBytes = (await track.getCodedWidth()) * (await track.getCodedHeight()) * 4
         return { frameS: rate > 0 ? 1 / rate : 1 / 30, frameBytes }
       })())
-    return { input, sink: new VideoSampleSink(track), firstS, meta: getMeta }
+    return { input, sink: new VideoSampleSink(track, software ? { hardwareAcceleration: 'prefer-software' } : {}), firstS, software, meta: getMeta }
   } catch (err) {
     input.dispose()
     throw err
