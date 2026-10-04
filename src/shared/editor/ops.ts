@@ -1,4 +1,4 @@
-import { produce } from 'immer'
+import { current, freeze, isDraft, original, produce } from 'immer'
 import { copyKeys, evalAnim, insertKeyExact, pasteKeys, removeKey, setEase, setKey, setValue, sliceKeys } from './anim'
 import { ANIM_PATHS, assignAnim, getAnim, mapItemAnims as mapAnims, mapVisualAnims as mapVisual, type AnimPath } from './animPaths'
 import { maintainAttachments } from './attachment'
@@ -62,15 +62,18 @@ export function aboveGuard(p: Project, i: number): boolean {
  * fica sem alvo (aviso noTarget).
  */
 function stampLegacyTargets(d: Project): void {
-  for (const t of d.tracks) {
-    for (const it of t.items) {
-      if (it.type !== 'effect' || it.scope !== 'track' || it.targetTrackId) continue
-      const below = visualTrackBelow(d, t.id)
-      if (!below) continue
-      it.targetTrackId = below
-      if (d.tracks.find((x) => x.id === below)!.items.some((x) => x.type === 'text' || x.type === 'shape')) it.targetMediaOnly = true
-    }
-  }
+  // leitura no estado de base (sem criar um proxy do immer por item a cada edição); só o item gravado passa pelo rascunho
+  const base = isDraft(d) ? original(d) : d
+  base.tracks.forEach((t, ti) => {
+    t.items.forEach((it, ii) => {
+      if (it.type !== 'effect' || it.scope !== 'track' || it.targetTrackId) return
+      const below = visualTrackBelow(base, t.id)
+      if (!below) return
+      const fx = d.tracks[ti].items[ii] as EffectItem
+      fx.targetTrackId = below
+      if (base.tracks.find((x) => x.id === below)!.items.some((x) => x.type === 'text' || x.type === 'shape')) fx.targetMediaOnly = true
+    })
+  })
 }
 
 /**
@@ -157,6 +160,13 @@ function isFollower(p: Project, it: Item): boolean {
   return it.type === 'effect' && !!it.linkId && groupHasMedia(p, it.linkId)
 }
 
+/** Grupos de vínculo com algum item que não é efeito — uma passada (laços sobre muitos itens: isFollower em O(1)). */
+function mediaGroups(p: Project): Set<string> {
+  const out = new Set<string>()
+  for (const t of p.tracks) for (const i of t.items) if (i.linkId && i.type !== 'effect') out.add(i.linkId)
+  return out
+}
+
 export function projectDurationUs(p: Project): Us {
   let max = 0
   for (const t of p.tracks) if (!t.hidden) for (const i of t.items) max = Math.max(max, end(i))
@@ -202,12 +212,12 @@ export function lockedVideoDesyncsEffects(p: Project, fromUs: Us): boolean {
 
 /** Ids dados + (opcionalmente) vinculados, sem repetição; lança se algum não existir. */
 function expand(p: Project, itemIds: string[], includeLinked: boolean): string[] {
-  const out: string[] = []
+  const out = new Set<string>()
   for (const id of itemIds) {
     mustFind(p, id)
-    for (const x of includeLinked ? linkedIds(p, id) : [id]) if (!out.includes(x)) out.push(x)
+    for (const x of includeLinked ? linkedIds(p, id) : [id]) out.add(x)
   }
-  return out
+  return [...out]
 }
 
 /** Item visual (não-áudio) só pode ficar em faixa de vídeo. */
@@ -530,9 +540,25 @@ function assertNotFxTrackFor(it: Item, t: Track): void {
  * outra faixa de efeitos (placeEffect). Sobrescrever nunca vale para seguidores: nem eles recortam, nem são recortados.
  */
 function relocateFollowers(d: Project, ids: Iterable<string>): void {
-  for (const id of ids) {
+  // estado atual lido UMA vez (sem um proxy do immer por item) e os grupos com mídia numa passada; com centenas de
+  // seguidores, findItem/isFollower/isFree no rascunho por id eram O(itens²) em proxies
+  const cur = isDraft(d) ? current(d) : d
+  const order = [...ids]
+  const want = new Set(order)
+  const groups = mediaGroups(cur)
+  const clash: string[] = []
+  for (const t of cur.tracks) {
+    const its = t.items.filter((i) => want.has(i.id) && i.type === 'effect' && !!i.linkId && groups.has(i.linkId))
+    if (its.length === 0) continue
+    // colisão com outro item da faixa (objetos puros: barato mesmo O(n) por seguidor)
+    for (const it of its) if (!isFree(t, it.startUs, end(it), new Set([it.id]))) clash.push(it.id)
+  }
+  // na ordem de `ids` (placeEffect é primeira-livre: a ordem decide quem fica com a vaga)
+  const rank = new Map(order.map((id, i) => [id, i]))
+  clash.sort((a, b) => rank.get(a)! - rank.get(b)!)
+  for (const id of clash) {
     const f = findItem(d, id)
-    if (!f || !isFollower(d, f.item) || isFree(f.track, f.item.startUs, end(f.item), new Set([id]))) continue
+    if (!f || isFree(f.track, f.item.startUs, end(f.item), new Set([id]))) continue
     f.track.items.splice(f.itemIndex, 1)
     placeEffect(d, f.item)
   }
@@ -564,7 +590,12 @@ function finalize(d: Project): void {
     for (const it of t.items) if (it.linkId) count.set(it.linkId, (count.get(it.linkId) ?? 0) + 1)
   }
   for (const t of d.tracks) {
-    for (const it of t.items) if (it.linkId && (count.get(it.linkId) ?? 0) < 2) delete it.linkId
+    t.items.forEach((it, i) => {
+      if (!it.linkId || (count.get(it.linkId) ?? 0) >= 2) return
+      // item congelado (posto pronto na faixa): troca por uma cópia sem o vínculo
+      if (Object.isFrozen(it)) t.items[i] = omit(it, 'linkId') as Item
+      else delete it.linkId
+    })
     let maxEnd = -Infinity
     for (const it of t.items) {
       if (it.startUs < maxEnd) throw new EditError('overlap', `Sobreposição na faixa "${t.name}"`)
@@ -928,8 +959,12 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
   if (ids.length === 0) return p
   const primary = new Set(itemIds)
   const dest = opts?.toTrackId ? mustTrack(p, opts.toTrackId) : null
+  // índice id → item/faixa numa passada (com centenas de efeitos vinculados, mustFind por id era O(itens²))
+  const where = new Map<string, { track: Track; item: Item }>()
+  for (const t of p.tracks) for (const it of t.items) where.set(it.id, { track: t, item: it })
+  const groups = mediaGroups(p)
   const plan = ids.map((id) => {
-    const f = mustFind(p, id)
+    const f = where.get(id)!
     assertUnlocked(f.track)
     const to = dest && primary.has(id) ? dest : f.track
     assertUnlocked(to)
@@ -942,7 +977,24 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
   if (delta === 0 && plan.every((x) => x.fromTrackId === x.toTrackId)) return p
   const idSet = new Set(ids)
   return edit(p, (d) => {
-    for (const t of d.tracks) if (t.items.some((i) => idSet.has(i.id))) t.items = t.items.filter((i) => !idSet.has(i.id))
+    // tira os movidos decidindo pelo estado puro (p) e lendo do rascunho SÓ os que ficam (continuam rascunhos: as
+    // escritas no lugar depois — makeRoom, relinkAcross… — seguem valendo); com centenas de efeitos vinculados, um
+    // proxy do immer por item lido dominava cada passo do arraste
+    const byId = new Map<string, Track>()
+    d.tracks.forEach((t, ti) => {
+      byId.set(t.id, t)
+      const its = p.tracks[ti]?.id === t.id ? p.tracks[ti].items : null
+      if (!its) {
+        if (t.items.some((i) => idSet.has(i.id))) t.items = t.items.filter((i) => !idSet.has(i.id))
+        return
+      }
+      if (!its.some((i) => idSet.has(i.id))) return
+      const keep: number[] = []
+      its.forEach((i, k) => { if (!idSet.has(i.id)) keep.push(k) })
+      const draft = t.items
+      t.items = keep.map((k) => draft[k])
+    })
+    const trackOf = (id: string): Track => byId.get(id) ?? mustTrack(d, id)
     let moved = plan.map((x) => ({ ...x, item: { ...x.item, startUs: x.item.startUs + delta } as Item }))
     const lifted: Item[] = []
     if (opts?.mode === 'insert') {
@@ -953,20 +1005,24 @@ export function moveItems(p: Project, itemIds: string[], deltaUs: Us, opts?: { t
     } else {
       for (const x of moved) {
         // seguidor nunca sobrescreve (recortaria o efeito de outro clipe): se o destino estiver ocupado, muda de faixa
-        if (isFollower(p, x.item)) continue
-        const t = mustTrack(d, x.toTrackId)
+        if (x.item.type === 'effect' && !!x.item.linkId && groups.has(x.item.linkId)) continue
+        const t = trackOf(x.toTrackId)
         if (isFree(t, x.item.startUs, end(x.item))) continue
         if (opts?.mode !== 'overwrite') throw new EditError('overlap', `Sobreposição na faixa "${t.name}"`)
         lifted.push(...overwriteIn(d, t, x.item.startUs, end(x.item)))
       }
     }
-    for (const x of moved) mustTrack(d, x.toTrackId).items.push(x.item)
+    const add = new Map<Track, Item[]>()
+    for (const x of moved) { const t = trackOf(x.toTrackId); (add.get(t) ?? add.set(t, []).get(t)!).push(x.item) }
+    for (const [t, its] of add) t.items.push(...its)
     for (const it of lifted) placeEffect(d, it)
     // clipe que mudou de faixa: os efeitos vinculados a ele passam a mirar a faixa nova
     for (const x of moved) {
       if (x.fromTrackId === x.toTrackId || x.item.type === 'effect' || !x.item.linkId) continue
       for (const t of d.tracks) for (const it of t.items) if (it.type === 'effect' && it.linkId === x.item.linkId && it.targetTrackId === x.fromTrackId) it.targetTrackId = x.toTrackId
     }
+    // congelados (raso) antes de current(): o immer não copia de novo cada item movido (relocateFollowers, âncoras)
+    for (const x of moved) Object.freeze(x.item)
     relocateFollowers(d, moved.map((x) => x.id))
     finalize(d)
   })
@@ -2053,6 +2109,74 @@ export function addEffect(p: Project, preset: EffectPresetId, at: Us, opts?: { d
     fx.linkId = linkId
   })
   return { project: q, itemId: item.id }
+}
+
+/**
+ * Insere de uma vez efeitos novos já prontos (região, âncora, nome) — um projeto novo, um passo de desfazer. `linkTo[i]`:
+ * clipe de mídia a cujo grupo de vínculo o efeito i entra (o clipe ganha um grupo novo se não tem; quem chama garante
+ * que a faixa dele está desbloqueada nesse caso). Faixas: as de efeitos do bloco (acima de toda a mídia, abaixo de
+ * texto/legendas) visíveis, desbloqueadas e livres no intervalo; senão "Efeitos N" novas no topo do bloco. Guloso por
+ * início (escalonamento de intervalos, primeira faixa livre): as faixas novas são no máximo o número de efeitos novos
+ * simultâneos. Faixa de efeitos bloqueada nunca recebe nada (como no addEffect: o efeito vai para outra/uma nova).
+ */
+export function addEffectItems(p: Project, items: readonly EffectItem[], linkTo: readonly (string | undefined)[]): Project {
+  if (items.length === 0) return p
+  const ids = new Set<string>()
+  for (const it of items) {
+    if (it.durationUs < MIN_ITEM_US) throw new EditError('invalid', `Item ${it.id} menor que a duração mínima`)
+    if (it.startUs < 0) throw new EditError('bounds', `Item ${it.id} começa antes de 0`)
+    if (ids.has(it.id)) throw new EditError('invalid', 'Id de item repetido')
+    ids.add(it.id)
+  }
+  const order = items.map((_, i) => i).sort((a, b) => items[a].startUs - items[b].startUs || end(items[a]) - end(items[b]))
+  // faixas existentes que servem (itens ordenados e sem sobreposição: busca binária) e o fim do último efeito novo
+  const { lo, hi } = fxBlock(p)
+  const cands = p.tracks.flatMap((t, i) => (i > lo && i < hi && isFxTrack(t) && !t.locked && !t.hidden ? [{ id: t.id, items: t.items, last: -Infinity }] : []))
+  const freeOld = (its: Item[], s: Us, e: Us): boolean => {
+    let a = 0, b = its.length
+    while (a < b) { const m = (a + b) >> 1; if (end(its[m]) <= s) a = m + 1; else b = m }
+    return a >= its.length || its[a].startUs >= e
+  }
+  const fresh: { last: Us; items: EffectItem[] }[] = []
+  const toOld = new Map<string, EffectItem[]>()
+  for (const i of order) {
+    const it = items[i], s = it.startUs, e = end(it)
+    const c = cands.find((t) => t.last <= s && freeOld(t.items, s, e))
+    if (c) { c.last = e; (toOld.get(c.id) ?? toOld.set(c.id, []).get(c.id)!).push(it); continue }
+    const n = fresh.find((t) => t.last <= s)
+    if (n) { n.last = e; n.items.push(it) } else fresh.push({ last: e, items: [it] })
+  }
+  // grupos de vínculo: índices dos clipes lidos antes de criar faixas
+  const clipAt = new Map<string, { ti: number; ii: number }>()
+  p.tracks.forEach((t, ti) => t.items.forEach((x, ii) => { if (x.type === 'media') clipAt.set(x.id, { ti, ii }) }))
+  for (const id of linkTo) if (id !== undefined && !clipAt.has(id)) throw new EditError('notFound', `Item não encontrado: ${id}`)
+  // vínculo e cópias congeladas antes do rascunho: o immer não copia (current) nem congela de novo 600 efeitos novos
+  const groups = new Map<string, string>()
+  const newGroup = new Set<string>()
+  for (const id of linkTo) {
+    if (id === undefined || groups.has(id)) continue
+    const at = clipAt.get(id)!
+    const g = p.tracks[at.ti].items[at.ii].linkId
+    groups.set(id, g ?? newId('l_'))
+    if (!g) newGroup.add(id)
+  }
+  const ready = new Map(items.map((it, i) => {
+    const id = linkTo[i]
+    return [it, freeze(id === undefined ? { ...it } : { ...it, linkId: groups.get(id)! }, true)]
+  }))
+  return edit(p, (d) => {
+    for (const id of newGroup) {
+      const at = clipAt.get(id)!
+      d.tracks[at.ti].items[at.ii].linkId = groups.get(id)!
+    }
+    for (const [tid, its] of toOld) {
+      const t = mustTrack(d, tid)
+      // os itens que já estavam continuam rascunhos (escritas no lugar depois seguem valendo); só a ordem é nova
+      t.items = [...t.items, ...its.map((it) => ready.get(it)!)].sort((a, b) => a.startUs - b.startUs)
+    }
+    for (const f of fresh) mustTrack(d, createTrack(d, 'video', fxInsertIndex(d), nextFxName(d), 'effects')).items = f.items.map((it) => ready.get(it)!)
+    finalize(d)
+  })
 }
 
 // ---------------------------------------------------------------- transições

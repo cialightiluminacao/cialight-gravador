@@ -1,4 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
+import { execFile } from 'child_process'
 import { basename, dirname, extname, join } from 'path'
 import { existsSync, promises as fsp, renameSync, rmSync, statSync } from 'fs'
 import { IPC, type GeneratedExt, type GeneratedMeta, type BarState, type CursorBeginInfo, type ExportRequest, type OverlayActionEvent, type OverlayModePayload, type OverlayStrokeEvent, type RecordingPhaseContext } from '@shared/ipc'
@@ -28,7 +29,9 @@ import { applyHotkeys, getHotkeyStatus } from './hotkeys/globalShortcuts'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { encoderFallbackChain } from '@shared/encoderCache'
 import type { AudioProcessOpts } from '@shared/editor/audioProcess'
-import { rnnoiseDir } from './export/ffmpegPath'
+import { ffmpegPath, ffprobePath, ocrScriptPath, rnnoiseDir } from './export/ffmpegPath'
+import { runScan } from './sensitive/scan'
+import { probeVideoStream, SensitiveScans, startScanForSender, type StreamInfo } from './sensitive/scanManager'
 import { MissingModelError, missingModelMessage } from './media/audioProcess'
 import { buildReviewAssets } from './export/reviewAssets'
 import { runFfmpeg } from './export/ffmpegRunner'
@@ -675,6 +678,34 @@ export function registerIpc(store: SessionStore, projects: ProjectStore): void {
     e.preventDefault()
     void editorExports.cancelOwnedBy(null).finally(() => app.quit())
   })
+
+  // ---- dados sensíveis (G3): OCR no main; o renderer só recebe tipo, máscara, confiança, caixas e tempos ----
+  // dimensões/giro da faixa v:N pedida (ruling R23: a webcam do rec.mp4 é v:1, com outro tamanho que a tela)
+  const runFfprobe = (args: string[]): Promise<string> =>
+    new Promise<string>((res, rej) => execFile(ffprobePath(), args, { maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout) => (err ? rej(err) : res(stdout))))
+  const probeScanStream = (file: string, idx = 0): Promise<StreamInfo> => probeVideoStream(file, idx, { probe, run: runFfprobe })
+  const sensitiveScans = new SensitiveScans(
+    (req, opts) => runScan(req, { ffmpeg: ffmpegPath(), helperScript: ocrScriptPath(), probe: probeScanStream, log }, opts),
+    (p) => {
+      try {
+        return statSync(p).isFile()
+      } catch {
+        return false
+      }
+    },
+    // o editor decodifica o intermediário quando ele existe (mediaUrls): a varredura lê o mesmo arquivo
+    (projectId, assetId) => {
+      try {
+        return projects.assetPath(projects.cached(projectId), assetId, 'intermediate', store)
+      } catch {
+        return null
+      }
+    }
+  )
+  // janela fechada, renderer caído ou recarregado no meio: a varredura (e os processos dela) acaba junto
+  ipcMain.handle(IPC.editorSensitive.start, (e, req: unknown) => startScanForSender(sensitiveScans, e.sender, req, IPC.editorSensitive))
+  ipcMain.handle(IPC.editorSensitive.cancel, (_e, scanId: unknown) => typeof scanId === 'string' && sensitiveScans.cancel(scanId))
+  app.on('will-quit', () => sensitiveScans.cancelAll())
 
   // ---- export ----
   ipcMain.handle(IPC.export.run, (_e, req: ExportRequest) => {

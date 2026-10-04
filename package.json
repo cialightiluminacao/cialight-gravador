@@ -28,6 +28,7 @@
     "test:editor-formats": "electron-vite build && cross-env CIALIGHT_TEST=editor-formats CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:editor-narration": "electron-vite build && node scripts/qa/editor-f3-narration.mjs",
     "test:models": "node scripts/fetch-models.mjs && electron-vite build && cross-env CIALIGHT_TEST=models CIALIGHT_RAW_DIR=test-out/raw electron .",
+    "test:sensitive": "vitest run --config vitest.ocr.config.ts",
     "icons": "node scripts/make-icons.mjs",
     "release:publish": "node scripts/fetch-models.mjs && electron-vite build && electron-builder --win --publish always"
   },
@@ -127,6 +128,13 @@
         "to": "models",
         "filter": [
           "**/*.rnnn"
+        ]
+      },
+      {
+        "from": "resources/ocr",
+        "to": "ocr",
+        "filter": [
+          "*.ps1"
         ]
       },
       {
