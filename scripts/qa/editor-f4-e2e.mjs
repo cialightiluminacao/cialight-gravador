@@ -23,6 +23,7 @@ import { createHash } from 'crypto'
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
 import electronPath from 'electron'
+import { guardShot } from './shotGuard.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9337'
@@ -192,6 +193,7 @@ async function ev(body) {
   return r.result?.result?.value
 }
 async function shot(name) {
+  await guardShot(send)
   await sleep(300)
   // a captura pode não voltar com a janela sem pintar (coberta/minimizada pelo uso da máquina): não trava o E2E
   const r = await Promise.race([send('Page.captureScreenshot', { format: 'png' }), sleep(20000).then(() => null)])

@@ -21,6 +21,7 @@ import { tmpdir } from 'os'
 import { pathToFileURL } from 'url'
 import electronPath from 'electron'
 import { guardSettings } from './settingsGuard.mjs'
+import { guardShot } from './shotGuard.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9342'
@@ -119,6 +120,7 @@ async function ev(body) {
   return r.result?.result?.value
 }
 async function shot(name) {
+  await guardShot(send)
   await sleep(400)
   const r = await Promise.race([send('Page.captureScreenshot', { format: 'png' }), sleep(20000).then(() => null)])
   if (!r?.result?.data) return console.log(`  (sem captura: ${name})`)

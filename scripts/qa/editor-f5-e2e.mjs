@@ -25,6 +25,7 @@ import { guardSettings, sha } from './settingsGuard.mjs'
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, statSync } from 'fs'
 import { join, resolve } from 'path'
 import electronPath from 'electron'
+import { guardShot } from './shotGuard.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9338'
@@ -166,6 +167,7 @@ async function ev(body) {
   return r.result?.result?.value
 }
 async function shot(name) {
+  await guardShot(send)
   await sleep(300)
   // a captura pode não voltar com a janela sem pintar: não trava o E2E
   const r = await Promise.race([send('Page.captureScreenshot', { format: 'png' }), sleep(20000).then(() => null)])

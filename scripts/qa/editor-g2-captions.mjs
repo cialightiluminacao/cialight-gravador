@@ -20,6 +20,7 @@ import { join, resolve } from 'path'
 import electronPath from 'electron'
 import { guardSettings } from './settingsGuard.mjs'
 import { synthSpeech } from './synthSpeech.mjs'
+import { guardShot } from './shotGuard.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9337'
@@ -176,6 +177,7 @@ async function ev(body, timeout = 240000) {
   return r.result?.result?.value
 }
 async function shot(name) {
+  await guardShot(send)
   const r = await send('Page.captureScreenshot', { format: 'png' })
   writeFileSync(join(SHOTS, name), Buffer.from(r.result.data, 'base64'))
   console.log(`  [captura] ${name}`)

@@ -15,6 +15,7 @@ import { spawn, execFileSync } from 'child_process'
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, openSync, readSync, closeSync, statSync } from 'fs'
 import { join, resolve } from 'path'
 import electronPath from 'electron'
+import { guardShot } from './shotGuard.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9335'
@@ -119,6 +120,7 @@ async function ev(body) {
   return r.result?.result?.value
 }
 async function shot(name) {
+  await guardShot(send)
   await sleep(400)
   if (BLUR) {
     // só para o screenshot: visualizador, miniaturas e filmstrips (a gravação mostra a área de trabalho real)

@@ -37,6 +37,7 @@ import { createHash } from 'crypto'
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, statSync } from 'fs'
 import { join, resolve } from 'path'
 import electronPath from 'electron'
+import { guardShot } from './shotGuard.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
 const PORT = process.env.CDP_PORT ?? '9338'
@@ -264,6 +265,7 @@ async function ev(body) {
   return r.result?.result?.value
 }
 async function shot(name) {
+  await guardShot(send)
   await sleep(300)
   const r = await Promise.race([send('Page.captureScreenshot', { format: 'png' }), sleep(20000).then(() => null)])
   if (!r?.result?.data) return console.log(`  (sem captura: ${name})`)
