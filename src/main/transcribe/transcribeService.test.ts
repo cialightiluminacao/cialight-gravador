@@ -5,7 +5,7 @@ import { constants, tmpdir } from 'os'
 import { join } from 'path'
 import type { spawn } from 'child_process'
 import type { TranscribeProgress, TranscribeRequest } from '@shared/ipc'
-import { LOW_VOICE_WARNING, TranscribeCancelledError, TranscribeService, WHISPER_START_ERROR, mergeWords, parseWhisperProgress, transcribeInputOf, whisperThreads, type TranscribeDeps } from './transcribeService'
+import { LOW_VOICE_WARNING, TranscribeCancelledError, TranscribeService, WHISPER_START_ERROR, FFMPEG_START_ERROR, mergeWords, parseWhisperProgress, transcribeInputOf, whisperThreads, type TranscribeDeps } from './transcribeService'
 import type { Asset } from '@shared/editor/project'
 
 let root: string
@@ -242,6 +242,22 @@ describe('TranscribeService', () => {
     expect((await first).words).toEqual({ a1: [] })
     expect(svc.busy).toBe(false)
     await expect(svc.transcribe(req([]), () => {})).resolves.toEqual({ words: {}, warnings: [] })
+  })
+
+  it('um asset offline é pulado com aviso pt-BR; os demais seguem (falha só se todos faltarem)', async () => {
+    const f = fake({})
+    const { svc } = service(f, {
+      resolveInput: (_p, id) => (id === 'off' ? { path: join(root, 'sumiu.mp4'), audioMap: '0:a:0', name: 'sumiu.mp4' } : { path: media, audioMap: '0:a:1', name: 'fala.mp4' })
+    })
+    const r = await svc.transcribe(req([{ assetId: 'off', fromUs: 0, toUs: 1_000_000 }, { assetId: 'a1', fromUs: 0, toUs: 6_000_000 }]), () => {})
+    expect(r.warnings).toContain('sumiu.mp4: arquivo não encontrado — sem legendas para este trecho')
+    expect(r.words.off).toBeUndefined()
+    expect(r.words.a1.length).toBeGreaterThan(0)
+  })
+
+  it('ffmpeg não inicia (ENOENT) na extração → mensagem pt-BR', async () => {
+    const f = fake({ extract: (x) => setTimeout(() => x.child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })), 1) })
+    await expect(service(f).svc.transcribe(req([{ assetId: 'a1', fromUs: 0, toUs: 6_000_000 }]), () => {})).rejects.toThrow(FFMPEG_START_ERROR)
   })
 
   it('arquivo de mídia ausente → erro pt-BR antes de qualquer processo', async () => {

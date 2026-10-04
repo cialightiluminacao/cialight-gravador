@@ -157,7 +157,7 @@ export function CaptionsPanel({ playback }: { playback: PlaybackController | nul
           className="h-8 w-full"
           disabled={!project || !!generateReason}
           title={generateReason ?? 'Transcreve a fala do projeto e cria as legendas'}
-          aria-describedby={generateReason && !locked ? 'caption-generate-reason' : undefined}
+          aria-describedby={generateReason ? (locked ? 'caption-locked-reason' : 'caption-generate-reason') : undefined}
           onClick={() => setGenerateOpen(true)}
           data-caption-generate=""
         >
@@ -176,7 +176,7 @@ export function CaptionsPanel({ playback }: { playback: PlaybackController | nul
             <FileDown className="h-3.5 w-3.5" /> Exportar SRT…
           </Button>
         </div>
-        {locked ? <p className="text-[10.5px] text-warn">A faixa de legendas está bloqueada: desbloqueie-a para editar.</p> : null}
+        {locked ? <p id="caption-locked-reason" className="text-[10.5px] text-warn" data-caption-locked-reason="">A faixa de legendas está bloqueada: desbloqueie-a para editar.</p> : null}
       </div>
 
       {importWarnings ? (

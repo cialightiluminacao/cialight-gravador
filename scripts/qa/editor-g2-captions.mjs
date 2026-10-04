@@ -6,7 +6,7 @@
 // pela IPC do app se faltar); o download do `small` é iniciado e cancelado pela UI.
 //
 // uso (depois de `npm run build`; SEMPRE sob o lock das execuções do Electron):
-//   node C:/Users/Eduardo/projetos/_locks/run-locked.mjs "node scripts/qa/editor-g2-captions.mjs"
+//   node <pasta dos locks>/run-locked.mjs "node scripts/qa/editor-g2-captions.mjs"
 //
 // Confere: (1) botão e textos do diálogo em pt-BR, base "baixado"; (2) small "precisa baixar (488 MB)", clicar inicia o
 // download com progresso, Cancelar não deixa arquivo/.part; (3) Gerar (base, pt): limites das cues, ≥ 80 % das palavras

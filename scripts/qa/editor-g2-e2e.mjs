@@ -7,7 +7,7 @@
 //   e "Salvar arquivo .srt ao lado".
 //
 // uso (depois de `npm run build`; SEMPRE sob o lock das execuções do Electron):
-//   node C:/Users/Eduardo/projetos/_locks/run-locked.mjs "node scripts/qa/editor-g2-e2e.mjs"
+//   node <pasta dos locks>/run-locked.mjs "node scripts/qa/editor-g2-e2e.mjs"
 //
 // Confere no arquivo exportado: (a) duração = a do plano; (b) o .srt tem o mesmo número de cues da faixa de legendas, com
 // os tempos a ≤ 1 quadro dos da faixa; (c) legenda queimada: no meio de 3 cues a região da legenda difere do fundo liso

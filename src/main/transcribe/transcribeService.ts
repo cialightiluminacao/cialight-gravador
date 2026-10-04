@@ -28,6 +28,8 @@ export class TranscribeCancelledError extends Error {
 export const LOW_VOICE_WARNING = 'Fala muito baixa: legendas sem filtro de silêncio'
 export const WHISPER_START_ERROR =
   'Não foi possível iniciar o reconhecimento de fala (whisper). Reinstale o CiaLight Gravador; se o problema continuar, instale o “Microsoft Visual C++ Redistributable 2015–2022 (x64)” e tente de novo.'
+export const FFMPEG_START_ERROR = 'Não foi possível iniciar o processamento de áudio (ffmpeg). Reinstale o CiaLight Gravador e tente de novo.'
+export const missingFileWarning = (name: string): string => `${name}: arquivo não encontrado — sem legendas para este trecho`
 /** Códigos de saída do Windows quando o processo nem chega a rodar (DLL ausente, imagem inválida, falha ao iniciar a DLL). */
 const START_FAILURE_CODES = new Set([0xc0000135, 0xc000007b, 0xc0000142, -1073741515, -1073741701, -1073741502])
 /** Fração do trecho atribuída à extração + silencedetect no progresso (o resto é do whisper). */
@@ -188,12 +190,20 @@ export class TranscribeService {
     const jobs = req.jobs
     const result: TranscribeResult = { words: {}, warnings: [] }
     if (!jobs.length) return result
-    // entradas resolvidas antes de qualquer processo: asset ausente/sem áudio falha na hora
-    const inputs = jobs.map((j) => {
+    // entradas resolvidas antes de qualquer processo: asset ausente/sem áudio falha na hora; arquivo offline (sumiu do
+    // disco) só pula o trecho com aviso — falha apenas se NENHUM trecho tiver arquivo
+    const missing = new Set<string>()
+    const inputs: (TranscribeInput | null)[] = jobs.map((j) => {
       const input = d.resolveInput(req.projectId, j.assetId)
-      if (!existsSync(input.path)) throw new Error(`Arquivo de mídia não encontrado: “${input.name}”.`)
-      return input
+      if (existsSync(input.path)) return input
+      missing.add(input.name)
+      const w = missingFileWarning(input.name)
+      if (!result.warnings.includes(w)) result.warnings.push(w)
+      return null
     })
+    if (inputs.every((x) => x === null)) {
+      throw new Error(`Arquivo de mídia não encontrado: “${[...missing].join('”, “')}”.`)
+    }
 
     const tmp = mkdtempSync(join((d.tmpRoot ?? tmpdir)(), 'cialight-whisper-'))
     this.tmpDir = tmp
@@ -206,13 +216,24 @@ export class TranscribeService {
       for (let i = 0; i < jobs.length; i++) {
         const job = jobs[i]
         const input = inputs[i]
+        if (!input) {
+          doneUs += Math.max(0, job.toUs - job.fromUs)
+          continue
+        }
         const durUs = Math.max(0, job.toUs - job.fromUs)
         const progress = (stage: TranscribeProgress['stage'], within: number): void =>
           onProgress({ stage, jobIndex: i, jobCount: jobs.length, fraction: Math.min(1, (doneUs + within * durUs) / totalUs) })
 
         progress('extract', 0)
         const wav = join(tmp, `job${i}.wav`)
-        const ex = await this.runChild(d.ffmpegPath(), extractArgs(input, job.fromUs, job.toUs, wav), 'ffmpeg', signal, {})
+        let ex: ChildResult
+        try {
+          ex = await this.runChild(d.ffmpegPath(), extractArgs(input, job.fromUs, job.toUs, wav), 'ffmpeg', signal, {})
+        } catch (e) {
+          if (e instanceof TranscribeCancelledError) throw e
+          d.log?.error('transcrição: ffmpeg não iniciou', e)
+          throw new Error(FFMPEG_START_ERROR)
+        }
         if (ex.code !== 0 || !existsSync(wav)) {
           d.log?.error(`transcrição: ffmpeg (extração) saiu com código ${ex.code}\n${ex.tail}`)
           throw new Error(`Não foi possível ler o áudio de “${input.name}”.`)
@@ -223,7 +244,14 @@ export class TranscribeService {
           doneUs += durUs
           continue
         }
-        const sd = await this.runChild(d.ffmpegPath(), silenceArgs(wav), 'ffmpeg', signal, { keep: /silence_(start|end)/ })
+        let sd: ChildResult
+        try {
+          sd = await this.runChild(d.ffmpegPath(), silenceArgs(wav), 'ffmpeg', signal, { keep: /silence_(start|end)/ })
+        } catch (e) {
+          if (e instanceof TranscribeCancelledError) throw e
+          d.log?.error('transcrição: ffmpeg (silencedetect) não iniciou', e)
+          throw new Error(FFMPEG_START_ERROR)
+        }
         if (sd.code !== 0) {
           d.log?.error(`transcrição: ffmpeg (silencedetect) saiu com código ${sd.code}\n${sd.tail}`)
           throw new Error(`Não foi possível analisar o áudio de “${input.name}”.`)
