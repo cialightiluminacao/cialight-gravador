@@ -174,7 +174,7 @@ whisper.cpp v1.9.4 e ggml (https://github.com/ggml-org/whisper.cpp) — Copyrigh
   Os binários CPU do release (whisper-cli.exe, whisper.dll, ggml*.dll) vão em resources/whisper e rodam como
   processo separado para gerar as legendas automáticas, tudo neste computador.
 
-Modelos de pesos do OpenAI Whisper (versões ggml de https://huggingface.co/ggerganov/whisper.cpp) — Copyright (c) OpenAI
+Modelos de pesos do OpenAI Whisper (versões ggml de https://huggingface.co/ggerganov/whisper.cpp) — Copyright (c) 2022 OpenAI
   Licença: MIT (https://github.com/openai/whisper). Não vão no instalador: são baixados sob demanda, só quando o
   usuário pede "Gerar legendas" (Base ≈ 148 MB, Preciso ≈ 488 MB), e conferidos por sha256.
 

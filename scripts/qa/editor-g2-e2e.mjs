@@ -145,12 +145,12 @@ function frameRgb(file, n) {
   return execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-i', file, '-vf', `select=eq(n\\,${n})`, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 64 << 20 })
 }
 /** Pixels da região (frações do quadro) que diferem do fundo liso por mais de `tol` (soma dos canais). */
-function diffFromBg(buf, w, h, r, tol = 90) {
+function diffFromBg(buf, w, h, r, tol = 90, bg = BG) {
   let n = 0
   for (let y = Math.floor(r.y0 * h); y < Math.floor(r.y1 * h); y++)
     for (let x = Math.floor(r.x0 * w); x < Math.floor(r.x1 * w); x++) {
       const i = (y * w + x) * 3
-      if (Math.abs(buf[i] - BG[0]) + Math.abs(buf[i + 1] - BG[1]) + Math.abs(buf[i + 2] - BG[2]) > tol) n++
+      if (Math.abs(buf[i] - bg[0]) + Math.abs(buf[i + 1] - bg[1]) + Math.abs(buf[i + 2] - bg[2]) > tol) n++
     }
   return n
 }
@@ -333,7 +333,10 @@ async function main(truth, durS) {
   const opt = await ev(`const d = T.dialog(); const srt = d.querySelector('[data-caption-srt]'); if (!srt.checked) await T.click(srt)
     return { burn: d.querySelector('[data-caption-burn]')?.checked, srt: d.querySelector('[data-caption-srt]')?.checked }`)
   check('diálogo: "Queimar no vídeo" e "Salvar arquivo .srt ao lado" marcados', opt.burn === true && opt.srt === true, opt)
+  // o caminho da pasta aparece no diálogo: o texto fica invisível só na captura (a imagem não mostra caminhos da máquina)
+  await ev(`const hid = []; for (const e of document.querySelectorAll('[role="dialog"] *')) if (e.children.length === 0 && /test-out/.test(e.textContent)) { e.style.visibility = 'hidden'; hid.push(e) } window.__ge.hid = hid; return hid.length`)
   await shot('g2-e2e-03-exportar.png')
+  await ev(`for (const e of T.hid ?? []) e.style.visibility = ''; return 1`)
   await ev(`await T.click(T.button('Exportar', T.dialog())); return 1`)
   let text = ''
   const te = Date.now()
@@ -399,16 +402,21 @@ async function main(truth, durS) {
   console.log(`  pixels da legenda (≠ fundo) no meio de 3 cues: ${JSON.stringify(inCue)}`)
   const minPx = Math.floor(pr.width * pr.height * 0.01)
   check(`(c) no meio de 3 cues a região da legenda difere do fundo (> ${minPx} px)`, inCue.every((x) => x.px > minPx), inCue)
-  // pausas sem cue: antes da 1ª, entre cues, depois da última (a maior)
+  // pausas sem cue (o fundo é o do próprio quadro: azul da tela, ou o preto do projeto onde não há mídia): uma no MEIO da fala (entre duas cues) e, de reforço, a maior do começo/fim
+  const rate = pr.fps.split('/').reduce((a, b) => a / b)
+  const noCuePx = (g) => { const n = Math.round((((g[0] + g[1]) / 2) * rate) / S); return { n, px: (() => { const f = frameRgb(outFile, n); const k = (Math.floor(pr.height / 2) * pr.width + 8) * 3; return diffFromBg(f, pr.width, pr.height, REGION, 90, [f[k], f[k + 1], f[k + 2]]) })() } }
   const total = pr.duration * S
-  const gaps = [[0, srt.cues[0].s], ...srt.cues.slice(1).map((c, i) => [srt.cues[i].e, c.s]), [srt.cues.at(-1).e, total - frameUs]].filter(([a, b]) => b - a >= 3 * frameUs).sort((x, y) => y[1] - y[0] - (x[1] - x[0]))
-  check('há uma pausa sem cue de ≥ 3 quadros para conferir', gaps.length >= 1, { first: srt.cues[0], last: srt.cues.at(-1), total })
-  if (gaps.length) {
-    const g = gaps[0]
-    const n = Math.round((((g[0] + g[1]) / 2) * pr.fps.split('/').reduce((a, b) => a / b)) / S)
-    const px = diffFromBg(frameRgb(outFile, n), pr.width, pr.height, REGION)
-    console.log(`  pausa sem cue [${(g[0] / S).toFixed(2)}; ${(g[1] / S).toFixed(2)}) s, quadro ${n}: ${px} px ≠ fundo`)
-    check('(c) numa pausa sem cue a região da legenda é o fundo liso (< 20 px)', px < 20, { gap: g, n, px })
+  const interior = srt.cues.slice(1).map((c, i) => [srt.cues[i].e, c.s]).filter(([a, b]) => b - a >= 3 * frameUs).sort((x, y) => y[1] - y[0] - (x[1] - x[0]))
+  check('há uma pausa sem cue de ≥ 3 quadros no meio da fala (entre duas cues)', interior.length >= 1, { cues: srt.cues.map((c) => [c.s / S, c.e / S]) })
+  if (interior.length) {
+    const r = noCuePx(interior[0])
+    console.log(`  pausa no meio da fala [${(interior[0][0] / S).toFixed(2)}; ${(interior[0][1] / S).toFixed(2)}) s, quadro ${r.n}: ${r.px} px ≠ fundo`)
+    check('(c) numa pausa sem cue no meio da fala a região da legenda é uniforme como o fundo do quadro (< 20 px)', r.px < 20, { gap: interior[0], ...r })
+  }
+  const edge = [[0, srt.cues[0].s], [srt.cues.at(-1).e, total - frameUs]].filter(([a, b]) => b - a >= 3 * frameUs)
+  for (const g of edge) {
+    const r = noCuePx(g)
+    check(`(c) sem cue em [${(g[0] / S).toFixed(2)}; ${(g[1] / S).toFixed(2)}) s (começo/fim) também é uniforme como o fundo`, r.px < 20, { gap: g, ...r })
   }
 }
 
