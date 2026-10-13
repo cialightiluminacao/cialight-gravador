@@ -6,7 +6,7 @@ import { buildRecordingConfig, useAppStore } from '@/app/store'
 import { startRecording } from '@/app/recordingController'
 import { refreshSources, useSources } from '@/hooks/useSources'
 import { useCameraPreview, useMicPreview } from '@/hooks/useMediaPreview'
-import { usePageVisible } from '@/hooks/usePageVisible'
+import { useWindowActive } from '@/hooks/usePageVisible'
 import { useVu } from '@/hooks/useVu'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent } from '@/components/ui/primitives'
@@ -98,9 +98,10 @@ export function PrepareScreen(): React.JSX.Element {
   const hotkeyStatus = useAppStore((s) => s.hotkeyStatus)
   const patch = usePatchSettings()
 
-  // lista de fontes só enquanto a janela está visível (minimizada/oculta: pausa)
-  const pageVisible = usePageVisible()
-  useSources(pageVisible)
+  // lista de fontes só com a janela visível e em foco (fora de foco/minimizada: pausa;
+  // ao voltar o foco atualiza na hora)
+  const windowActive = useWindowActive()
+  useSources(windowActive)
 
   // restaura a última fonte usada quando settings chegam depois da primeira listagem
   const restoredRef = useRef(false)

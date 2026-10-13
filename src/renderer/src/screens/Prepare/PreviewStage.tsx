@@ -4,7 +4,7 @@ import type { CaptureSource, DisplayInfo, Fps, PipKeyframe, Quality } from '@sha
 import { QUALITY_PRESETS } from '@shared/defaults'
 import { targetDimensions } from '@/engine/encoderSupport'
 import { cn } from '@/lib/cn'
-import { usePageVisible } from '@/hooks/usePageVisible'
+import { useWindowActive } from '@/hooks/usePageVisible'
 import { Tip } from '@/components/ui/primitives'
 import { PipOverlay, pipWithShape } from './PipOverlay'
 
@@ -140,8 +140,8 @@ function StageToolbar({ pip, stageW, stageH, onPipChange, mirrored, onToggleMirr
 }
 
 export function PreviewStage({ source, display, quality, fps, cameraOn, camStream, pip, onPipChange, mirrored, onToggleMirror, active }: PreviewStageProps): React.JSX.Element {
-  const pageVisible = usePageVisible()
-  const liveThumb = useLiveThumbnail(source, active && pageVisible)
+  const windowActive = useWindowActive()
+  const liveThumb = useLiveThumbnail(source, active && windowActive)
   const imgSrc = liveThumb ?? source?.thumbnailDataUrl ?? null
 
   // proporção do palco
