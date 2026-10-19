@@ -63,8 +63,8 @@ export function Transport({ playback, fullscreen, onToggleFullscreen }: { playba
   const empty = totalUs === 0
 
   return (
-    <div className="grid h-12 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-3 border-t border-border bg-surface/50 px-3">
-      <div className="font-mono tnum flex min-w-0 items-baseline gap-1.5 text-[13px]">
+    <div className="flex min-h-12 shrink-0 flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-border bg-surface/50 px-2 py-1.5">
+      <div className="font-mono tnum flex min-w-0 flex-1 basis-[140px] items-baseline gap-1.5 text-[13px]">
         <span className="text-fg" aria-label="Tempo atual">
           {formatTimecodeUs(playheadUs, fps)}
         </span>
@@ -79,7 +79,7 @@ export function Transport({ playback, fullscreen, onToggleFullscreen }: { playba
           </span>
         ) : null}
       </div>
-      <div className="flex items-center gap-0.5">
+      <div className="flex shrink-0 items-center gap-0.5">
         <IconBtn label="Ir para o início" shortcut="Home" onClick={() => seekTo(playback, 0)} disabled={empty}>
           <ChevronFirst className="h-4 w-4" />
         </IconBtn>
@@ -96,7 +96,7 @@ export function Transport({ playback, fullscreen, onToggleFullscreen }: { playba
           <ChevronLast className="h-4 w-4" />
         </IconBtn>
       </div>
-      <div className="flex items-center justify-end gap-1">
+      <div className="flex min-w-0 flex-1 basis-[220px] items-center justify-end gap-1">
         <Tip content="Nível da mixagem (L/R, pico)">
           <span className="mr-1 flex items-center">
             <LevelMeter

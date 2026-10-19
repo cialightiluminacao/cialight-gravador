@@ -122,21 +122,21 @@ export function UpdateTab(): React.JSX.Element {
   return (
     <div className="flex flex-col gap-4">
       <Section title="Sobre" className="rise-in">
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-4">
           <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-accent/15 ring-1 ring-accent/30">
             <span className="h-4 w-4 rounded-full bg-accent shadow-[0_0_18px_rgba(255,77,79,0.6)]" />
           </div>
-          <div className="shrink-0">
-            <div className="flex items-baseline gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <span className="whitespace-nowrap text-base font-bold tracking-tight">CiaLight Gravador</span>
               <span className="font-mono tnum text-sm text-fg-2">v{appInfo?.version ?? '—'}</span>
               {appInfo && !appInfo.isPackaged ? <Badge tone="info">desenvolvimento</Badge> : null}
             </div>
-            <p className="mt-0.5 whitespace-nowrap text-xs text-muted">
+            <p className="mt-0.5 text-xs text-muted">
               Electron <span className="font-mono">{appInfo?.electron ?? '—'}</span> · Chromium <span className="font-mono">{appInfo?.chrome ?? '—'}</span> · Windows x64
             </p>
           </div>
-          <div className="ml-auto flex shrink-0 items-center gap-1">
+          <div className="ml-auto flex max-w-full flex-wrap items-center gap-1">
             <Button size="sm" variant="secondary" onClick={() => external(REPO_URL)}>
               <GitBranch className="h-3.5 w-3.5" /> Repositório
             </Button>

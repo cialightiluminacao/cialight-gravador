@@ -183,6 +183,10 @@ Bibliotecas de runtime do Microsoft Visual C++ (MSVCP140.dll, VCRUNTIME140.dll, 
   sem instalar nada, conforme os termos de redistribuição do Microsoft Visual Studio (arquivos redistribuíveis).
 
 --------------------------------------------------------------------------------
+@modelcontextprotocol/sdk (MIT, https://github.com/modelcontextprotocol/typescript-sdk)
+  Copyright (c) 2024 Anthropic, PBC. Incluído no conector MCP local empacotado em resources/agents/mcp.cjs.
+  Licenças completas do SDK e das dependências incluídas no conector: resources/agents/THIRD_PARTY_NOTICES.txt.
+
 opencut-classic (https://github.com/OpenCut-app/OpenCut, MIT) foi consultado como referência de
 arquitetura para o editor; nenhum código dele foi copiado ou adaptado.
 

@@ -18,13 +18,17 @@ export function createTexture(gl: WebGL2RenderingContext): WebGLTexture {
 
 /**
  * Sobe VideoFrame/ImageBitmap/canvas como textura RGBA8: linha 0 da imagem em t = 0 (sem flip), alpha não
- * pré-multiplicado. `sub`: a textura já tem as dimensões da fonte (envio anterior igual) — texSubImage2D, sem realocar.
+ * pré-multiplicado. `sub`: a textura já tem as dimensões da fonte (envio anterior igual).
  */
 export function uploadTexture(gl: WebGL2RenderingContext, tex: WebGLTexture, source: TexImageSource, sub = false): void {
   gl.bindTexture(gl.TEXTURE_2D, tex)
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
-  if (sub) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source)
+  // NV12 do decoder: texImage2D permite o caminho rápido de importação no ANGLE/D3D11.
+  // I420 continua em texSubImage2D: trocar esse caminho altera a cor/última linha
+  // em frames com visibleRect recortado (coberto pelo harness de paridade YUV).
+  const importNv12 = typeof VideoFrame !== 'undefined' && source instanceof VideoFrame && source.format === 'NV12'
+  if (sub && !importNv12) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source)
   else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source)
 }
 

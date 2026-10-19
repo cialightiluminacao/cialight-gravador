@@ -11,6 +11,7 @@ import { defaultReframeAspect } from './ReframeDialog'
 import { exportCurrentFrame } from './frameExport'
 import { copyProjectChapters } from './chaptersActions'
 import { ExportQueueButton } from './ExportQueuePanel'
+import { AgentButton } from '../agents/AgentPanel'
 
 // Barra superior do editor: voltar (salva antes), nome editável, desfazer/refazer, estado do
 // autosave, proporção do quadro (só o quadro), "Reenquadrar" (proporção nova com o conteúdo reposicionado),
@@ -62,7 +63,7 @@ function ProjectName({ project }: { project: Project }): React.JSX.Element {
     <input
       aria-label="Nome do projeto"
       title="Clique para renomear"
-      className="h-8 w-[clamp(140px,22vw,320px)] min-w-0 truncate rounded-lg border border-transparent bg-transparent px-2 text-[13px] font-semibold text-fg outline-none hover:border-border focus:border-accent/50 focus:bg-bg-2"
+      className="h-8 w-[clamp(120px,18vw,260px)] min-w-[100px] truncate rounded-lg border border-transparent bg-transparent px-2 text-[13px] font-semibold text-fg outline-none hover:border-border focus:border-accent/50 focus:bg-bg-2"
       value={draft ?? project.name}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
@@ -122,25 +123,26 @@ export function TopBar({ onBack, onExport }: { onBack: () => void; onExport: () 
         </HistoryButton>
         <div className="mx-1.5 h-5 w-px bg-border-strong" />
         <Tip content="Proporção do quadro do projeto" side="bottom">
-          <span className="block w-[200px]">
+          <span className="block w-[160px] min-[1360px]:w-[200px]">
             <Select triggerClassName="h-8 rounded-lg px-2.5 text-xs" value={aspect} options={options} onValueChange={setAspect} />
           </span>
         </Tip>
         <Tip content="Reenquadrar para vertical, quadrado ou 4:5 seguindo o ponto de interesse" side="bottom">
-          <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" data-reframe-open="" aria-pressed={reframing} onClick={() => (reframing ? useReframe.getState().close() : useReframe.getState().openPanel(defaultReframeAspect(project)))}>
-            <Crop className="h-3.5 w-3.5" /> Reenquadrar
+          <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" data-reframe-open="" aria-label="Reenquadrar" aria-pressed={reframing} onClick={() => (reframing ? useReframe.getState().close() : useReframe.getState().openPanel(defaultReframeAspect(project)))}>
+            <Crop className="h-3.5 w-3.5" /><span className="hidden min-[1180px]:inline">Reenquadrar</span>
           </Button>
         </Tip>
         <Tip content="Exportar o quadro do cursor como PNG (tamanho do projeto)" shortcut={SHORTCUT_LABELS.exportFrame} side="bottom">
           <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" aria-label="Exportar quadro (PNG)" data-export-frame="" onClick={() => void exportCurrentFrame()}>
-            <ImageDown className="h-3.5 w-3.5" /> Quadro
+            <ImageDown className="h-3.5 w-3.5" /><span className="hidden min-[1180px]:inline">Quadro</span>
           </Button>
         </Tip>
         <Tip content="Copiar capítulos do YouTube (dos marcadores; usa I–O se marcado)" side="bottom">
           <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2.5" aria-label="Copiar capítulos" data-copy-chapters="" onClick={() => void copyProjectChapters()}>
-            <ListOrdered className="h-3.5 w-3.5" /> Capítulos
+            <ListOrdered className="h-3.5 w-3.5" /><span className="hidden min-[1280px]:inline">Capítulos</span>
           </Button>
         </Tip>
+        <AgentButton />
         <ExportQueueButton />
         <Tip content="Exportar vídeo, GIF ou áudio" shortcut={SHORTCUT_LABELS.export} side="bottom">
           <Button variant="primary" size="sm" className="ml-1.5 h-8 px-3.5" onClick={onExport}>

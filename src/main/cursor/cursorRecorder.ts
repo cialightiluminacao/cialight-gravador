@@ -9,8 +9,8 @@ import { CURSOR_FILE, normalizeContain, normalizeToFrame, type CursorButton, typ
 // quando o engine de gravação começa/pausa/retoma) e normaliza ao quadro gravado do instante. Fontes de ponto,
 // quadro, cliques, relógio e timer são injetadas (teste unitário e fonte sintética do test:capture).
 
-/** Intervalo pedido ao timer: o quantum padrão do Windows é 15,6 ms, então 15 → ~64 Hz e 16 → ~32 Hz (medido). */
-export const CURSOR_TICK_MS = 15
+/** Headroom for Windows timer jitter while recording; the integration gate checks ≥50 Hz and <1% CPU. */
+export const CURSOR_TICK_MS = 12
 
 export interface CursorRecorderDeps {
   /** Relógio de parede monotônico (ms). */

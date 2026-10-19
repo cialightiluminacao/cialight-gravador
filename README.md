@@ -142,6 +142,18 @@ Screenshots em `docs/qa/editor-f1/`, `docs/qa/editor-f2/`, `docs/qa/editor-f3/`,
 
 **Legendas automáticas:** na aba **Legendas**, **Gerar legendas…** transcreve a fala do projeto e preenche a faixa de legendas (até 2 linhas, 0,7 a 6 s cada; as pausas abrem uma legenda nova), com os tempos certos mesmo depois de cortes, silêncios removidos e velocidades. É tudo **offline**: o áudio não sai do computador. No primeiro uso o app baixa o modelo, só depois que você confirma: **Base** (148 MB, rápido, padrão) ou **Preciso** (488 MB, mais lento e mais exato); ele fica em `%APPDATA%\cialight-gravador\models\whisper`. Um `Ctrl+Z` desfaz a geração inteira. Veja também a visão **Transcrição** (busca, clique para ir ao trecho e copiar o texto). Detalhes na seção 26 da [especificação](docs/superpowers/specs/2026-10-01-editor-design.md).
 
+## Edição com agentes de IA (v1.11.0)
+
+No editor, o botão **IA** abre a conexão local com Codex, Claude Code e outros clientes MCP. Também disponível em **Configurações → Avançado → Agentes de IA**. Ative a conexão, copie o comando do Codex ou a configuração MCP e cadastre no cliente escolhido. O aplicativo precisa estar aberto. O conector já vem no instalador e não exige instalar Node.js separadamente.
+
+Os agentes podem listar/criar/abrir projetos, importar arquivos, montar e cortar clipes, tratar voz, editar textos e legendas, aplicar efeitos, transições, keyframes e zoom, consultar transcrições, ver imagens reais da prévia e exportar pelo mesmo compositor do editor. Cada lote de edição vira um passo de desfazer, com validação e controle de revisão para não sobrescrever edições manuais.
+
+O botão **Preparar vídeo** remove pausas longas mantendo as faixas sincronizadas, normaliza a voz e gera legendas em português com Whisper local. O modelo precisa estar instalado (ou o download autorizado na própria tela). A conexão MCP não exige uma chave de API do CiaLight: o agente externo fornece a inteligência e pode receber os textos e imagens retornados pelas ferramentas, conforme o serviço escolhido.
+
+Exemplo de pedido ao agente: “Examine o projeto aberto, remova pausas longas, normalize a voz, coloque legendas em português, confira a prévia e exporte para YouTube 1080p. Acompanhe até concluir e informe o caminho do vídeo.”
+
+A biblioteca agora oferece busca sem diferenciar acentos, ordenação por nome/duração/tamanho/tipo e modos de grade/lista. Detalhes da integração e dos testes em [docs/agents.md](docs/agents.md).
+
 ## Estrutura
 
 ```

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { toast } from 'sonner'
 import { AlertTriangle, AudioLines, Film, Image as ImageIcon, Pause, Play, Plus, SearchX } from 'lucide-react'
 import type { Asset, Us } from '@shared/editor/project'
@@ -5,7 +6,7 @@ import type { IngestStep } from '@shared/ipc'
 import { Tip } from '@/components/ui/primitives'
 import { cn } from '@/lib/cn'
 import type { IngestProgress } from '../state/editorStore'
-import { mediaUrl, projectFileUrl } from './mediaImport'
+import { mediaUrl, projectFileUrl, retryAsset } from './mediaImport'
 import { toggleAudioPreview, useAudioPreview } from './audioPreview'
 
 // Cartão de mídia da biblioteca: miniatura (1º quadro do filmstrip), duração e estado da ingestão.
@@ -66,11 +67,16 @@ function PreviewButton({ projectId, asset }: { projectId: string; asset: Asset }
   )
 }
 
-export function MediaCard({ projectId, asset, progress, onAdd, onRelink }: { projectId: string; asset: Asset; progress?: IngestProgress; onAdd: () => void; onRelink: () => void }): React.JSX.Element {
+export function MediaCard({ projectId, asset, progress, onAdd, onRelink, compact = false }: { projectId: string; asset: Asset; progress?: IngestProgress; onAdd: () => void; onRelink: () => void; compact?: boolean }): React.JSX.Element {
+  const [retrying, setRetrying] = useState(false)
+  const retry = async (): Promise<void> => {
+    setRetrying(true)
+    try { await retryAsset(projectId, asset.id) } catch (e) { toast.error('Não foi possível tentar novamente', { description: e instanceof Error ? e.message : String(e) }) } finally { setRetrying(false) }
+  }
   const unusable = asset.status === 'error'
   return (
     <div
-      className={cn('group relative flex min-w-0 flex-col gap-1 rounded-lg p-1 outline-none hover:bg-white/4 focus-visible:ring-2 focus-visible:ring-[var(--ring)]', unusable ? 'cursor-default' : 'cursor-grab active:cursor-grabbing')}
+      className={cn('group relative flex min-w-0 gap-1 rounded-lg p-1 outline-none hover:bg-white/4 focus-visible:ring-2 focus-visible:ring-[var(--ring)]', compact ? 'flex-row items-center gap-2' : 'flex-col', unusable ? 'cursor-default' : 'cursor-grab active:cursor-grabbing')}
       draggable={!unusable}
       tabIndex={0}
       role="button"
@@ -85,7 +91,7 @@ export function MediaCard({ projectId, asset, progress, onAdd, onRelink }: { pro
       }}
       title={asset.error ?? asset.name}
     >
-      <div className={cn('relative flex aspect-video items-center justify-center overflow-hidden rounded-md border border-border', asset.kind === 'audio' ? 'bg-gradient-to-br from-info/10 to-bg-2' : 'bg-bg-2')}>
+      <div className={cn('relative flex aspect-video items-center justify-center overflow-hidden rounded-md border border-border', compact && 'w-20 shrink-0', asset.kind === 'audio' ? 'bg-gradient-to-br from-info/10 to-bg-2' : 'bg-bg-2')}>
         <Thumb projectId={projectId} asset={asset} />
         {asset.kind === 'audio' && asset.status === 'ready' ? <PreviewButton projectId={projectId} asset={asset} /> : null}
         {asset.durationUs !== null ? <span className="font-mono tnum absolute bottom-1 right-1 rounded bg-black/65 px-1 text-[9.5px] leading-4 text-white">{shortDuration(asset.durationUs)}</span> : null}
@@ -115,7 +121,8 @@ export function MediaCard({ projectId, asset, progress, onAdd, onRelink }: { pro
             <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-danger">
               <AlertTriangle className="h-3 w-3" /> Erro
             </span>
-            <span className="line-clamp-2 w-full text-[9.5px] leading-3 text-white/70 [overflow-wrap:anywhere]">{asset.error ?? 'Não foi possível processar'}</span>
+            <span className={cn('line-clamp-2 w-full text-[9.5px] leading-3 text-white/70 [overflow-wrap:anywhere]', compact && 'hidden')}>{asset.error ?? 'Não foi possível processar'}</span>
+            <button type="button" disabled={retrying} aria-label={`Tentar novamente ${asset.name}`} className="mt-1 rounded border border-border-strong bg-surface-3 px-2 py-0.5 text-[10px] font-semibold text-fg disabled:opacity-50" onClick={e => { e.stopPropagation(); void retry() }}>{retrying ? 'Tentando…' : compact ? 'Tentar' : 'Tentar novamente'}</button>
           </div>
         ) : null}
         {!unusable ? (
@@ -134,7 +141,7 @@ export function MediaCard({ projectId, asset, progress, onAdd, onRelink }: { pro
           </Tip>
         ) : null}
       </div>
-      <span className="truncate px-0.5 text-[11px] leading-4 text-fg-2">{asset.name}</span>
+      <span className={cn('min-w-0 truncate px-0.5 text-[11px] leading-4 text-fg-2', compact && 'flex-1')} title={asset.name}>{asset.name}{compact && <span className="mt-1 block text-[10px] text-muted">{asset.kind === 'audio' ? 'Áudio' : asset.kind === 'video' ? 'Vídeo' : 'Imagem'} · {shortDuration(asset.durationUs)}</span>}</span>
     </div>
   )
 }

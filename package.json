@@ -6,11 +6,11 @@
   "license": "MIT",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "node scripts/fetch-whisper.mjs && electron-vite dev",
-    "build": "electron-vite build",
+    "dev": "node scripts/fetch-ffmpeg.mjs && node scripts/fetch-whisper.mjs && node scripts/build-agents.mjs && electron-vite dev",
+    "build": "node scripts/build-agents.mjs && electron-vite build",
     "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
     "typecheck:web": "tsc -p tsconfig.web.json --noEmit",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:agents",
     "test": "vitest run",
     "test:watch": "vitest",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
@@ -19,7 +19,7 @@
     "vendor:signalsmith": "node scripts/vendor-signalsmith.mjs",
     "spike": "cross-env CIALIGHT_SPIKE=1 electron-vite dev",
     "spike:editor": "cross-env CIALIGHT_SPIKE=editor electron-vite dev",
-    "dist:win": "node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && electron-vite build && electron-builder --win",
+    "dist:win": "node scripts/fetch-ffmpeg.mjs && node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && node scripts/build-agents.mjs && electron-vite build && electron-builder --win",
     "postversion": "git push --follow-tags",
     "test:ffmpeg": "electron-vite build && cross-env CIALIGHT_TEST=ffmpeg CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:capture": "electron-vite build && cross-env CIALIGHT_TEST=capture CIALIGHT_RAW_DIR=test-out/raw electron .",
@@ -32,7 +32,13 @@
     "test:models": "node scripts/fetch-models.mjs && electron-vite build && cross-env CIALIGHT_TEST=models CIALIGHT_RAW_DIR=test-out/raw electron .",
     "test:sensitive": "vitest run --config vitest.ocr.config.ts",
     "icons": "node scripts/make-icons.mjs",
-    "release:publish": "node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && electron-vite build && electron-builder --win --publish always"
+    "release:publish": "node scripts/fetch-ffmpeg.mjs && node scripts/fetch-models.mjs && node scripts/fetch-whisper.mjs && node scripts/build-agents.mjs && electron-vite build && electron-builder --win --publish always",
+    "build:agents": "node scripts/build-agents.mjs",
+    "test:agents": "npm run build && node scripts/qa/editor-agents.mjs",
+    "typecheck:agents": "tsc -p tsconfig.agents.json",
+    "audit:catalog": "node scripts/qa/audit-catalog.mjs",
+    "audit:suite": "node scripts/qa/audit-suite.mjs",
+    "audit:ui": "node scripts/qa/audit-ui.mjs"
   },
   "dependencies": {
     "electron-log": "^5.4.4",
@@ -42,6 +48,7 @@
   "devDependencies": {
     "@fontsource-variable/azeret-mono": "^5.3.0",
     "@fontsource-variable/manrope": "^5.3.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@radix-ui/react-dialog": "^1.1.6",
     "@radix-ui/react-dropdown-menu": "^2.1.24",
     "@radix-ui/react-popover": "^1.1.23",
@@ -59,6 +66,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.2.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "adm-zip": "^0.6.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -66,6 +74,7 @@
     "electron": "43.4.0",
     "electron-builder": "26.15.7",
     "electron-vite": "^5.0.0",
+    "esbuild": "0.25.12",
     "immer": "^11.1.18",
     "lucide-react": "^1.32.0",
     "mediabunny": "^1.61.0",
@@ -155,6 +164,14 @@
         "filter": [
           "*.png"
         ]
+      },
+      {
+        "filter": [
+          "mcp.cjs",
+          "THIRD_PARTY_NOTICES.txt"
+        ],
+        "to": "agents",
+        "from": "resources/agents"
       }
     ],
     "win": {

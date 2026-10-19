@@ -41,6 +41,8 @@ export function DevicesTab(): React.JSX.Element {
       await refreshDevices()
       const st = useAppStore.getState().devices
       toast.success(`${st.cameras.length} câmera(s) e ${st.mics.length} microfone(s) encontrados`)
+    } catch {
+      toast.error('Não foi possível consultar câmeras e microfones. Verifique a conexão e tente novamente.')
     } finally {
       setRefreshing(false)
     }

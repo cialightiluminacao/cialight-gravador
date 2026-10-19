@@ -17,6 +17,7 @@ import { EditorScreen } from '@/editor/ui/EditorScreen'
 import { ProjectsHome } from '@/editor/ui/ProjectsHome'
 import { QueueLeaveDialog } from '@/editor/ui/ExportQueuePanel'
 import { hydrateExportQueue } from '@/editor/export/exportQueueStore'
+import { installAgentBridge } from '@/editor/agents/bridge'
 
 // Shell do gravador: título, banner de atualização, tela atual, toasts.
 // A tela é escolhida pelo estado (`screen`) — sem router.
@@ -68,6 +69,7 @@ function useBoot(): void {
       st.getState().setUpdateStatus(upd)
     })()
     const offs = [
+      installAgentBridge(),
       window.api.settings.onChange((s) => st.getState().setSettings(s)),
       window.api.hotkeys.onStatus((h) => st.getState().setHotkeyStatus(h)),
       window.api.update.onStatus((u) => {

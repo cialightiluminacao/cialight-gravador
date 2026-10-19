@@ -85,7 +85,7 @@ export function Slider({ className, ...props }: SliderPrimitive.SliderProps): Re
         <SliderPrimitive.Range className="absolute h-full bg-accent" />
       </SliderPrimitive.Track>
       {(props.value ?? props.defaultValue ?? [0]).map((_, i) => (
-        <SliderPrimitive.Thumb key={i} className="block h-4 w-4 rounded-full border-2 border-accent bg-fg shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]" />
+        <SliderPrimitive.Thumb key={i} aria-label={props['aria-label']} aria-labelledby={props['aria-labelledby']} className="block h-4 w-4 rounded-full border-2 border-accent bg-fg shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]" />
       ))}
     </SliderPrimitive.Root>
   )

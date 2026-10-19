@@ -33,12 +33,14 @@ function pickType(candidates: string[]): { mime: string; ext: string } {
 export class FallbackRecorder {
   private tracks: TrackRec[] = []
   private totalBytes = 0
+  private failure: Error | null = null
 
   constructor(
     private api: IpcApi,
     private sessionId: string,
     private streams: { screen: MediaStream; cam: MediaStream | null; mic: MediaStream | null; sys: MediaStreamTrack | null },
-    private onBytes: (bytes: number) => void
+    private onBytes: (bytes: number) => void,
+    private onError: (error: Error) => void = () => {}
   ) {}
 
   async start(): Promise<FallbackFiles> {
@@ -47,28 +49,44 @@ export class FallbackRecorder {
       const { mime, ext } = pickType(isVideo ? VIDEO_TYPES : AUDIO_TYPES)
       const file = `rec-fallback-${name}.${ext}`
       const handle = await this.api.session.writeOpen(this.sessionId, file)
-      const recorder = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: isVideo ? bps : undefined, audioBitsPerSecond: isVideo ? undefined : bps })
+      let recorder: MediaRecorder
+      try {
+        recorder = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: isVideo ? bps : undefined, audioBitsPerSecond: isVideo ? undefined : bps })
+      } catch (error) {
+        await this.api.session.writeClose(handle).catch(() => {})
+        throw error
+      }
       const rec: TrackRec = { name, recorder, handle, position: 0, file, queue: Promise.resolve() }
       recorder.ondataavailable = (ev) => {
         if (!ev.data || ev.data.size === 0) return
         const blob = ev.data
         rec.queue = rec.queue.then(async () => {
+          if (this.failure) return
           const buf = new Uint8Array(await blob.arrayBuffer())
           await this.api.session.write(rec.handle, buf, rec.position)
           rec.position += buf.byteLength
           this.totalBytes += buf.byteLength
           this.onBytes(this.totalBytes)
+        }).catch((error: unknown) => {
+          if (this.failure) return
+          this.failure = error instanceof Error ? error : new Error(String(error))
+          this.onError(this.failure)
         })
       }
       this.tracks.push(rec)
       files[name] = file
     }
-    await add('screen', new MediaStream(this.streams.screen.getVideoTracks()), true, 12e6)
-    if (this.streams.cam) await add('webcam', new MediaStream(this.streams.cam.getVideoTracks()), true, 5e6)
-    if (this.streams.mic) await add('mic', new MediaStream(this.streams.mic.getAudioTracks()), false, 160e3)
-    if (this.streams.sys) await add('system', new MediaStream([this.streams.sys]), false, 160e3)
-    for (const t of this.tracks) t.recorder.start(1000)
-    return files
+    try {
+      await add('screen', new MediaStream(this.streams.screen.getVideoTracks()), true, 12e6)
+      if (this.streams.cam) await add('webcam', new MediaStream(this.streams.cam.getVideoTracks()), true, 5e6)
+      if (this.streams.mic) await add('mic', new MediaStream(this.streams.mic.getAudioTracks()), false, 160e3)
+      if (this.streams.sys) await add('system', new MediaStream([this.streams.sys]), false, 160e3)
+      for (const t of this.tracks) t.recorder.start(1000)
+      return files
+    } catch (error) {
+      await this.stop().catch(() => {})
+      throw error
+    }
   }
 
   pause(): void {
@@ -80,7 +98,7 @@ export class FallbackRecorder {
   }
 
   async stop(): Promise<void> {
-    await Promise.all(
+    const stopped = await Promise.allSettled(
       this.tracks.map(
         (t) =>
           new Promise<void>((resolve) => {
@@ -94,9 +112,12 @@ export class FallbackRecorder {
       )
     )
     for (const t of this.tracks) {
-      await t.queue
-      await this.api.session.writeClose(t.handle).catch(() => {})
+      try { await t.queue }
+      finally { await this.api.session.writeClose(t.handle).catch(() => {}) }
     }
     this.tracks = []
+    if (this.failure) throw this.failure
+    const failed = stopped.find(r => r.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
   }
 }

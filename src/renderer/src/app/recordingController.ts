@@ -144,7 +144,7 @@ export async function startRecording(config: RecordingConfig): Promise<void> {
         toast.warning(e.message)
       } else if (e.type === 'error') {
         toast.error(e.message)
-        if (e.fatal) void finishAfterStop()
+        if (e.fatal) void stopRecording()
       } else if (e.type === 'bytes') {
         st.setLive({ bytes: e.bytes, elapsedMs: e.elapsedMs })
       }

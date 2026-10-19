@@ -23,6 +23,7 @@ import type { PersistedQueueItem } from './exportQueueFile'
 import type { SensitiveKind } from './editor/sensitive'
 import type { ScanError, ScanProgress, ScanResult } from './editor/sensitiveScan'
 import type { SourceWord, TranscribeJob } from './editor/transcribePlan'
+import type { AgentConnectionStatus, AgentRequest, AgentReply } from './agentProtocol'
 
 export type Unsubscribe = () => void
 
@@ -218,6 +219,12 @@ export interface CursorBeginInfo {
 }
 
 export interface IpcApi {
+  agents: {
+    status(): Promise<AgentConnectionStatus>
+    enable(value: boolean): Promise<AgentConnectionStatus>
+    onRequest(cb: (request: AgentRequest) => void): Unsubscribe
+    reply(reply: AgentReply): void
+  }
   app: {
     info(): Promise<AppInfo>
     openExternal(url: string): Promise<void>

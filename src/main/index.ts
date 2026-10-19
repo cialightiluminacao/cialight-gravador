@@ -6,7 +6,7 @@ import { runEditorSpike } from './spike/editorSpikeMain'
 import { createRecorderWindow, editorNeedsFlush, flushEditor, getRecorderWindow, setQuitting, showRecorder } from './windows/recorderWindow'
 import { installDisplayMediaHandler } from './capture/displayMediaHandler'
 import { listDisplays } from './capture/sources'
-import { dirname, join } from 'path'
+import { dirname, join, resolve, relative, isAbsolute } from 'path'
 import { existsSync } from 'fs'
 import { SessionStore } from './session/sessionStore'
 import { ProjectStore } from './project/projectStore'
@@ -16,6 +16,7 @@ import { runWhenIdle } from './maintenance/whenIdle'
 import { hasActiveExportJobs } from './export/exportJob'
 import { cachedEncoderProbe, probeEncoders } from './export/encoderProbe'
 import { registerIpc } from './ipc'
+import { registerAgents } from './agents/register'
 import { applyHotkeys, onHotkeyStatus, unregisterAllHotkeys } from './hotkeys/globalShortcuts'
 import { createTray } from './tray'
 import { initAutoUpdater, check as updateCheck, stopUpdater } from './update/autoUpdater'
@@ -36,6 +37,13 @@ const MAINTENANCE_DELAY_MS = 15_000
 const MAINTENANCE_RETRY_MS = 60_000
 
 app.setAppUserModelId('com.cialight.gravador')
+// Development QA can use an isolated profile inside test-out, preserving the installed app's data.
+if (!app.isPackaged && (process.env.CIALIGHT_QA || process.env.CIALIGHT_TEST) && process.env.CIALIGHT_QA_USER_DATA) {
+  const profile = resolve(process.env.CIALIGHT_QA_USER_DATA)
+  const inside = relative(resolve(app.getAppPath(), 'test-out'), profile)
+  if (!inside || inside.startsWith('..') || isAbsolute(inside)) throw new Error('O perfil QA precisa estar dentro de test-out/')
+  app.setPath('userData', profile)
+}
 registerFileProtocolScheme()
 
 // Editor: decoders WebCodecs inativos não devem ser recuperados pelo Chromium (o DecoderPool ainda
@@ -120,6 +128,7 @@ if (!gotLock) {
     installFileProtocol(store, projects)
     installDisplayMediaHandler()
     registerIpc(store, projects)
+    registerAgents()
 
     setCommandSink((cmd) => {
       const w = getRecorderWindow()

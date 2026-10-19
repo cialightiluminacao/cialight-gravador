@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Clapperboard, FolderInput, LoaderCircle, Plus, Upload } from 'lucide-react'
+import { ArrowDownUp, Clapperboard, FolderInput, Grid2X2, List, LoaderCircle, Plus, Search, Upload } from 'lucide-react'
 import type { SessionSummary } from '@shared/types'
 import type { Asset } from '@shared/editor/project'
 import { Button } from '@/components/ui/Button'
@@ -18,6 +18,7 @@ import { addAssetAtPlayhead } from './editorActions'
 import { importPaths, importSession } from './mediaImport'
 import { relinkAsset } from './relinkFlow'
 import { stopAudioPreview } from './audioPreview'
+import { libraryAssets, type MediaSort } from './mediaLibrary'
 
 // Biblioteca (coluna esquerda): abas Mídia / Áudio / Gravações / Efeitos / Texto / Transições / Legendas / Modelos; importar por botão ou arrastando
 // arquivos do Explorer; cartões arrastáveis para a linha do tempo (efeitos também para o visualizador).
@@ -43,6 +44,10 @@ export function MediaBin({ projectId, playback }: { projectId: string; playback:
   const [tab, setTab] = useState<Tab>('media')
   const [dropping, setDropping] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [query, setQuery] = useState('')
+  const [sort, setSort] = useState<MediaSort>('name')
+  const [descending, setDescending] = useState(false)
+  const [view, setView] = useState<'grid' | 'list'>(() => { try { return localStorage.getItem('editor.libraryView') === 'list' ? 'list' : 'grid' } catch { return 'grid' } })
   const playing = useEditorStore((s) => s.playing)
   useEffect(() => {
     if (playing) stopAudioPreview()
@@ -67,14 +72,17 @@ export function MediaBin({ projectId, playback }: { projectId: string; playback:
 
   const visual = assets.filter((a) => a.kind !== 'audio')
   const audio = assets.filter((a) => a.kind === 'audio')
+  const filteredVisual = libraryAssets(visual, query, sort, descending)
+  const filteredAudio = libraryAssets(audio, query, sort, descending)
   const grid = (list: Asset[], empty: React.ReactNode): React.ReactNode =>
     list.length === 0 ? (
       empty
     ) : (
-      <div className="grid grid-cols-2 gap-1.5 p-2">
-        {list.map((a) => (
-          <MediaCard key={a.id} projectId={projectId} asset={a} progress={ingest[a.id]} onAdd={() => addAssetAtPlayhead(a.id)} onRelink={() => void relinkAsset(projectId, a)} />
+      <div className={view === 'grid' ? 'grid grid-cols-2 gap-1.5 p-2' : 'flex flex-col gap-1 p-2'}>
+        {(list === visual ? filteredVisual : filteredAudio).map((a) => (
+          <MediaCard key={a.id} projectId={projectId} asset={a} compact={view === 'list'} progress={ingest[a.id]} onAdd={() => addAssetAtPlayhead(a.id)} onRelink={() => void relinkAsset(projectId, a)} />
         ))}
+        {query.trim() && (list === visual ? filteredVisual : filteredAudio).length === 0 && <p className="col-span-2 p-2 text-xs text-muted">Nenhum arquivo encontrado.</p>}
       </div>
     )
 
@@ -137,6 +145,13 @@ export function MediaBin({ projectId, playback }: { projectId: string; playback:
             </Button>
           </Tip>
         </div>
+        {(tab === 'media' || tab === 'audio') && <div className="space-y-2 border-b border-border p-2">
+          <label className="flex items-center gap-2 rounded-md border border-border bg-bg-2 px-2"><Search className="h-3.5 w-3.5 text-muted" /><input aria-label="Buscar arquivos na biblioteca" placeholder="Buscar arquivos…" value={query} onChange={e => setQuery(e.target.value)} className="h-8 w-full min-w-0 bg-transparent text-xs outline-none" /></label>
+          <div className="flex items-center gap-1"><select aria-label="Ordenar arquivos" className="h-7 min-w-0 flex-1 rounded-md border border-border bg-surface-2 px-1 text-xs" value={sort} onChange={e => setSort(e.target.value as MediaSort)}><option value="name">Nome</option><option value="duration">Duração</option><option value="size">Tamanho</option><option value="type">Tipo</option></select>
+            <button aria-label="Inverter ordenação" className="rounded p-1.5 hover:bg-white/5" onClick={() => setDescending(!descending)}><ArrowDownUp className="h-3.5 w-3.5" /></button>
+            <button aria-label={view === 'grid' ? 'Exibir em lista' : 'Exibir em grade'} className="rounded p-1.5 hover:bg-white/5" onClick={() => { const next = view === 'grid' ? 'list' : 'grid'; setView(next); try { localStorage.setItem('editor.libraryView', next) } catch { /* optional preference */ } }}>{view === 'grid' ? <List className="h-3.5 w-3.5" /> : <Grid2X2 className="h-3.5 w-3.5" />}</button>
+          </div>
+        </div>}
         <TabsContent value="media" className="min-h-0 flex-1 overflow-y-auto">
           {grid(visual, <DropHint onPick={() => void pick()} text="Arraste vídeos e imagens do Explorer para cá ou clique em Importar." />)}
         </TabsContent>

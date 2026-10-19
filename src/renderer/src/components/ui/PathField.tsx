@@ -26,8 +26,12 @@ export function PathField({
   const parent = cut >= 0 ? effective.slice(0, cut + 1) : ''
   const leaf = cut >= 0 ? effective.slice(cut + 1) : effective
   const pick = async (): Promise<void> => {
-    const chosen = await window.api.settings.pickFolder(effective || null)
-    if (chosen) onChange(chosen)
+    try {
+      const chosen = await window.api.settings.pickFolder(effective || null)
+      if (chosen) onChange(chosen)
+    } catch {
+      toast.error('Não foi possível escolher a pasta. Tente novamente.')
+    }
   }
   const open = async (): Promise<void> => {
     if (!effective) return
@@ -43,10 +47,10 @@ export function PathField({
         <FolderOpen className="h-4 w-4 shrink-0 text-muted" />
         <span className="font-mono flex min-w-0 flex-1 items-baseline text-[12px]" title={effective}>
           {/* Pai truncado pelo início («…\Videos\»): direção rtl no contêiner, texto ltr dentro. */}
-          <span className="min-w-[8ch] shrink truncate text-muted" style={{ direction: 'rtl' }}>
+          <span className="min-w-0 shrink truncate text-muted" style={{ direction: 'rtl' }}>
             <span dir="ltr">{parent}</span>
           </span>
-          <span className="shrink-0 font-semibold text-fg">{leaf || '—'}</span>
+          <span className="max-w-full shrink-0 truncate font-semibold text-fg">{leaf || '—'}</span>
         </span>
         {isDefault ? <span className="shrink-0 rounded-md bg-white/6 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">padrão</span> : null}
       </div>

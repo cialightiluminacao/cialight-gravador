@@ -1,8 +1,8 @@
 // Baixa o build pinado do ffmpeg (BtbN, série 8.1) para resources/ffmpeg/.
 // - Tenta as URLs em ordem (espelho próprio primeiro, depois BtbN).
 // - Confere o sha256 pinado em VERSION.json (se vazio, imprime o hash e falha).
-// - Extrai só ffmpeg.exe, ffprobe.exe e LICENSE.txt (achatando bin/).
-// - Idempotente: pula se resources/ffmpeg/.stamp já for igual ao build.
+// - Extrai executáveis, DLLs e licença (achatando bin/).
+// - Só reutiliza o build quando ffmpeg e ffprobe conseguem iniciar.
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
@@ -16,7 +16,23 @@ const meta = JSON.parse(readFileSync(join(dir, 'VERSION.json'), 'utf8'))
 const stampFile = join(dir, '.stamp')
 const force = process.argv.includes('--force')
 
-if (!force && existsSync(stampFile) && readFileSync(stampFile, 'utf8').trim() === meta.build && existsSync(join(dir, 'ffmpeg.exe'))) {
+function verifyBinaries() {
+  for (const name of ['ffmpeg', 'ffprobe']) {
+    const ver = execFileSync(join(dir, `${name}.exe`), ['-version'], { encoding: 'utf8', windowsHide: true }).split('\n')[0]
+    if (!ver.includes(`${name} version n${meta.series}`)) throw new Error(`versão inesperada: ${ver}`)
+  }
+}
+
+let ready = false
+if (!force && existsSync(stampFile) && readFileSync(stampFile, 'utf8').trim() === meta.build) {
+  try {
+    verifyBinaries()
+    ready = true
+  } catch {
+    console.warn('Componentes do ffmpeg ausentes ou inválidos; restaurando o build pinado.')
+  }
+}
+if (ready) {
   console.log(`ffmpeg já presente (${meta.build}); use --force para baixar de novo.`)
   process.exit(0)
 }
@@ -79,7 +95,11 @@ for (const entry of zip.getEntries()) {
 if (seenExact.size !== exact.size || extracted === 0) { console.error(`extraídos ${extracted} arquivos; faltando: ${[...exact].filter((f) => !seenExact.has(f)).join(', ')}`); process.exit(4) }
 if (!existsSync(join(dir, 'ffmpeg.exe')) || !existsSync(join(dir, 'ffprobe.exe'))) { console.error('ffmpeg.exe/ffprobe.exe não encontrados no zip'); process.exit(4) }
 
-const ver = execFileSync(join(dir, 'ffmpeg.exe'), ['-version'], { encoding: 'utf8' }).split('\n')[0]
-if (!ver.includes(`ffmpeg version n${meta.series}`)) { console.error(`versão inesperada: ${ver}`); process.exit(5) }
+try {
+  verifyBinaries()
+} catch (e) {
+  console.error(`Não foi possível validar ffmpeg/ffprobe: ${e.message}`)
+  process.exit(5)
+}
 writeFileSync(stampFile, meta.build)
-console.log(`pronto: ${ver}`)
+console.log(`pronto: ffmpeg e ffprobe ${meta.series} validados`)

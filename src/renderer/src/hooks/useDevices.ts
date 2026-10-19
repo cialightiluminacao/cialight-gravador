@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { toast } from 'sonner'
 import { useAppStore } from '@/app/store'
 
 // Enumera câmeras e microfones (labels só aparecem após permissão; pedimos uma
@@ -32,8 +33,12 @@ export async function refreshDevices(): Promise<void> {
 
 export function useDevices(): void {
   useEffect(() => {
-    void refreshDevices()
-    const on = (): void => void refreshDevices()
+    const on = (): void => {
+      void refreshDevices().catch(() => {
+        toast.error('Não foi possível consultar câmeras e microfones. Tente Atualizar dispositivos nas configurações.')
+      })
+    }
+    on()
     navigator.mediaDevices.addEventListener('devicechange', on)
     return () => navigator.mediaDevices.removeEventListener('devicechange', on)
   }, [])

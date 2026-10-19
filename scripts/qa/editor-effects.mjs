@@ -159,6 +159,9 @@ window.__fx = (() => {
     input.focus()
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, String(value))
     input.dispatchEvent(new Event('input', { bubbles: true }))
+    // A digitação e a perda de foco do usuário ocorrem em tasks distintas.
+    // Aguarda o draft controlado do React antes de disparar o blur de confirmação.
+    await settle()
     input.blur()
     await settle()
   }

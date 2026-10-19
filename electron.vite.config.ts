@@ -18,6 +18,8 @@ export default defineConfig({
     resolve: { alias: { '@': resolve('src/renderer/src'), '@shared': resolve('src/shared') } },
     plugins: [react(), tailwindcss()],
     build: {
+      // Keep font URLs compatible with the renderer's self-only CSP, including small subsets.
+      assetsInlineLimit: (filePath) => /\.(?:woff2?|ttf|otf)$/i.test(filePath) ? false : undefined,
       rollupOptions: {
         input: {
           index: resolve('src/renderer/index.html'),

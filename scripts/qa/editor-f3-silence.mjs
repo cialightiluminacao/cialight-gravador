@@ -179,7 +179,16 @@ window.__sq = (() => {
     }
     return bad
   }
-  const seek = async (us) => { window.__qaEditor.controller.seek(us); await new Promise((r) => setTimeout(r, 900)); await settle() }
+  const seek = async (us) => {
+    window.__qaEditor.controller.seek(us)
+    await settle()
+    const frame = await Promise.race([
+      window.__qaEditor.engine.render.requestFrame(us, false),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Quadro solicitado não foi renderizado em 5 s')), 5000))
+    ])
+    if (frame.t !== 'rendered' || frame.tUs !== us || frame.missing.length) throw new Error('Quadro incompleto: ' + JSON.stringify(frame))
+    await settle()
+  }
   /** Diferença média (0–255) entre dois PNG (base64) do mesmo tamanho. */
   const pngDiff = async (a, b) => {
     const load = (b64) => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = 'data:image/png;base64,' + b64 })

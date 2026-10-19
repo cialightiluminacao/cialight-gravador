@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { FILE_PROTOCOL, IPC, type IpcApi } from '@shared/ipc'
+import { AGENT_IPC } from '@shared/agentProtocol'
 
 // API tipada exposta ao renderer (contextIsolation ON). Cada janela recebe o
 // mesmo preload; `windowKind` diz qual é (recorder | bar | overlay | spike).
@@ -15,6 +16,12 @@ function on<T>(channel: string, cb: (payload: T) => void): () => void {
 }
 
 const api: IpcApi = {
+  agents: {
+    status: () => ipcRenderer.invoke(AGENT_IPC.status),
+    enable: value => ipcRenderer.invoke(AGENT_IPC.enable, value),
+    onRequest: cb => on(AGENT_IPC.request, cb),
+    reply: reply => ipcRenderer.send(AGENT_IPC.reply, reply)
+  },
   app: {
     info: () => ipcRenderer.invoke(IPC.app.info),
     openExternal: (url) => ipcRenderer.invoke(IPC.app.openExternal, url),

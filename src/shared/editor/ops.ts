@@ -814,16 +814,26 @@ function pickTrack(p: Project, kind: TrackKind, explicitId: string | undefined, 
  * Vídeo com áudio → item na faixa de vídeo (audio.enabled=false) + item de áudio vinculado (sem visual);
  * cria faixas se necessário. Devolve [vídeo, áudio] (ou só o que existir).
  */
-export function addMediaFromAsset(p: Project, assetId: string, atUs: Us, opts?: { videoTrackId?: string; audioTrackId?: string; mode?: InsertMode }): { project: Project; itemIds: string[] } {
+export function addMediaFromAsset(p: Project, assetId: string, atUs: Us, opts?: { videoTrackId?: string; audioTrackId?: string; mode?: InsertMode; inUs?: Us; durationUs?: Us }): { project: Project; itemIds: string[] } {
   const asset = p.assets.find((a) => a.id === assetId)
   if (!asset) throw new EditError('notFound', `Asset não encontrado: ${assetId}`)
   const hasVideo = asset.kind !== 'audio'
   const hasAudio = asset.kind === 'audio' || (asset.kind === 'video' && !!asset.audio)
+  const makeItem = (kind: TrackKind): MediaItem => {
+    const item = createMediaItem(asset, atUs, kind)
+    item.inUs = opts?.inUs ?? 0
+    item.durationUs = opts?.durationUs ?? item.durationUs - item.inUs
+    if (!Number.isSafeInteger(item.inUs) || item.inUs < 0 || !Number.isSafeInteger(item.durationUs) || item.durationUs < MIN_ITEM_US) throw new EditError('bounds', 'Trecho de origem inválido')
+    if (asset.kind === 'image' && item.inUs !== 0) throw new EditError('bounds', 'Imagem não possui ponto de entrada')
+    if (asset.kind !== 'image' && asset.durationUs !== null && item.inUs + item.durationUs > asset.durationUs) throw new EditError('bounds', 'Trecho de origem excede a duração da mídia')
+    return item
+  }
   let at = Math.max(0, Math.round(atUs))
   let q = p
   const itemIds: string[] = []
   if (hasVideo) {
-    const base = createMediaItem(asset, at, 'video')
+    const base = makeItem('video')
+    base.startUs = at
     const it: MediaItem = { ...base, audio: { ...base.audio, enabled: false } }
     const r = pickTrack(q, 'video', opts?.videoTrackId, opts?.mode, at, end(it))
     q = insertItems(r.project, r.trackId, [it], r.mode)
@@ -831,7 +841,8 @@ export function addMediaFromAsset(p: Project, assetId: string, atUs: Us, opts?: 
     itemIds.push(it.id)
   }
   if (hasAudio) {
-    const it = createMediaItem(asset, at, 'audio')
+    const it = makeItem('audio')
+    it.startUs = at
     // em modo insert o espaço já foi aberto em todas as faixas pela inserção do vídeo
     const mode = hasVideo && opts?.mode === 'insert' ? 'overwrite' : opts?.mode
     const r = pickTrack(q, 'audio', opts?.audioTrackId, mode, at, end(it), !hasVideo)

@@ -55,6 +55,7 @@ export async function enqueueAsset(projectId: string, a: Asset, analyzeAudio = f
   try {
     await window.api.media.enqueue(projectId, a.id, { ...(await decideDecodable(projectId, a)), ...(analyzeAudio ? { analyzeAudio } : {}) })
   } catch (e) {
+    if (!analyzeAudio && useEditorStore.getState().project?.id === projectId) useEditorStore.getState().applyAssetPatch(a.id, { status: 'error', error: errMsg(e) })
     toast.error(`Não foi possível processar “${a.name}”: ${errMsg(e)}`)
   }
 }
@@ -74,11 +75,16 @@ export function enqueuePending(projectId: string, assets: Asset[]): void {
 /** Importa arquivos do disco para o projeto aberto; devolve os assets adicionados. */
 export async function importPaths(projectId: string, paths: string[]): Promise<Asset[]> {
   if (paths.length === 0) return []
+  if (useEditorStore.getState().project?.id !== projectId) return []
   let assets: Asset[]
   try {
     assets = await window.api.media.import(projectId, paths)
   } catch (e) {
     toast.error(`Não foi possível importar: ${errMsg(e)}`)
+    return []
+  }
+  if (useEditorStore.getState().project?.id !== projectId) {
+    toast.info('Importação não aplicada: outro projeto foi aberto durante a leitura dos arquivos.')
     return []
   }
   const ok = useEditorStore.getState().apply((p) => assets.reduce((q, a) => addAsset(q, a), p))
@@ -96,6 +102,7 @@ export async function importSession(projectId: string, sessionId: string, label:
   try {
     const session = await window.api.session.prepareForEditor(sessionId)
     if (!session) throw new Error('gravação não encontrada no disco')
+    if (useEditorStore.getState().project?.id !== projectId) throw new Error('Outro projeto foi aberto durante a leitura da gravação')
     const assets = sessionAssets(session, newId('rec_'), label)
     if (!useEditorStore.getState().apply((p) => assets.reduce((q, a) => addAsset(q, a), p))) return []
     // o main só enfileira assets que conhece: salva antes de pedir filmstrip/peaks
@@ -115,7 +122,28 @@ export async function importSession(projectId: string, sessionId: string, label:
  */
 export async function relinkTo(projectId: string, a: Asset, path: string): Promise<Asset> {
   const next = await window.api.media.relink(projectId, a.id, path)
+  if (useEditorStore.getState().project?.id !== projectId) throw new Error('Outro projeto foi aberto; a mídia não foi alterada no editor atual')
   useEditorStore.getState().applyAssetPatch(a.id, next)
   await enqueueAsset(projectId, next)
   return next
+}
+
+/** Reprocessa a mesma mídia mantendo o ID, os clipes e os vínculos da timeline. */
+export async function retryAsset(projectId: string, assetId: string): Promise<void> {
+  const project = useEditorStore.getState().project
+  const asset = project?.id === projectId ? project.assets.find(a => a.id === assetId) : undefined
+  if (!asset || asset.status !== 'error') throw new Error('A mídia não está disponível para tentar novamente')
+  if (asset.source.type === 'file') {
+    await relinkTo(projectId, asset, asset.source.path)
+  } else {
+    useEditorStore.getState().applyAssetPatch(assetId, { status: 'processing', error: undefined })
+    await flushAutosave()
+    if (useEditorStore.getState().project?.id !== projectId) return
+    try {
+      await window.api.media.enqueue(projectId, assetId, await decideDecodable(projectId, asset))
+    } catch (e) {
+      if (useEditorStore.getState().project?.id === projectId) useEditorStore.getState().applyAssetPatch(assetId, { status: 'error', error: errMsg(e) })
+      throw e
+    }
+  }
 }

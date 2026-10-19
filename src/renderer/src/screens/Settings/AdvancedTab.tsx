@@ -9,6 +9,7 @@ import { Note, SettingRow, SettingRows } from '@/components/ui/SettingRow'
 import { PathField } from '@/components/ui/PathField'
 import { formatDate } from '@/lib/format'
 import { useSettingsPatch } from './useSettingsPatch'
+import { AgentPanel } from '@/editor/agents/AgentPanel'
 
 // Aba Avançado: proteção das janelas, encoder de exportação, pasta de brutos, logs e dados.
 
@@ -38,6 +39,7 @@ export function AdvancedTab(): React.JSX.Element {
 
   return (
     <div className="flex flex-col gap-4">
+      <Section title="Agentes de IA"><AgentPanel /></Section>
       <Section title="Proteção das janelas" className="rise-in">
         <SettingRow
           label={

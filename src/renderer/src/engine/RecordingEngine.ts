@@ -42,6 +42,7 @@ export class RecordingEngine {
   private state: 'idle' | 'prepared' | 'recording' | 'paused' | 'stopping' | 'stopped' = 'idle'
   private micMuted = false
   private camOn = true
+  private stopPending: Promise<Session> | null = null
 
   constructor(private api: IpcApi) {}
 
@@ -94,71 +95,85 @@ export class RecordingEngine {
         ? ({ echoCancellation: false, noiseSuppression: false, autoGainControl: false, restrictOwnAudio: true } as MediaTrackConstraints)
         : false
     })
-    const screenTrack = screen.getVideoTracks()[0]
-    const st = screenTrack.getSettings()
-    const srcW = st.width ?? 1920
-    const srcH = st.height ?? 1080
-    const video = await pickVideoConfig(config.quality, wantFps, srcW, srcH)
-    // aplica a resolução escolhida na própria track (Chromium reescala a captura)
-    if (video.width !== srcW || video.height !== srcH) {
-      try {
-        await screenTrack.applyConstraints({ width: { ideal: video.width }, height: { ideal: video.height }, frameRate: { ideal: video.fps } })
-      } catch (e) {
-        this.emit({ type: 'warning', message: `Não foi possível reduzir a resolução da captura (${String(e)}); gravando em ${srcW}×${srcH}.` })
-        video.width = srcW
-        video.height = srcH
-      }
-    }
-    if (video.downgraded) this.emit({ type: 'warning', message: `O encoder de vídeo não suporta a qualidade escolhida; gravando em ${video.height}p.` })
-    const systemAudioTrack = screen.getAudioTracks()[0] ?? null
-    if (config.systemAudio && !systemAudioTrack) this.emit({ type: 'warning', message: 'O áudio do sistema não pôde ser capturado nesta fonte.' })
-
-    // 2) câmera
     let cam: MediaStream | null = null
-    if (config.webcam) {
-      try {
-        cam = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: config.webcam.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
-        })
-      } catch (e) {
-        this.emit({ type: 'warning', message: `Câmera indisponível (${(e as Error).name}); gravando sem webcam.` })
-      }
-    }
-    // 3) microfone
     let mic: MediaStream | null = null
-    if (config.mic) {
-      try {
-        mic = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            deviceId: { exact: config.mic.deviceId },
-            echoCancellation: config.mic.echoCancellation,
-            noiseSuppression: config.mic.noiseSuppression,
-            autoGainControl: config.mic.autoGainControl
-          }
-        })
-      } catch (e) {
-        this.emit({ type: 'warning', message: `Microfone indisponível (${(e as Error).name}); gravando sem microfone.` })
+    try {
+      const screenTrack = screen.getVideoTracks()[0]
+      const st = screenTrack.getSettings()
+      const srcW = st.width ?? 1920
+      const srcH = st.height ?? 1080
+      const video = await pickVideoConfig(config.quality, wantFps, srcW, srcH)
+      // aplica a resolução escolhida na própria track (Chromium reescala a captura)
+      if (video.width !== srcW || video.height !== srcH) {
+        try {
+          await screenTrack.applyConstraints({ width: { ideal: video.width }, height: { ideal: video.height }, frameRate: { ideal: video.fps } })
+        } catch (e) {
+          this.emit({ type: 'warning', message: `Não foi possível reduzir a resolução da captura (${String(e)}); gravando em ${srcW}×${srcH}.` })
+          video.width = srcW
+          video.height = srcH
+        }
       }
-    }
-    this.streams = { screen, cam, mic, video, systemAudioTrack }
-    this.micMuted = false
-    this.camOn = true
+      if (video.downgraded) this.emit({ type: 'warning', message: `O encoder de vídeo não suporta a qualidade escolhida; gravando em ${video.height}p.` })
+      const systemAudioTrack = screen.getAudioTracks()[0] ?? null
+      if (config.systemAudio && !systemAudioTrack) this.emit({ type: 'warning', message: 'O áudio do sistema não pôde ser capturado nesta fonte.' })
 
-    // 4) sessão
-    const sessionId = sessionIdFor(new Date())
-    const { session } = await this.api.session.create(config, sessionId)
-    session.video = { width: video.width, height: video.height, fps: video.fps, codec: video.fullCodecString, bitrate: video.bitrate }
-    if (cam) {
-      const cs = cam.getVideoTracks()[0].getSettings()
-      session.webcam = { deviceId: config.webcam!.deviceId, label: config.webcam!.label, width: cs.width ?? 1280, height: cs.height ?? 720, mirrored: config.webcam!.mirrored }
-    } else {
-      session.webcam = undefined
+      // 2) câmera
+      if (config.webcam) {
+        try {
+          cam = await navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { exact: config.webcam.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+          })
+        } catch (e) {
+          this.emit({ type: 'warning', message: `Câmera indisponível (${(e as Error).name}); gravando sem webcam.` })
+        }
+      }
+      // 3) microfone
+      if (config.mic) {
+        try {
+          mic = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              deviceId: { exact: config.mic.deviceId },
+              echoCancellation: config.mic.echoCancellation,
+              noiseSuppression: config.mic.noiseSuppression,
+              autoGainControl: config.mic.autoGainControl
+            }
+          })
+        } catch (e) {
+          this.emit({ type: 'warning', message: `Microfone indisponível (${(e as Error).name}); gravando sem microfone.` })
+        }
+      }
+      this.streams = { screen, cam, mic, video, systemAudioTrack }
+      this.micMuted = false
+      this.camOn = true
+
+      // 4) sessão
+      const sessionId = sessionIdFor(new Date())
+      const { session } = await this.api.session.create(config, sessionId)
+      session.video = { width: video.width, height: video.height, fps: video.fps, codec: video.fullCodecString, bitrate: video.bitrate }
+      if (cam) {
+        const cs = cam.getVideoTracks()[0].getSettings()
+        session.webcam = { deviceId: config.webcam!.deviceId, label: config.webcam!.label, width: cs.width ?? 1280, height: cs.height ?? 720, mirrored: config.webcam!.mirrored }
+      } else {
+        session.webcam = undefined
+      }
+      if (!mic) session.mic = undefined
+      session.systemAudio = !!systemAudioTrack
+      this.recorder = new SessionRecorder(session, { now: () => performance.now(), save: (s) => this.api.session.save(s) })
+      this.state = 'prepared'
+      return this.streams
+    } catch (error) {
+      // A falha pode acontecer antes de this.streams receber os streams abertos.
+      for (const stream of [screen, cam, mic]) {
+        for (const track of stream?.getTracks() ?? []) {
+          try { track.stop() } catch { /* já parada */ }
+        }
+      }
+      this.streams = null
+      this.recorder = null
+      this.config = null
+      this.state = 'idle'
+      throw error
     }
-    if (!mic) session.mic = undefined
-    session.systemAudio = !!systemAudioTrack
-    this.recorder = new SessionRecorder(session, { now: () => performance.now(), save: (s) => this.api.session.save(s) })
-    this.state = 'prepared'
-    return this.streams
   }
 
   /** Começa a codificar/gravar. */
@@ -251,7 +266,7 @@ export class RecordingEngine {
     }
     this.output = null
     this.sources = []
-    this.fallback = new FallbackRecorder(this.api, session.id, { screen, cam, mic, sys }, (bytes) => (this.bytes = bytes))
+    this.fallback = new FallbackRecorder(this.api, session.id, { screen, cam, mic, sys }, (bytes) => (this.bytes = bytes), (error) => this.onSourceError('compatibilidade', error))
     const files = await this.fallback.start()
     session.engine = 'mediarecorder'
     session.files = { rec: files.screen, fallback: files }
@@ -344,7 +359,16 @@ export class RecordingEngine {
   }
 
   /** Encerra a gravação, fecha arquivos e streams. Retorna a sessão salva. */
-  async stop(): Promise<Session> {
+  stop(): Promise<Session> {
+    if (this.stopPending) return this.stopPending
+    const pending = this.stopInternal()
+    this.stopPending = pending
+    const clear = (): void => { if (this.stopPending === pending) this.stopPending = null }
+    void pending.then(clear, clear)
+    return pending
+  }
+
+  private async stopInternal(): Promise<Session> {
     if (!this.recorder) throw new Error('nada gravando')
     if (this.state === 'stopping' || this.state === 'stopped') return this.recorder.session
     this.state = 'stopping'
